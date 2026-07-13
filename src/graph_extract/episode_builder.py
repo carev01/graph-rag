@@ -30,8 +30,14 @@ def _merge_tiny(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[C
 def _split_oversize(c: Chunk, max_tokens: int) -> list[Chunk]:
     if c.token_count <= max_tokens:
         return [c]
+    if len(c.text) == 0:
+        return [c]
     parts = math.ceil(c.token_count / max_tokens)
     text_len = len(c.text)
+    # Degenerate guard: declared token_count wildly exceeds text length,
+    # which would otherwise produce more parts than there are characters
+    # (and thus empty-text pieces).
+    parts = min(parts, max(1, text_len))
     # Equal-ish char boundaries covering the FULL text (last boundary == text_len).
     boundaries = [round(i * text_len / parts) for i in range(parts + 1)]
     boundaries[-1] = text_len
@@ -39,10 +45,10 @@ def _split_oversize(c: Chunk, max_tokens: int) -> list[Chunk]:
     for i in range(parts):
         start, end = boundaries[i], boundaries[i + 1]
         seg = c.text[start:end]
-        if text_len > 0:
-            token_count = round(c.token_count * len(seg) / text_len)
-        else:
-            token_count = c.token_count // parts
+        # Proportional-by-char-span estimate, clamped so rounding can never
+        # push a piece's declared token_count over max_tokens (the ≤max
+        # invariant is a hard constraint; a slight under-estimate is fine).
+        token_count = min(round(c.token_count * len(seg) / text_len), max_tokens)
         pieces.append(Chunk(
             text=seg,
             start_index=c.start_index + start,

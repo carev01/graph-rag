@@ -68,3 +68,22 @@ def test_merge_respects_max_ceiling():
     assert len(eps) == 2
     assert all(e.token_count <= 1800 for e in eps)
     assert eps[0].token_count == 1790
+
+def test_split_high_density_never_exceeds_max():
+    # Dense chunks (more tokens per char than the 2-char/token _mk() helper
+    # produces) can push proportional-rounding token_count slightly OVER
+    # max_tokens for a piece. Every resulting episode must still be <= max.
+    cases = [
+        (2301, 3600, 1800),
+        (5000, 9000, 1800),
+        (777, 3333, 500),
+        (1, 4000, 1800),  # degenerate: declared tokens far exceed text length
+    ]
+    for text_len, token_count, max_tokens in cases:
+        chunk = Chunk(text="x" * text_len, start_index=0, end_index=text_len,
+                     token_count=token_count)
+        eps = build_episodes(article_id="a1", title="T", chapter_path="C",
+                             content_hash="h", chunks=[chunk],
+                             max_chunk_tokens=max_tokens, min_chunk_tokens=50)
+        assert all(e.token_count <= max_tokens for e in eps), (
+            text_len, token_count, max_tokens, [e.token_count for e in eps])
