@@ -135,6 +135,31 @@ class Neo4jRepo:
                 article=w.article,
             )
 
+    async def apply_incomplete_article(self, props: dict) -> None:
+        """Persist a minimal Article node for a record whose source could not be
+        resolved in the catalog (spec §7): never drop the record.
+
+        No vendor/product/source wiring is written (those ids are unknown); the
+        node is flagged `catalog_incomplete=true` for a later reconciliation
+        pass. Idempotent MERGE on id — a subsequent apply_structural fills the
+        remaining properties via `SET a += $article` on the same id.
+        """
+        async with self._driver.session() as sess:
+            await sess.run(
+                "MERGE (a:Article {id:$id}) SET a += $props",
+                id=props["id"], props=props,
+            )
+
+    async def is_catalog_incomplete(self, article_id: str) -> bool | None:
+        """Test helper: the article's `catalog_incomplete` flag (None if absent)."""
+        async with self._driver.session() as sess:
+            r = await sess.run(
+                "MATCH (a:Article {id:$id}) RETURN a.catalog_incomplete AS f",
+                id=article_id,
+            )
+            rec = await r.single()
+            return rec["f"] if rec else None
+
     async def get_content_hash(self, article_id: str) -> str | None:
         async with self._driver.session() as sess:
             r = await sess.run(

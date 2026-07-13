@@ -10,4 +10,4 @@ services:
     environment:
       POSTGRES_PASSWORD: testpassword
       POSTGRES_DB: graphsync
-    ports: ["5433:5432"]
+    ports: ["5432:5432"]

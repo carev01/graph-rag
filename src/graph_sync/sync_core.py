@@ -6,7 +6,9 @@ from graph_sync.catalog import Catalog
 from graph_sync.config import Settings
 from graph_sync.delta_client import DeltaStream, build_delta_params
 from graph_sync.mapper import map_content, map_tombstone
-from graph_sync.models import ContentRecord, TombstoneRecord, min_watermark
+from graph_sync.models import (
+    ContentRecord, TombstoneRecord, decode_cursor_seq, min_watermark,
+)
 from graph_sync.neo4j_repo import Neo4jRepo
 from graph_sync.state_store import StateStore
 from graph_sync.toc import fetch_toc
@@ -39,6 +41,16 @@ class SyncCore:
         self._repo = repo
         self._store = store
         self._settings = settings
+        # In-process single-flight guard. The Postgres advisory lock alone is
+        # not enough: the poll loop and the webhook both drive run_incremental
+        # on this same instance/connection, and pg_try_advisory_lock is
+        # reentrant per session (a second call on the same connection returns
+        # True again) while two concurrent queries on the shared lock
+        # connection raise InterfaceError. This flag is flipped synchronously
+        # (no await between check and set), so under asyncio it admits exactly
+        # one in-flight run_incremental; the advisory lock remains for
+        # cross-process safety.
+        self._incremental_running = False
 
     async def _apply_record(
         self, rec: ContentRecord | TombstoneRecord, res: BootstrapResult | IncrementalResult
@@ -61,10 +73,24 @@ class SyncCore:
             await self._catalog.refresh()
             info = self._catalog.resolve(rec.source_id)
         if info is None:
-            await self._store.record_dead_letter(
-                rec.model_dump_json(), f"unknown source {rec.source_id}"
-            )
-            return None
+            # Spec §7: never DROP an unknown-source record (and never let the
+            # batch advance the cursor past it as a silent loss). Persist a
+            # minimal Article node flagged catalog_incomplete instead of dead-
+            # lettering: it is then hash-gated on retry, and a later catalog
+            # refresh + reconciliation can complete its vendor/product/source
+            # wiring. A subsequent apply_structural fills the rest via
+            # `SET a += $article` on the same id.
+            await self._repo.apply_incomplete_article({
+                "id": rec.id, "source_id": rec.source_id, "title": rec.title,
+                "source_url": rec.source_url, "topic_key": rec.topic_key,
+                "content_hash": rec.content_hash,
+                "estimated_tokens": rec.estimated_tokens,
+                "sort_order": rec.sort_order, "last_updated_at": rec.last_updated_at,
+                "run_id": rec.run_id, "seq": rec.seq, "removed": False,
+                "catalog_incomplete": True,
+            })
+            res.applied += 1
+            return rec.source_id
 
         await self._repo.apply_structural(map_content(rec, info))
         res.applied += 1
@@ -108,25 +134,41 @@ class SyncCore:
             await self.refresh_toc(sid)
         marks = await self._store.all_bootstrap_watermarks()
         if marks:
-            await self._store.set_cursor(min_watermark(marks))
+            candidate = min_watermark(marks)
+            # Only advance, never regress. bootstrap_progress rows are never
+            # cleared, so a later repair-bootstrap of one shard would otherwise
+            # reset the live incremental cursor back to that shard's original
+            # (lower) watermark and force a huge redundant replay.
+            current = await self._store.get_cursor()
+            if current is None or decode_cursor_seq(candidate) > decode_cursor_seq(current):
+                await self._store.set_cursor(candidate)
         return res
 
     async def run_incremental(self) -> IncrementalResult:
         res = IncrementalResult()
-        if not await self._store.try_lock():
-            return res  # another sync is already running: single-flight
-        try:
-            cursor = await self._store.get_cursor()
-            stream = DeltaStream(self._client, build_delta_params(since=cursor))
-            async for rec in stream.records():
-                touched = await self._apply_record(rec, res)
-                if touched:
-                    res.sources.add(touched)
-            if stream.terminated_clean and stream.next_since:
-                await self._store.set_cursor(stream.next_since)
-                res.advanced = True
-                for sid in res.sources:
-                    await self.refresh_toc(sid)
+        # In-process single-flight: checked-and-set synchronously (no await
+        # between), so a second concurrent caller — e.g. a webhook firing mid
+        # poll-cycle — skips instead of running a second overlapping sync.
+        if self._incremental_running:
             return res
+        self._incremental_running = True
+        try:
+            if not await self._store.try_lock():
+                return res  # another process is already running: single-flight
+            try:
+                cursor = await self._store.get_cursor()
+                stream = DeltaStream(self._client, build_delta_params(since=cursor))
+                async for rec in stream.records():
+                    touched = await self._apply_record(rec, res)
+                    if touched:
+                        res.sources.add(touched)
+                if stream.terminated_clean and stream.next_since:
+                    await self._store.set_cursor(stream.next_since)
+                    res.advanced = True
+                    for sid in res.sources:
+                        await self.refresh_toc(sid)
+                return res
+            finally:
+                await self._store.unlock()
         finally:
-            await self._store.unlock()
+            self._incremental_running = False

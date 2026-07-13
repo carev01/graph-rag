@@ -72,7 +72,7 @@ def register_webhook() -> None:
         async with make_client(s, admin=True) as client:
             resp = await client.post("/api/webhooks", json={
                 "url": s.webhook_public_url,
-                "events": "extraction_complete",
+                "events": ["extraction_complete"],
                 "secret": secret, "is_active": True})
             resp.raise_for_status()
             typer.echo(f"registered; secret={secret}")

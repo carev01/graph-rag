@@ -35,6 +35,22 @@ async def test_webhook_rejects_bad_hmac():
                          headers={"X-DocExtractor-Signature":"sha256=bad"})
     assert r.status_code == 401 and calls == []
 
+async def test_webhook_rejects_when_secret_unconfigured():
+    # An empty secret must fail closed: verify_signature("", ...) would validate
+    # against an empty-key HMAC, so a forged delivery would otherwise be accepted.
+    from types import SimpleNamespace
+    calls: list = []
+    store = FakeStore()
+    settings = SimpleNamespace(webhook_secret="", webhook_debounce_seconds=300)
+    async def trigger(): calls.append(1)
+    app = FastAPI(); app.include_router(build_router(store, settings, trigger))
+    body = b'{"source_id":"s1"}'
+    forged = "sha256=" + hmac.new(b"", body, hashlib.sha256).hexdigest()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        r = await c.post("/webhooks/docextractor", content=body,
+                         headers={"X-DocExtractor-Signature": forged})
+    assert r.status_code == 401 and calls == []
+
 async def test_webhook_accepts_and_dedups():
     calls=[]; store=FakeStore(); app = await _app(store, calls)
     body = json.dumps({"event":"extraction_complete","source_id":"s1"}).encode()

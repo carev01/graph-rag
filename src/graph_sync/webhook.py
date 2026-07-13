@@ -14,6 +14,11 @@ def build_router(store, settings, trigger: Callable[[], Awaitable[None]]) -> API
 
     @router.post("/webhooks/docextractor")
     async def receive(request: Request, background: BackgroundTasks) -> Response:
+        # Fail closed when no secret is configured: an empty secret makes
+        # verify_signature() validate against an empty-key HMAC, which anyone
+        # reachable could forge. Reject rather than authenticate with no key.
+        if not settings.webhook_secret:
+            return Response(status_code=401)
         body = await request.body()
         sig = request.headers.get("X-DocExtractor-Signature")
         if not verify_signature(settings.webhook_secret, body, sig):

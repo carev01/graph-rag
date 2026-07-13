@@ -4,7 +4,8 @@ import httpx
 import pytest
 from pathlib import Path
 from graph_sync.catalog import Catalog
-from graph_sync.sync_core import SyncCore
+from graph_sync.models import ContentRecord
+from graph_sync.sync_core import BootstrapResult, SyncCore
 from graph_sync.config import Settings
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
@@ -83,3 +84,40 @@ async def test_bootstrap_resumes_after_truncation(neo4j_repo, state_store):
     assert await neo4j_repo.article_count_by_source(src) == 146
     # The original bootstrap watermark (not a resume-recomputed one) became the cursor
     assert await state_store.get_cursor() is not None
+
+
+def _empty_catalog_client():
+    """A client whose catalog endpoints are empty, so refresh() can't resolve
+    the source -- exercises the unknown-source path."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/vendors":
+            return httpx.Response(200, content=b'{"vendors":[]}')
+        if req.url.path == "/api/products":
+            return httpx.Response(200, content=b'{"products":[]}')
+        if req.url.path == "/api/sources":
+            return httpx.Response(200, content=b'{"sources":[]}')
+        raise AssertionError(req.url.path)
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://x")
+
+
+async def test_unknown_source_record_is_persisted_not_dropped(neo4j_repo, state_store):
+    # Spec §7: a record whose source can't be resolved (even after refresh) must
+    # NOT be dropped/dead-lettered -- it is persisted as a minimal, catalog_incomplete
+    # Article so it survives and is hash-gated on retry.
+    rec = ContentRecord.model_validate({
+        "change_type": "added", "id": "orphan-1", "topic_key": "tk",
+        "source_id": "no-such-source", "vendor": "Ghost", "product": "GhostProd",
+        "title": "Orphan", "source_url": "https://x/orphan", "content_hash": "oh1",
+        "estimated_tokens": 42, "sort_order": 0, "run_id": "r1", "seq": None,
+    })
+    client = _empty_catalog_client()
+    core = SyncCore(client, Catalog(client), neo4j_repo, state_store, _settings())
+    dl_before = await state_store.dead_letter_count()
+    res = BootstrapResult()
+    touched = await core._apply_record(rec, res)
+    assert touched == "no-such-source" and res.applied == 1
+    # Persisted, not dropped: node exists with the right hash and the flag set.
+    assert await neo4j_repo.get_content_hash("orphan-1") == "oh1"
+    assert await neo4j_repo.is_catalog_incomplete("orphan-1") is True
+    # Not dead-lettered.
+    assert await state_store.dead_letter_count() == dl_before
