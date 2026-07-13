@@ -1,0 +1,13 @@
+services:
+  neo4j:
+    image: neo4j:5.22
+    environment:
+      NEO4J_AUTH: neo4j/testpassword
+      NEO4J_PLUGINS: '["graph-data-science"]'
+    ports: ["7474:7474", "7687:7687"]
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: graphsync
+    ports: ["5432:5432"]
