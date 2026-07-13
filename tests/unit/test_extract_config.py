@@ -11,5 +11,5 @@ def test_extract_settings_defaults(monkeypatch):
     s = get_extract_settings()
     assert s.embed_dim == 768
     assert s.group_id == "backup-docs"
-    assert s.llm_client_mode == "structured"
+    assert s.llm_client_mode == "generic_json_schema"
     assert s.max_chunk_tokens == 1800
