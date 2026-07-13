@@ -1,6 +1,6 @@
 from __future__ import annotations
 import base64, json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
@@ -66,3 +66,20 @@ class StructuralWrite:
 class Tombstone:
     article_id: str
     removed_at: str
+
+@dataclass
+class ChapterRow:
+    id: str
+    source_id: str
+    title: str
+    url: str | None
+    level: int
+    sort_order: int
+
+@dataclass
+class TocSnapshot:
+    source_id: str
+    chapters: list[ChapterRow] = field(default_factory=list)
+    root_ids: list[str] = field(default_factory=list)
+    nesting: list[tuple[str, str]] = field(default_factory=list)
+    article_links: list[tuple[str, str]] = field(default_factory=list)
