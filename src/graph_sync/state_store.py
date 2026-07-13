@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+import asyncpg
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sync_cursor (
+  id int PRIMARY KEY DEFAULT 1, cursor text, updated_at timestamptz DEFAULT now(),
+  CHECK (id = 1));
+CREATE TABLE IF NOT EXISTS bootstrap_progress (
+  shard text PRIMARY KEY, watermark text, last_id text, status text,
+  updated_at timestamptz DEFAULT now());
+CREATE TABLE IF NOT EXISTS webhook_delivery (
+  signature text PRIMARY KEY, received_at timestamptz DEFAULT now());
+CREATE TABLE IF NOT EXISTS source_debounce (
+  source_id text PRIMARY KEY, last_run_at timestamptz);
+CREATE TABLE IF NOT EXISTS dead_letter (
+  id bigserial PRIMARY KEY, raw text, context text, created_at timestamptz DEFAULT now());
+"""
+_LOCK_KEY = 911_222_333
+
+
+class StateStore:
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+        self._pool: asyncpg.Pool | None = None
+        self._lock_conn: asyncpg.Connection | None = None
+
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(self._dsn)
+        return self._pool
+
+    async def init_schema(self) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as c:
+            await c.execute(_SCHEMA)
+
+    async def close(self) -> None:
+        if self._lock_conn is not None:
+            await self._lock_conn.close()
+        if self._pool is not None:
+            await self._pool.close()
+
+    async def get_cursor(self) -> str | None:
+        pool = await self._get_pool()
+        return await pool.fetchval("SELECT cursor FROM sync_cursor WHERE id=1")
+
+    async def set_cursor(self, cursor: str) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "INSERT INTO sync_cursor (id, cursor, updated_at) VALUES (1,$1,now()) "
+            "ON CONFLICT (id) DO UPDATE SET cursor=$1, updated_at=now()", cursor)
+
+    async def upsert_bootstrap(self, shard, watermark, last_id, status) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "INSERT INTO bootstrap_progress (shard,watermark,last_id,status,updated_at) "
+            "VALUES ($1,$2,$3,$4,now()) ON CONFLICT (shard) DO UPDATE SET "
+            "watermark=$2,last_id=$3,status=$4,updated_at=now()",
+            shard, watermark, last_id, status)
+
+    async def get_bootstrap(self, shard) -> dict | None:
+        pool = await self._get_pool()
+        row = await pool.fetchrow("SELECT * FROM bootstrap_progress WHERE shard=$1", shard)
+        return dict(row) if row else None
+
+    async def all_bootstrap_watermarks(self) -> list[str]:
+        pool = await self._get_pool()
+        rows = await pool.fetch(
+            "SELECT watermark FROM bootstrap_progress WHERE watermark IS NOT NULL")
+        return [r["watermark"] for r in rows]
+
+    async def seen_delivery(self, signature: str) -> bool:
+        pool = await self._get_pool()
+        res = await pool.execute(
+            "INSERT INTO webhook_delivery (signature) VALUES ($1) "
+            "ON CONFLICT (signature) DO NOTHING", signature)
+        return res == "INSERT 0 0"  # 0 rows inserted => already seen
+
+    async def should_run_source(self, source_id: str, debounce_seconds: int) -> bool:
+        pool = await self._get_pool()
+        async with pool.acquire() as c, c.transaction():
+            row = await c.fetchrow(
+                "SELECT last_run_at FROM source_debounce WHERE source_id=$1 FOR UPDATE",
+                source_id)
+            if row and row["last_run_at"] is not None:
+                due = await c.fetchval(
+                    "SELECT now() - $1 > make_interval(secs => $2)",
+                    row["last_run_at"], debounce_seconds)
+                if not due:
+                    return False
+            await c.execute(
+                "INSERT INTO source_debounce (source_id,last_run_at) VALUES ($1,now()) "
+                "ON CONFLICT (source_id) DO UPDATE SET last_run_at=now()", source_id)
+            return True
+
+    async def record_dead_letter(self, raw: str, context: str) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "INSERT INTO dead_letter (raw,context) VALUES ($1,$2)", raw, context)
+
+    async def dead_letter_count(self) -> int:
+        pool = await self._get_pool()
+        return await pool.fetchval("SELECT count(*) FROM dead_letter")
+
+    async def try_lock(self) -> bool:
+        if self._lock_conn is None:
+            self._lock_conn = await asyncpg.connect(self._dsn)
+        return await self._lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", _LOCK_KEY)
+
+    async def unlock(self) -> None:
+        if self._lock_conn is not None:
+            await self._lock_conn.execute("SELECT pg_advisory_unlock($1)", _LOCK_KEY)
