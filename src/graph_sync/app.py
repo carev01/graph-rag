@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+import logging
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from fastapi import APIRouter, FastAPI
 
@@ -14,6 +15,8 @@ from graph_sync.poll_loop import run_poll_loop
 from graph_sync.state_store import StateStore
 from graph_sync.sync_core import SyncCore
 from graph_sync.webhook import build_router
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -52,13 +55,94 @@ def create_app(
     return app
 
 
+class _SchemaResource(Protocol):
+    """Structural shape of `Neo4jRepo`/`StateStore`: shared by `build_lifespan`
+    so unit tests can pass fakes without depending on the real classes."""
+
+    async def init_schema(self) -> None: ...
+    async def close(self) -> None: ...
+
+
+class _AsyncCloser(Protocol):
+    async def aclose(self) -> None: ...
+
+
+class _CatalogLike(Protocol):
+    async def load(self) -> None: ...
+
+
+def build_lifespan(
+    *,
+    repo: _SchemaResource,
+    store: _SchemaResource,
+    client: _AsyncCloser,
+    trigger: Callable[[], Awaitable[None]],
+    poll_interval_seconds: int,
+    catalog: _CatalogLike | None = None,
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    """Build the FastAPI lifespan for the live service, given already-built deps.
+
+    Kept separate from `main()` (which builds the *real* deps) so the
+    startup/shutdown sequencing can be exercised in unit tests with fakes
+    instead of real Neo4j/Postgres/httpx.
+
+    Startup: optionally `catalog.load()` (main() passes a real Catalog; unit
+    tests can omit it), then `repo.init_schema()` and `store.init_schema()`,
+    then starts the background poll task.
+
+    Shutdown must be robust even if a poll cycle is mid-flight or already
+    failed:
+    - The poll task is *cancelled* (not just awaited) so an in-flight
+      `trigger()` call (e.g. a slow httpx request) can't block shutdown, and
+      any exception it already raised (or raises on cancellation) is caught
+      and logged rather than propagated -- a failing poll cycle must never
+      prevent cleanup.
+    - The three resources are closed independently via `asyncio.gather(...,
+      return_exceptions=True)` so a failure closing one doesn't skip the
+      others; any close failures are logged, not raised.
+    """
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if catalog is not None:
+            await catalog.load()
+        await repo.init_schema()
+        await store.init_schema()
+        stop_event = asyncio.Event()
+        poll_task = asyncio.create_task(
+            run_poll_loop(trigger, poll_interval_seconds, stop_event)
+        )
+        try:
+            yield
+        finally:
+            stop_event.set()
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("poll loop raised during shutdown")
+
+            results = await asyncio.gather(
+                repo.close(), store.close(), client.aclose(), return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.exception(
+                        "error closing a resource during shutdown", exc_info=result
+                    )
+
+    return lifespan
+
+
 def main() -> FastAPI:
     """Production entrypoint: `uvicorn graph_sync.app:main --factory`.
 
     Builds the real dependency graph (httpx client, Catalog, Neo4jRepo,
-    StateStore, SyncCore), wires the webhook router and the background poll
-    loop through a FastAPI lifespan, and delegates route composition to
-    `create_app` so the `/health` and `/status` wiring isn't duplicated.
+    StateStore, SyncCore), wires the webhook router, and delegates the
+    startup/shutdown sequencing to `build_lifespan` and route composition to
+    `create_app` so neither is duplicated here.
     """
     settings = get_settings()
     client = make_client(settings, admin=False)
@@ -71,24 +155,14 @@ def main() -> FastAPI:
         await sync_core.run_incremental()
 
     router = build_router(store, settings, trigger)
-    stop_event = asyncio.Event()
-
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        await catalog.load()
-        await repo.init_schema()
-        await store.init_schema()
-        poll_task = asyncio.create_task(
-            run_poll_loop(trigger, settings.poll_interval_seconds, stop_event)
-        )
-        try:
-            yield
-        finally:
-            stop_event.set()
-            await poll_task
-            await repo.close()
-            await store.close()
-            await client.aclose()
+    lifespan = build_lifespan(
+        repo=repo,
+        store=store,
+        client=client,
+        trigger=trigger,
+        poll_interval_seconds=settings.poll_interval_seconds,
+        catalog=catalog,
+    )
 
     return create_app(
         status_store=store,

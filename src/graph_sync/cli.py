@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 
 import httpx
@@ -14,6 +15,7 @@ from graph_sync.state_store import StateStore
 from graph_sync.sync_core import SyncCore
 
 app = typer.Typer()
+logger = logging.getLogger(__name__)
 
 
 async def _build_sync_core(
@@ -23,14 +25,41 @@ async def _build_sync_core(
 
     Mirrors `app.main()`'s lifespan startup (load catalog, init schemas) so
     CLI runs and the live service see the same bootstrap sequence.
+
+    If any step after opening a resource fails (including `catalog.load()`/
+    `init_schema()`), every resource already opened here is closed before
+    the exception propagates. Without this, a failure partway through
+    construction would return nothing to the caller, so the caller's own
+    `try/finally` (which only covers the code *after* this function
+    returns) would never run and the already-open client/driver/pool would
+    leak.
     """
     client = make_client(settings, admin=False)
-    catalog = Catalog(client)
-    repo = Neo4jRepo(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
-    store = StateStore(settings.postgres_dsn)
-    await catalog.load()
-    await repo.init_schema()
-    await store.init_schema()
+    repo: Neo4jRepo | None = None
+    store: StateStore | None = None
+    try:
+        catalog = Catalog(client)
+        repo = Neo4jRepo(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
+        store = StateStore(settings.postgres_dsn)
+        await catalog.load()
+        await repo.init_schema()
+        await store.init_schema()
+    except Exception:
+        for closer in (
+            store.close if store is not None else None,
+            repo.close if repo is not None else None,
+            client.aclose,
+        ):
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception:
+                logger.exception(
+                    "error closing a resource while cleaning up after a "
+                    "_build_sync_core failure"
+                )
+        raise
     core = SyncCore(client, catalog, repo, store, settings)
     return core, client, repo, store
 
