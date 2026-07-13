@@ -222,3 +222,16 @@ class Neo4jRepo:
                 id=article_id,
             )
             return (await r.single())["n"]
+
+    async def delete_source_articles(self, source_id: str) -> None:
+        """Test helper: drop all Article nodes for a source (and their edges).
+
+        Used to isolate integration tests that share a module-scoped `neo4j_repo`
+        fixture with another test replaying the same source/content -- without
+        this, a later test's hash-gate would see the earlier test's identical
+        content_hash values and skip everything.
+        """
+        async with self._driver.session() as sess:
+            await sess.run(
+                "MATCH (a:Article {source_id:$sid}) DETACH DELETE a", sid=source_id
+            )
