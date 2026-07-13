@@ -25,7 +25,12 @@ class ExtractSettings(BaseSettings):
     max_chunk_tokens: int = 1800
     min_chunk_tokens: int = 128
     max_coroutines: int = 3
-    llm_client_mode: Literal["structured", "generic_json_schema", "generic_json_object"] = "structured"
+    # Default set to generic_json_schema per Task 6 evidence: gpt-oss-20b via
+    # llama-server fails the OpenAIClient "structured" (Responses API) path
+    # (markdown-fenced/malformed JSON, 0 entities), but OpenAIGenericClient
+    # with json_schema extracts cleanly. Task 7's probe compares json_schema
+    # vs json_object and confirms this.
+    llm_client_mode: Literal["structured", "generic_json_schema", "generic_json_object"] = "generic_json_schema"
     judge_base_url: str = ""
     judge_model: str = ""
 
