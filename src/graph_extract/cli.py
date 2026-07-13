@@ -97,6 +97,14 @@ def ingest(
                 f"episodes_added={res.episodes_added} "
                 f"episodes_skipped={res.episodes_skipped}"
             )
+            # Emit the cost report HERE, in-process: the usage tally is
+            # process-local, so a separate `eval cost` invocation would see an
+            # empty tally. This is the only path that reports real extraction
+            # cost for the run. Covers extraction-LLM chat.completions tokens;
+            # the cross-encoder is not called during add_episode (search-time
+            # only), and TEI embeddings are not token-metered.
+            typer.echo("--- cost (this run) ---")
+            _dump(await cost_report(res.episodes_added))
         finally:
             await driver.close()
             await docext.aclose()
