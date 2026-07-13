@@ -13,6 +13,8 @@ graph:
 """
 from __future__ import annotations
 
+import re
+
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
@@ -111,9 +113,33 @@ async def cost_report(episodes_processed: int = 0,
 
 _JUDGE_PROMPT = (
     "Is the following FACT supported by the TEXT below it? "
-    "Answer with a single word: yes or no.\n\n"
+    "You may reason about it first, but you MUST end your response with your "
+    "verdict as a final single word on its own: yes or no.\n\n"
     "FACT: {fact}\n\nTEXT: {content}"
 )
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_YES_NO_RE = re.compile(r"\b(yes|no)\b")
+
+
+def _parse_yes_no(content: str | None) -> bool | None:
+    """Parse a judge verdict out of possibly reasoning-model output.
+
+    `gpt-oss-20b` (the judge) is a reasoning model that commonly emits
+    chain-of-thought text before its final yes/no, so a naive
+    `.startswith("yes")` misreads "reasoning... yes" as "no". Instead: strip
+    any `<think>...</think>` preamble, then take the LAST word-boundary
+    yes/no token in the remaining text -- for a reasoning-then-answer
+    response, the final verdict is last. Returns `None` if no yes/no token
+    is found (unparseable), rather than silently guessing "no".
+    """
+    if content is None:
+        return None
+    text = _THINK_TAG_RE.sub("", content.strip().lower())
+    matches = _YES_NO_RE.findall(text)
+    if not matches:
+        return None
+    return matches[-1] == "yes"
 
 
 def _judge_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
@@ -137,7 +163,9 @@ async def fact_quality(driver, settings: ExtractSettings, sample: int) -> dict:
 
     client, model = _judge_client_and_model(settings)
     results: list[dict] = []
-    yes = 0
+    supported = 0
+    unsupported = 0
+    unparseable = 0
     for row in rows:
         resp = await client.chat.completions.create(
             model=model,
@@ -145,16 +173,24 @@ async def fact_quality(driver, settings: ExtractSettings, sample: int) -> dict:
                       "content": _JUDGE_PROMPT.format(fact=row["fact"], content=row["content"])}],
             temperature=0.0,
         )
-        answer = (resp.choices[0].message.content or "").strip().lower()
-        verdict = answer.startswith("yes")
-        if verdict:
-            yes += 1
+        raw_answer = resp.choices[0].message.content or ""
+        verdict = _parse_yes_no(raw_answer)
+        if verdict is True:
+            supported += 1
+        elif verdict is False:
+            unsupported += 1
+        else:
+            unparseable += 1
         results.append({"uuid": row["uuid"], "fact": row["fact"], "verdict": verdict,
-                        "raw_answer": answer})
+                        "raw_answer": raw_answer})
 
     total = len(results)
+    parsed = supported + unsupported
     return {
         "sampled": total,
-        "precision": (yes / total) if total else 0.0,
+        "supported": supported,
+        "unsupported": unsupported,
+        "unparseable": unparseable,
+        "precision": (supported / parsed) if parsed else 0.0,
         "results": results,
     }
