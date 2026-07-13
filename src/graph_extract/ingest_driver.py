@@ -81,7 +81,7 @@ class IngestDriver:
 
     async def ingest_source(self, source_id: str, limit: int | None = None) -> IngestResult:
         ids = await self.list_article_ids(source_id)
-        if limit:
+        if limit is not None:
             ids = ids[:limit]
         out = IngestResult()
         for aid in ids:
