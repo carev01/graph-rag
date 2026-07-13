@@ -1,5 +1,6 @@
 from __future__ import annotations
 import base64, json
+from dataclasses import dataclass
 from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
@@ -53,3 +54,15 @@ def decode_cursor_seq(cursor: str) -> int:
 
 def min_watermark(cursors: list[str]) -> str:
     return min(cursors, key=decode_cursor_seq)
+
+@dataclass
+class StructuralWrite:
+    vendor: dict
+    product: dict
+    source: dict
+    article: dict
+
+@dataclass
+class Tombstone:
+    article_id: str
+    removed_at: str
