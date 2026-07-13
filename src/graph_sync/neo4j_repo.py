@@ -42,14 +42,29 @@ MERGE (s)-[:HAS_ARTICLE]->(a)
 #    fragile and hard to reason about.
 #
 # Fix: use OPTIONAL MATCH where a "maybe zero rows" step must not gate later work, and
-# split the TOC apply into four independent, idempotent `session.run()` statements
-# instead of one giant WITH-chained query. Each statement is simple enough to not hit
-# the row-collapse trap. Semantics (upsert chapters, wire HAS_CHAPTER nesting, rewire
-# IN_CHAPTER, prune stale chapters) are unchanged from the brief's intent.
+# split the TOC apply into independent, idempotent statements instead of one giant
+# WITH-chained query. Each statement is simple enough to not hit the row-collapse trap.
+# All statements now run on a single explicit write transaction (see `apply_toc` below)
+# via `tx.run(...)`, so the whole TOC pass is atomic even though it's several statements.
 _UPSERT_CHAPTERS = """
 UNWIND $chapters AS ch
 MERGE (c:Chapter {id: ch.id})
 SET c += ch
+"""
+
+# Chapters are rebuilt authoritatively from each TOC snapshot, so any HAS_CHAPTER edge
+# touching one of this source's chapters (source->root or chapter->chapter nesting) is
+# cleared before re-wiring below. Without this, a chapter that *moves* in the tree
+# (e.g. root -> nested under another chapter) keeps its old edge in addition to the new
+# one and ends up with two parents. Uses the same OPTIONAL MATCH / WITH DISTINCT guard
+# as `_REWIRE_ARTICLE_LINKS` so a zero-row delete (e.g. first-ever apply_toc for a
+# source) doesn't collapse the row stream and skip the second delete.
+_CLEAR_HAS_CHAPTER = """
+OPTIONAL MATCH (s:Source {id: $source_id})-[r1:HAS_CHAPTER]->(:Chapter {source_id: $source_id})
+DELETE r1
+WITH DISTINCT 1 AS _
+OPTIONAL MATCH (:Chapter {source_id: $source_id})-[r2:HAS_CHAPTER]->(:Chapter {source_id: $source_id})
+DELETE r2
 """
 
 _WIRE_ROOT_CHAPTERS = """
@@ -65,12 +80,20 @@ MATCH (pc:Chapter {id: pair[0]}), (cc:Chapter {id: pair[1]})
 MERGE (pc)-[:HAS_CHAPTER]->(cc)
 """
 
+# `MERGE (a:Article ...)` (not `MATCH`) per spec §5.5: a TOC snapshot may reference an
+# article that hasn't been apply_structural'd yet (forward reference). MERGE creates a
+# stub Article node (id only) so the IN_CHAPTER link is preserved instead of silently
+# dropped; the later structural delta fills in the stub's real properties via
+# `_APPLY_STRUCTURAL`'s `MERGE (a:Article {id: $article.id}) SET a += $article` on the
+# same id. Do not SET anything else on the stub here.
 _REWIRE_ARTICLE_LINKS = """
 OPTIONAL MATCH (a:Article {source_id: $source_id})-[r:IN_CHAPTER]->()
 DELETE r
 WITH DISTINCT 1 AS _
 UNWIND $article_links AS link
-MATCH (a:Article {id: link[0]}), (c:Chapter {id: link[1]})
+MERGE (a:Article {id: link[0]})
+WITH a, link
+MATCH (c:Chapter {id: link[1]})
 MERGE (a)-[:IN_CHAPTER]->(c)
 """
 
@@ -124,20 +147,33 @@ class Neo4jRepo:
         nesting = [list(p) for p in snap.nesting]
         article_links = [list(p) for p in snap.article_links]
         keep = [c["id"] for c in chapters]
-        async with self._driver.session() as sess:
-            await sess.run(_UPSERT_CHAPTERS, chapters=chapters)
-            await sess.run(
+
+        async def _tx(tx):  # type: ignore[no-untyped-def]
+            await tx.run(_UPSERT_CHAPTERS, chapters=chapters)
+            # Clear ALL existing HAS_CHAPTER edges touching this source's chapters
+            # before re-wiring roots+nesting from the snapshot, since chapters are
+            # rebuilt authoritatively each apply_toc: otherwise a chapter that *moves*
+            # in the tree keeps its old parent edge in addition to the new one.
+            await tx.run(_CLEAR_HAS_CHAPTER, source_id=snap.source_id)
+            await tx.run(
                 _WIRE_ROOT_CHAPTERS,
                 source_id=snap.source_id,
                 root_ids=snap.root_ids,
             )
-            await sess.run(_WIRE_NESTING, nesting=nesting)
-            await sess.run(
+            await tx.run(_WIRE_NESTING, nesting=nesting)
+            await tx.run(
                 _REWIRE_ARTICLE_LINKS,
                 source_id=snap.source_id,
                 article_links=article_links,
             )
-            await sess.run(_PRUNE_CHAPTERS, source_id=snap.source_id, keep=keep)
+            await tx.run(_PRUNE_CHAPTERS, source_id=snap.source_id, keep=keep)
+
+        # All statements run on one explicit write transaction so the whole TOC pass
+        # is atomic: a mid-pass crash can no longer leave chapters upserted but
+        # links/prune un-applied, since the transaction either commits in full or
+        # rolls back in full. Each statement stays individually idempotent.
+        async with self._driver.session() as sess:
+            await sess.execute_write(_tx)
 
     async def article_count_by_source(self, source_id: str) -> int:
         async with self._driver.session() as sess:
@@ -159,3 +195,12 @@ class Neo4jRepo:
             )
             rec = await r.single()
             return rec["id"] if rec else None
+
+    async def chapter_parent_count(self, chapter_id: str) -> int:
+        """Test helper: count incoming HAS_CHAPTER edges (Source-root or Chapter-nesting)."""
+        async with self._driver.session() as sess:
+            r = await sess.run(
+                "MATCH ()-[:HAS_CHAPTER]->(c:Chapter {id:$id}) RETURN count(*) AS n",
+                id=chapter_id,
+            )
+            return (await r.single())["n"]
