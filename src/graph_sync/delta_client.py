@@ -1,0 +1,51 @@
+from __future__ import annotations
+from typing import AsyncIterator
+import httpx
+from graph_sync.config import Settings
+from graph_sync.models import (
+    ContentRecord, TombstoneRecord, ControlRecord, parse_delta_line,
+)
+
+def make_client(settings: Settings, *, admin: bool = False) -> httpx.AsyncClient:
+    key = settings.docext_admin_key if admin else settings.docext_read_key
+    return httpx.AsyncClient(
+        base_url=settings.docext_base_url,
+        headers={"X-API-Key": key},
+        verify=settings.docext_verify_tls,
+        timeout=300.0,
+    )
+
+def build_delta_params(*, since: str | None = None, source_id: str | None = None,
+                       vendor_id: str | None = None,
+                       bootstrap_after: str | None = None) -> dict:
+    params = {"since": since, "source_id": source_id,
+              "vendor_id": vendor_id, "bootstrap_after": bootstrap_after}
+    return {k: v for k, v in params.items() if v is not None}
+
+class DeltaStream:
+    def __init__(self, client: httpx.AsyncClient, params: dict) -> None:
+        self._client = client
+        self._params = params
+        self.bootstrap_start_since: str | None = None
+        self.next_since: str | None = None
+        self.count: int | None = None
+        self.terminated_clean: bool = False
+
+    async def records(self) -> AsyncIterator[ContentRecord | TombstoneRecord]:
+        async with self._client.stream(
+            "GET", "/api/articles/delta", params=self._params
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                rec = parse_delta_line(line)
+                if isinstance(rec, ControlRecord):
+                    if rec.control == "bootstrap_start":
+                        self.bootstrap_start_since = rec.next_since
+                    elif rec.control == "cursor":
+                        self.next_since = rec.next_since
+                        self.count = rec.count
+                        self.terminated_clean = True
+                    continue
+                yield rec
