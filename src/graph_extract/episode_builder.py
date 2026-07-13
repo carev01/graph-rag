@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from dataclasses import dataclass
 from graph_extract.chonkie_client import Chunk
 
@@ -14,10 +15,11 @@ class Episode:
 def needs_presplit(token_count_total: int, ceiling: int = 7000) -> bool:
     return token_count_total > ceiling
 
-def _merge_tiny(chunks: list[Chunk], min_tokens: int) -> list[Chunk]:
+def _merge_tiny(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[Chunk]:
     out: list[Chunk] = []
     for c in chunks:
-        if out and c.token_count < min_tokens:
+        if (out and c.token_count < min_tokens
+                and out[-1].token_count + c.token_count <= max_tokens):
             p = out[-1]
             out[-1] = Chunk(text=p.text + "\n" + c.text, start_index=p.start_index,
                             end_index=c.end_index, token_count=p.token_count + c.token_count)
@@ -28,22 +30,35 @@ def _merge_tiny(chunks: list[Chunk], min_tokens: int) -> list[Chunk]:
 def _split_oversize(c: Chunk, max_tokens: int) -> list[Chunk]:
     if c.token_count <= max_tokens:
         return [c]
-    parts = (c.token_count + max_tokens - 1) // max_tokens
-    span = max(1, len(c.text) // parts)
+    parts = math.ceil(c.token_count / max_tokens)
+    text_len = len(c.text)
+    # Equal-ish char boundaries covering the FULL text (last boundary == text_len).
+    boundaries = [round(i * text_len / parts) for i in range(parts + 1)]
+    boundaries[-1] = text_len
     pieces: list[Chunk] = []
     for i in range(parts):
-        seg = c.text[i * span:(i + 1) * span] if i < parts - 1 else c.text[i * span:]
-        if seg:
-            pieces.append(Chunk(text=seg, start_index=0, end_index=0,
-                                token_count=min(max_tokens, c.token_count - i * max_tokens)))
+        start, end = boundaries[i], boundaries[i + 1]
+        seg = c.text[start:end]
+        if text_len > 0:
+            token_count = round(c.token_count * len(seg) / text_len)
+        else:
+            token_count = c.token_count // parts
+        pieces.append(Chunk(
+            text=seg,
+            start_index=c.start_index + start,
+            end_index=c.start_index + end,
+            token_count=token_count,
+        ))
     return pieces
 
 def build_episodes(*, article_id: str, title: str, chapter_path: str, content_hash: str,
                    chunks: list[Chunk], max_chunk_tokens: int, min_chunk_tokens: int) -> list[Episode]:
-    merged = _merge_tiny(chunks, min_chunk_tokens)
-    sized: list[Chunk] = []
-    for c in merged:
-        sized.extend(_split_oversize(c, max_chunk_tokens))
+    # Split first (equal, content-preserving pieces), THEN merge tiny remainders.
+    # This ordering avoids orphaning a sub-min piece created by splitting.
+    split: list[Chunk] = []
+    for c in chunks:
+        split.extend(_split_oversize(c, max_chunk_tokens))
+    sized = _merge_tiny(split, min_chunk_tokens, max_chunk_tokens)
     prefix = f"[{title} › {chapter_path}]" if chapter_path else f"[{title}]"
     episodes: list[Episode] = []
     for idx, c in enumerate(sized):
