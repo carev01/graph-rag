@@ -1,0 +1,39 @@
+dad69d7c-189b-4d53-8d70-40697eae685a	AWS	4184	Vault Lock
+d4d25628-1f6e-42ea-a5c5-e66b2e1bf2f8	AWS	5361	Continuous backups and PITR
+dca2468e-879c-4d12-8763-a1c71827b33f	AWS	4702	Logging AWS Backup API calls with CloudTrail
+2c92266f-f84c-49c2-9e89-3b4376ec9043	AWS	4075	What is AWS Backup?
+d1f26f66-1acb-421e-889d-d0d79e3af387	AWS	1353	Amazon Redshift backups
+5d7d817e-7045-41c1-8b36-faa94a5b2c40	AWS	5968	Cross-account backup
+4abf72f3-3f93-4292-8257-cf1dad0d425b	AWS	2482	Requester tasks
+6caffcaa-5228-4c6c-9af0-6cab6b8494ff	AWS	1680	Backup vault creation and deletion
+85ca0827-4a02-4e0b-aca9-481508856cf5	AWS	4940	AWS Backup feature availability
+78e2b9e5-bf0c-4e76-8b83-fc54e76f52cd	AWS	1701	Cross-Region backup
+82ed2eb9-24a3-4322-bccb-958dd88c0f31	AWS	2071	EC2 restore
+04b95d92-d3b4-41b3-92fe-a25de736fb64	AWS	1332	Backup and tag copy
+43620897-c724-4164-ab1c-64add9e9f1b8	AWS	3249	Blogs, videos, tutorials, and other resources
+e85a46a9-0350-4ce9-a407-b853622ad094	AWS	5208	EKS restore
+49d019c4-ceb8-4a0a-b908-cd35602cab20	AWS	3104	S3 restore
+c6d9f522-46a4-40c3-9e44-ed02e83d46d5	AWS	2769	Restore by resource type
+42140879-ff97-4595-8615-1f16b2ee9bb4	AWS	2819	VM restore
+b64e0602-ddf5-46dd-a7b5-789403ed3fd6	AWS	506	Changing your retention period
+ec64eae8-3e67-4607-a635-614bfec1876b	AWS	2919	Controls and remediation
+06059606-e70d-4d97-bcf3-c2bc223f1b47	AWS	3362	Encryption for backups in AWS Backup
+424b1222-b049-4e5a-82b3-cd5735f60f79	Azure	2534	Manage
+f7fa671c-fad5-4557-aa52-cfd6264a56d7	Azure	1530	Overview
+fb158436-9e80-484f-b318-9706aee9e009	Azure	3765	Security for hybrid backups
+55f4325b-713c-4453-8a90-5d3f6a163718	Azure	4374	Create
+4ceed599-fafe-476e-b98e-b744b7b58657	Azure	4366	Migrate to availability zone support
+e2f3ee74-04f0-4d6f-9925-83dc0b43b193	Azure	1318	Configure and run Cross Region Restore
+e53dfaee-916c-4947-9224-43ba63f6a14f	Azure	1389	Restore
+8f869443-b48d-4a45-a9fb-7d0df772e632	Azure	5542	Restore SQL Server database from the vault
+388cac51-a108-4cd1-bfc4-097e9f1b6b87	Azure	5401	FAQ-Back up Azure Files
+1cde879f-5152-4b0e-a9e8-9d4e762ee9ed	Azure	4067	Overview of soft delete
+ee96c754-212d-44a6-a274-911d5392f3c0	Azure	3485	Back up and restore Azure VMs with Azure Backup Instant Rest
+a0e14280-837e-4e23-a930-9119e7692e94	Azure	3617	Back up encrypted Azure VMs
+f3199c91-3ccb-4538-b3e7-b4e45521d8ec	Azure	952	Encryption in Azure Backup
+7322fae3-e27d-4db9-8560-8640d976e3b6	Azure	3959	Manage soft deleted items
+b0eadd12-baf7-484e-8fb0-f0fd756aaba5	Azure	896	FAQ-Soft Delete
+165b7197-1f9d-40de-abb4-8ceb0cb74eee	Azure	1430	Soft delete backups for SQL Server and SAP HANA in Azure VMs
+ffaa7c19-d1cd-491f-b8c4-2cb8ae234070	Azure	2794	Manage recovery points
+cac5320c-a617-4704-b0f1-9afa39b1d281	Azure	2530	Overview
+9967084e-7d84-4f8f-bca7-0ce534bee0a6	Azure	2365	Restore VMware VMs with Azure Backup Server
