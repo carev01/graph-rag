@@ -18,7 +18,7 @@ This is the backbone the rest of the system hangs off. It is independently valua
 
 ### Explicitly out of scope (later slices)
 
-Graphiti episodes / `add_episode`, chunking, any LLM or embedding call, the `HAS_EPISODE` provenance edge, `:NEXT` sibling edges, the community layer, retrieval, and MCP/Copilot exposure. The TOC-refresh pass (§4, ⚠️2) is an **optional** add-on within this slice, not a requirement.
+Graphiti episodes / `add_episode`, chunking, any LLM or embedding call, the `HAS_EPISODE` provenance edge, the community layer, retrieval, and MCP/Copilot exposure. `:NEXT` sibling edges remain deferred (reading order is derivable from `sort_order`). **Authoritative chapter hierarchy IS in scope** for this slice via the TOC-refresh pass (§5.5).
 
 ## 2. Environment (established, not assumed)
 
@@ -42,6 +42,7 @@ Graphiti episodes / `add_episode`, chunking, any LLM or embedding call, the `HAS
    │   • background poll loop (fallback)         graph ops)        upserts)             │
    │   • CLI: bootstrap / sync-once / register-webhook                                  │
    │        └──► delta_client (NDJSON stream, cursor discipline)                        │
+   │        └──► toc (per-source TOC tree fetch) ──► toc_mapper (tree→chapter ops)       │
    │        └──► state_store (cursor, bootstrap progress, webhook dedup) ──► Postgres   │
    │        └──► catalog (source→product→vendor id + metadata cache) ──► DocExtractor   │
    └────────────────────────────────────────────────────────────────────────────────────┘
@@ -53,9 +54,11 @@ Graphiti episodes / `add_episode`, chunking, any LLM or embedding call, the `HAS
 | `delta_client` | Streams `GET /api/articles/delta` as typed records; enforces cursor rules (surfaces "clean finish" only on the terminal `cursor` control line); bootstrap resume via `bootstrap_after`. Pure HTTP I/O. | httpx, models |
 | `catalog` | Resolves `source_id → product_id → vendor_id` and supplies metadata absent from the delta; in-memory cache refreshed on miss and on `extraction_complete`. | httpx |
 | `mapper` | **Pure function:** `(delta record, catalog snapshot) → ordered list of graph ops`. Receives an already-resolved in-memory catalog lookup and performs no I/O itself — the bulk of correctness lives here and is unit-tested with plain calls. | models |
-| `neo4j_repo` | Executes graph ops as idempotent `MERGE` Cypher in a transaction; owns schema/constraints. | neo4j driver |
+| `toc` | Fetches `GET /api/articles/toc/{source_id}` (JSON tree). Thin HTTP I/O. | httpx |
+| `toc_mapper` | **Pure function:** TOC tree → ordered chapter ops (chapter nodes keyed by `toc_entry_id`, hierarchy edges, `IN_CHAPTER` rewiring by `article_id`, prune list). No I/O — unit-tested with recorded TOC fixtures. | models |
+| `neo4j_repo` | Executes graph ops (article + chapter) as idempotent `MERGE` Cypher in a transaction; owns schema/constraints; single writer of chapter structure. | neo4j driver |
 | `state_store` | Cursor get/set (atomic), bootstrap progress, webhook dedup; single-flight advisory lock. | Postgres (asyncpg/SQLAlchemy) |
-| `sync_core` | Orchestrates read cursor → stream → map → write → advance-on-clean-terminal. Idempotent, single-flight. | all above |
+| `sync_core` | Orchestrates read cursor → stream → map → write → advance-on-clean-terminal; also invokes the per-source TOC-refresh pass (§5.5). Idempotent, single-flight. | all above |
 | `webhook` | FastAPI route: verify HMAC, dedup, debounce, enqueue a `sync_core` pass, return 200 fast. | sync_core, state_store |
 | `poll_loop` | Background task invoking `sync_core` every 30 min as the missed-webhook safety net. | sync_core |
 | `app` / `cli` | FastAPI wiring + thin ops CLI. | all |
@@ -71,16 +74,16 @@ Graphiti episodes / `add_episode`, chunking, any LLM or embedding call, the `HAS
 | `:Vendor` | `id` (UUID), `name`, `website` |
 | `:Product` | `id`, `name`, `version`, `vendor_id` |
 | `:Source` | `id`, `name`, `base_url`, `source_type`, `platform`, `last_extracted_at` |
-| `:Chapter` | composite key `(source_id, title)`, `level` |
+| `:Chapter` | `id` (`toc_entry_id` UUID), `source_id`, `title`, `url`, `level`, `sort_order` |
 | `:Article` | `id`, `title`, `source_url`, `topic_key`, `content_hash`, `estimated_tokens`, `sort_order`, `last_updated_at`, `run_id`, `seq`, `removed`, `removed_at` |
 
-Relationships: `(:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)-[:HAS_ARTICLE]->(:Article)`; `(:Source)-[:HAS_CHAPTER]->(:Chapter)`; `(:Article)-[:IN_CHAPTER]->(:Chapter)`.
+Relationships: `(:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)-[:HAS_ARTICLE]->(:Article)`; `(:Source)-[:HAS_CHAPTER]->(:Chapter)`; chapter nesting `(:Chapter)-[:HAS_CHAPTER]->(:Chapter)`; `(:Article)-[:IN_CHAPTER]->(:Chapter)` (to the article's immediate parent chapter). Chapter structure and `IN_CHAPTER` are written **only** by the TOC-refresh pass (§5.5).
 
-Constraints/indexes: uniqueness on `Vendor/Product/Source/Article.id`; composite uniqueness on `Chapter (source_id, title)`; index on `Article.source_id` (reconciliation). All writes are `MERGE`, so replays are idempotent.
+Constraints/indexes: uniqueness on `Vendor/Product/Source/Article/Chapter.id`; index on `Article.source_id` and `Chapter.source_id` (reconciliation + per-source TOC rewiring/pruning). All writes are `MERGE`, so replays are idempotent.
 
 **⚠️1 — Vendor/Product IDs are not in the delta feed.** The delta gives `vendor`/`product` as *name strings* but the authoritative `source_id`. Resolve deterministically `source_id → product_id → vendor_id` via `/api/sources`, `/api/products`, `/api/vendors` (40+79+284 rows). The `catalog` cache loads these at startup, refreshes on cache miss and on `extraction_complete`, and supplies delta-absent metadata (website, product version, base_url, platform). No per-article detail calls.
 
-**⚠️2 — Chapters in the delta are title-strings only** (`parent_chapter`, `top_level_chapter`); no IDs, no full hierarchy, no `toc_entry_id`. Build `:Chapter` by composite key `(source_id, title)` and link article→immediate chapter→top-level. Authoritative hierarchy, `toc_entry_id`, intermediate levels, and sibling `:NEXT` ordering come from `GET /api/articles/toc/{source_id}` — scoped as an **optional TOC-refresh add-on** within this slice. `sort_order` is stored, so reading order is derivable without `:NEXT`.
+**⚠️2 — Chapters come from the TOC endpoint, not the delta.** The delta carries only title-strings (`parent_chapter`, `top_level_chapter`) — no IDs, no hierarchy, no `toc_entry_id` — so they are **not used to build chapter nodes**. Instead, authoritative chapter structure is built by the TOC-refresh pass (§5.5) from `GET /api/articles/toc/{source_id}`, which returns the full tree with `id` (`toc_entry_id`), `title`, `url`, `level`, `sort_order`, `is_article`, `article_id`, and `children[]`. Non-leaf navigation entries become `:Chapter` nodes keyed by `toc_entry_id`; each leaf's `article_id` links its `:Article` to the immediate parent chapter via `IN_CHAPTER`. This makes the delta-side article upsert simpler (it writes no chapter linkage; it still stores the article's own `sort_order`). Sibling `:NEXT` edges remain deferred — reading order is derivable from `sort_order`.
 
 **⚠️3 — deliberately dropped in this slice:** `content_markdown` and `images` (become Graphiti episodes in slice 2; storing ~260M tokens of markdown as node properties is waste) and `extracted_at`/`created_at` (article-detail-only; not worth 105k detail calls). `content_hash` is retained for change-gating.
 
@@ -101,6 +104,7 @@ Constraints/indexes: uniqueness on `Vendor/Product/Source/Article.id`; composite
 2. Apply each `added` record (structural upsert); track highest applied article `id`.
 3. Stream ends **without** terminal `cursor` line → truncated. Resume with `?bootstrap_after=<highest applied id>`, **keeping the original watermark** (ignore the resumed `bootstrap_start`). Repeat until clean terminal.
 4. On clean terminal, mark shard complete. When all shards complete, set global `sync_cursor` to the **min watermark across shards** and switch to incremental.
+5. Run the **TOC-refresh pass (§5.5) for each source** touched during bootstrap, so chapter structure is authoritative before the slice is considered synced.
 
 ### 5.2 Incremental (steady state)
 
@@ -125,6 +129,22 @@ Constraints/indexes: uniqueness on `Vendor/Product/Source/Article.id`; composite
 
 `added`/`updated` are treated identically in this slice (idempotent structural upserts); the distinction only matters in slice 2 (append-episode temporal policy). `content_hash` gating is what makes them safe here.
 
+### 5.5 TOC-refresh pass (authoritative chapters)
+
+Chapter structure is derived from the source's navigation tree, not the per-article delta, so it is refreshed **per source** rather than per record.
+
+**When it runs:**
+- After bootstrap of a source (§5.1 step 5).
+- On `extraction_complete` for a source — the webhook payload names the `source_id`, and page add/remove reshapes the TOC — so the pass runs for exactly that source after the article deltas are applied.
+- (Belt-and-suspenders) a periodic full refresh across all sources on the 30-min poll cadence is **not** required; a per-source refresh keyed off extraction is sufficient. A manual `refresh-toc <source_id>` CLI exists for repair.
+
+**What it does** (per source, single Neo4j transaction):
+1. `toc` fetches `GET /api/articles/toc/{source_id}`.
+2. `toc_mapper` (pure) flattens the tree → ordered chapter ops: `MERGE (:Chapter {id: toc_entry_id})` with `title/url/level/sort_order/source_id`; `(:Source)-[:HAS_CHAPTER]->(:Chapter)` for roots and `(:Chapter)-[:HAS_CHAPTER]->(:Chapter)` for nesting; `(:Article {id: article_id})-[:IN_CHAPTER]->(:Chapter)` for each leaf's immediate parent.
+3. **Rewire + prune:** `IN_CHAPTER` for the source's articles is replaced to match the current tree, and `:Chapter` nodes for that `source_id` that are absent from the current tree are detached and removed. Chapters are structural navigation — safe to rebuild from the authoritative tree each pass (unlike articles, which are tombstoned, never deleted).
+
+**Ordering vs. article ingestion:** `IN_CHAPTER` links by `article_id`; if the TOC references an article not yet upserted (rare timing skew), the `MERGE (:Article {id})` creates a stub that the article delta later fills in — no lost edge. The pass therefore runs *after* the delta batch for the source, but is self-healing if ordering slips.
+
 ## 6. Webhook path (end-to-end)
 
 **Registration** (one-time CLI `register-webhook`, admin key): `POST /api/webhooks` with `events:"extraction_complete"`, our endpoint URL, and a generated HMAC `secret` stored in Postgres/env. Endpoint: `http(s)://srv-openclaw.home.lan:<port>/webhooks/docextractor`. If DocExtractor enforces HTTPS/internal-CA trust on delivery, terminate TLS with a cert from that CA (or fall back to a tunnel); the accepted scheme is confirmed at registration time.
@@ -148,6 +168,7 @@ Validated live: trigger an extraction (admin key) on a small source, watch the s
 | DocExtractor 401 (bad/expired key) | Fail loudly, alertable; no silent partial sync. |
 | Catalog cache miss (unknown `source_id`) | Refresh catalog once; if still unknown, write the article with `source_id` + `catalog_incomplete=true` and log — never drop the record. |
 | Malformed/unparseable NDJSON line | Route to `dead_letter` with raw line + context; continue the stream but **fail the batch** (do not advance cursor past a dropped line). Alert on dead-letter growth. |
+| TOC fetch fails / TOC-refresh errors for a source | Article deltas already applied and cursor advancement are **independent** of the TOC pass — a failed TOC refresh is logged and retried (next extraction or manual `refresh-toc`), never blocks or reverts article sync. Chapter structure is eventually-consistent; articles are not. |
 | Webhook HMAC fail | 401, dropped, logged. |
 | Duplicate webhook delivery | Deduped, 200, no work. |
 | Two syncs race (webhook + poll) | Single-flight lock; later one sets dirty flag; active run does one more pass. |
@@ -160,9 +181,9 @@ Guiding rule: **the cursor advances only on fully-applied, cleanly-terminated ba
 
 The pure `mapper` seam keeps most correctness infrastructure-free.
 
-- **Unit (pure, the bulk):** `mapper` record→graph-ops for every case (added, updated, tombstone, `run_id:null`, missing chapter, unknown source); `delta_client` cursor discipline (terminal detection, truncation, bootstrap resume with retained watermark); HMAC verify/reject; content_hash gate skip/pass; min-watermark computation. Fed by **recorded NDJSON fixtures** captured from the live feed and checked in.
-- **Integration (testcontainers):** `neo4j_repo` idempotency (apply a batch twice → identical graph), constraints, tombstone-keeps-node; `state_store` atomic cursor advance + single-flight lock; webhook dedup.
-- **End-to-end (`@live`, opt-in):** bootstrap AWS Backup (146 articles) → 146 `:Article` nodes wired to correct Source/Product/Vendor; reconcile vs `/api/dashboard/sources`; register webhook, trigger extraction (admin key), assert signed POST arrives and drives sync. Excluded from the default CI lane.
+- **Unit (pure, the bulk):** `mapper` record→graph-ops for every case (added, updated, tombstone, `run_id:null`, unknown source); `toc_mapper` tree→chapter-ops (nesting, leaf→article `IN_CHAPTER`, prune list, article-stub-on-missing); `delta_client` cursor discipline (terminal detection, truncation, bootstrap resume with retained watermark); HMAC verify/reject; content_hash gate skip/pass; min-watermark computation. Fed by **recorded NDJSON + TOC-JSON fixtures** captured from the live feed and checked in.
+- **Integration (testcontainers):** `neo4j_repo` idempotency (apply a batch twice → identical graph), constraints, tombstone-keeps-node, TOC-refresh rewire+prune (chapter removed from tree → detached; re-running the pass is a no-op); `state_store` atomic cursor advance + single-flight lock; webhook dedup.
+- **End-to-end (`@live`, opt-in):** bootstrap AWS Backup (146 articles) → 146 `:Article` nodes wired to correct Source/Product/Vendor, and chapter hierarchy matching the live TOC (spot-check known nesting, e.g. *Backup vaults › Vault Lock*); reconcile vs `/api/dashboard/sources`; register webhook, trigger extraction (admin key), assert signed POST arrives and drives sync + TOC refresh. Excluded from the default CI lane.
 
 ## 9. Project layout
 
@@ -173,6 +194,7 @@ graph-rag/
   .env.example              # keys, URLs, secrets (never real values)
   src/graph_sync/
     models.py  delta_client.py  catalog.py  mapper.py
+    toc.py  toc_mapper.py
     neo4j_repo.py  state_store.py  sync_core.py
     webhook.py  poll_loop.py  app.py  cli.py  config.py
   tests/
@@ -184,9 +206,10 @@ Config via `pydantic-settings` (env). Async throughout (`httpx.AsyncClient`, asy
 
 ## 10. Success criteria — slice is "done" when
 
-1. Bootstrap ingests a chosen source/vendor into the structural graph; node/edge counts reconcile against DocExtractor's dashboard.
+1. Bootstrap ingests a chosen source/vendor into the structural graph; node/edge counts reconcile against DocExtractor's dashboard, and chapter hierarchy (from the TOC pass) matches the live TOC tree for the source.
 2. Incremental sync applies added/updated/removed correctly; re-running with the same cursor is a clean no-op (`count:0`), proving idempotency.
 3. Bootstrap resume works after a forced mid-stream drop, with no missed or duplicated articles.
 4. A real `extraction_complete` webhook is received, HMAC-verified, deduped, and drives a sync end-to-end.
 5. `content_hash` gating measurably skips unchanged records on replay.
-6. Full unit + integration suite green; `@live` E2E passes against the cluster.
+6. TOC-refresh is authoritative and self-correcting: re-running the pass is a no-op, and a chapter removed from the rebuilt tree is detached from the graph (no orphan `:Chapter`).
+7. Full unit + integration suite green; `@live` E2E passes against the cluster.
