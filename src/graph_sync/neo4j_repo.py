@@ -82,16 +82,25 @@ MERGE (pc)-[:HAS_CHAPTER]->(cc)
 
 # `MERGE (a:Article ...)` (not `MATCH`) per spec §5.5: a TOC snapshot may reference an
 # article that hasn't been apply_structural'd yet (forward reference). MERGE creates a
-# stub Article node (id only) so the IN_CHAPTER link is preserved instead of silently
-# dropped; the later structural delta fills in the stub's real properties via
-# `_APPLY_STRUCTURAL`'s `MERGE (a:Article {id: $article.id}) SET a += $article` on the
-# same id. Do not SET anything else on the stub here.
+# stub Article node so the IN_CHAPTER link is preserved instead of silently dropped; the
+# later structural delta fills in the stub's real properties via `_APPLY_STRUCTURAL`'s
+# `MERGE (a:Article {id: $article.id}) SET a += $article` on the same id.
+#
+# `ON CREATE SET a.source_id = $source_id` is required on the stub: the clear step above
+# (`OPTIONAL MATCH (a:Article {source_id: $source_id})-[r:IN_CHAPTER]->() DELETE r`) is
+# scoped by source_id. Without it, a stub created here has no source_id and is invisible
+# to that clear step on a later apply_toc call for the same source, so re-rewiring the
+# same (still-unfilled) article to a different chapter would add a second IN_CHAPTER edge
+# instead of replacing the first. Every article_links entry for a given apply_toc call
+# belongs to that call's source_id, and a real apply_structural later sets the same
+# source_id via `$article`, so this is never in conflict. Do not SET anything else on the
+# stub here.
 _REWIRE_ARTICLE_LINKS = """
 OPTIONAL MATCH (a:Article {source_id: $source_id})-[r:IN_CHAPTER]->()
 DELETE r
 WITH DISTINCT 1 AS _
 UNWIND $article_links AS link
-MERGE (a:Article {id: link[0]})
+MERGE (a:Article {id: link[0]}) ON CREATE SET a.source_id = $source_id
 WITH a, link
 MATCH (c:Chapter {id: link[1]})
 MERGE (a)-[:IN_CHAPTER]->(c)
@@ -202,5 +211,14 @@ class Neo4jRepo:
             r = await sess.run(
                 "MATCH ()-[:HAS_CHAPTER]->(c:Chapter {id:$id}) RETURN count(*) AS n",
                 id=chapter_id,
+            )
+            return (await r.single())["n"]
+
+    async def article_in_chapter_count(self, article_id: str) -> int:
+        """Test helper: count outgoing IN_CHAPTER edges from an article."""
+        async with self._driver.session() as sess:
+            r = await sess.run(
+                "MATCH (a:Article {id:$id})-[:IN_CHAPTER]->() RETURN count(*) AS n",
+                id=article_id,
             )
             return (await r.single())["n"]

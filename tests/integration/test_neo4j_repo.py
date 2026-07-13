@@ -86,3 +86,31 @@ async def test_apply_toc_forward_referenced_article_gets_stub_then_filled(neo4j_
     await neo4j_repo.apply_structural(_write(article_id="a6", source_id="s7", h="h6"))
     assert await neo4j_repo.get_content_hash("a6") == "h6"
     assert await neo4j_repo.article_chapter_id("a6") == "cZ"  # link still intact
+
+
+async def test_apply_toc_relinks_unfilled_stub_across_snapshots(neo4j_repo):
+    # Two TOC snapshots for the same source both forward-reference "a8", which is never
+    # apply_structural'd in this test. The stub Article created by the first apply_toc
+    # must carry source_id so the second apply_toc's clear step (scoped by source_id)
+    # can see and remove its old IN_CHAPTER edge before relinking -- otherwise a8 ends up
+    # with two IN_CHAPTER edges, violating the no-duplicate-edges invariant.
+    #
+    # Both chapters are present (as roots) in BOTH snapshots so that _PRUNE_CHAPTERS never
+    # deletes cP: pruning a chapter would DETACH DELETE it and incidentally remove a8's
+    # stale edge as a side effect, masking the bug this test targets. This isolates the
+    # rewire step itself.
+    snap1 = TocSnapshot(source_id="s8",
+        chapters=[ChapterRow("cP", "s8", "P", "u", 0, 0),
+                  ChapterRow("cQ", "s8", "Q", "u", 0, 1)],
+        root_ids=["cP", "cQ"], nesting=[], article_links=[("a8", "cP")])
+    await neo4j_repo.apply_toc(snap1)
+    assert await neo4j_repo.article_chapter_id("a8") == "cP"
+
+    snap2 = TocSnapshot(source_id="s8",
+        chapters=[ChapterRow("cP", "s8", "P", "u", 0, 0),
+                  ChapterRow("cQ", "s8", "Q", "u", 0, 1)],
+        root_ids=["cP", "cQ"], nesting=[], article_links=[("a8", "cQ")])
+    await neo4j_repo.apply_toc(snap2)
+
+    assert await neo4j_repo.article_in_chapter_count("a8") == 1
+    assert await neo4j_repo.article_chapter_id("a8") == "cQ"
