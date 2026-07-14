@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
+from typing import Literal
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 from graphiti_core import Graphiti
 from graphiti_core.llm_client import OpenAIClient, LLMConfig
@@ -31,7 +32,7 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
     """
     orig = client.chat.completions.create
 
-    async def create(*args, **kwargs):  # type: ignore[no-untyped-def]
+    async def create(*args, **kwargs):
         extra = dict(kwargs.get("extra_body") or {})
         # require_parameters: only route to providers that actually support the
         # request params (response_format/json_schema) -- prevents routing to a
@@ -43,7 +44,7 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
         kwargs["extra_body"] = extra
         return await orig(*args, **kwargs)
 
-    client.chat.completions.create = create  # type: ignore[assignment]
+    client.chat.completions.create = create  # type: ignore[method-assign]
     return client
 
 
@@ -70,7 +71,8 @@ def _llm_client(s: ExtractSettings):
     if s.llm_client_mode == "structured":
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
-    mode = "json_schema" if s.llm_client_mode == "generic_json_schema" else "json_object"
+    mode: Literal["json_schema", "json_object"] = (
+        "json_schema" if s.llm_client_mode == "generic_json_schema" else "json_object")
     return OpenAIGenericClient(config=cfg, client=raw, structured_output_mode=mode)
 
 def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI:
@@ -82,7 +84,7 @@ def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI
     """
     orig = client.embeddings.create
 
-    async def create(*args, **kwargs):  # type: ignore[no-untyped-def]
+    async def create(*args, **kwargs):
         inp = kwargs.get("input")
         if isinstance(inp, list) and len(inp) > max_batch:
             merged = None
@@ -99,7 +101,7 @@ def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI
             return merged
         return await orig(*args, **kwargs)
 
-    client.embeddings.create = create  # type: ignore[assignment]
+    client.embeddings.create = create  # type: ignore[method-assign]
     return client
 
 

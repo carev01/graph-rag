@@ -50,7 +50,7 @@ def instrument(async_openai):
         resp = await cc_orig(*args, **kwargs)
         _tally_usage(resp)
         return resp
-    async_openai.chat.completions.create = cc_create  # type: ignore[assignment]
+    async_openai.chat.completions.create = cc_create
 
     responses = getattr(async_openai, "responses", None)
     for name in ("create", "parse"):

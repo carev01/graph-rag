@@ -1,4 +1,6 @@
-import httpx, json, pytest
+import httpx
+import json
+import pytest
 from graph_extract.content_fetch import fetch_article, ArticleContent
 
 pytestmark = pytest.mark.asyncio

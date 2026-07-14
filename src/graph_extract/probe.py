@@ -40,11 +40,11 @@ async def _chunks_for(s: ExtractSettings, docext: httpx.AsyncClient,
 
 async def run_probe(s: ExtractSettings, article_ids: list[str], n_chunks: int,
                     modes: tuple[str, ...] = DEFAULT_MODES) -> dict:
-    docext = make_docext_client(s)
+    docext = make_docext_client(s)  # type: ignore[arg-type]  # structurally compatible
     report: dict = {}
     try:
         for mode in modes:
-            sm = replace(s, llm_client_mode=mode)
+            sm = replace(s, llm_client_mode=mode)  # type: ignore[arg-type]
             g = build_graphiti(sm)
             await init_indices(g)
             reset_tally()

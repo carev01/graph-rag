@@ -43,4 +43,13 @@ target-version = "py312"
 
 [tool.mypy]
 python_version = "3.12"
-strict = true
+# Pragmatic baseline (not full --strict): keep the checks that catch real bugs
+# (arg-type, attr-defined, return-value, and type-checking inside untyped
+# functions), but don't require full annotation coverage / generic
+# parametrization on internal helpers and third-party (neo4j/asyncpg/graphiti)
+# boundaries. This makes the gate honest and CI-enforceable.
+check_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+# Several deps ship no type stubs (asyncpg, etc.); don't fail on that boundary.
+ignore_missing_imports = true

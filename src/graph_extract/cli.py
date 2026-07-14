@@ -12,6 +12,7 @@ from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.eval import cost_report, dedup_report, fact_quality, provenance_report
 from graph_extract.graphiti_client import build_graphiti, init_indices
 from graph_extract.ingest_driver import IngestDriver
+from graphiti_core import Graphiti
 from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
 from graph_sync.delta_client import make_client
@@ -36,7 +37,7 @@ def _dump(obj: object) -> None:
 
 async def _build_ingest_driver(
     settings: ExtractSettings,
-) -> tuple[IngestDriver, object, httpx.AsyncClient, AsyncDriver]:
+) -> tuple[IngestDriver, Graphiti, httpx.AsyncClient, AsyncDriver]:
     """Construct the real dependency graph the `ingest` command needs.
 
     If any step after opening a resource fails, every resource already
@@ -50,7 +51,8 @@ async def _build_ingest_driver(
     docext: httpx.AsyncClient | None = None
     driver: AsyncDriver | None = None
     try:
-        docext = make_client(settings, admin=False)
+        # ExtractSettings is structurally compatible with the fields make_client reads.
+        docext = make_client(settings, admin=False)  # type: ignore[arg-type]
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password)
         )

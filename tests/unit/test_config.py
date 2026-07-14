@@ -1,4 +1,3 @@
-import os
 from graph_sync.config import get_settings
 
 def test_settings_load_from_env(monkeypatch):

@@ -1,4 +1,4 @@
-import httpx, pytest
+import httpx
 from pathlib import Path
 from graph_sync.delta_client import DeltaStream, build_delta_params
 from graph_sync.models import ContentRecord

@@ -1,5 +1,6 @@
 from __future__ import annotations
-import base64, json
+import base64
+import json
 from dataclasses import dataclass, field
 from typing import Literal
 from pydantic import BaseModel, ConfigDict

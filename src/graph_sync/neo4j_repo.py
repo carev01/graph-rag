@@ -182,7 +182,7 @@ class Neo4jRepo:
         article_links = [list(p) for p in snap.article_links]
         keep = [c["id"] for c in chapters]
 
-        async def _tx(tx):  # type: ignore[no-untyped-def]
+        async def _tx(tx):
             await tx.run(_UPSERT_CHAPTERS, chapters=chapters)
             # Clear ALL existing HAS_CHAPTER edges touching this source's chapters
             # before re-wiring roots+nesting from the snapshot, since chapters are
@@ -214,7 +214,9 @@ class Neo4jRepo:
             r = await sess.run(
                 "MATCH (a:Article {source_id:$s}) RETURN count(a) AS n", s=source_id
             )
-            return (await r.single())["n"]
+            rec = await r.single()
+            assert rec is not None  # count() always returns exactly one row
+            return rec["n"]
 
     async def chapter_exists(self, chapter_id: str) -> bool:
         async with self._driver.session() as sess:
@@ -237,7 +239,9 @@ class Neo4jRepo:
                 "MATCH ()-[:HAS_CHAPTER]->(c:Chapter {id:$id}) RETURN count(*) AS n",
                 id=chapter_id,
             )
-            return (await r.single())["n"]
+            rec = await r.single()
+            assert rec is not None  # count() always returns exactly one row
+            return rec["n"]
 
     async def article_in_chapter_count(self, article_id: str) -> int:
         """Test helper: count outgoing IN_CHAPTER edges from an article."""
@@ -246,7 +250,9 @@ class Neo4jRepo:
                 "MATCH (a:Article {id:$id})-[:IN_CHAPTER]->() RETURN count(*) AS n",
                 id=article_id,
             )
-            return (await r.single())["n"]
+            rec = await r.single()
+            assert rec is not None  # count() always returns exactly one row
+            return rec["n"]
 
     async def delete_source_articles(self, source_id: str) -> None:
         """Test helper: drop all Article nodes for a source (and their edges).

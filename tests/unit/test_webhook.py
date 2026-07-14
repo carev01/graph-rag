@@ -1,4 +1,7 @@
-import hmac, hashlib, json, pytest
+import hmac
+import hashlib
+import json
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from graph_sync.webhook import verify_signature, build_router
@@ -16,20 +19,28 @@ def test_verify_signature_accepts_and_rejects():
     assert verify_signature(SECRET, body, None) is False
 
 class FakeStore:
-    def __init__(self): self.seen=set(); self.ran=[]
+    def __init__(self):
+        self.seen = set()
+        self.ran = []
     async def seen_delivery(self, sig):
-        dup = sig in self.seen; self.seen.add(sig); return dup
-    async def should_run_source(self, sid, deb): self.ran.append(sid); return True
+        dup = sig in self.seen
+        self.seen.add(sig)
+        return dup
+    async def should_run_source(self, sid, deb):
+        self.ran.append(sid)
+        return True
 
 async def _app(store, calls):
     from types import SimpleNamespace
     settings = SimpleNamespace(webhook_secret=SECRET, webhook_debounce_seconds=300)
     async def trigger(): calls.append(1)
-    app = FastAPI(); app.include_router(build_router(store, settings, trigger))
+    app = FastAPI()
+    app.include_router(build_router(store, settings, trigger))
     return app
 
 async def test_webhook_rejects_bad_hmac():
-    calls=[]; app = await _app(FakeStore(), calls)
+    calls = []
+    app = await _app(FakeStore(), calls)
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
         r = await c.post("/webhooks/docextractor", content=b"{}",
                          headers={"X-DocExtractor-Signature":"sha256=bad"})
@@ -43,7 +54,8 @@ async def test_webhook_rejects_when_secret_unconfigured():
     store = FakeStore()
     settings = SimpleNamespace(webhook_secret="", webhook_debounce_seconds=300)
     async def trigger(): calls.append(1)
-    app = FastAPI(); app.include_router(build_router(store, settings, trigger))
+    app = FastAPI()
+    app.include_router(build_router(store, settings, trigger))
     body = b'{"source_id":"s1"}'
     forged = "sha256=" + hmac.new(b"", body, hashlib.sha256).hexdigest()
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
@@ -52,7 +64,9 @@ async def test_webhook_rejects_when_secret_unconfigured():
     assert r.status_code == 401 and calls == []
 
 async def test_webhook_accepts_and_dedups():
-    calls=[]; store=FakeStore(); app = await _app(store, calls)
+    calls = []
+    store = FakeStore()
+    app = await _app(store, calls)
     body = json.dumps({"event":"extraction_complete","source_id":"s1"}).encode()
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
         h = {"X-DocExtractor-Signature": _sig(body)}

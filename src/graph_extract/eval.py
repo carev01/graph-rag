@@ -29,7 +29,7 @@ ASSUMED_FULL_CORPUS_EPISODES = 105_000
 
 async def dedup_report(driver, group_id, canon_merge: list[str],
                        distinct_pairs: list[tuple[str, str]]) -> dict:
-    out = {"merge": {}, "distinct": [], "totals": {}}
+    out: dict = {"merge": {}, "distinct": [], "totals": {}}
     async with driver.session() as s:
         for name in canon_merge:
             r = await s.run("MATCH (e:Entity {group_id:$g}) WHERE toLower(e.name)=toLower($n) "

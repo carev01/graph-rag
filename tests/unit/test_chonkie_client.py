@@ -1,4 +1,6 @@
-import httpx, json, pytest
+import httpx
+import json
+import pytest
 from graph_extract.chonkie_client import neural_chunk, Chunk
 
 pytestmark = pytest.mark.asyncio

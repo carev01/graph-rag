@@ -1,5 +1,5 @@
 from graph_extract.chonkie_client import Chunk
-from graph_extract.episode_builder import build_episodes, needs_presplit, Episode, _split_oversize
+from graph_extract.episode_builder import build_episodes, needs_presplit, _split_oversize
 
 def _mk(toks):  # chunks with given token counts, text length ~4 chars/token
     out, pos = [], 0
