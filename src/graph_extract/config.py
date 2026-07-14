@@ -10,6 +10,7 @@ class ExtractSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     docext_base_url: str
     docext_read_key: str
+    docext_admin_key: str = ""  # so make_client(admin=...) is structurally safe
     docext_verify_tls: bool = False
     neo4j_uri: str
     neo4j_user: str

@@ -161,7 +161,14 @@ class SyncCore:
             res = IncrementalResult()
             while True:
                 self._incremental_dirty = False
-                res = await self._run_incremental_once()
+                r = await self._run_incremental_once()
+                # Accumulate across passes so the returned counts reflect ALL
+                # work, not just the last (dirty re-pass) pass.
+                res.applied += r.applied
+                res.removed += r.removed
+                res.skipped += r.skipped
+                res.sources |= r.sources
+                res.advanced = res.advanced or r.advanced
                 if not self._incremental_dirty:
                     return res
         finally:

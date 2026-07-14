@@ -125,9 +125,11 @@ def build_graphiti(s: ExtractSettings) -> Graphiti:
     # clients we created (LLM + embedder) so they don't leak, esp. in a
     # long-running CLI that builds one Graphiti per invocation.
     owned = [embed_client]
-    llm_raw = getattr(llm, "client", None)
-    if llm_raw is not None:
-        owned.append(llm_raw)
+    # The LLM and reranker clients both store their raw AsyncOpenAI as `.client`
+    # (the reranker builds its own from config when no client= is passed).
+    for extra in (getattr(llm, "client", None), getattr(reranker, "client", None)):
+        if extra is not None:
+            owned.append(extra)
     orig_close = g.close
 
     async def _close() -> None:
