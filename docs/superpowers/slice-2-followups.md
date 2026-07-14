@@ -14,6 +14,26 @@ deferred. Roughly priority-ordered.
 - **Latency ~6 min/episode** on one GPU (serialized). Full-corpus extraction is a
   background/batch concern; the 2a pilot runs a sample.
 
+## Slice 2b ENTRY REQUIREMENTS (user-mandated at the 2a GO-WITH-CHANGES sign-off)
+
+The 2a verdict (`slice-2a-viability.md`) was approved **on condition** that slice 2b
+addresses these two extraction-quality issues up front (an ontology/prompt-v2 +
+dedup-tuning pass before scaling). These are requirements, not nice-to-haves:
+
+1. **Reduce noise.** ~20–30% of extracted facts (and ~4% of entities) are low-value:
+   ARNs (`arn:aws:...`), error codes (`InvalidOrganizationBackupPlan`), specific
+   example IDs/values, and CLI commands (`Install-Module …`). Strengthen the
+   `EXTRACTION_INSTRUCTIONS` suppression (explicitly exclude ARNs/resource-IDs/error-
+   codes/CLI-commands/example-values), populate `excluded_entity_types`, and consider a
+   post-extraction filter. Re-measure noise rate.
+2. **Improve deduplication quality.** Dedup precision misses cause false cross-vendor
+   merges (e.g. an Azure vault/immutability concept merged into `AWS Backup Vault Lock`).
+   Tighten canonicalization (it currently over-merges mid-tier concepts), add vendor-
+   scoping hints to extraction/resolution, and add targeted `SAME_AS`/split fix-ups
+   (plan §4.3). Also address entity **type confusion** (e.g. `AWS CLI`→Platform,
+   `SEC 17a-4`→Platform) via sharper type descriptions (ontology v2). Re-measure the
+   dedup report (correct-merge vs false-merge) against a labelled overlap set.
+
 ## Deferred to slice 2b (semantic pipeline hardening)
 - **Append/invalidate temporal update policy** for re-extracted changed articles; the
   residual-staleness sweep; structural↔semantic `SAME_AS` reconciliation; durable work
