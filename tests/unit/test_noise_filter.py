@@ -12,6 +12,14 @@ NOISE = [
     "Install-Module -Name Az.RecoveryServices -Force",
     "snap-07ce8c3141d361233",
     "vol-00a422a05b9c6asd3",
+    # Service-action strings (IAM/API actions), never products/concepts.
+    "kms:GetKeyPolicy",
+    "kms:put-key-policy",
+    "s3:PutObject",
+    # API request-field names extracted as entities.
+    "BackupVaultArn",
+    "EncryptionKeyArn",
+    "BackupVaultName",
 ]
 KEEP = [
     "immutability",

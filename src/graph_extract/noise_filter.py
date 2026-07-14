@@ -34,8 +34,19 @@ _CLI = re.compile(
     r"|`"
 )
 
-# CamelCase API/operation or error identifiers ending in a status/verb word.
-_API_ERR = re.compile(r"^[A-Z][A-Za-z0-9]*(Failed|Error|Exception|RequestId|Id)$")
+# CamelCase API/operation identifiers ending in a status/verb word or a bare
+# request-field suffix. `Arn`/`Name` catch API parameter field names extracted
+# as entities ("BackupVaultArn", "EncryptionKeyArn", "BackupVaultName"); the
+# single-token guard in is_noise keeps real multi-word concepts safe.
+_API_ERR = re.compile(
+    r"^[A-Z][A-Za-z0-9]*(Failed|Error|Exception|RequestId|Id|Arn|Name)$"
+)
+
+# Service-action strings, e.g. "kms:GetKeyPolicy", "kms:put-key-policy",
+# "s3:PutObject" — an IAM/API action, never a product/concept. A lowercase
+# service prefix, a colon, then the action token (nothing else). `arn:...`
+# is handled by _ARN above; prose with colons has a space and won't match.
+_SERVICE_ACTION = re.compile(r"^[a-z][a-z0-9]{1,20}:[A-Za-z][A-Za-z0-9-]*$")
 
 
 def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name fixed by contract
@@ -49,6 +60,8 @@ def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name f
     if _RESOURCE_ID.match(n):
         return True
     if _CLI.search(n):
+        return True
+    if _SERVICE_ACTION.match(n):
         return True
     if _API_ERR.match(n) and " " not in n:
         return True
