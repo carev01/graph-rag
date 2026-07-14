@@ -29,6 +29,7 @@ class ExtractSettings(BaseSettings):
     embed_base_url: str = "http://srv-llm.home.lan:8082/v1"
     embed_model: str = "jinaai/jina-embeddings-v5-text-nano-retrieval"
     embed_dim: int = 768
+    embed_max_batch: int = 32  # TEI/Jina max_client_batch_size; cap embed batches to this
     chonkie_base_url: str = "http://srv-llm.home.lan:8084"
     chonkie_model: str = "mirth/chonky_modernbert_base_1"
     group_id: str = "backup-docs"

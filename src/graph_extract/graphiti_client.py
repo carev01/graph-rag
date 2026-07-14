@@ -73,10 +73,45 @@ def _llm_client(s: ExtractSettings):
     mode = "json_schema" if s.llm_client_mode == "generic_json_schema" else "json_object"
     return OpenAIGenericClient(config=cfg, client=raw, structured_output_mode=mode)
 
+def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI:
+    """Cap embedding requests to max_batch inputs per call.
+
+    TEI/Jina enforces max_client_batch_size (32); graphiti can send larger
+    batches (observed: 34), which TEI rejects with HTTP 422 and drops the whole
+    article. Split oversized inputs into <=max_batch sub-batches, preserving order.
+    """
+    orig = client.embeddings.create
+
+    async def create(*args, **kwargs):  # type: ignore[no-untyped-def]
+        inp = kwargs.get("input")
+        if isinstance(inp, list) and len(inp) > max_batch:
+            merged = None
+            data = []
+            for i in range(0, len(inp), max_batch):
+                sub = dict(kwargs)
+                sub["input"] = inp[i:i + max_batch]
+                r = await orig(*args, **sub)
+                merged = r
+                data.extend(r.data)
+            for idx, d in enumerate(data):
+                d.index = idx
+            merged.data = data  # type: ignore[union-attr]
+            return merged
+        return await orig(*args, **kwargs)
+
+    client.embeddings.create = create  # type: ignore[assignment]
+    return client
+
+
 def build_graphiti(s: ExtractSettings) -> Graphiti:
-    embedder = OpenAIEmbedder(config=OpenAIEmbedderConfig(
-        api_key="not-needed", embedding_model=s.embed_model,
-        embedding_dim=s.embed_dim, base_url=s.embed_base_url))
+    embed_client = _batch_capped_embeddings(
+        AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
+                    timeout=90.0, max_retries=4), s.embed_max_batch)
+    embedder = OpenAIEmbedder(
+        config=OpenAIEmbedderConfig(
+            api_key="not-needed", embedding_model=s.embed_model,
+            embedding_dim=s.embed_dim, base_url=s.embed_base_url),
+        client=embed_client)
     # CRITICAL: pass an explicit LOCAL reranker so Graphiti does not build its
     # default OpenAIRerankerClient() pointed at api.openai.com.
     reranker = OpenAIRerankerClient(config=_llm_config(s))
