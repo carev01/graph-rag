@@ -48,7 +48,12 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
 
 
 def _llm_client(s: ExtractSettings):
-    raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url))
+    # Explicit timeout + retries: a cloud endpoint can drop a connection
+    # (observed: an OpenRouter socket stuck in CLOSE_WAIT hung the whole run
+    # with no progress). A bounded per-request timeout makes a dead request
+    # abort and retry instead of hanging forever.
+    raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
+                                 timeout=90.0, max_retries=4))
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
     cfg = _llm_config(s)
