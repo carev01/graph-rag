@@ -20,6 +20,14 @@ NOISE = [
     "BackupVaultArn",
     "EncryptionKeyArn",
     "BackupVaultName",
+    # Lowercase shell commands (as typed), distinct from Title-Case prose.
+    "aws backup start-restore-job",
+    "az backup vault list",
+    # Geographic region / AZ names (low-value, prompt can't suppress).
+    "AWS Regions",
+    "Canada (Central) Region",
+    "primary region",
+    "Azure paired region",
 ]
 KEEP = [
     "immutability",
@@ -35,6 +43,12 @@ KEEP = [
     "Azure Backup",
     "soft delete",
     "retention policy",
+    # Title-Case prose with a vendor prefix — NOT shell commands.
+    "AWS managed key",
+    "AWS managed policy",
+    "Azure managed disk",
+    # A capability that contains "region" but doesn't end in it.
+    "Cross-Region backup",
 ]
 
 
