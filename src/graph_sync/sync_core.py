@@ -51,6 +51,9 @@ class SyncCore:
         # one in-flight run_incremental; the advisory lock remains for
         # cross-process safety.
         self._incremental_running = False
+        # Set when a nudge arrives mid-sync so the running sync does one more
+        # pass (spec §5.3/§7) instead of dropping the trigger.
+        self._incremental_dirty = False
 
     async def _apply_record(
         self, rec: ContentRecord | TombstoneRecord, res: BootstrapResult | IncrementalResult
@@ -145,30 +148,45 @@ class SyncCore:
         return res
 
     async def run_incremental(self) -> IncrementalResult:
-        res = IncrementalResult()
         # In-process single-flight: checked-and-set synchronously (no await
         # between), so a second concurrent caller — e.g. a webhook firing mid
-        # poll-cycle — skips instead of running a second overlapping sync.
+        # poll-cycle — does not run a second overlapping sync. Instead it marks
+        # the run dirty so the active sync does one more pass (never drops a
+        # nudge; spec §5.3/§7).
         if self._incremental_running:
-            return res
+            self._incremental_dirty = True
+            return IncrementalResult()
         self._incremental_running = True
         try:
-            if not await self._store.try_lock():
-                return res  # another process is already running: single-flight
-            try:
-                cursor = await self._store.get_cursor()
-                stream = DeltaStream(self._client, build_delta_params(since=cursor))
-                async for rec in stream.records():
-                    touched = await self._apply_record(rec, res)
-                    if touched:
-                        res.sources.add(touched)
-                if stream.terminated_clean and stream.next_since:
-                    await self._store.set_cursor(stream.next_since)
-                    res.advanced = True
-                    for sid in res.sources:
-                        await self.refresh_toc(sid)
-                return res
-            finally:
-                await self._store.unlock()
+            res = IncrementalResult()
+            while True:
+                self._incremental_dirty = False
+                res = await self._run_incremental_once()
+                if not self._incremental_dirty:
+                    return res
         finally:
             self._incremental_running = False
+
+    async def _run_incremental_once(self) -> IncrementalResult:
+        res = IncrementalResult()
+        if not await self._store.try_lock():
+            return res  # another process is already running: single-flight
+        try:
+            cursor = await self._store.get_cursor()
+            stream = DeltaStream(self._client, build_delta_params(since=cursor))
+            async for rec in stream.records():
+                touched = await self._apply_record(rec, res)
+                if touched:
+                    res.sources.add(touched)
+            # Unparseable lines are dead-lettered and BLOCK cursor advance
+            # (do not skip past a dropped line; spec §7).
+            for bad in stream.malformed:
+                await self._store.record_dead_letter(bad, "unparseable delta line")
+            if stream.terminated_clean and stream.next_since and not stream.malformed:
+                await self._store.set_cursor(stream.next_since)
+                res.advanced = True
+                for sid in res.sources:
+                    await self.refresh_toc(sid)
+            return res
+        finally:
+            await self._store.unlock()

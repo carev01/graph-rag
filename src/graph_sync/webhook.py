@@ -27,7 +27,11 @@ def build_router(store, settings, trigger: Callable[[], Awaitable[None]]) -> API
             return Response(status_code=401)
         if await store.seen_delivery(sig):
             return Response(content='{"status":"ok"}', media_type="application/json")
-        payload = json.loads(body or b"{}")
+        try:
+            payload = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            # Authenticated but malformed body -> clean 400, not a 500.
+            return Response(status_code=400)
         source_id = payload.get("source_id")
         run = True
         if source_id:

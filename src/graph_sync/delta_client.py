@@ -30,6 +30,7 @@ class DeltaStream:
         self.next_since: str | None = None
         self.count: int | None = None
         self.terminated_clean: bool = False
+        self.malformed: list[str] = []  # raw lines that failed to parse
 
     async def records(self) -> AsyncIterator[ContentRecord | TombstoneRecord]:
         async with self._client.stream(
@@ -39,7 +40,15 @@ class DeltaStream:
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
-                rec = parse_delta_line(line)
+                try:
+                    rec = parse_delta_line(line)
+                except Exception:
+                    # Record the unparseable line and keep reading the stream
+                    # (so remaining good records + the terminal control line are
+                    # still seen); the caller dead-letters these and refuses to
+                    # advance the cursor past them (spec §7).
+                    self.malformed.append(line)
+                    continue
                 if isinstance(rec, ControlRecord):
                     if rec.control == "bootstrap_start":
                         self.bootstrap_start_since = rec.next_since

@@ -104,25 +104,30 @@ def build_lifespan(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        if catalog is not None:
-            await catalog.load()
-        await repo.init_schema()
-        await store.init_schema()
         stop_event = asyncio.Event()
-        poll_task = asyncio.create_task(
-            run_poll_loop(trigger, poll_interval_seconds, stop_event)
-        )
+        poll_task: asyncio.Task[None] | None = None
         try:
+            # Startup init is inside the try so a failure here (e.g. Neo4j down
+            # at boot) still runs the cleanup below instead of leaking the
+            # already-opened resources.
+            if catalog is not None:
+                await catalog.load()
+            await repo.init_schema()
+            await store.init_schema()
+            poll_task = asyncio.create_task(
+                run_poll_loop(trigger, poll_interval_seconds, stop_event)
+            )
             yield
         finally:
-            stop_event.set()
-            poll_task.cancel()
-            try:
-                await poll_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("poll loop raised during shutdown")
+            if poll_task is not None:
+                stop_event.set()
+                poll_task.cancel()
+                try:
+                    await poll_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("poll loop raised during shutdown")
 
             results = await asyncio.gather(
                 repo.close(), store.close(), client.aclose(), return_exceptions=True

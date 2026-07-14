@@ -36,10 +36,13 @@ class StateStore:
             await c.execute(_SCHEMA)
 
     async def close(self) -> None:
+        # Idempotent: null out handles so a second close() is a no-op.
         if self._lock_conn is not None:
             await self._lock_conn.close()
+            self._lock_conn = None
         if self._pool is not None:
             await self._pool.close()
+            self._pool = None
 
     async def get_cursor(self) -> str | None:
         pool = await self._get_pool()

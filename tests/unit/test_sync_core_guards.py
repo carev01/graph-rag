@@ -70,13 +70,15 @@ async def test_run_incremental_is_single_flight_in_process():
     task_a = asyncio.create_task(core.run_incremental())
     await entered.wait()  # A is mid-stream, guard is set
 
-    res_b = await core.run_incremental()  # must short-circuit
+    res_b = await core.run_incremental()  # must short-circuit (no overlapping run)
     assert res_b.advanced is False and res_b.applied == 0
 
     release.set()
     res_a = await task_a
     assert res_a.advanced is True  # A did the real work (advanced the cursor)
-    assert store.set_cursor_calls == [_cursor(9)]
+    # B's mid-sync nudge marked the run dirty, so A does ONE more pass rather
+    # than dropping the trigger (spec §5.3/§7) -> two passes, two set_cursor calls.
+    assert store.set_cursor_calls == [_cursor(9), _cursor(9)]
     await client.aclose()
 
 

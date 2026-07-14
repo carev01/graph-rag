@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+log = logging.getLogger("graph_sync.catalog")
 
 
 @dataclass(frozen=True)
@@ -98,11 +101,24 @@ class Catalog:
             "products"
         ]
 
+        # Bound concurrency so a large product catalog can't open an unbounded
+        # burst of connections (the fan-out is one call per product).
+        sem = asyncio.Semaphore(8)
+
         async def fetch_sources(product_id: str) -> list[dict[str, Any]]:
-            resp = await client.get(
-                "/api/sources", params={"product_id": product_id, "limit": 200}
-            )
+            async with sem:
+                resp = await client.get(
+                    "/api/sources", params={"product_id": product_id, "limit": 200}
+                )
             result: list[dict[str, Any]] = resp.json()["sources"]
+            # Guard the exact silent-drop failure mode this per-product
+            # enumeration exists to avoid: if a single product ever hits the
+            # 200 page cap, some of its sources are being dropped.
+            if len(result) >= 200:
+                log.warning(
+                    "product %s returned %d sources (>= 200 page cap); some may be "
+                    "silently dropped -- this product needs its own pagination",
+                    product_id, len(result))
             return result
 
         results = await asyncio.gather(*(fetch_sources(p["id"]) for p in products))

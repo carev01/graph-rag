@@ -63,6 +63,18 @@ async def test_webhook_rejects_when_secret_unconfigured():
                          headers={"X-DocExtractor-Signature": forged})
     assert r.status_code == 401 and calls == []
 
+async def test_webhook_malformed_json_returns_400():
+    # Authenticated but unparseable body -> clean 400, not a 500, no enqueue.
+    calls = []
+    app = await _app(FakeStore(), calls)
+    body = b'{not json'
+    sig = _sig(body)
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        r = await c.post("/webhooks/docextractor", content=body,
+                         headers={"X-DocExtractor-Signature": sig})
+    assert r.status_code == 400 and calls == []
+
+
 async def test_webhook_accepts_and_dedups():
     calls = []
     store = FakeStore()
