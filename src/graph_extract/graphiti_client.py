@@ -33,7 +33,13 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
 
     async def create(*args, **kwargs):  # type: ignore[no-untyped-def]
         extra = dict(kwargs.get("extra_body") or {})
-        extra.setdefault("provider", {"data_collection": "allow", "allow_fallbacks": True})
+        # require_parameters: only route to providers that actually support the
+        # request params (response_format/json_schema) -- prevents routing to a
+        # provider that ignores structured output and returns malformed/truncated
+        # JSON. data_collection=allow widens past the account data-policy 404.
+        extra.setdefault("provider", {"data_collection": "allow",
+                                      "require_parameters": True,
+                                      "allow_fallbacks": True})
         kwargs["extra_body"] = extra
         return await orig(*args, **kwargs)
 
