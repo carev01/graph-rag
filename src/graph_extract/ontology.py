@@ -7,23 +7,23 @@ class Vendor(BaseModel):
     """A backup software/service vendor (e.g. AWS, Microsoft)."""
 
 class Product(BaseModel):
-    """A backup product or service (e.g. AWS Backup, Azure Backup)."""
+    """A backup product or service, including vendor CLIs and SDKs (e.g. AWS Backup, Azure Backup, AWS CLI)."""
     version: str | None = Field(default=None, description="Product version if stated")
 
 class Workload(BaseModel):
     """A data source or system that gets backed up (e.g. Amazon S3, Azure VM, SQL Server, Kubernetes)."""
 
 class Capability(BaseModel):
-    """A backup feature or mechanism (e.g. immutability, cross-region copy, instant restore)."""
+    """A backup feature or mechanism (e.g. immutability, cross-region copy, instant restore) — NOT accounts, roles, or resources."""
 
 class Platform(BaseModel):
-    """An OS or cloud/infrastructure platform (e.g. Windows, Linux, Azure, AWS, Hyper-V)."""
+    """An OS or cloud/infrastructure platform (e.g. Windows, Linux, Azure, AWS, Hyper-V, VMware) — NOT tools, CLIs, SDKs, or regulations (a CLI/SDK is a Product; a regulation is a Concept)."""
 
 class Concept(BaseModel):
-    """A domain concept (e.g. RPO, RTO, 3-2-1 rule, retention policy, recovery point)."""
+    """A domain concept (e.g. RPO, RTO, 3-2-1 rule, retention policy, recovery point) or a regulation/standard (e.g. SEC 17a-4)."""
 
 class Requirement(BaseModel):
-    """A prerequisite/constraint (e.g. an IAM permission, minimum version, port, license)."""
+    """A prerequisite/constraint (e.g. an IAM permission, minimum version, port, license, required account/role)."""
 
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Vendor": Vendor, "Product": Product, "Workload": Workload,
@@ -68,6 +68,11 @@ Do NOT extract documentation-navigation or UI noise as entities: phrases like
 "this guide", "the following table", "Note", "Important", "see also", button
 labels, menu items, or breadcrumb fragments.
 
+Do NOT extract as entities: ARNs (`arn:...`), resource IDs (`snap-...`,
+`vol-...`), error/exception codes (`...Failed`, `...RequestId`), CLI commands
+(`aws ...`, `Install-Module ...`), or example/placeholder values. Extract the
+concept, not the example (extract `recovery point`, not the ARN).
+
 Use these CANONICAL names so the same concept from different vendors resolves to
 one entity:
 - Workloads: "Kubernetes" (not "K8s"), "Amazon S3" (not "S3 bucket"),
@@ -76,6 +81,10 @@ one entity:
 - Capabilities: "immutability" (not "WORM"/"immutable backups"), "cross-region copy",
   "soft delete", "instant restore", "deduplication", "air gap".
 - Concepts: "RPO", "RTO", "3-2-1 rule", "retention policy", "recovery point".
-Keep AWS Backup and Azure Backup as DISTINCT products, and Amazon S3 and
-Azure Blob Storage as DISTINCT workloads — do not merge across vendors.
+
+Use canonical GENERIC names for cross-vendor concepts so AWS and Azure converge
+(`immutability`, `cross-region copy`, `RPO`, `Kubernetes`). Keep VENDOR-BRANDED
+features vendor-specific and DISTINCT (`AWS Backup Vault Lock`,
+`Azure immutable vault`, `Amazon S3`, `Azure Blob Storage`) — do not merge these
+across vendors. Likewise keep AWS Backup and Azure Backup as DISTINCT products.
 """
