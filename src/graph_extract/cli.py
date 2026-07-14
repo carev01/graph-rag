@@ -325,7 +325,15 @@ def quality_report(
             err=True,
         )
         raise typer.Exit(code=1)
-    baseline = json.loads(QUALITY_BASELINE_PATH.read_text())
+    try:
+        baseline = json.loads(QUALITY_BASELINE_PATH.read_text())
+    except json.JSONDecodeError:
+        typer.echo(
+            f"error: baseline at {QUALITY_BASELINE_PATH} is malformed JSON. "
+            "Re-run `quality-baseline` to regenerate it.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     async def _run() -> None:
         settings = get_extract_settings()
