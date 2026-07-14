@@ -22,6 +22,13 @@ AWS_ART = "011dc3fa-62ea-4832-8588-e7b815e8a380"  # Vault access policies (small
 
 
 async def test_ingest_one_article_links_provenance(live_ingest_driver, live_extract_driver):
+    # Reset this article's episodes first so `episodes_added >= 1` holds on
+    # every run (the compose Neo4j is persistent; without this a re-run would
+    # be fully hash-gated and add 0).
+    async with live_extract_driver.session() as s:
+        await s.run(
+            "MATCH (:Article {id:$a})-[:HAS_EPISODE]->(e:Episodic) DETACH DELETE e",
+            a=AWS_ART)
     r = await live_ingest_driver.ingest_article(AWS_ART)
     assert r.episodes_added >= 1
     async with live_extract_driver.session() as s:

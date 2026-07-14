@@ -36,6 +36,9 @@ def _catalog():
 
 async def test_bootstrap_ingests_and_gates(neo4j_repo, state_store):
     src = "21632f3b-5a4c-4c93-9f00-6701d0e9f677"
+    # Reset this source so the test is order-independent (the module-scoped
+    # neo4j_repo fixture is shared with the resume test, which also uses it).
+    await neo4j_repo.delete_source_articles(src)
     core = SyncCore(_client(), _catalog(), neo4j_repo, state_store, _settings())
     r1 = await core.bootstrap(source_id=src)
     assert r1.applied == 146 and r1.skipped == 0

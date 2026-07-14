@@ -1,12 +1,12 @@
 import hmac
 import hashlib
 import json
-import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from graph_sync.webhook import verify_signature, build_router
 
-pytestmark = pytest.mark.asyncio
+# asyncio_mode = "auto" (pyproject) auto-collects the async tests; no module
+# pytestmark, so the one sync test (test_verify_signature_*) isn't mis-marked.
 SECRET = "s3cr3t"
 
 def _sig(body: bytes) -> str:

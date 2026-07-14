@@ -51,11 +51,11 @@ async def dedup_report(driver, group_id, canon_merge: list[str],
     return out
 
 
-async def provenance_report(driver, sample: int) -> dict:
+async def provenance_report(driver, group_id, sample: int) -> dict:
     async with driver.session() as s:
         r = await s.run(
-            "MATCH ()-[f:RELATES_TO]->() RETURN f.uuid AS uuid "
-            "ORDER BY rand() LIMIT $n", n=sample)
+            "MATCH ()-[f:RELATES_TO {group_id:$g}]->() RETURN f.uuid AS uuid "
+            "ORDER BY rand() LIMIT $n", g=group_id, n=sample)
         uuids = [rec["uuid"] async for rec in r]
 
     prov = Provenance(driver)
@@ -156,12 +156,15 @@ def _judge_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str
 
 async def fact_quality(driver, settings: ExtractSettings, sample: int) -> dict:
     async with driver.session() as s:
+        # Judge each fact against ALL its supporting episodes (not just the
+        # first), scoped to this group_id.
         r = await s.run(
-            "MATCH ()-[f:RELATES_TO]->() "
-            "WITH f, f.episodes[0] AS epu "
+            "MATCH ()-[f:RELATES_TO {group_id:$g}]->() "
+            "UNWIND f.episodes AS epu "
             "MATCH (e:Episodic {uuid: epu}) WHERE e.content IS NOT NULL "
-            "RETURN DISTINCT f.uuid AS uuid, f.fact AS fact, e.content AS content "
-            "ORDER BY rand() LIMIT $n", n=sample)
+            "WITH f, collect(e.content) AS contents WHERE size(contents) > 0 "
+            "RETURN f.uuid AS uuid, f.fact AS fact, contents AS contents "
+            "ORDER BY rand() LIMIT $n", g=settings.group_id, n=sample)
         rows = [dict(rec) async for rec in r]
 
     client, model = _judge_client_and_model(settings)
@@ -170,10 +173,11 @@ async def fact_quality(driver, settings: ExtractSettings, sample: int) -> dict:
     unsupported = 0
     unparseable = 0
     for row in rows:
+        content = "\n---\n".join(row["contents"])
         resp = await client.chat.completions.create(
             model=model,
             messages=[{"role": "user",
-                      "content": _JUDGE_PROMPT.format(fact=row["fact"], content=row["content"])}],
+                      "content": _JUDGE_PROMPT.format(fact=row["fact"], content=content)}],
             temperature=0.0,
         )
         raw_answer = resp.choices[0].message.content or ""

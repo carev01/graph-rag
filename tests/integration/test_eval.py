@@ -50,7 +50,7 @@ async def test_provenance_report_counts_resolved_and_dangling(extract_driver):
             "episodes:['nonexistent-episode'], group_id:'g'}]->(e4)"
         )
     from graph_extract.eval import provenance_report
-    rep = await provenance_report(extract_driver, sample=2)
+    rep = await provenance_report(extract_driver, "g", sample=2)
     assert rep["sampled"] == 2
     assert rep["resolved"] == 1
     assert rep["dangling"] == 1

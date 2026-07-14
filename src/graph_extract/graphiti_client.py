@@ -117,9 +117,29 @@ def build_graphiti(s: ExtractSettings) -> Graphiti:
     # CRITICAL: pass an explicit LOCAL reranker so Graphiti does not build its
     # default OpenAIRerankerClient() pointed at api.openai.com.
     reranker = OpenAIRerankerClient(config=_llm_config(s))
-    return Graphiti(s.neo4j_uri, s.neo4j_user, s.neo4j_password,
-                    llm_client=_llm_client(s), embedder=embedder,
-                    cross_encoder=reranker, max_coroutines=s.max_coroutines)
+    llm = _llm_client(s)
+    g = Graphiti(s.neo4j_uri, s.neo4j_user, s.neo4j_password,
+                 llm_client=llm, embedder=embedder,
+                 cross_encoder=reranker, max_coroutines=s.max_coroutines)
+    # Graphiti.close() only closes the Neo4j driver; also close the AsyncOpenAI
+    # clients we created (LLM + embedder) so they don't leak, esp. in a
+    # long-running CLI that builds one Graphiti per invocation.
+    owned = [embed_client]
+    llm_raw = getattr(llm, "client", None)
+    if llm_raw is not None:
+        owned.append(llm_raw)
+    orig_close = g.close
+
+    async def _close() -> None:
+        await orig_close()
+        for c in owned:
+            try:
+                await c.close()
+            except Exception:  # best-effort cleanup
+                pass
+
+    g.close = _close  # type: ignore[method-assign]
+    return g
 
 async def init_indices(graphiti: Graphiti) -> None:
     await graphiti.build_indices_and_constraints()

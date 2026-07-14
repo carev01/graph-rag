@@ -137,7 +137,7 @@ def eval_provenance(sample: int = typer.Option(20, "--sample")) -> None:
         settings = get_extract_settings()
         driver = await _build_driver(settings)
         try:
-            report = await provenance_report(driver, sample)
+            report = await provenance_report(driver, settings.group_id, sample)
             _dump(report)
         finally:
             await driver.close()
