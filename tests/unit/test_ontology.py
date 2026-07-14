@@ -21,6 +21,39 @@ def test_tool_edge_wired():
     assert ("Tool", "Product") in EDGE_TYPE_MAP
     assert "Operates" in EDGE_TYPE_MAP[("Tool", "Product")]
 
+def test_limits_edge_broadened_to_capability_and_platform():
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Workload")]
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Capability")]
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Platform")]
+    # Broadening is additive: existing edges remain.
+    assert "Provides" in EDGE_TYPE_MAP[("Product", "Capability")]
+    assert "IntegratesWith" in EDGE_TYPE_MAP[("Product", "Platform")]
+
+def test_instructions_capture_limitation_statements():
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "not supported" in lowered
+    assert "limits" in lowered
+
+def test_instructions_exclude_ui_elements():
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "ui elements" in lowered
+    assert "panes" in lowered and "wizards" in lowered
+    assert "action labels" in lowered
+
+def test_tool_docstring_has_negative_ui_examples():
+    from graph_extract.ontology import Tool
+    doc = Tool.__doc__ or ""
+    assert "pane" in doc.lower()
+    assert "button" in doc.lower()
+    assert "wizard" in doc.lower()
+    assert "Restore pane" in doc
+    assert "NOT an action" in doc
+
+def test_concept_and_platform_cover_storage_classes():
+    from graph_extract.ontology import Concept, Platform
+    assert "S3 Standard" in (Concept.__doc__ or "")
+    assert "storage classes" in (Platform.__doc__ or "")
+
 def test_edge_type_map_references_defined_types():
     for (src, tgt), edges in EDGE_TYPE_MAP.items():
         assert src in ENTITY_TYPES and tgt in ENTITY_TYPES
