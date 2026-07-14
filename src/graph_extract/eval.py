@@ -1,15 +1,21 @@
 """Evaluation reports for the viability verdict.
 
-Four reports, each independently runnable against a live (or seeded test)
-graph:
+Reports, each independently runnable against a live (or seeded test) graph:
 
 - `dedup_report`   -- did canonical concepts merge to one `:Entity` node, and
                        did distinct concepts stay separate?
+- `noise_report`   -- deterministic % of entities/facts flagged by
+                       `noise_filter.is_noise` (no LLM).
+- `dedup_report_v2` -- acceptance labels from `quality_labels`: merge counts +
+                       cross-vendor support, distinct-pair collapse, and
+                       suspect false merges (no LLM).
 - `provenance_report` -- does fact -> episode -> article -> url resolve?
 - `cost_report`    -- token usage from the module-level usage tally, plus a
                        simple, clearly-labeled full-corpus extrapolation.
 - `fact_quality`   -- LLM-judge faithfulness sample (fact vs. its supporting
                        episode content) for a human spot-check.
+- `type_precision` -- LLM-judge check of assigned entity types against the v2
+                       type definitions.
 """
 from __future__ import annotations
 
@@ -18,6 +24,8 @@ import re
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
+from graph_extract.noise_filter import is_noise
+from graph_extract.ontology import ENTITY_TYPES
 from graph_extract.provenance import Provenance
 from graph_extract.usage import get_tally, instrument
 
@@ -48,6 +56,92 @@ async def dedup_report(driver, group_id, canon_merge: list[str],
             "MATCH (e:Entity {group_id:$g}) UNWIND labels(e) AS l WITH l WHERE l <> 'Entity' "
             "RETURN l AS label, count(*) AS c", g=group_id)
         out["totals"]["by_label"] = {rec["label"]: rec["c"] async for rec in r}
+    return out
+
+
+_NOISE_SAMPLE_CAP = 20
+
+
+async def noise_report(driver, group_id) -> dict:
+    """Deterministic noise rate over entities and facts. NO LLM.
+
+    An entity is noise per `noise_filter.is_noise` on its name; a fact
+    (`RELATES_TO` edge) is noise when either endpoint entity is noise.
+    """
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (e:Entity {group_id:$g}) RETURN e.name AS name", g=group_id)
+        entity_names = [rec["name"] async for rec in r]
+        r = await s.run(
+            "MATCH (a:Entity)-[f:RELATES_TO {group_id:$g}]->(b:Entity) "
+            "RETURN a.name AS a, b.name AS b", g=group_id)
+        fact_endpoints = [(rec["a"], rec["b"]) async for rec in r]
+
+    noisy_entities = [n for n in entity_names if is_noise(n or "")]
+    noisy_facts = sum(
+        1 for a, b in fact_endpoints if is_noise(a or "") or is_noise(b or ""))
+
+    e_total, f_total = len(entity_names), len(fact_endpoints)
+    return {
+        "entities": {
+            "total": e_total,
+            "noise": len(noisy_entities),
+            "rate": (len(noisy_entities) / e_total) if e_total else 0.0,
+            "by_flag_sample": noisy_entities[:_NOISE_SAMPLE_CAP],
+        },
+        "facts": {
+            "total": f_total,
+            "noise": noisy_facts,
+            "rate": (noisy_facts / f_total) if f_total else 0.0,
+        },
+    }
+
+
+async def _cross_vendor_names(session, group_id) -> set[str]:
+    r = await session.run(
+        "MATCH (v:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)"
+        "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(:Episodic)-[:MENTIONS]->"
+        "(e:Entity {group_id:$g}) "
+        "WITH e, count(DISTINCT v.name) AS nv WHERE nv > 1 RETURN e.name AS name",
+        g=group_id)
+    return {rec["name"] async for rec in r}
+
+
+async def dedup_report_v2(driver, group_id, labels) -> dict:
+    """Acceptance-label dedup report. Deterministic, NO LLM.
+
+    `labels` is the `graph_extract.quality_labels` module (SHOULD_MERGE,
+    SHOULD_DISTINCT, VENDOR_TOKENS as data).
+    """
+    out: dict = {"should_merge": {}, "should_distinct": [], "suspect_false_merge": {}}
+    async with driver.session() as s:
+        cross_vendor = await _cross_vendor_names(s, group_id)
+        cross_vendor_lower = {n.lower() for n in cross_vendor}
+
+        for name in labels.SHOULD_MERGE:
+            r = await s.run(
+                "MATCH (e:Entity {group_id:$g}) WHERE toLower(e.name)=toLower($n) "
+                "RETURN count(e) AS c", g=group_id, n=name)
+            out["should_merge"][name] = {
+                "node_count": (await r.single())["c"],
+                "cross_vendor": name.lower() in cross_vendor_lower,
+            }
+
+        for a, b in labels.SHOULD_DISTINCT:
+            r = await s.run(
+                "MATCH (e:Entity {group_id:$g}) "
+                "WHERE toLower(e.name) IN [toLower($a),toLower($b)] "
+                "RETURN count(e) AS c", g=group_id, a=a, b=b)
+            c = (await r.single())["c"]
+            out["should_distinct"].append(
+                {"pair": [a, b], "node_count": c, "collapsed": c < 2})
+
+    # Vendor-branded names (contain a VENDOR_TOKENS token) that nonetheless
+    # have cross-vendor episode support -> likely false merges.
+    suspects = sorted(
+        n for n in cross_vendor
+        if any(tok in n.lower() for tok in labels.VENDOR_TOKENS))
+    out["suspect_false_merge"] = {"names": suspects, "count": len(suspects)}
     return out
 
 
@@ -200,4 +294,106 @@ async def fact_quality(driver, settings: ExtractSettings, sample: int) -> dict:
         "unparseable": unparseable,
         "precision": (supported / parsed) if parsed else 0.0,
         "results": results,
+    }
+
+
+def _type_definitions() -> str:
+    return "\n".join(
+        f"- {name}: {(model.__doc__ or '').strip()}"
+        for name, model in ENTITY_TYPES.items())
+
+
+_TYPE_JUDGE_PROMPT = (
+    "You are auditing entity typing in a knowledge graph about backup products.\n"
+    "Given the ENTITY name below, pick the single best type from these "
+    "definitions:\n{definitions}\n\n"
+    "You may reason first, but you MUST end your response with the chosen "
+    "type name as a final single word on its own line.\n\n"
+    "ENTITY: {name}"
+)
+
+_TYPE_NAME_RE = re.compile(
+    r"\b(" + "|".join(re.escape(t) for t in ENTITY_TYPES) + r")\b", re.IGNORECASE)
+
+_CANON_TYPE = {t.lower(): t for t in ENTITY_TYPES}
+
+
+def _parse_type(content: str | None) -> str | None:
+    """Extract the judge's final type verdict from reasoning-model output.
+
+    GLM (the judge) reasons before answering, so type names may appear
+    mid-reasoning; the FINAL occurrence is the verdict. Strips any
+    `<think>...</think>` preamble, matches known type names
+    case-insensitively, and returns the last match canonicalized -- or
+    `None` when no type name appears (unparseable).
+    """
+    if content is None:
+        return None
+    text = _THINK_TAG_RE.sub("", content.strip())
+    matches = _TYPE_NAME_RE.findall(text)
+    if not matches:
+        return None
+    return _CANON_TYPE[matches[-1].lower()]
+
+
+async def type_precision(driver, settings: ExtractSettings, sample: int) -> dict:
+    """LLM-judge check that entities carry the right (v2) type label.
+
+    Samples `(name, type)` pairs -- type is the secondary node label next to
+    `:Entity` -- and asks the JUDGE model (GLM, via `_judge_client_and_model`;
+    never the extraction model) to pick the best type from the v2
+    definitions. `max_tokens=600` because the judge is a reasoning model and
+    a small cap truncates the final answer to empty.
+    """
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (e:Entity {group_id:$g}) "
+            "UNWIND labels(e) AS l WITH e, l WHERE l <> 'Entity' "
+            "WITH e, collect(l)[0] AS type "
+            "RETURN e.name AS name, type AS type ORDER BY rand() LIMIT $n",
+            g=settings.group_id, n=sample)
+        rows = [dict(rec) async for rec in r]
+
+    client, model = _judge_client_and_model(settings)
+    definitions = _type_definitions()
+    per_type: dict[str, dict] = {}
+    misclassifications: list[dict] = []
+    correct = 0
+    unparseable = 0
+    for row in rows:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user",
+                       "content": _TYPE_JUDGE_PROMPT.format(
+                           definitions=definitions, name=row["name"])}],
+            temperature=0.0,
+            max_tokens=600,
+        )
+        raw_answer = resp.choices[0].message.content or ""
+        judged = _parse_type(raw_answer)
+        assigned = row["type"]
+        bucket = per_type.setdefault(assigned, {"sampled": 0, "correct": 0})
+        bucket["sampled"] += 1
+        if judged is None:
+            unparseable += 1
+        elif judged == assigned:
+            correct += 1
+            bucket["correct"] += 1
+        else:
+            misclassifications.append(
+                {"name": row["name"], "assigned": assigned, "judged": judged,
+                 "raw_answer": raw_answer})
+
+    for bucket in per_type.values():
+        bucket["precision"] = (
+            bucket["correct"] / bucket["sampled"]) if bucket["sampled"] else 0.0
+    total = len(rows)
+    parsed = total - unparseable
+    return {
+        "sampled": total,
+        "correct": correct,
+        "unparseable": unparseable,
+        "precision": (correct / parsed) if parsed else 0.0,
+        "per_type": per_type,
+        "misclassifications": misclassifications,
     }
