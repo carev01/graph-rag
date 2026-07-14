@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
-from openai import AsyncOpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from graphiti_core import Graphiti
 from graphiti_core.llm_client import OpenAIClient, LLMConfig
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
@@ -47,18 +47,29 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
     return client
 
 
+def _is_azure(base_url: str) -> bool:
+    return "azure.com" in base_url or "cognitiveservices" in base_url
+
 def _llm_client(s: ExtractSettings):
+    cfg = _llm_config(s)
     # Explicit timeout + retries: a cloud endpoint can drop a connection
-    # (observed: an OpenRouter socket stuck in CLOSE_WAIT hung the whole run
-    # with no progress). A bounded per-request timeout makes a dead request
-    # abort and retry instead of hanging forever.
+    # (observed: an OpenRouter socket stuck in CLOSE_WAIT hung the whole run).
+    # A bounded per-request timeout makes a dead request abort and retry.
+    if _is_azure(s.llm_base_url):
+        # Azure OpenAI: Responses API + structured mode (native reasoning). The
+        # base_url is the resource endpoint (host); the SDK builds /openai/...
+        raw = instrument(AsyncAzureOpenAI(
+            azure_endpoint=s.llm_base_url, api_key=s.llm_api_key,
+            api_version=s.llm_api_version, timeout=90.0, max_retries=4))
+        return OpenAIClient(config=cfg, client=raw,
+                            reasoning=s.llm_reasoning_effort, verbosity="low")
     raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
                                  timeout=90.0, max_retries=4))
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
-    cfg = _llm_config(s)
     if s.llm_client_mode == "structured":
-        return OpenAIClient(config=cfg, client=raw, reasoning="auto", verbosity="low")
+        return OpenAIClient(config=cfg, client=raw,
+                            reasoning=s.llm_reasoning_effort, verbosity="low")
     mode = "json_schema" if s.llm_client_mode == "generic_json_schema" else "json_object"
     return OpenAIGenericClient(config=cfg, client=raw, structured_output_mode=mode)
 

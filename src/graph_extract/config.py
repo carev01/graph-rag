@@ -21,6 +21,11 @@ class ExtractSettings(BaseSettings):
     # in .env (never committed). Only the LLM/extraction path uses this — the
     # embedder stays local (TEI/Jina, "not-needed").
     llm_api_key: str = "not-needed"
+    # Azure OpenAI: when llm_base_url points at *.azure.com/*.cognitiveservices,
+    # an AsyncAzureOpenAI client is used (Responses API + structured mode). Set
+    # the api version and (for reasoning models like gpt-5-mini) the effort.
+    llm_api_version: str = ""
+    llm_reasoning_effort: str = "minimal"  # minimal|low|medium|high (gpt-5 family)
     embed_base_url: str = "http://srv-llm.home.lan:8082/v1"
     embed_model: str = "jinaai/jina-embeddings-v5-text-nano-retrieval"
     embed_dim: int = 768
