@@ -16,6 +16,11 @@ class ExtractSettings(BaseSettings):
     neo4j_password: str
     llm_base_url: str = "http://srv-llm.home.lan:8080/v1"
     llm_model: str = "gpt-oss-20b"
+    # API key for the LLM endpoint. Local llama-server ignores it ("not-needed");
+    # a cloud endpoint (e.g. OpenRouter) needs a real key, supplied via LLM_API_KEY
+    # in .env (never committed). Only the LLM/extraction path uses this — the
+    # embedder stays local (TEI/Jina, "not-needed").
+    llm_api_key: str = "not-needed"
     embed_base_url: str = "http://srv-llm.home.lan:8082/v1"
     embed_model: str = "jinaai/jina-embeddings-v5-text-nano-retrieval"
     embed_dim: int = 768
@@ -33,6 +38,7 @@ class ExtractSettings(BaseSettings):
     llm_client_mode: Literal["structured", "generic_json_schema", "generic_json_object"] = "generic_json_schema"
     judge_base_url: str = ""
     judge_model: str = ""
+    judge_api_key: str = ""  # if empty, the judge reuses llm_api_key (fallback path)
 
 
 @lru_cache

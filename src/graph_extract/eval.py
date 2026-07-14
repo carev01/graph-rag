@@ -145,9 +145,12 @@ def _parse_yes_no(content: str | None) -> bool | None:
 def _judge_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
     if settings.judge_base_url:
         base_url, model = settings.judge_base_url, settings.judge_model
+        api_key = settings.judge_api_key or "not-needed"
     else:
+        # Fall back to the LLM endpoint + its key (may be a cloud key, e.g. OpenRouter).
         base_url, model = settings.llm_base_url, settings.llm_model
-    client = instrument(AsyncOpenAI(api_key="not-needed", base_url=base_url))
+        api_key = settings.judge_api_key or settings.llm_api_key
+    client = instrument(AsyncOpenAI(api_key=api_key, base_url=base_url))
     return client, model
 
 

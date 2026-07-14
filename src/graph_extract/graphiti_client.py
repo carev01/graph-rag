@@ -16,11 +16,35 @@ from graph_extract.ontology import (
 )
 
 def _llm_config(s: ExtractSettings) -> LLMConfig:
-    return LLMConfig(api_key="not-needed", model=s.llm_model,
+    return LLMConfig(api_key=s.llm_api_key, model=s.llm_model,
                      small_model=s.llm_model, base_url=s.llm_base_url, temperature=0.0)
 
+def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
+    """For OpenRouter endpoints, attach a provider preference so structured-
+    output extraction requests can route to a matching provider.
+
+    Graphiti's strict-json_schema extraction requests otherwise 404 with
+    'No endpoints available matching your guardrail restrictions and data
+    policy' when the account's privacy policy excludes the providers that
+    serve this model with structured outputs. `data_collection: allow` +
+    `allow_fallbacks` widens the eligible set for these requests.
+    """
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):  # type: ignore[no-untyped-def]
+        extra = dict(kwargs.get("extra_body") or {})
+        extra.setdefault("provider", {"data_collection": "allow", "allow_fallbacks": True})
+        kwargs["extra_body"] = extra
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[assignment]
+    return client
+
+
 def _llm_client(s: ExtractSettings):
-    raw = instrument(AsyncOpenAI(api_key="not-needed", base_url=s.llm_base_url))
+    raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url))
+    if "openrouter" in s.llm_base_url:
+        raw = _inject_openrouter_provider(raw)
     cfg = _llm_config(s)
     if s.llm_client_mode == "structured":
         return OpenAIClient(config=cfg, client=raw, reasoning="auto", verbosity="low")
