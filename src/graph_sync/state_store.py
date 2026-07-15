@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import asyncpg
 
 _SCHEMA = """
@@ -146,15 +148,15 @@ class StateStore:
             batch, include_bootstrap)
         return [dict(r) for r in rows]
 
-    async def complete_semantic_job(self, job_id: int, claimed_at) -> None:
+    async def complete_semantic_job(self, job_id: int, claimed_at: datetime | None) -> None:
         pool = await self._get_pool()
         await pool.execute(
             "UPDATE semantic_jobs SET status='done', updated_at=now() "
-            "WHERE id=$1 AND claimed_at=$2", job_id, claimed_at)
+            "WHERE id=$1 AND claimed_at=$2 AND status='in_progress'", job_id, claimed_at)
 
     async def fail_semantic_job(
         self, job_id: int, error: str, *, max_attempts: int, retry_delay_seconds: float,
-        claimed_at
+        claimed_at: datetime | None
     ) -> None:
         pool = await self._get_pool()
         await pool.execute(
@@ -162,7 +164,7 @@ class StateStore:
             "status=CASE WHEN attempts+1 >= $3 THEN 'dead' ELSE 'pending' END, "
             "next_attempt_at=CASE WHEN attempts+1 >= $3 THEN next_attempt_at "
             "ELSE now() + make_interval(secs => $4) END, updated_at=now() "
-            "WHERE id=$1 AND claimed_at=$5",
+            "WHERE id=$1 AND claimed_at=$5 AND status='in_progress'",
             job_id, error, max_attempts, retry_delay_seconds, claimed_at)
 
     async def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> int:

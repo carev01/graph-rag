@@ -123,21 +123,30 @@ async def test_reaper_dead_letters_at_max_attempts(state_store):
     assert await state_store.claim_semantic_jobs(10, True) == []  # dead, not re-claimable
 
 
-async def test_complete_is_fenced_by_claimed_at(state_store):
-    await state_store.enqueue_semantic_job("fz1", "upsert", "h", "incremental")
+async def test_stale_worker_cannot_complete_after_reap(state_store):
+    await state_store.enqueue_semantic_job("fz2", "upsert", "h", "incremental")
     [j] = await state_store.claim_semantic_jobs(10, True)          # claimed_at = T1
-    # simulate reaper reset + re-claim -> new claimed_at (T2)
+    # force the claim stale (older than the lease), then run the REAL reaper -- it
+    # re-pends the job but, per the reaper's actual behavior, does NOT null claimed_at
     async with (await state_store._get_pool()).acquire() as c:
         await c.execute(
-            "UPDATE semantic_jobs SET status='pending', claimed_at=NULL WHERE id=$1", j["id"])
-    [j2] = await state_store.claim_semantic_jobs(10, True)         # claimed_at = T2, different
-    # original worker's late complete with the STALE claimed_at must no-op
-    await state_store.complete_semantic_job(j["id"], j["claimed_at"])
-    # job is still in_progress under the T2 claim (not flipped to done)
+            "UPDATE semantic_jobs SET claimed_at = now() - interval '2 hours' WHERE id=$1",
+            j["id"])
+    assert await state_store.reap_stale_jobs(3600, max_attempts=5) == 1
+    async with (await state_store._get_pool()).acquire() as c:
+        row = await c.fetchrow(
+            "SELECT status, claimed_at FROM semantic_jobs WHERE id=$1", j["id"])
+    assert row["status"] == "pending"
+    stale_claimed_at = row["claimed_at"]          # still the T1-derived (now stale) value
+    # the ORIGINAL worker's late complete: claimed_at still MATCHES, but status is no
+    # longer 'in_progress' -- the status guard must make this a no-op
+    await state_store.complete_semantic_job(j["id"], stale_claimed_at)
     async with (await state_store._get_pool()).acquire() as c:
         status = await c.fetchval("SELECT status FROM semantic_jobs WHERE id=$1", j["id"])
-    assert status == "in_progress"
-    # the CURRENT owner (T2) can complete it
+    assert status == "pending"          # NOT flipped to done by the stale worker
+    # a fresh claim re-claims it with a new claimed_at (T2); the current owner can complete it
+    [j2] = await state_store.claim_semantic_jobs(10, True)
+    assert j2["id"] == j["id"]
     await state_store.complete_semantic_job(j2["id"], j2["claimed_at"])
     async with (await state_store._get_pool()).acquire() as c:
         assert await c.fetchval("SELECT status FROM semantic_jobs WHERE id=$1", j["id"]) == "done"
