@@ -10,13 +10,21 @@ import re
 
 _ARN = re.compile(r"^arn:aws:", re.IGNORECASE)
 
-# Bare cloud resource ids, e.g. "snap-07ce8c3141d361233", "vol-00a422a05b9c6asd3".
+# Bare cloud resource ids, e.g. "snap-07ce8c3141d361233", "vol-00a422a05b9c6asd3",
+# and AWS Organizations/root/OU ids ("o-a1b2c3d4e5", "r-f6g7h8i9j0example").
 # Alphanumeric body (not hex-only: real ids observed in 2a output contain
 # non-hex letters), at least 6 chars, nothing else in the name.
 _RESOURCE_ID = re.compile(
-    r"^(?:snap|vol|i|ami|vpc|subnet|sg|eni)-[0-9a-z]{6,}$",
+    r"^(?:snap|vol|i|ami|vpc|subnet|sg|eni|o|r|ou)-[0-9a-z]{6,}$",
     re.IGNORECASE,
 )
+
+# Pure-numeric identifiers, e.g. AWS 12-digit account ids ("112233445566").
+# No backup concept is all digits; 6+ digits avoids catching versions/years.
+_NUMERIC_ID = re.compile(r"^\d{6,}$")
+
+# CamelCase "Invalid..." error/exception codes ("InvalidOrganizationBackupPlan").
+_INVALID_CODE = re.compile(r"^Invalid[A-Z][A-Za-z]*$")
 
 # CLI command lines, NOT product names. A name is a command only when it has
 # actual command shape:
@@ -69,6 +77,10 @@ def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name f
     if _ARN.search(n):
         return True
     if _RESOURCE_ID.match(n):
+        return True
+    if _NUMERIC_ID.match(n):
+        return True
+    if _INVALID_CODE.match(n):
         return True
     if _CLI.search(n):
         return True

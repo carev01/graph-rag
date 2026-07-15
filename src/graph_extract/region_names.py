@@ -153,6 +153,12 @@ _RAW: tuple[str, ...] = (
     "us-east-1", "us-west-1",
     "eu-central-1", "eu-west-1",
     "me-east-1",
+    # Regions observed in the full pilot run that the initial tables missed.
+    "asia pacific (new zealand)", "asia pacific (taipei)",
+    "china (beijing)", "china (ningxia)",
+    "mexico central", "mexico (central)",
+    "new zealand north", "taiwan north",
+    "eastus2euap", "centraluseuap",
 )
 
 REGION_NAMES: frozenset[str] = frozenset(normalize_region(x) for x in _RAW)
