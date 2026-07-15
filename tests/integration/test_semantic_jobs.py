@@ -41,3 +41,30 @@ async def test_lane_incremental_not_downgraded(state_store):
     await state_store.enqueue_semantic_job("a2", "upsert", "h", "bootstrap")  # must NOT downgrade
     [j] = await state_store.claim_semantic_jobs(10, True)
     assert j["lane"] == "incremental"
+
+
+async def test_incremental_claimed_before_bootstrap(state_store):
+    await state_store.enqueue_semantic_job("b1", "upsert", "h", "bootstrap")
+    await state_store.enqueue_semantic_job("i1", "upsert", "h", "incremental")
+    [first] = await state_store.claim_semantic_jobs(1, True)
+    assert first["article_id"] == "i1"  # incremental preempts bootstrap
+    await state_store.claim_semantic_jobs(10, True)  # drain remaining (b1) so it doesn't leak
+
+
+async def test_bootstrap_withheld_when_excluded(state_store):
+    await state_store.enqueue_semantic_job("b1", "upsert", "h", "bootstrap")
+    assert await state_store.claim_semantic_jobs(10, False) == []   # bootstrap excluded
+    assert len(await state_store.claim_semantic_jobs(10, True)) == 1  # drains it
+
+
+async def test_token_ledger_accumulates(state_store):
+    base = await state_store.today_token_total()
+    await state_store.record_tokens(100)
+    await state_store.record_tokens(50)
+    assert await state_store.today_token_total() == base + 150
+
+
+async def test_today_token_total_zero_when_empty(state_store):
+    pool = await state_store._get_pool()
+    await pool.execute("DELETE FROM token_ledger WHERE day=current_date")
+    assert await state_store.today_token_total() == 0

@@ -157,6 +157,17 @@ class StateStore:
             "UPDATE semantic_jobs SET status='failed', attempts=attempts+1, "
             "last_error=$2, updated_at=now() WHERE id=$1", job_id, error)
 
+    async def record_tokens(self, delta: int) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "INSERT INTO token_ledger (day, tokens) VALUES (current_date, $1) "
+            "ON CONFLICT (day) DO UPDATE SET tokens = token_ledger.tokens + $1", delta)
+
+    async def today_token_total(self) -> int:
+        pool = await self._get_pool()
+        return await pool.fetchval(
+            "SELECT COALESCE((SELECT tokens FROM token_ledger WHERE day=current_date), 0)")
+
     async def try_lock(self) -> bool:
         if self._lock_conn is None:
             self._lock_conn = await asyncpg.connect(self._dsn)
