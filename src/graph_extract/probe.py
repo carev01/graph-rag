@@ -21,7 +21,7 @@ from graph_extract import chonkie_client, content_fetch, episode_builder
 from graph_extract.config import ExtractSettings
 from graph_extract.graphiti_client import add_text_episode, build_graphiti, init_indices
 from graph_extract.usage import get_tally, reset_tally
-from graph_sync.delta_client import make_client as make_docext_client
+from docext.client import make_docext_client
 
 DEFAULT_MODES = ("generic_json_schema", "generic_json_object")
 
@@ -40,7 +40,10 @@ async def _chunks_for(s: ExtractSettings, docext: httpx.AsyncClient,
 
 async def run_probe(s: ExtractSettings, article_ids: list[str], n_chunks: int,
                     modes: tuple[str, ...] = DEFAULT_MODES) -> dict:
-    docext = make_docext_client(s)  # type: ignore[arg-type]  # structurally compatible
+    docext = make_docext_client(
+        base_url=s.docext_base_url, read_key=s.docext_read_key,
+        admin_key=s.docext_admin_key, verify_tls=s.docext_verify_tls, admin=False,
+    )
     report: dict = {}
     try:
         for mode in modes:

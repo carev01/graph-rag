@@ -1,19 +1,16 @@
 from __future__ import annotations
 from typing import AsyncIterator
 import httpx
+from docext.client import make_docext_client
 from graph_sync.config import Settings
 from graph_sync.models import (
     ContentRecord, TombstoneRecord, ControlRecord, parse_delta_line,
 )
 
 def make_client(settings: Settings, *, admin: bool = False) -> httpx.AsyncClient:
-    key = settings.docext_admin_key if admin else settings.docext_read_key
-    return httpx.AsyncClient(
-        base_url=settings.docext_base_url,
-        headers={"X-API-Key": key},
-        verify=settings.docext_verify_tls,
-        timeout=300.0,
-    )
+    return make_docext_client(
+        base_url=settings.docext_base_url, read_key=settings.docext_read_key,
+        admin_key=settings.docext_admin_key, verify_tls=settings.docext_verify_tls, admin=admin)
 
 def build_delta_params(*, since: str | None = None, source_id: str | None = None,
                        vendor_id: str | None = None,
