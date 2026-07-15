@@ -5,17 +5,19 @@ from __future__ import annotations
 import pytest
 
 from graph_sync.catalog import Catalog
-from graph_sync.sync_core import BootstrapResult, SyncCore
+from graph_sync.sync_core import BootstrapResult, IncrementalResult, SyncCore
 
 pytestmark = pytest.mark.asyncio
 
 
 class _FakeStore:
     def __init__(self) -> None:
-        self.enqueue_calls: list[tuple[str, str, str | None]] = []
+        self.enqueue_calls: list[tuple[str, str, str | None, str]] = []
 
-    async def enqueue_semantic_job(self, article_id: str, op: str, content_hash: str | None) -> None:
-        self.enqueue_calls.append((article_id, op, content_hash))
+    async def enqueue_semantic_job(
+        self, article_id: str, op: str, content_hash: str | None, lane: str
+    ) -> None:
+        self.enqueue_calls.append((article_id, op, content_hash, lane))
 
 
 class _FakeRepo:
@@ -105,7 +107,7 @@ async def test_content_change_enqueues_upsert():
     res = BootstrapResult()
     await core._apply_record(rec, res)
 
-    assert store.enqueue_calls == [("a1", "upsert", "hash-new")]
+    assert store.enqueue_calls == [("a1", "upsert", "hash-new", "bootstrap")]
     assert len(repo.structural_calls) == 1
 
 
@@ -122,7 +124,7 @@ async def test_incomplete_article_path_enqueues_upsert():
     res = BootstrapResult()
     await core._apply_record(rec, res)
 
-    assert store.enqueue_calls == [("a2", "upsert", "hash-x")]
+    assert store.enqueue_calls == [("a2", "upsert", "hash-x", "bootstrap")]
     assert len(repo.incomplete_calls) == 1
 
 
@@ -138,8 +140,40 @@ async def test_tombstone_enqueues_remove():
     res = BootstrapResult()
     await core._apply_record(rec, res)
 
-    assert store.enqueue_calls == [("a3", "remove", None)]
+    assert store.enqueue_calls == [("a3", "remove", None, "bootstrap")]
     assert len(repo.tombstone_calls) == 1
+
+
+async def test_bootstrap_lane_inferred():
+    from graph_sync.models import parse_delta_line
+    import json
+
+    rec = parse_delta_line(json.dumps(
+        _content_record(article_id="a5", source_id="s1", content_hash="hash-boot")))
+    store = _FakeStore()
+    repo = _FakeRepo(existing_hash=None)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+
+    res = BootstrapResult()
+    await core._apply_record(rec, res)
+
+    assert store.enqueue_calls == [("a5", "upsert", "hash-boot", "bootstrap")]
+
+
+async def test_incremental_lane_inferred():
+    from graph_sync.models import parse_delta_line
+    import json
+
+    rec = parse_delta_line(json.dumps(
+        _content_record(article_id="a6", source_id="s1", content_hash="hash-incr")))
+    store = _FakeStore()
+    repo = _FakeRepo(existing_hash=None)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+
+    res = IncrementalResult()
+    await core._apply_record(rec, res)
+
+    assert store.enqueue_calls == [("a6", "upsert", "hash-incr", "incremental")]
 
 
 async def test_unchanged_hash_does_not_enqueue():
