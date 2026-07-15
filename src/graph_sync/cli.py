@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import signal
 
 import httpx
 import typer
 
+from graph_extract.cli import _build_ingest_driver
+from graph_extract.config import get_extract_settings
 from graph_sync.catalog import Catalog
 from graph_sync.config import Settings, get_settings
 from graph_sync.delta_client import make_client
 from graph_sync.neo4j_repo import Neo4jRepo
+from graph_sync.semantic_worker import run_worker
 from graph_sync.state_store import StateStore
 from graph_sync.sync_core import SyncCore
 
@@ -132,6 +136,37 @@ def refresh_toc(source_id: str = typer.Argument(...)) -> None:
             await repo.close()
             await store.close()
             await client.aclose()
+
+    asyncio.run(_run())
+
+
+@app.command("worker")
+def worker(
+    batch: int = typer.Option(10, "--batch"),
+    poll_seconds: float = typer.Option(5.0, "--poll-seconds"),
+) -> None:
+    """Standalone semantic-ingestion worker: claims `semantic_jobs` rows and
+    drives them through the real `IngestDriver` (upsert -> ingest_article,
+    remove -> tombstone_article_episodes). Runs until SIGINT/SIGTERM."""
+
+    async def _run() -> None:
+        settings = get_settings()
+        store = StateStore(settings.postgres_dsn)
+        await store.init_schema()
+        ingest, graphiti, docext, driver = await _build_ingest_driver(get_extract_settings())
+        try:
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+            await run_worker(
+                store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event
+            )
+        finally:
+            await store.close()
+            await driver.close()
+            await docext.aclose()
+            await graphiti.close()
 
     asyncio.run(_run())
 
