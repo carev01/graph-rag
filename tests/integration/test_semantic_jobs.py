@@ -21,11 +21,12 @@ async def test_claim_skiplocked_disjoint(state_store):
 async def test_complete_and_fail(state_store):
     await state_store.enqueue_semantic_job("a1", "remove", None)
     [j] = await state_store.claim_semantic_jobs(10, True)
-    await state_store.complete_semantic_job(j["id"])
+    await state_store.complete_semantic_job(j["id"], j["claimed_at"])
     assert await state_store.claim_semantic_jobs(10, True) == []          # done, not re-claimable
     await state_store.enqueue_semantic_job("a2", "upsert", "h")
     [k] = await state_store.claim_semantic_jobs(10, True)
-    await state_store.fail_semantic_job(k["id"], "boom", max_attempts=1, retry_delay_seconds=0)
+    await state_store.fail_semantic_job(
+        k["id"], "boom", max_attempts=1, retry_delay_seconds=0, claimed_at=k["claimed_at"])
     assert await state_store.claim_semantic_jobs(10, True) == []          # dead, not re-claimable
 
 
@@ -74,10 +75,12 @@ async def test_fail_retries_then_dead(state_store):
     base = await state_store.dead_semantic_job_count()
     await state_store.enqueue_semantic_job("retry-a1", "upsert", "h", "incremental")
     [j] = await state_store.claim_semantic_jobs(10, True)
-    await state_store.fail_semantic_job(j["id"], "boom", max_attempts=2, retry_delay_seconds=0)
+    await state_store.fail_semantic_job(
+        j["id"], "boom", max_attempts=2, retry_delay_seconds=0, claimed_at=j["claimed_at"])
     # attempts now 1 (<2): back to pending, re-claimable (delay 0)
     [j2] = await state_store.claim_semantic_jobs(10, True)
-    await state_store.fail_semantic_job(j2["id"], "boom2", max_attempts=2, retry_delay_seconds=0)
+    await state_store.fail_semantic_job(
+        j2["id"], "boom2", max_attempts=2, retry_delay_seconds=0, claimed_at=j2["claimed_at"])
     # attempts now 2 (>=2): dead, not re-claimable
     assert await state_store.claim_semantic_jobs(10, True) == []
     assert await state_store.dead_semantic_job_count() == base + 1
@@ -86,7 +89,8 @@ async def test_fail_retries_then_dead(state_store):
 async def test_backoff_hides_job(state_store):
     await state_store.enqueue_semantic_job("retry-a2", "upsert", "h", "incremental")
     [j] = await state_store.claim_semantic_jobs(10, True)
-    await state_store.fail_semantic_job(j["id"], "x", max_attempts=5, retry_delay_seconds=3600)
+    await state_store.fail_semantic_job(
+        j["id"], "x", max_attempts=5, retry_delay_seconds=3600, claimed_at=j["claimed_at"])
     assert await state_store.claim_semantic_jobs(10, True) == []   # next_attempt_at in the future
 
 
@@ -117,3 +121,23 @@ async def test_reaper_dead_letters_at_max_attempts(state_store):
     assert await state_store.reap_stale_jobs(3600, max_attempts=3) == 1
     assert await state_store.dead_semantic_job_count() == base + 1
     assert await state_store.claim_semantic_jobs(10, True) == []  # dead, not re-claimable
+
+
+async def test_complete_is_fenced_by_claimed_at(state_store):
+    await state_store.enqueue_semantic_job("fz1", "upsert", "h", "incremental")
+    [j] = await state_store.claim_semantic_jobs(10, True)          # claimed_at = T1
+    # simulate reaper reset + re-claim -> new claimed_at (T2)
+    async with (await state_store._get_pool()).acquire() as c:
+        await c.execute(
+            "UPDATE semantic_jobs SET status='pending', claimed_at=NULL WHERE id=$1", j["id"])
+    [j2] = await state_store.claim_semantic_jobs(10, True)         # claimed_at = T2, different
+    # original worker's late complete with the STALE claimed_at must no-op
+    await state_store.complete_semantic_job(j["id"], j["claimed_at"])
+    # job is still in_progress under the T2 claim (not flipped to done)
+    async with (await state_store._get_pool()).acquire() as c:
+        status = await c.fetchval("SELECT status FROM semantic_jobs WHERE id=$1", j["id"])
+    assert status == "in_progress"
+    # the CURRENT owner (T2) can complete it
+    await state_store.complete_semantic_job(j2["id"], j2["claimed_at"])
+    async with (await state_store._get_pool()).acquire() as c:
+        assert await c.fetchval("SELECT status FROM semantic_jobs WHERE id=$1", j["id"]) == "done"

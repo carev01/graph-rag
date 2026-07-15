@@ -142,17 +142,19 @@ class StateStore:
             "AND ($2 OR lane='incremental') "
             "ORDER BY (lane='bootstrap'), next_attempt_at "
             "FOR UPDATE SKIP LOCKED LIMIT $1) "
-            "RETURNING id, article_id, op, content_hash, attempts, lane",
+            "RETURNING id, article_id, op, content_hash, attempts, lane, claimed_at",
             batch, include_bootstrap)
         return [dict(r) for r in rows]
 
-    async def complete_semantic_job(self, job_id: int) -> None:
+    async def complete_semantic_job(self, job_id: int, claimed_at) -> None:
         pool = await self._get_pool()
         await pool.execute(
-            "UPDATE semantic_jobs SET status='done', updated_at=now() WHERE id=$1", job_id)
+            "UPDATE semantic_jobs SET status='done', updated_at=now() "
+            "WHERE id=$1 AND claimed_at=$2", job_id, claimed_at)
 
     async def fail_semantic_job(
-        self, job_id: int, error: str, *, max_attempts: int, retry_delay_seconds: float
+        self, job_id: int, error: str, *, max_attempts: int, retry_delay_seconds: float,
+        claimed_at
     ) -> None:
         pool = await self._get_pool()
         await pool.execute(
@@ -160,7 +162,8 @@ class StateStore:
             "status=CASE WHEN attempts+1 >= $3 THEN 'dead' ELSE 'pending' END, "
             "next_attempt_at=CASE WHEN attempts+1 >= $3 THEN next_attempt_at "
             "ELSE now() + make_interval(secs => $4) END, updated_at=now() "
-            "WHERE id=$1", job_id, error, max_attempts, retry_delay_seconds)
+            "WHERE id=$1 AND claimed_at=$5",
+            job_id, error, max_attempts, retry_delay_seconds, claimed_at)
 
     async def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> int:
         pool = await self._get_pool()
