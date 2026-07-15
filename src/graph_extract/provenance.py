@@ -19,13 +19,14 @@ class Provenance:
         async with self._driver.session() as s:
             await s.run(
                 "MATCH (a:Article {id:$a}) "
+                "MATCH (e:Episodic {uuid:$u}) "
                 "OPTIONAL MATCH (a)-[old:HAS_EPISODE {chunk_index:$i}]->(oldE:Episodic) "
                 "WHERE oldE.uuid <> $u "
                 "SET oldE.superseded = true DELETE old "
-                "WITH a "
-                "MATCH (e:Episodic {uuid:$u}) "
+                "WITH a, e "
                 "MERGE (a)-[r:HAS_EPISODE {chunk_index:$i}]->(e) "
-                "SET r.heading_path=$hp, r.token_count=$tc, r.content_hash=$h",
+                "SET r.heading_path=$hp, r.token_count=$tc, r.content_hash=$h, "
+                "e.superseded = false",
                 a=article_id, u=episode_uuid, i=chunk_index, hp=heading_path,
                 tc=token_count, h=content_hash)
 
