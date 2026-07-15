@@ -226,7 +226,7 @@ git commit -m "chore: scaffold graph-sync project, tooling, config"
 - [ ] **Step 1: Capture the delta stream and TOC** (uses the read key; run from repo root)
 
 ```bash
-export RKEY=dxk_h7Xf2Y7h0gnT2IHgF9Ud8KTb93tGzsWd3Q09GsaU0vE
+export RKEY="$DOCEXT_READ_KEY"  # read-only key from untracked .env (never commit the literal)
 export B=https://docextractor.k3s.home.lan
 export SRC=21632f3b-5a4c-4c93-9f00-6701d0e9f677
 mkdir -p tests/fixtures

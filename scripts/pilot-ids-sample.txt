@@ -1,0 +1,8 @@
+dad69d7c-189b-4d53-8d70-40697eae685a	AWS	4184	Vault Lock
+78e2b9e5-bf0c-4e76-8b83-fc54e76f52cd	AWS	1701	Cross-Region backup
+06059606-e70d-4d97-bcf3-c2bc223f1b47	AWS	3362	Encryption for backups in AWS Backup
+49d019c4-ceb8-4a0a-b908-cd35602cab20	AWS	3104	S3 restore
+1cde879f-5152-4b0e-a9e8-9d4e762ee9ed	Azure	4067	Overview of soft delete
+e2f3ee74-04f0-4d6f-9925-83dc0b43b193	Azure	1318	Configure and run Cross Region Restore
+f3199c91-3ccb-4538-b3e7-b4e45521d8ec	Azure	952	Encryption in Azure Backup
+e53dfaee-916c-4947-9224-43ba63f6a14f	Azure	1389	Restore

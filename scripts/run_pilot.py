@@ -13,6 +13,7 @@ Run (long — hours on a local GPU):
 """
 from __future__ import annotations
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -25,7 +26,9 @@ from graph_extract.ingest_driver import IngestDriver
 from graph_extract.provenance import Provenance
 from graph_sync.delta_client import make_client
 
-IDS_FILE = Path("scripts/pilot-ids.txt")
+# Default to the full pilot list; PILOT_IDS_FILE overrides it (used by the
+# slice-2b quality-iteration loop to ingest the small AWS/Azure overlap sample).
+IDS_FILE = Path(os.environ.get("PILOT_IDS_FILE", "scripts/pilot-ids.txt"))
 
 
 def _load_ids() -> list[tuple[str, str, str]]:

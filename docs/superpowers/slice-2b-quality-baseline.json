@@ -1,0 +1,273 @@
+{
+  "noise": {
+    "entities": {
+      "total": 693,
+      "noise": 34,
+      "rate": 0.049062049062049064,
+      "by_flag_sample": [
+        "CreatorRequestId",
+        "AWS account",
+        "arn:aws:backup:us-east-1:123456789012:recovery-point:2FC4C6F8-0FC1-546B-B91C-209C599C1D56",
+        "--copy-source-tags-to-restored-resource flag",
+        "AssociateBackupVaultMpaApprovalTeamFailed",
+        "CreateRestoreAccessBackupVaultFailed",
+        "DisassociateBackupVaultMpaApprovalTeamFailed",
+        "RevokeRestoreAccessBackupVaultFailed",
+        "ScanJobFailed",
+        "arn:aws:ec2:us-east-1:123456789012:volume/vol-00a422a05b9c6asd3",
+        "arn:aws:iam::123456789012:root",
+        "arn:aws:ec2:us-east-1::snapshot/snap-00a129455bdbc9d99",
+        "arn:aws:ec2:us-east-1::snapshot/snap-05f426fd9daab3433",
+        "arn:aws:backup:ca-central-1:123456789012:backup-plan:orgs/544033d1-b19c-3f2a-9c20-40bcfa82ca68",
+        "arn:aws:iam::$account:role/role",
+        "AWS tags",
+        "Select AWS services to backup",
+        "arn:aws:source-resource",
+        "arn:aws:iam::444455556666:root",
+        "arn:aws:iam::111122223333:role/SomeRole"
+      ]
+    },
+    "facts": {
+      "total": 2185,
+      "noise": 147,
+      "rate": 0.06727688787185354
+    }
+  },
+  "dedup": {
+    "should_merge": {
+      "immutability": {
+        "node_count": 1,
+        "cross_vendor": false
+      },
+      "cross-region copy": {
+        "node_count": 0,
+        "cross_vendor": false
+      },
+      "Kubernetes": {
+        "node_count": 0,
+        "cross_vendor": false
+      },
+      "RPO": {
+        "node_count": 1,
+        "cross_vendor": false
+      },
+      "RTO": {
+        "node_count": 0,
+        "cross_vendor": false
+      },
+      "encryption": {
+        "node_count": 0,
+        "cross_vendor": false
+      },
+      "recovery point": {
+        "node_count": 1,
+        "cross_vendor": true
+      },
+      "retention policy": {
+        "node_count": 1,
+        "cross_vendor": false
+      },
+      "soft delete": {
+        "node_count": 1,
+        "cross_vendor": false
+      },
+      "backup vault": {
+        "node_count": 1,
+        "cross_vendor": true
+      },
+      "restore": {
+        "node_count": 0,
+        "cross_vendor": false
+      }
+    },
+    "should_distinct": [
+      {
+        "pair": [
+          "Amazon S3",
+          "Azure Blob Storage"
+        ],
+        "node_count": 2,
+        "collapsed": false
+      },
+      {
+        "pair": [
+          "AWS Backup",
+          "Azure Backup"
+        ],
+        "node_count": 2,
+        "collapsed": false
+      },
+      {
+        "pair": [
+          "AWS Backup Vault Lock",
+          "Azure immutable vault"
+        ],
+        "node_count": 1,
+        "collapsed": true
+      }
+    ],
+    "suspect_false_merge": {
+      "names": [
+        "AWS Backup API",
+        "AWS Backup Vault Lock",
+        "AWS Backup default service role",
+        "AWS Backup pricing",
+        "AWS CLI",
+        "AWS Command Line Interface",
+        "AWS Storage Gateway (Volume Gateway)",
+        "AWS Storage Gateway volumes",
+        "AWS account",
+        "AWSBackupOperatorAccess",
+        "AWSBackupServiceRolePolicyForRestores",
+        "AWSBackupServiceRolePolicyForS3Restore",
+        "Amazon DocumentDB",
+        "Amazon EC2",
+        "Amazon EFS file systems",
+        "Amazon Redshift table backups",
+        "Amazon S3 URI",
+        "Building cyber resiliency with AWS Backup logically air-gapped vault",
+        "Creating backup plans using a JSON document and the AWS Backup CLI",
+        "arn:aws:backup-gateway:us-east-1:209870788375:hypervisor/hype-9B1AB1F1",
+        "arn:aws:backup:ca-central-1:123456789012:backup-plan:orgs/544033d1-b19c-3f2a-9c20-40bcfa82ca68",
+        "arn:aws:backup:us-east-1:123456789012:recovery-point:2FC4C6F8-0FC1-546B-B91C-209C599C1D56",
+        "arn:aws:source-resource"
+      ],
+      "count": 23
+    }
+  },
+  "type_precision": {
+    "sampled": 40,
+    "correct": 20,
+    "unparseable": 5,
+    "precision": 0.5714285714285714,
+    "per_type": {
+      "Workload": {
+        "sampled": 8,
+        "correct": 6,
+        "precision": 0.75
+      },
+      "Concept": {
+        "sampled": 2,
+        "correct": 1,
+        "precision": 0.5
+      },
+      "Product": {
+        "sampled": 8,
+        "correct": 1,
+        "precision": 0.125
+      },
+      "Platform": {
+        "sampled": 5,
+        "correct": 1,
+        "precision": 0.2
+      },
+      "Capability": {
+        "sampled": 12,
+        "correct": 9,
+        "precision": 0.75
+      },
+      "Requirement": {
+        "sampled": 4,
+        "correct": 2,
+        "precision": 0.5
+      },
+      "Vendor": {
+        "sampled": 1,
+        "correct": 0,
+        "precision": 0.0
+      }
+    },
+    "misclassifications": [
+      {
+        "name": "Request approval team change",
+        "assigned": "Workload",
+        "judged": "Capability",
+        "raw_answer": "Capability"
+      },
+      {
+        "name": "associate-backup-vault-mpa-approval-team",
+        "assigned": "Product",
+        "judged": "Requirement",
+        "raw_answer": "The entity \"associate-backup-vault-mpa-approval-team\" appears to be an AWS IAM permission or policy action related to AWS Backup Multi-Party Approval (MPA). According to the definitions, an IAM permission falls under the \"Requirement\" type.\n\nRequirement"
+      },
+      {
+        "name": "locally redundant storage (LRS)",
+        "assigned": "Product",
+        "judged": "Capability",
+        "raw_answer": "Capability"
+      },
+      {
+        "name": "Azure RBAC",
+        "assigned": "Concept",
+        "judged": "Requirement",
+        "raw_answer": "Azure RBAC (Role-Based Access Control) is an authorization system in Azure used to manage access to resources. In the context of backup products, it is typically referenced as a prerequisite or constraint for performing actions, such as assigning specific roles to a backup service or user. This aligns perfectly with the definition of an IAM permission or prerequisite.\n\nRequirement"
+      },
+      {
+        "name": "ZRS storage",
+        "assigned": "Platform",
+        "judged": "Workload",
+        "raw_answer": "Workload"
+      },
+      {
+        "name": "EKS restore",
+        "assigned": "Workload",
+        "judged": "Capability",
+        "raw_answer": "Capability"
+      },
+      {
+        "name": "recovery point ID",
+        "assigned": "Requirement",
+        "judged": "Concept",
+        "raw_answer": "Concept"
+      },
+      {
+        "name": "Azure Backup Instant Restore",
+        "assigned": "Product",
+        "judged": "Capability",
+        "raw_answer": "Capability"
+      },
+      {
+        "name": "ACLs",
+        "assigned": "Capability",
+        "judged": "Requirement",
+        "raw_answer": "ACLs (Access Control Lists) are sets of permissions that dictate who can access a resource. In the context of backups, they are often prerequisites or constraints that must be configured correctly for a backup to succeed or for data to be restored properly. This aligns with the definition of a Requirement, which includes IAM permissions and similar constraints.\n\nRequirement"
+      },
+      {
+        "name": "Modify Policy",
+        "assigned": "Product",
+        "judged": "Requirement",
+        "raw_answer": "Requirement"
+      },
+      {
+        "name": "AWS Backup Vault Lock",
+        "assigned": "Product",
+        "judged": "Capability",
+        "raw_answer": "AWS Backup Vault Lock is a feature provided by AWS Backup that enforces immutability and prevents unauthorized deletion of backups. This aligns with the definition of a backup feature or mechanism.\nCapability"
+      },
+      {
+        "name": "CreatorRequestId",
+        "assigned": "Capability",
+        "judged": "Requirement",
+        "raw_answer": "Reasoning: \"CreatorRequestId\" is an idempotency token or unique identifier parameter used in API requests (such as those for AWS Backup) to ensure that a creation request is processed only once. It acts as a prerequisite parameter or constraint for the operation, fitting the definition of a Requirement.\n\nRequirement"
+      },
+      {
+        "name": "hardened (vaulted) restore point",
+        "assigned": "Requirement",
+        "judged": "Concept",
+        "raw_answer": "Concept"
+      },
+      {
+        "name": "DBInstanceIdentifier restored-db-instance",
+        "assigned": "Product",
+        "judged": "Requirement",
+        "raw_answer": "The entity \"DBInstanceIdentifier restored-db-instance\" appears to be a parameter and its value used to identify a database instance during a backup or restore operation. Parameters and identifiers used to configure or execute operations fit best as prerequisites or constraints.\n\nRequirement"
+      },
+      {
+        "name": "GetRecoveryPointRestoreMetadata API",
+        "assigned": "Product",
+        "judged": "Capability",
+        "raw_answer": "Capability"
+      }
+    ]
+  }
+}

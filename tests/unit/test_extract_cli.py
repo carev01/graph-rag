@@ -59,3 +59,15 @@ def test_eval_quality_help():
     result = runner.invoke(app, ["eval", "quality", "--help"])
     assert result.exit_code == 0
     assert "--sample" in result.stdout
+
+
+def test_quality_baseline_help():
+    result = runner.invoke(app, ["quality-baseline", "--help"])
+    assert result.exit_code == 0
+    assert "--sample" in result.stdout
+
+
+def test_quality_report_help():
+    result = runner.invoke(app, ["quality-report", "--help"])
+    assert result.exit_code == 0
+    assert "--sample" in result.stdout
