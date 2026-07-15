@@ -159,3 +159,26 @@ async def test_stale_worker_cannot_complete_after_reap(state_store):
     await state_store.complete_semantic_job(j2["id"], j2["claimed_at"])
     async with (await state_store._get_pool()).acquire() as c:
         assert await c.fetchval("SELECT status FROM semantic_jobs WHERE id=$1", j["id"]) == "done"
+
+
+# NOTE: this test DROPs and recreates the shared semantic_jobs table, so it must
+# run LAST in this module -- every other test above relies on the module-scoped
+# state_store fixture's table (and, in the reaper test's case, on leaked rows
+# from earlier tests). Keep this the final function in the file.
+async def test_migration_adds_columns_to_existing_table(state_store):
+    pool = await state_store._get_pool()
+    async with pool.acquire() as c:
+        await c.execute("DROP TABLE IF EXISTS semantic_jobs CASCADE")
+        await c.execute(
+            "CREATE TABLE semantic_jobs (id bigserial PRIMARY KEY, article_id text NOT NULL, "
+            "op text NOT NULL, content_hash text, status text NOT NULL DEFAULT 'pending', "
+            "attempts int NOT NULL DEFAULT 0, last_error text, enqueued_at timestamptz DEFAULT now(), "
+            "claimed_at timestamptz, updated_at timestamptz DEFAULT now())")
+        await c.execute("INSERT INTO semantic_jobs (article_id, op) VALUES ('old', 'upsert')")
+    await state_store.init_schema()                       # runs the ALTERs
+    async with pool.acquire() as c:
+        row = await c.fetchrow("SELECT lane, next_attempt_at FROM semantic_jobs WHERE article_id='old'")
+    assert row["lane"] == "incremental" and row["next_attempt_at"] is not None
+    # round-trip still works post-migration
+    await state_store.enqueue_semantic_job("mig1", "upsert", "h", "bootstrap")
+    assert any(j["article_id"] == "mig1" for j in await state_store.claim_semantic_jobs(10, True))
