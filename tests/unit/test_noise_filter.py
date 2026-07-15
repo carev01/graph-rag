@@ -28,6 +28,12 @@ NOISE = [
     "Canada (Central) Region",
     "primary region",
     "Azure paired region",
+    # Pure-numeric account ids, AWS org/root ids, Invalid-* error codes.
+    "112233445566",
+    "123456789012",
+    "o-a1b2c3d4e5",
+    "r-f6g7h8i9j0example",
+    "InvalidOrganizationBackupPlan",
 ]
 KEEP = [
     "immutability",
@@ -49,6 +55,13 @@ KEEP = [
     "Azure managed disk",
     # A capability that contains "region" but doesn't end in it.
     "Cross-Region backup",
+    # Short numbers (years/versions) are NOT ids — numeric pattern needs 6+ digits.
+    "2024",
+    "3-2-1 rule",
+    # Real products shaped like an o-/r- id but with NO digit in the body — kept
+    # (the org-id pattern requires a digit).
+    "R-Studio",
+    "O-Ring",
 ]
 
 

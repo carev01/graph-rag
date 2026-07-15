@@ -18,6 +18,19 @@ _RESOURCE_ID = re.compile(
     re.IGNORECASE,
 )
 
+# AWS Organizations / root / OU ids ("o-a1b2c3d4e5", "r-f6g7h8i9j0example",
+# "ou-1a2b-34cd56ef"). The single-letter o/r prefixes need a body that
+# actually looks like an id -- REQUIRE at least one digit -- so real product
+# names of the same shape ("R-Studio", "O-Ring") are kept.
+_ORG_ID = re.compile(r"^(?:o|r|ou)-[0-9a-z-]*[0-9][0-9a-z-]*$", re.IGNORECASE)
+
+# Pure-numeric identifiers, e.g. AWS 12-digit account ids ("112233445566").
+# No backup concept is all digits; 6+ digits avoids catching versions/years.
+_NUMERIC_ID = re.compile(r"^\d{6,}$")
+
+# CamelCase "Invalid..." error/exception codes ("InvalidOrganizationBackupPlan").
+_INVALID_CODE = re.compile(r"^Invalid[A-Z][A-Za-z]*$")
+
 # CLI command lines, NOT product names. A name is a command only when it has
 # actual command shape:
 #   - a LOWERCASE "aws"/"az"/"kubectl"/"gcloud" (as typed in a shell) followed
@@ -69,6 +82,12 @@ def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name f
     if _ARN.search(n):
         return True
     if _RESOURCE_ID.match(n):
+        return True
+    if _ORG_ID.match(n):
+        return True
+    if _NUMERIC_ID.match(n):
+        return True
+    if _INVALID_CODE.match(n):
         return True
     if _CLI.search(n):
         return True
