@@ -25,8 +25,8 @@ async def test_complete_and_fail(state_store):
     assert await state_store.claim_semantic_jobs(10, True) == []          # done, not re-claimable
     await state_store.enqueue_semantic_job("a2", "upsert", "h")
     [k] = await state_store.claim_semantic_jobs(10, True)
-    await state_store.fail_semantic_job(k["id"], "boom")
-    assert await state_store.claim_semantic_jobs(10, True) == []          # failed, not re-claimable
+    await state_store.fail_semantic_job(k["id"], "boom", max_attempts=1, retry_delay_seconds=0)
+    assert await state_store.claim_semantic_jobs(10, True) == []          # dead, not re-claimable
 
 
 async def test_lane_upgrade_not_downgrade(state_store):
@@ -68,3 +68,36 @@ async def test_today_token_total_zero_when_empty(state_store):
     pool = await state_store._get_pool()
     await pool.execute("DELETE FROM token_ledger WHERE day=current_date")
     assert await state_store.today_token_total() == 0
+
+
+async def test_fail_retries_then_dead(state_store):
+    base = await state_store.dead_semantic_job_count()
+    await state_store.enqueue_semantic_job("retry-a1", "upsert", "h", "incremental")
+    [j] = await state_store.claim_semantic_jobs(10, True)
+    await state_store.fail_semantic_job(j["id"], "boom", max_attempts=2, retry_delay_seconds=0)
+    # attempts now 1 (<2): back to pending, re-claimable (delay 0)
+    [j2] = await state_store.claim_semantic_jobs(10, True)
+    await state_store.fail_semantic_job(j2["id"], "boom2", max_attempts=2, retry_delay_seconds=0)
+    # attempts now 2 (>=2): dead, not re-claimable
+    assert await state_store.claim_semantic_jobs(10, True) == []
+    assert await state_store.dead_semantic_job_count() == base + 1
+
+
+async def test_backoff_hides_job(state_store):
+    await state_store.enqueue_semantic_job("retry-a2", "upsert", "h", "incremental")
+    [j] = await state_store.claim_semantic_jobs(10, True)
+    await state_store.fail_semantic_job(j["id"], "x", max_attempts=5, retry_delay_seconds=3600)
+    assert await state_store.claim_semantic_jobs(10, True) == []   # next_attempt_at in the future
+
+
+async def test_reaper_reclaims_stale_inprogress(state_store):
+    await state_store.enqueue_semantic_job("retry-a3", "upsert", "h", "incremental")
+    [j] = await state_store.claim_semantic_jobs(10, True)          # now in_progress, fresh claimed_at
+    assert await state_store.reap_stale_jobs(3600) == 0            # fresh, not reaped
+    # force claimed_at into the past, then reap
+    async with (await state_store._get_pool()).acquire() as c:
+        await c.execute(
+            "UPDATE semantic_jobs SET claimed_at = now() - interval '2 hours' WHERE id=$1",
+            j["id"])
+    assert await state_store.reap_stale_jobs(3600) == 1
+    assert len(await state_store.claim_semantic_jobs(10, True)) == 1  # re-claimable

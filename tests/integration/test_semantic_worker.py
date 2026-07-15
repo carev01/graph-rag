@@ -37,6 +37,13 @@ async def test_worker_marks_failed_and_continues(state_store):
 
     await state_store.enqueue_semantic_job("w-a3", "upsert", "h")
     n = await run_worker_once(state_store, Boom(), batch=10)
-    # job is 'failed', not re-claimable, no exception bubbled
+    # no exception bubbled; interim worker literal is max_attempts=5, retry_delay=0,
+    # so a single failure retries: job goes back to 'pending' and is immediately
+    # re-claimable rather than terminal-failing.
     assert n == 1
-    assert await state_store.claim_semantic_jobs(10, True) == []
+
+    # drive it through the remaining attempts until it dead-letters
+    for _ in range(4):
+        assert await run_worker_once(state_store, Boom(), batch=10) == 1
+    assert await state_store.claim_semantic_jobs(10, True) == []  # dead, not re-claimable
+    assert await state_store.dead_semantic_job_count() == 1

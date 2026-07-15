@@ -19,7 +19,8 @@ async def run_worker_once(store, ingest, batch: int) -> int:
             await store.complete_semantic_job(job["id"])
         except Exception as e:  # a poison job must not block the queue
             logger.exception("semantic job %s failed", job["id"])
-            await store.fail_semantic_job(job["id"], str(e))
+            await store.fail_semantic_job(
+                job["id"], str(e), max_attempts=5, retry_delay_seconds=0)
     return len(jobs)
 
 

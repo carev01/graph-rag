@@ -151,11 +151,29 @@ class StateStore:
         await pool.execute(
             "UPDATE semantic_jobs SET status='done', updated_at=now() WHERE id=$1", job_id)
 
-    async def fail_semantic_job(self, job_id: int, error: str) -> None:
+    async def fail_semantic_job(
+        self, job_id: int, error: str, *, max_attempts: int, retry_delay_seconds: float
+    ) -> None:
         pool = await self._get_pool()
         await pool.execute(
-            "UPDATE semantic_jobs SET status='failed', attempts=attempts+1, "
-            "last_error=$2, updated_at=now() WHERE id=$1", job_id, error)
+            "UPDATE semantic_jobs SET attempts=attempts+1, last_error=$2, "
+            "status=CASE WHEN attempts+1 >= $3 THEN 'dead' ELSE 'pending' END, "
+            "next_attempt_at=CASE WHEN attempts+1 >= $3 THEN next_attempt_at "
+            "ELSE now() + make_interval(secs => $4) END, updated_at=now() "
+            "WHERE id=$1", job_id, error, max_attempts, retry_delay_seconds)
+
+    async def reap_stale_jobs(self, lease_seconds: float) -> int:
+        pool = await self._get_pool()
+        res = await pool.execute(
+            "UPDATE semantic_jobs SET status='pending', attempts=attempts+1, "
+            "next_attempt_at=now(), updated_at=now() "
+            "WHERE status='in_progress' AND claimed_at < now() - make_interval(secs => $1)",
+            lease_seconds)
+        return int(res.split()[-1])   # "UPDATE <n>"
+
+    async def dead_semantic_job_count(self) -> int:
+        pool = await self._get_pool()
+        return await pool.fetchval("SELECT count(*) FROM semantic_jobs WHERE status='dead'")
 
     async def record_tokens(self, delta: int) -> None:
         pool = await self._get_pool()
