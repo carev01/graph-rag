@@ -3,14 +3,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import signal
 
 import httpx
 import typer
+from graphiti_core import Graphiti
+from neo4j import AsyncDriver
 
+from graph_extract.cli import _build_ingest_driver
+from graph_extract.config import get_extract_settings
+from graph_extract.ingest_driver import IngestDriver
 from graph_sync.catalog import Catalog
 from graph_sync.config import Settings, get_settings
 from graph_sync.delta_client import make_client
 from graph_sync.neo4j_repo import Neo4jRepo
+from graph_sync.semantic_worker import run_worker
 from graph_sync.state_store import StateStore
 from graph_sync.sync_core import SyncCore
 
@@ -62,6 +69,35 @@ async def _build_sync_core(
         raise
     core = SyncCore(client, catalog, repo, store, settings)
     return core, client, repo, store
+
+
+async def _build_worker_deps(
+    settings: Settings,
+) -> tuple[StateStore, IngestDriver, Graphiti, httpx.AsyncClient, AsyncDriver]:
+    """Construct the real dependency graph the `worker` command needs.
+
+    `_build_ingest_driver` already cleans up its own partial state (docext,
+    driver, graphiti) on failure, but it has no knowledge of `store`. If
+    `store.init_schema()` or `_build_ingest_driver` itself fails after
+    `store`'s connection pool is already open, that pool must still be
+    closed here before the exception propagates -- otherwise the caller's
+    own `try/finally` (which only covers the code *after* this function
+    returns) would never run and the already-open pool would leak.
+    """
+    store = StateStore(settings.postgres_dsn)
+    try:
+        await store.init_schema()
+        ingest, graphiti, docext, driver = await _build_ingest_driver(get_extract_settings())
+    except Exception:
+        try:
+            await store.close()
+        except Exception:
+            logger.exception(
+                "error closing the state store while cleaning up after a "
+                "_build_worker_deps failure"
+            )
+        raise
+    return store, ingest, graphiti, docext, driver
 
 
 @app.command("register-webhook")
@@ -132,6 +168,35 @@ def refresh_toc(source_id: str = typer.Argument(...)) -> None:
             await repo.close()
             await store.close()
             await client.aclose()
+
+    asyncio.run(_run())
+
+
+@app.command("worker")
+def worker(
+    batch: int = typer.Option(10, "--batch"),
+    poll_seconds: float = typer.Option(5.0, "--poll-seconds"),
+) -> None:
+    """Standalone semantic-ingestion worker: claims `semantic_jobs` rows and
+    drives them through the real `IngestDriver` (upsert -> ingest_article,
+    remove -> tombstone_article_episodes). Runs until SIGINT/SIGTERM."""
+
+    async def _run() -> None:
+        settings = get_settings()
+        store, ingest, graphiti, docext, driver = await _build_worker_deps(settings)
+        try:
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+            await run_worker(
+                store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event
+            )
+        finally:
+            await store.close()
+            await driver.close()
+            await docext.aclose()
+            await graphiti.close()
 
     asyncio.run(_run())
 

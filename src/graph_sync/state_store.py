@@ -15,6 +15,14 @@ CREATE TABLE IF NOT EXISTS source_debounce (
   source_id text PRIMARY KEY, last_run_at timestamptz);
 CREATE TABLE IF NOT EXISTS dead_letter (
   id bigserial PRIMARY KEY, raw text, context text, created_at timestamptz DEFAULT now());
+CREATE TABLE IF NOT EXISTS semantic_jobs (
+  id bigserial PRIMARY KEY, article_id text NOT NULL,
+  op text NOT NULL, content_hash text,
+  status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0,
+  last_error text, enqueued_at timestamptz DEFAULT now(),
+  claimed_at timestamptz, updated_at timestamptz DEFAULT now());
+CREATE UNIQUE INDEX IF NOT EXISTS ux_semantic_jobs_pending
+  ON semantic_jobs(article_id) WHERE status='pending';
 """
 _LOCK_KEY = 911_222_333
 
@@ -105,6 +113,37 @@ class StateStore:
     async def dead_letter_count(self) -> int:
         pool = await self._get_pool()
         return await pool.fetchval("SELECT count(*) FROM dead_letter")
+
+    async def enqueue_semantic_job(
+        self, article_id: str, op: str, content_hash: str | None
+    ) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "INSERT INTO semantic_jobs (article_id, op, content_hash) VALUES ($1,$2,$3) "
+            "ON CONFLICT (article_id) WHERE status='pending' "
+            "DO UPDATE SET op=excluded.op, content_hash=excluded.content_hash, "
+            "enqueued_at=now(), updated_at=now()",
+            article_id, op, content_hash)
+
+    async def claim_semantic_jobs(self, batch: int) -> list[dict]:
+        pool = await self._get_pool()
+        rows = await pool.fetch(
+            "UPDATE semantic_jobs SET status='in_progress', claimed_at=now(), updated_at=now() "
+            "WHERE id IN (SELECT id FROM semantic_jobs WHERE status='pending' "
+            "ORDER BY enqueued_at FOR UPDATE SKIP LOCKED LIMIT $1) "
+            "RETURNING id, article_id, op, content_hash, attempts", batch)
+        return [dict(r) for r in rows]
+
+    async def complete_semantic_job(self, job_id: int) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "UPDATE semantic_jobs SET status='done', updated_at=now() WHERE id=$1", job_id)
+
+    async def fail_semantic_job(self, job_id: int, error: str) -> None:
+        pool = await self._get_pool()
+        await pool.execute(
+            "UPDATE semantic_jobs SET status='failed', attempts=attempts+1, "
+            "last_error=$2, updated_at=now() WHERE id=$1", job_id, error)
 
     async def try_lock(self) -> bool:
         if self._lock_conn is None:

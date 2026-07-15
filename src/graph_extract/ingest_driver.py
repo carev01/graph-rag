@@ -77,7 +77,22 @@ class IngestDriver:
             res.episodes_added += 1
             res.entities += len(r.nodes)
             res.edges += len(r.edges)
+        await self._supersede_trailing_episodes(art.id, len(episodes))
         return res
+
+    async def tombstone_article_episodes(self, article_id: str) -> int:
+        async with self._driver.session() as s:
+            r = await s.run(
+                "MATCH (:Article {id:$a})-[:HAS_EPISODE]->(e:Episodic) "
+                "SET e.removed=true RETURN count(e) AS c", a=article_id)
+            rec = await r.single()
+            return rec["c"] if rec else 0
+
+    async def _supersede_trailing_episodes(self, article_id: str, new_count: int) -> None:
+        async with self._driver.session() as s:
+            await s.run(
+                "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->(e:Episodic) "
+                "WHERE r.chunk_index >= $n SET e.superseded=true", a=article_id, n=new_count)
 
     async def ingest_source(self, source_id: str, limit: int | None = None) -> IngestResult:
         ids = await self.list_article_ids(source_id)
