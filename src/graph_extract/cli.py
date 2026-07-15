@@ -26,7 +26,7 @@ from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
 from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
-from graph_sync.delta_client import make_client
+from docext.client import make_docext_client
 
 app = typer.Typer()
 eval_app = typer.Typer()
@@ -69,8 +69,11 @@ async def _build_ingest_driver(
     docext: httpx.AsyncClient | None = None
     driver: AsyncDriver | None = None
     try:
-        # ExtractSettings is structurally compatible with the fields make_client reads.
-        docext = make_client(settings, admin=False)  # type: ignore[arg-type]
+        docext = make_docext_client(
+            base_url=settings.docext_base_url, read_key=settings.docext_read_key,
+            admin_key=settings.docext_admin_key, verify_tls=settings.docext_verify_tls,
+            admin=False,
+        )
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password)
         )

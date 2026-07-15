@@ -69,6 +69,9 @@ def test_instructions_exclude_noise_entities():
     assert "arn:" in lowered
     assert "snap-" in lowered and "vol-" in lowered
     assert "install-module" in lowered
+    # Error/exception code markers — literal casing as named in the instructions.
+    assert "Failed" in EXTRACTION_INSTRUCTIONS
+    assert "RequestId" in EXTRACTION_INSTRUCTIONS
 
 def test_instructions_exclude_timezones_but_not_regions():
     # v5: regions are first-class (Region entity), no longer excluded as noise.

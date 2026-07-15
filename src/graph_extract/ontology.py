@@ -20,7 +20,7 @@ class Capability(BaseModel):
     """A backup feature or mechanism (e.g. immutability, cross-region copy, instant restore, synthetic full backup, changed block tracking) — NOT accounts, roles, or resources."""
 
 class Platform(BaseModel):
-    """An OS, hypervisor, or cloud/infrastructure platform that products run on or integrate with (e.g. Windows, Linux, VMware vSphere, Hyper-V, AWS, Azure) — NOT tools/CLIs/consoles (those are Tools), NOT geographic regions, storage classes/tiers (S3 Standard, Azure Archive tier), storage-redundancy tiers (LRS/ZRS), or configuration settings (those are Concepts or not extracted)."""
+    """An OS, hypervisor, or cloud/infrastructure platform that products run on or integrate with (e.g. Windows, Linux, VMware vSphere (the hypervisor platform, not the VMs it hosts), Hyper-V, AWS, Azure) — NOT tools/CLIs/consoles (those are Tools), NOT geographic regions, storage classes/tiers (S3 Standard, Azure Archive tier), storage-redundancy tiers (LRS/ZRS), or configuration settings (those are Concepts or not extracted)."""
 
 class Concept(BaseModel):
     """A domain concept (e.g. RPO, RTO, 3-2-1 rule, retention policy, recovery point, backup frequency, storage classes/tiers like S3 Standard, S3 Glacier, Azure Archive tier, storage-redundancy tiers like LRS/ZRS) or a regulation/standard (e.g. SEC 17a-4, GDPR)."""

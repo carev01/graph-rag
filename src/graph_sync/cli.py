@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import signal
@@ -23,6 +24,10 @@ from graph_sync.sync_core import SyncCore
 
 app = typer.Typer()
 logger = logging.getLogger(__name__)
+
+
+def _dump(obj: object) -> None:
+    typer.echo(json.dumps(obj, indent=2, default=str))
 
 
 async def _build_sync_core(
@@ -168,6 +173,22 @@ def refresh_toc(source_id: str = typer.Argument(...)) -> None:
             await repo.close()
             await store.close()
             await client.aclose()
+
+    asyncio.run(_run())
+
+
+@app.command("queue-status")
+def queue_status() -> None:
+    """Dead-letter / queue observability: print `semantic_jobs` counts by status."""
+
+    async def _run() -> None:
+        settings = get_settings()
+        store = StateStore(settings.postgres_dsn)
+        try:
+            await store.init_schema()
+            _dump(await store.job_status_counts())
+        finally:
+            await store.close()
 
     asyncio.run(_run())
 
