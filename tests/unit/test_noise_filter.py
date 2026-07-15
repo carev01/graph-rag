@@ -58,6 +58,10 @@ KEEP = [
     # Short numbers (years/versions) are NOT ids — numeric pattern needs 6+ digits.
     "2024",
     "3-2-1 rule",
+    # Real products shaped like an o-/r- id but with NO digit in the body — kept
+    # (the org-id pattern requires a digit).
+    "R-Studio",
+    "O-Ring",
 ]
 
 
