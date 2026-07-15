@@ -20,6 +20,7 @@ from graph_extract.eval import (
     provenance_report,
     type_precision,
 )
+from graph_extract.graph_cleanup import prune_noise_entities, retype_region_entities
 from graph_extract.graphiti_client import build_graphiti, init_indices
 from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
@@ -356,6 +357,24 @@ def quality_report(
             f"type precision: {current['type_precision']['precision']:.3f} "
             f"(baseline {baseline.get('type_precision', {}).get('precision', 'n/a')})"
         )
+
+    asyncio.run(_run())
+
+
+@app.command("cleanup")
+def cleanup() -> None:
+    """Run the deterministic post-ingest correctors: prune noise entities,
+    then retype any mistyped region entities to :Region."""
+
+    async def _run() -> None:
+        settings = get_extract_settings()
+        driver = await _build_driver(settings)
+        try:
+            prune = await prune_noise_entities(driver, settings.group_id)
+            retype = await retype_region_entities(driver, settings.group_id)
+            _dump({"prune": prune, "retype": retype})
+        finally:
+            await driver.close()
 
     asyncio.run(_run())
 

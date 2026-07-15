@@ -61,6 +61,11 @@ def test_eval_quality_help():
     assert "--sample" in result.stdout
 
 
+def test_cleanup_help():
+    result = runner.invoke(app, ["cleanup", "--help"])
+    assert result.exit_code == 0
+
+
 def test_quality_baseline_help():
     result = runner.invoke(app, ["quality-baseline", "--help"])
     assert result.exit_code == 0
