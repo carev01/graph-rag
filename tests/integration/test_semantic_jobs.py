@@ -93,11 +93,27 @@ async def test_backoff_hides_job(state_store):
 async def test_reaper_reclaims_stale_inprogress(state_store):
     await state_store.enqueue_semantic_job("retry-a3", "upsert", "h", "incremental")
     [j] = await state_store.claim_semantic_jobs(10, True)          # now in_progress, fresh claimed_at
-    assert await state_store.reap_stale_jobs(3600) == 0            # fresh, not reaped
+    assert await state_store.reap_stale_jobs(3600, max_attempts=5) == 0  # fresh, not reaped
     # force claimed_at into the past, then reap
     async with (await state_store._get_pool()).acquire() as c:
         await c.execute(
             "UPDATE semantic_jobs SET claimed_at = now() - interval '2 hours' WHERE id=$1",
             j["id"])
-    assert await state_store.reap_stale_jobs(3600) == 1
+    assert await state_store.reap_stale_jobs(3600, max_attempts=5) == 1
     assert len(await state_store.claim_semantic_jobs(10, True)) == 1  # re-claimable
+
+
+async def test_reaper_dead_letters_at_max_attempts(state_store):
+    base = await state_store.dead_semantic_job_count()
+    await state_store.enqueue_semantic_job("retry-a4", "upsert", "h", "incremental")
+    [j] = await state_store.claim_semantic_jobs(10, True)          # now in_progress
+    # force attempts to max_attempts - 1 and claimed_at into the past, simulating a
+    # process-crash-looped job that's about to exhaust its retries
+    async with (await state_store._get_pool()).acquire() as c:
+        await c.execute(
+            "UPDATE semantic_jobs SET attempts=$2, "
+            "claimed_at = now() - interval '2 hours' WHERE id=$1",
+            j["id"], 2)
+    assert await state_store.reap_stale_jobs(3600, max_attempts=3) == 1
+    assert await state_store.dead_semantic_job_count() == base + 1
+    assert await state_store.claim_semantic_jobs(10, True) == []  # dead, not re-claimable

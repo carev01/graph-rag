@@ -162,13 +162,14 @@ class StateStore:
             "ELSE now() + make_interval(secs => $4) END, updated_at=now() "
             "WHERE id=$1", job_id, error, max_attempts, retry_delay_seconds)
 
-    async def reap_stale_jobs(self, lease_seconds: float) -> int:
+    async def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> int:
         pool = await self._get_pool()
         res = await pool.execute(
-            "UPDATE semantic_jobs SET status='pending', attempts=attempts+1, "
-            "next_attempt_at=now(), updated_at=now() "
+            "UPDATE semantic_jobs SET attempts=attempts+1, updated_at=now(), "
+            "status=CASE WHEN attempts+1 >= $2 THEN 'dead' ELSE 'pending' END, "
+            "next_attempt_at=CASE WHEN attempts+1 >= $2 THEN next_attempt_at ELSE now() END "
             "WHERE status='in_progress' AND claimed_at < now() - make_interval(secs => $1)",
-            lease_seconds)
+            lease_seconds, max_attempts)
         return int(res.split()[-1])   # "UPDATE <n>"
 
     async def dead_semantic_job_count(self) -> int:
