@@ -1,19 +1,19 @@
 # Quality-Metrics Follow-ups — Design Spec
 
 **Project:** Temporal GraphRAG over DocExtractor
-**Slice:** 2b-quality follow-ups (metric trustworthiness + two extraction nudges)
+**Slice:** 2b-quality follow-ups (metric trustworthiness + region modelling + extraction nudges)
 **Date:** 2026-07-14
 **Status:** Draft for review
 
-Follows the merged slice 2b-quality ([`slice-2b-quality-report.md`](../slice-2b-quality-report.md) §5). Fixes the four residuals so the quality measurements can be trusted as gates, plus two extraction nudges. No new subsystems — edits to `eval.py`, `noise_filter.py`, `quality_labels.py`, `ontology.py`, `cli.py`.
+Follows the merged slice 2b-quality ([`slice-2b-quality-report.md`](../slice-2b-quality-report.md) §5). Fixes the four residuals so the quality measurements can be trusted as gates, promotes regions to a first-class entity so region/residency questions are answerable, and adds a canonicalization nudge. No new subsystems — edits to `eval.py`, `noise_filter.py`, `quality_labels.py`, `ontology.py`, `graph_cleanup.py`, `cli.py`, plus a new `region_names.py` data module.
 
 ## Motivation
 
-The slice hit its goals but three *measurements* were shown unreliable and two extraction residuals remain. The metrics are what future slices gate on, so making them honest is the priority.
+The slice hit its goals but three *measurements* were shown unreliable and two extraction residuals remain. Crucially, the earlier plan to *suppress* regions as noise would have made region/data-residency questions — e.g. **"which vendors offer their SaaS backups in Germany?"** — unanswerable. Regions were never noise; they were **mistyped as `Platform`**. So Item 1 gives them a correct home (a `Region` type + availability edge) instead of deleting them, which both fixes the type pollution and *enables* a valuable query class.
 
 ## Scope & environment
 
-- The **full-run 2a-successor graph is still in Neo4j** (579 entities / 1,935 facts, group `backup-docs`). Items 1–3 are validated against it with **no re-extraction**. Item 4 is a prompt change validated on the 8-article overlap sample (`scripts/pilot-ids-sample.txt`, ~20 min).
+- The **full-run 2a-successor graph is still in Neo4j** (579 entities / 1,935 facts, group `backup-docs`). **Items 2–3** (metric/parse changes) are validated against it with **no re-extraction**. **Items 1 and 4** change the ontology/prompt, so their extracted output (the `Region` nodes, `AvailableIn` facts, canonical names) is validated on the 8-article overlap sample (`scripts/pilot-ids-sample.txt`, ~20 min) and then the full 39-article run for the headline.
 - Judge stays `glm-5.2:cloud` (independent; self-judge guard now enforced).
 
 ## Item 2 — `should_distinct` tri-state + synonym tolerance (deterministic)
@@ -45,39 +45,39 @@ The slice hit its goals but three *measurements* were shown unreliable and two e
 
 **Testing:** unit tests for `_parse_type` (think-block, punctuation, empty→None). The larger-N/retry behaviour is validated live against the current graph (report-producing, not CI).
 
-## Item 1 — region names, exhaustive across cloud/backup vendors (gazetteer + patterns)
+## Item 1 — `Region` as a first-class entity type (Option A) + exhaustive gazetteer
 
-**Problem:** `_REGION` (`\bregions?$`) catches trailing-"region" names but not display-name regions still typed `Platform`: `India West`, `Israel Central`, `Asia Pacific (Malaysia)`. Structural heuristics alone can't be exhaustive because providers place the direction token inconsistently (suffix: `India West`; prefix: `East Asia`, `West Europe`, `North Europe`; embedded: `South Central US`).
+**Problem:** regions were typed `Platform`, which both polluted `Platform` and — under the earlier suppress-as-noise plan — would have deleted the very data needed to answer region/residency questions. The right fix is a correct type, not deletion.
 
-**Fix (exhaustive, gazetteer-backed):** a new data module `src/graph_extract/region_names.py` holding `REGION_NAMES: frozenset[str]` — the normalised (lowercased, whitespace-collapsed) set of known region **display names and codes** across the major providers whose products this corpus covers:
-- **AWS** — all region *codes* (`us-east-1`, `eu-west-2`, `ap-southeast-4`, `ca-central-1`, `il-central-1`, `us-gov-west-1`, `cn-north-1`, …) and *display names* (`US East (N. Virginia)`, `Asia Pacific (Tokyo)`, `EU (Ireland)`, `Canada (Central)`, …).
-- **Azure** — all region display names (`East US`, `East US 2`, `West Europe`, `North Europe`, `Southeast Asia`, `East Asia`, `Australia East`, `India West`, `Central India`, `Israel Central`, `Sweden Central`, `UK South`, `Brazil South`, `Qatar Central`, `Jio India West`, …), including the "paired/secondary region" phrasings.
-- **GCP** — region codes (`us-central1`, `europe-west4`, `asia-northeast1`, `southamerica-east1`, `me-central2`, `africa-south1`, …).
-- **OCI, IBM Cloud, Alibaba Cloud** — their common region display names/codes (these appear in multi-cloud backup docs).
-- Common **grouping labels**: `AWS Regions`, `Azure paired region`, `national clouds`, `US government regions`, `China regions`, cardinal macro-regions (`Americas`, `EMEA`, `APAC`) are **not** included here (too generic / ambiguous) — those trailing-"region"/plural cases stay with `_REGION`.
+**Design — ontology-v5 (the fifth and final ontology addition, alongside `Tool`):**
+1. **New entity type `Region`** (`ontology.py`): *a specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data* — a cloud region (`Germany West Central`, `East US`, `us-east-1`), a country/geo (`Germany`, `EU`), or a named availability zone. Explicitly **NOT** a `Platform` (a region runs *on* a platform), **NOT** a generic relative term (`primary region`, `secondary region` are `Concept`s), **NOT** a data-redundancy tier (LRS/ZRS stay `Concept`). Add to `ENTITY_TYPES`.
+2. **New edge `AvailableIn` (Product→Region)** (`ontology.py`): *a product/service is available in, operates in, or stores data in a region.* Add to `EDGE_TYPES` and `EDGE_TYPE_MAP` as `("Product","Region"): ["AvailableIn"]`. Add an `EXTRACTION_INSTRUCTIONS` line to capture availability/residency statements ("available in…", "data resides in…", "supported regions…", "not available in…"). This is what makes *"which vendors offer their SaaS backups in Germany?"* answerable: `(:Product)-[AvailableIn]->(:Region "Germany …")`, with the vendor reachable via the structural layer / the product's `Provides` capability facts.
+3. **`region_names.py` gazetteer** — `REGION_NAMES: frozenset[str]`, the normalised (lowercased, whitespace-collapsed) set of published region **display names and codes** across the providers this corpus covers — AWS (codes `us-east-1`…`il-central-1`…`us-gov-west-1`…`cn-north-1` + display names `US East (N. Virginia)`, `Asia Pacific (Tokyo)`, `EU (Ireland)`…), Azure (`East US`, `West Europe`, `North Europe`, `Southeast Asia`, `East Asia`, `Australia East`, `India West`, `Central India`, `Israel Central`, `Germany West Central`, `Sweden Central`, `UK South`, `Brazil South`, `Qatar Central`, `Jio India West`…), GCP (`us-central1`, `europe-west4`, `asia-northeast1`, `southamerica-east1`, `me-central2`, `africa-south1`…), and the common OCI / IBM Cloud / Alibaba Cloud regions. Dated (`2026-07`) static data file, like `quality_labels.py`.
+4. **Deterministic retype guarantee** — the two-layer pattern (prompt + deterministic corrector), mirroring `noise_filter`/`prune_noise_entities`. `region_names.REGION_NAMES` is the **single source of truth** for "what is a region", used by both the extraction examples and a new `graph_cleanup.retype_region_entities(driver, group_id) -> dict`: for every `:Entity` whose normalised name (vendor-prefix stripped) is in `REGION_NAMES` but is not already `:Region`, **relabel** it — remove the mistaken custom type label (e.g. `:Platform`) and `SET e:Region`, leaving the Graphiti-owned `:Entity` label and all edges intact (allowed under design-invariant #5 because these custom type labels are *ours*, defined in `ENTITY_TYPES`). Returns `{scanned, retyped, retyped_names}` for audit. This guarantees regions are correctly typed even when the model still slips (we observed it mistype regions before).
 
-**Matching (`noise_filter`):** normalise the candidate (lowercase, collapse spaces), strip a leading vendor word (`aws|amazon|azure|microsoft|google|gcp|oracle|oci|ibm|alibaba`) and any trailing `region(s)`, then flag if the result is in `REGION_NAMES`. Retain `_REGION` (trailing "region(s)") and add a **parenthetical-place** pattern (`… (Tokyo)`, `Asia Pacific (Malaysia)`) as generalization for display names not enumerated.
+**`noise_filter` changes:** regions are **no longer noise**. Remove nothing that deletes a *specific* region. Keep `_REGION` (`\bregions?$`) only for **generic/relative** region *words* (`AWS Regions`, `Azure paired region`, `primary/secondary region`) — non-specific, not answerable, low value (reversible, documented). The gazetteer is NOT wired into `noise_filter` for deletion; it feeds typing.
 
-**False-positive guard (critical, since the set is large):** the gazetteer must not shadow real domain terms. Unit tests assert every KEEP term survives, and the module is curated to exclude bare tokens that double as domain words (no bare `central`, `east`, `standard`, `archive`; entries are full multi-word region names or codes only). Any collision found → remove that entry, don't ship it.
+**False-positive guard (critical):** the gazetteer must not shadow domain terms. Entries are full multi-word region names or codes only — **no bare tokens** (`central`, `east`, `standard`, `archive`) that double as domain words. Unit tests assert every KEEP term survives and that `retype_region_entities` only relabels genuine regions on a seeded graph. Any collision → drop that entry.
 
-**Sourcing & maintenance:** the list is compiled from each provider's public region table as of 2026-07; it's a static data file (like `quality_labels.py`), reviewed at sign-off, and cheap to extend. A dated comment records the snapshot. New regions appearing later fall through to the structural patterns or are added in a one-line PR.
+**Granularity / rollup:** named cloud regions embed the country/geo token (`Germany West Central` contains `Germany`), so a country-level question resolves by retrieval-time containment against `Region` nodes; the model is also instructed to extract the bare country/geo as its own `Region` where stated, so `Germany` can exist as a node in its own right.
 
-**Acceptance:** the three observed escapees (`India West`, `Israel Central`, `Asia Pacific (Malaysia)`) plus a broad cross-provider sample (≥ 2 dozen AWS/Azure/GCP names spanning suffix/prefix/embedded/parenthetical/code forms) are all flagged; every existing KEEP/NOISE test still holds; a scan of what the gazetteer additionally flags on the current 579-entity graph shows only genuine regions removed.
+**Acceptance:** on a sample/full re-run, `Germany`/`Germany West Central`/major-provider regions exist as `:Region` nodes (not `:Platform`); `AvailableIn` facts connect products to regions; the retype pass relabels any residual mistyped region deterministically (audited); `Platform` no longer contains regions; every existing KEEP/NOISE filter test holds; and the target query — vendors offering a SaaS-backup capability `AvailableIn` a `Germany` region — is traversable in the graph.
 
 ## Item 4 — canonicalization nudge (prompt; lowest priority)
 
 **Problem:** `immutability` and `retention policy` appeared under near-synonym names in the full run rather than the canonical label (hurting `should_merge` node counts).
 
-**Fix:** extend the canonical-names guidance in `EXTRACTION_INSTRUCTIONS` with the specific fragmenting cases (map common variants → the canonical `immutability`, `retention policy`, etc.). Prompt-only; no schema change.
+**Fix:** extend the canonical-names guidance in `EXTRACTION_INSTRUCTIONS` with the specific fragmenting cases (map common variants → the canonical `immutability`, `retention policy`, etc.). Prompt-only; no schema change. Folds into the same ontology edit as Item 1 (both touch `EXTRACTION_INSTRUCTIONS`) and rides the same re-run.
 
-**Acceptance:** on a sample re-run, `immutability`/`retention policy` resolve to their canonical `SHOULD_MERGE` names (node_count ≥ 1 under the canonical spelling). This is the one item needing re-extraction; if the effect is marginal, it is logged rather than chased.
+**Acceptance:** on a sample re-run, `immutability`/`retention policy` resolve to their canonical `SHOULD_MERGE` names (node_count ≥ 1 under the canonical spelling). If the effect is marginal, it is logged rather than chased.
 
 ## Non-goals / deferred
 
 - No majority-vote for `type_precision` (chosen against — cost).
-- Region gazetteer covers the major cloud/backup providers' published regions (AWS/Azure/GCP/OCI/IBM/Alibaba) as of the 2026-07 snapshot; niche/private-cloud region naming and future new regions fall through to the structural patterns until added.
+- Region gazetteer covers the major cloud/backup providers' published regions (AWS/Azure/GCP/OCI/IBM/Alibaba) as of the 2026-07 snapshot; niche/private-cloud region naming and future new regions fall through to the structural patterns / retype pass until added.
+- `Region` availability is modelled via the `AvailableIn` edge only (Product→Region). No region hierarchy (region→country→continent) or geo-reasoning; country rollup is retrieval-time containment. No `Vendor→Region` edge (vendor reached via the product).
 - Broader pipeline hardening (temporal policy, queue, SAME_AS, staleness sweep) stays in the later 2b sub-slice per `slice-2-followups.md`.
 
 ## Acceptance summary
 
-Done when: `should_distinct` reports tri-state and no false `merged` on the current graph; `type_precision` unparseable rate is materially reduced and the metric is visibly steadier at the larger N; the three region escapees are pruned with all filter tests green; the canonicalization nudge is shipped and its sample-run effect recorded; unit + integration tests green; ruff/mypy clean.
+Done when: `should_distinct` reports tri-state and no false `merged` on the current graph; `type_precision` unparseable rate is materially reduced and the metric is visibly steadier at the larger N; `Region` is a first-class type with the gazetteer + deterministic retype pass, regions leave `Platform`, `AvailableIn` facts exist, and the "vendors offering SaaS backup in Germany" traversal works on a re-run; the canonicalization nudge is shipped and its sample-run effect recorded; unit + integration tests green; ruff/mypy clean.
