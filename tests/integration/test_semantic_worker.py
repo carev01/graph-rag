@@ -92,6 +92,34 @@ async def test_worker_reaps_budgets_meters_and_retries(state_store):
     assert after_tokens - before_tokens == 100
 
 
+async def test_worker_records_tokens_on_failure(state_store):
+    class BurnThenBoom:
+        """Burns real tokens (as multi-call Graphiti extraction would) then
+        fails on a later step (e.g. a Neo4j write timeout)."""
+
+        async def ingest_article(self, aid):
+            usage.get_tally().add("llm", prompt=100, completion=0)
+            raise RuntimeError("write timeout after extraction")
+
+        async def tombstone_article_episodes(self, aid):
+            return 0
+
+    usage.reset_tally()
+    base = await state_store.today_token_total()
+    await state_store.enqueue_semantic_job("w-burn-boom", "upsert", "h")
+
+    n = await run_worker_once(state_store, BurnThenBoom(), **_WK)
+    assert n == 1
+
+    # job failed and was scheduled to retry (not silently dropped)
+    remaining = await state_store.claim_semantic_jobs(10, True)
+    assert len(remaining) == 1
+    assert remaining[0]["article_id"] == "w-burn-boom"
+
+    # tokens burned before the failure must still be recorded in the ledger
+    assert await state_store.today_token_total() == base + 100
+
+
 async def test_worker_withholds_bootstrap_over_budget(state_store):
     class RecordingIngest:
         def __init__(self):

@@ -29,10 +29,6 @@ async def run_worker_once(
                 await ingest.tombstone_article_episodes(job["article_id"])
             else:
                 raise ValueError(f"unknown op {job['op']!r}")
-            after = get_tally()
-            delta = (after.prompt_tokens + after.completion_tokens) - t0
-            if delta:
-                await store.record_tokens(delta)
             await store.complete_semantic_job(job["id"])
         except Exception as e:  # a poison job must not block the queue
             logger.exception("semantic job %s failed", job["id"])
@@ -40,6 +36,11 @@ async def run_worker_once(
                 job["id"], str(e), max_attempts=max_attempts,
                 retry_delay_seconds=exp_backoff(
                     job["attempts"] + 1, base=backoff_base, cap=backoff_cap))
+        finally:
+            after = get_tally()
+            delta = (after.prompt_tokens + after.completion_tokens) - t0
+            if delta:
+                await store.record_tokens(delta)
     return len(jobs)
 
 
