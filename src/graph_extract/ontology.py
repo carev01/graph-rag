@@ -116,9 +116,11 @@ one entity:
 - Workloads: "Kubernetes" (not "K8s"), "Amazon S3" (not "S3 bucket"),
   "Azure Blob Storage", "Azure VM", "Amazon EC2", "SQL Server", "VMware vSphere",
   "Microsoft 365".
-- Capabilities: "immutability" (not "WORM"/"immutable vault"/"immutable
-  backups"/"immutability policy"), "cross-region copy", "soft delete",
-  "instant restore", "deduplication", "air gap".
+- Capabilities: "immutability" (not "WORM"/"immutable backups"/"immutability
+  policy"), "cross-region copy", "soft delete", "instant restore",
+  "deduplication", "air gap". (But a VENDOR-BRANDED name like "Azure immutable
+  vault" or "AWS Backup Vault Lock" stays DISTINCT — see below — do not fold it
+  into "immutability".)
 - Concepts: "RPO", "RTO", "3-2-1 rule", "retention policy" (not
   "retention"/"retention rule"/"retention settings"), "recovery point".
 
