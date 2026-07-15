@@ -14,8 +14,8 @@ Reports, each independently runnable against a live (or seeded test) graph:
                        simple, clearly-labeled full-corpus extrapolation.
 - `fact_quality`   -- LLM-judge faithfulness sample (fact vs. its supporting
                        episode content) for a human spot-check.
-- `type_precision` -- LLM-judge check of assigned entity types against the v2
-                       type definitions.
+- `type_precision` -- LLM-judge check of assigned entity types against the
+                       ontology's type definitions.
 """
 from __future__ import annotations
 
@@ -219,7 +219,7 @@ _YES_NO_RE = re.compile(r"\b(yes|no)\b")
 def _parse_yes_no(content: str | None) -> bool | None:
     """Parse a judge verdict out of possibly reasoning-model output.
 
-    `gpt-oss-20b` (the judge) is a reasoning model that commonly emits
+    `glm-5.2` (the judge) is a reasoning model that commonly emits
     chain-of-thought text before its final yes/no, so a naive
     `.startswith("yes")` misreads "reasoning... yes" as "no". Instead: strip
     any `<think>...</think>` preamble, then take the LAST word-boundary
@@ -244,6 +244,15 @@ def _judge_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str
         # Fall back to the LLM endpoint + its key (may be a cloud key, e.g. OpenRouter).
         base_url, model = settings.llm_base_url, settings.llm_model
         api_key = settings.judge_api_key or settings.llm_api_key
+    if base_url == settings.llm_base_url and model == settings.llm_model:
+        # The resolved judge is the extraction model itself -- never let the
+        # judge silently grade its own output. A shared/empty judge_api_key
+        # (reusing llm_api_key) is fine as long as base_url/model differ.
+        raise ValueError(
+            "Judge model resolves to the extraction model (self-judging). "
+            "Set JUDGE_BASE_URL / JUDGE_MODEL / JUDGE_API_KEY in .env to an "
+            "independent judge (e.g. glm-5.2:cloud)."
+        )
     client = instrument(AsyncOpenAI(api_key=api_key, base_url=base_url))
     return client, model
 
@@ -266,24 +275,28 @@ async def fact_quality(driver, settings: ExtractSettings, sample: int) -> dict:
     supported = 0
     unsupported = 0
     unparseable = 0
-    for row in rows:
-        content = "\n---\n".join(row["contents"])
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user",
-                      "content": _JUDGE_PROMPT.format(fact=row["fact"], content=content)}],
-            temperature=0.0,
-        )
-        raw_answer = resp.choices[0].message.content or ""
-        verdict = _parse_yes_no(raw_answer)
-        if verdict is True:
-            supported += 1
-        elif verdict is False:
-            unsupported += 1
-        else:
-            unparseable += 1
-        results.append({"uuid": row["uuid"], "fact": row["fact"], "verdict": verdict,
-                        "raw_answer": raw_answer})
+    try:
+        for row in rows:
+            content = "\n---\n".join(row["contents"])
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user",
+                          "content": _JUDGE_PROMPT.format(fact=row["fact"], content=content)}],
+                temperature=0.0,
+                max_tokens=600,
+            )
+            raw_answer = resp.choices[0].message.content or ""
+            verdict = _parse_yes_no(raw_answer)
+            if verdict is True:
+                supported += 1
+            elif verdict is False:
+                unsupported += 1
+            else:
+                unparseable += 1
+            results.append({"uuid": row["uuid"], "fact": row["fact"], "verdict": verdict,
+                            "raw_answer": raw_answer})
+    finally:
+        await client.close()
 
     total = len(results)
     parsed = supported + unsupported
@@ -337,13 +350,13 @@ def _parse_type(content: str | None) -> str | None:
 
 
 async def type_precision(driver, settings: ExtractSettings, sample: int) -> dict:
-    """LLM-judge check that entities carry the right (v2) type label.
+    """LLM-judge check that entities carry the right type label.
 
     Samples `(name, type)` pairs -- type is the secondary node label next to
     `:Entity` -- and asks the JUDGE model (GLM, via `_judge_client_and_model`;
-    never the extraction model) to pick the best type from the v2
-    definitions. `max_tokens=600` because the judge is a reasoning model and
-    a small cap truncates the final answer to empty.
+    never the extraction model) to pick the best type from the ontology's
+    type definitions. `max_tokens=600` because the judge is a reasoning
+    model and a small cap truncates the final answer to empty.
     """
     async with driver.session() as s:
         r = await s.run(
@@ -360,29 +373,32 @@ async def type_precision(driver, settings: ExtractSettings, sample: int) -> dict
     misclassifications: list[dict] = []
     correct = 0
     unparseable = 0
-    for row in rows:
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user",
-                       "content": _TYPE_JUDGE_PROMPT.format(
-                           definitions=definitions, name=row["name"])}],
-            temperature=0.0,
-            max_tokens=600,
-        )
-        raw_answer = resp.choices[0].message.content or ""
-        judged = _parse_type(raw_answer)
-        assigned = row["type"]
-        bucket = per_type.setdefault(assigned, {"sampled": 0, "correct": 0})
-        bucket["sampled"] += 1
-        if judged is None:
-            unparseable += 1
-        elif judged == assigned:
-            correct += 1
-            bucket["correct"] += 1
-        else:
-            misclassifications.append(
-                {"name": row["name"], "assigned": assigned, "judged": judged,
-                 "raw_answer": raw_answer})
+    try:
+        for row in rows:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user",
+                           "content": _TYPE_JUDGE_PROMPT.format(
+                               definitions=definitions, name=row["name"])}],
+                temperature=0.0,
+                max_tokens=600,
+            )
+            raw_answer = resp.choices[0].message.content or ""
+            judged = _parse_type(raw_answer)
+            assigned = row["type"]
+            bucket = per_type.setdefault(assigned, {"sampled": 0, "correct": 0})
+            bucket["sampled"] += 1
+            if judged is None:
+                unparseable += 1
+            elif judged == assigned:
+                correct += 1
+                bucket["correct"] += 1
+            else:
+                misclassifications.append(
+                    {"name": row["name"], "assigned": assigned, "judged": judged,
+                     "raw_answer": raw_answer})
+    finally:
+        await client.close()
 
     for bucket in per_type.values():
         bucket["precision"] = (

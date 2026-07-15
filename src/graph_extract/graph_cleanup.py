@@ -22,7 +22,7 @@ async def prune_noise_entities(driver: AsyncDriver, group_id: str) -> dict:
             g=group_id,
         )
         rows = [dict(rec) async for rec in r]
-        noise = [row["name"] for row in rows if is_noise(row["name"], row.get("type"))]
+        noise = [row["name"] for row in rows if is_noise(row["name"] or "", row.get("type"))]
         if noise:
             await s.run(
                 "MATCH (e:Entity {group_id:$g}) WHERE e.name IN $names DETACH DELETE e",
