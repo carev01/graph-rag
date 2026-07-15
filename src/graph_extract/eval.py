@@ -130,6 +130,9 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
         def _forms(member):
             return [member] if isinstance(member, str) else list(member)
 
+        def _canon(member):
+            return member if isinstance(member, str) else member[0]
+
         async def _node_ids(forms):
             r = await s.run(
                 "MATCH (e:Entity {group_id:$g}) "
@@ -148,7 +151,7 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
             else:
                 state = "distinct"
             out["should_distinct"].append({
-                "pair": [a, b],
+                "pair": [_canon(a), _canon(b)],
                 "state": state,
                 "collapsed": state == "merged",
                 "a_nodes": len(a_ids), "b_nodes": len(b_ids),
