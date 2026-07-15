@@ -24,7 +24,7 @@ async def test_worker_processes_upsert_and_remove(state_store):
     assert n == 2
     assert ("upsert", "w-a1") in stub.calls
     assert ("remove", "w-a2") in stub.calls
-    assert await state_store.claim_semantic_jobs(10) == []  # both completed
+    assert await state_store.claim_semantic_jobs(10, True) == []  # both completed
 
 
 async def test_worker_marks_failed_and_continues(state_store):
@@ -39,4 +39,4 @@ async def test_worker_marks_failed_and_continues(state_store):
     n = await run_worker_once(state_store, Boom(), batch=10)
     # job is 'failed', not re-claimable, no exception bubbled
     assert n == 1
-    assert await state_store.claim_semantic_jobs(10) == []
+    assert await state_store.claim_semantic_jobs(10, True) == []

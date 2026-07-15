@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_worker_once(store, ingest, batch: int) -> int:
-    jobs = await store.claim_semantic_jobs(batch)
+    jobs = await store.claim_semantic_jobs(batch, True)
     for job in jobs:
         try:
             if job["op"] == "upsert":

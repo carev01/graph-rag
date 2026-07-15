@@ -20,9 +20,14 @@ CREATE TABLE IF NOT EXISTS semantic_jobs (
   op text NOT NULL, content_hash text,
   status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0,
   last_error text, enqueued_at timestamptz DEFAULT now(),
-  claimed_at timestamptz, updated_at timestamptz DEFAULT now());
+  claimed_at timestamptz, updated_at timestamptz DEFAULT now(),
+  lane text NOT NULL DEFAULT 'incremental',
+  next_attempt_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS ux_semantic_jobs_pending
   ON semantic_jobs(article_id) WHERE status='pending';
+ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS lane text NOT NULL DEFAULT 'incremental';
+ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
+CREATE TABLE IF NOT EXISTS token_ledger (day date PRIMARY KEY, tokens bigint NOT NULL DEFAULT 0);
 """
 _LOCK_KEY = 911_222_333
 
@@ -115,23 +120,30 @@ class StateStore:
         return await pool.fetchval("SELECT count(*) FROM dead_letter")
 
     async def enqueue_semantic_job(
-        self, article_id: str, op: str, content_hash: str | None
+        self, article_id: str, op: str, content_hash: str | None,
+        lane: str = "incremental"
     ) -> None:
         pool = await self._get_pool()
         await pool.execute(
-            "INSERT INTO semantic_jobs (article_id, op, content_hash) VALUES ($1,$2,$3) "
-            "ON CONFLICT (article_id) WHERE status='pending' "
-            "DO UPDATE SET op=excluded.op, content_hash=excluded.content_hash, "
+            "INSERT INTO semantic_jobs (article_id, op, content_hash, lane) VALUES ($1,$2,$3,$4) "
+            "ON CONFLICT (article_id) WHERE status='pending' DO UPDATE SET "
+            "op=excluded.op, content_hash=excluded.content_hash, "
+            "lane=CASE WHEN excluded.lane='incremental' OR semantic_jobs.lane='incremental' "
+            "THEN 'incremental' ELSE 'bootstrap' END, "
             "enqueued_at=now(), updated_at=now()",
-            article_id, op, content_hash)
+            article_id, op, content_hash, lane)
 
-    async def claim_semantic_jobs(self, batch: int) -> list[dict]:
+    async def claim_semantic_jobs(self, batch: int, include_bootstrap: bool) -> list[dict]:
         pool = await self._get_pool()
         rows = await pool.fetch(
             "UPDATE semantic_jobs SET status='in_progress', claimed_at=now(), updated_at=now() "
-            "WHERE id IN (SELECT id FROM semantic_jobs WHERE status='pending' "
-            "ORDER BY enqueued_at FOR UPDATE SKIP LOCKED LIMIT $1) "
-            "RETURNING id, article_id, op, content_hash, attempts", batch)
+            "WHERE id IN (SELECT id FROM semantic_jobs "
+            "WHERE status='pending' AND next_attempt_at <= now() "
+            "AND ($2 OR lane='incremental') "
+            "ORDER BY (lane='bootstrap'), next_attempt_at "
+            "FOR UPDATE SKIP LOCKED LIMIT $1) "
+            "RETURNING id, article_id, op, content_hash, attempts, lane",
+            batch, include_bootstrap)
         return [dict(r) for r in rows]
 
     async def complete_semantic_job(self, job_id: int) -> None:
