@@ -23,7 +23,11 @@ class _FakeStore:
         self._cursor = cursor
         self._watermarks = watermarks or []
         self.set_cursor_calls: list[str] = []
+        self.enqueue_calls: list[tuple[str, str, str | None]] = []
         self.lock_held = False
+
+    async def enqueue_semantic_job(self, article_id: str, op: str, content_hash: str | None) -> None:
+        self.enqueue_calls.append((article_id, op, content_hash))
 
     async def try_lock(self) -> bool:
         self.lock_held = True

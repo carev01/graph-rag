@@ -59,6 +59,7 @@ class SyncCore:
         self, rec: ContentRecord | TombstoneRecord, res: BootstrapResult | IncrementalResult
     ) -> str | None:
         if isinstance(rec, TombstoneRecord):
+            await self._store.enqueue_semantic_job(rec.id, "remove", None)
             await self._repo.tombstone_article(map_tombstone(rec))
             # BootstrapResult has no `removed` counter (bootstrap streams never emit
             # tombstones); only IncrementalResult tracks it.
@@ -83,6 +84,7 @@ class SyncCore:
             # refresh + reconciliation can complete its vendor/product/source
             # wiring. A subsequent apply_structural fills the rest via
             # `SET a += $article` on the same id.
+            await self._store.enqueue_semantic_job(rec.id, "upsert", rec.content_hash)
             await self._repo.apply_incomplete_article({
                 "id": rec.id, "source_id": rec.source_id, "title": rec.title,
                 "source_url": rec.source_url, "topic_key": rec.topic_key,
@@ -95,6 +97,7 @@ class SyncCore:
             res.applied += 1
             return rec.source_id
 
+        await self._store.enqueue_semantic_job(rec.id, "upsert", rec.content_hash)
         await self._repo.apply_structural(map_content(rec, info))
         res.applied += 1
         return rec.source_id
