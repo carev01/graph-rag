@@ -190,7 +190,12 @@ def worker(
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, stop_event.set)
             await run_worker(
-                store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event
+                store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event,
+                budget=settings.semantic_daily_token_budget,
+                max_attempts=settings.semantic_max_attempts,
+                backoff_base=settings.semantic_backoff_base_seconds,
+                backoff_cap=settings.semantic_backoff_cap_seconds,
+                lease=settings.semantic_reaper_lease_seconds,
             )
         finally:
             await store.close()
