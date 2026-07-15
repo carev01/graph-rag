@@ -45,7 +45,7 @@ DEFAULT_DISTINCT_PAIRS = [
 # reruns (e.g. after the ontology-v2 / noise-prune slice-2b changes land).
 QUALITY_BASELINE_PATH = Path("docs/superpowers/slice-2b-quality-baseline.json")
 QUALITY_REPORT_PATH = Path("docs/superpowers/slice-2b-quality-report.md")
-DEFAULT_TYPE_PRECISION_SAMPLE = 40
+DEFAULT_TYPE_PRECISION_SAMPLE = 100
 
 
 def _dump(obj: object) -> None:

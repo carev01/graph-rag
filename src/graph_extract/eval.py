@@ -364,6 +364,7 @@ def _parse_type(content: str | None) -> str | None:
     if content is None:
         return None
     text = _THINK_TAG_RE.sub("", content.strip())
+    text = text.replace("*", "").replace("`", "")
     matches = _TYPE_NAME_RE.findall(text)
     if not matches:
         return None
@@ -378,14 +379,27 @@ async def type_precision(driver, settings: ExtractSettings, sample: int) -> dict
     never the extraction model) to pick the best type from the ontology's
     type definitions. `max_tokens=600` because the judge is a reasoning
     model and a small cap truncates the final answer to empty.
+
+    `sample` is capped at the number of typed entities actually available, so
+    requesting more than the graph has doesn't change the sampled count run
+    to run. If the judge's first answer is unparseable, one terse retry is
+    made (a single authoritative re-ask, not a majority vote) before the
+    entity is counted unparseable.
     """
     async with driver.session() as s:
+        # Cap requested sample at what's available (avoids over-requesting on
+        # small graphs, and keeps the sampled set stable in size run-to-run).
+        cap = (await (await s.run(
+            "MATCH (e:Entity {group_id:$g}) "
+            "WHERE size([l IN labels(e) WHERE l<>'Entity'])>0 "
+            "RETURN count(e) AS c", g=settings.group_id)).single())["c"]
+        n = min(sample, cap)
         r = await s.run(
             "MATCH (e:Entity {group_id:$g}) "
             "UNWIND labels(e) AS l WITH e, l WHERE l <> 'Entity' "
             "WITH e, collect(l)[0] AS type "
             "RETURN e.name AS name, type AS type ORDER BY rand() LIMIT $n",
-            g=settings.group_id, n=sample)
+            g=settings.group_id, n=n)
         rows = [dict(rec) async for rec in r]
 
     client, model = _judge_client_and_model(settings)
@@ -394,18 +408,25 @@ async def type_precision(driver, settings: ExtractSettings, sample: int) -> dict
     misclassifications: list[dict] = []
     correct = 0
     unparseable = 0
+
+    async def _judge(name: str, terse: bool) -> str:
+        prompt = _TYPE_JUDGE_PROMPT.format(definitions=definitions, name=name)
+        if terse:
+            prompt += "\n\nAnswer with exactly ONE type word, nothing else."
+        resp = await client.chat.completions.create(
+            model=model, temperature=0.0, max_tokens=600,
+            messages=[{"role": "user", "content": prompt}])
+        return resp.choices[0].message.content or ""
+
     try:
         for row in rows:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user",
-                           "content": _TYPE_JUDGE_PROMPT.format(
-                               definitions=definitions, name=row["name"])}],
-                temperature=0.0,
-                max_tokens=600,
-            )
-            raw_answer = resp.choices[0].message.content or ""
+            raw_answer = await _judge(row["name"], terse=False)
             judged = _parse_type(raw_answer)
+            if judged is None:
+                # One authoritative retry with a terse nudge -- not a
+                # majority vote, just a single second chance before giving up.
+                raw_answer = await _judge(row["name"], terse=True)
+                judged = _parse_type(raw_answer)
             assigned = row["type"]
             bucket = per_type.setdefault(assigned, {"sampled": 0, "correct": 0})
             bucket["sampled"] += 1
