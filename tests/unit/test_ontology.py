@@ -3,10 +3,10 @@ from graph_extract.ontology import (
     ENTITY_TYPES, EDGE_TYPES, EDGE_TYPE_MAP, EXTRACTION_INSTRUCTIONS,
 )
 
-def test_entity_types_are_the_eight():
+def test_entity_types_are_the_nine():
     assert set(ENTITY_TYPES) == {
         "Vendor", "Product", "Tool", "Workload", "Capability", "Platform",
-        "Concept", "Requirement"}
+        "Concept", "Region", "Requirement"}
     assert all(issubclass(t, BaseModel) for t in ENTITY_TYPES.values())
 
 def test_tool_type_registered():
@@ -70,10 +70,11 @@ def test_instructions_exclude_noise_entities():
     assert "snap-" in lowered and "vol-" in lowered
     assert "install-module" in lowered
 
-def test_instructions_exclude_regions_and_timezones():
-    assert "Australia East" in EXTRACTION_INSTRUCTIONS
-    assert "us-east-1" in EXTRACTION_INSTRUCTIONS
+def test_instructions_exclude_timezones_but_not_regions():
+    # v5: regions are first-class (Region entity), no longer excluded as noise.
     assert "UTC" in EXTRACTION_INSTRUCTIONS
+    assert "us-east-1" in EXTRACTION_INSTRUCTIONS
+    assert "specific geographic regions" not in EXTRACTION_INSTRUCTIONS.lower()
 
 def test_instructions_state_type_boundaries():
     assert "LRS" in EXTRACTION_INSTRUCTIONS
@@ -101,3 +102,16 @@ def test_docstrings_state_type_boundaries():
     assert "Tool" in (Product.__doc__ or "")
     assert "NOT" in (Requirement.__doc__ or "")
     assert "Concept" in (Requirement.__doc__ or "")
+
+def test_region_type_and_edge():
+    from graph_extract import ontology as o
+    assert "Region" in o.ENTITY_TYPES
+    assert "AvailableIn" in o.EDGE_TYPES
+    for pair in [("Product", "Region"), ("Capability", "Region"), ("Workload", "Region")]:
+        assert "AvailableIn" in o.EDGE_TYPE_MAP[pair]
+    for (a, b), edges in o.EDGE_TYPE_MAP.items():
+        assert a in o.ENTITY_TYPES and b in o.ENTITY_TYPES
+        assert all(e in o.EDGE_TYPES for e in edges)
+    instr = o.EXTRACTION_INSTRUCTIONS.lower()
+    assert "available in" in instr
+    assert "specific geographic regions" not in instr  # regions are now extracted

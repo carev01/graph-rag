@@ -25,13 +25,16 @@ class Platform(BaseModel):
 class Concept(BaseModel):
     """A domain concept (e.g. RPO, RTO, 3-2-1 rule, retention policy, recovery point, backup frequency, storage classes/tiers like S3 Standard, S3 Glacier, Azure Archive tier, storage-redundancy tiers like LRS/ZRS) or a regulation/standard (e.g. SEC 17a-4, GDPR)."""
 
+class Region(BaseModel):
+    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data (e.g. Germany West Central, East US, us-east-1, Germany, EU) — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (LRS/ZRS are Concepts)."""
+
 class Requirement(BaseModel):
     """A concrete prerequisite or constraint to USE a product: a permission, minimum version, open port, license, or required role/account (e.g. Backup Operator role, TCP 443 open, minimum agent version) — NOT general domain nouns (a recovery point is a Concept)."""
 
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Vendor": Vendor, "Product": Product, "Tool": Tool, "Workload": Workload,
     "Capability": Capability, "Platform": Platform, "Concept": Concept,
-    "Requirement": Requirement,
+    "Region": Region, "Requirement": Requirement,
 }
 
 # Edge (fact) types.
@@ -49,11 +52,13 @@ class Requires(BaseModel):
     """A product requires a requirement."""
 class Operates(BaseModel):
     """A tool operates/administers a product."""
+class AvailableIn(BaseModel):
+    """A product, capability, or workload is available in, operates in, or stores data in a region."""
 
 EDGE_TYPES: dict[str, type[BaseModel]] = {
     "Supports": Supports, "Provides": Provides, "AppliesTo": AppliesTo,
     "IntegratesWith": IntegratesWith, "Limits": Limits, "Requires": Requires,
-    "Operates": Operates,
+    "Operates": Operates, "AvailableIn": AvailableIn,
 }
 
 EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
@@ -63,6 +68,9 @@ EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
     ("Product", "Platform"): ["IntegratesWith", "Limits"],
     ("Product", "Requirement"): ["Requires"],
     ("Tool", "Product"): ["Operates"],
+    ("Product", "Region"): ["AvailableIn"],
+    ("Capability", "Region"): ["AvailableIn"],
+    ("Workload", "Region"): ["AvailableIn"],
 }
 
 EXCLUDED_ENTITY_TYPES: list[str] = []
@@ -80,20 +88,25 @@ page/section names, or action labels as entities ("Restore pane", "Jobs",
 
 Do NOT extract as entities: ARNs (`arn:...`), resource IDs (`snap-...`,
 `vol-...`), error/exception codes (`...Failed`, `...RequestId`), CLI commands
-(`aws ...`, `Install-Module ...`), example/placeholder values, specific
-geographic regions or availability zones ("Australia East", "us-east-1",
-"West Central US", "primary region"), or time zones (UTC). Extract the
-concept, not the example (extract `recovery point`, not the ARN).
+(`aws ...`, `Install-Module ...`), example/placeholder values, or time zones
+(UTC). Extract the concept, not the example (extract `recovery point`, not
+the ARN).
 
 Type boundaries:
 - Platform means ONLY an OS, hypervisor, or cloud/infra platform (Windows,
   Linux, VMware vSphere, Hyper-V, AWS, Azure). Storage-redundancy tiers (LRS,
   ZRS) and configuration settings (backup frequency) are Concepts, never Platforms.
+- A specific region or jurisdiction (Germany West Central, East US, us-east-1,
+  Germany) is a Region, not a Platform; a generic "primary/secondary region"
+  remains a Concept.
 - Tools (CLIs, SDKs, named console/portal applications) are Tool, not Product
   or Platform.
 - DO capture limitation statements ("not supported", "except", "does not",
   "cannot", "only up to") as Limits facts (product limits a workload,
   capability, or platform) — they are easy to miss and highly valuable.
+- DO capture availability/residency statements ("available in <region>",
+  "data resides in", "supported regions", "not available in") as AvailableIn
+  facts from the product, capability, or workload to the region.
 - Requirement is a concrete prerequisite to use a product (permission, minimum
   version, port, license, required role) — general domain nouns like
   `recovery point` or `soft delete` are Concepts, not Requirements.
@@ -103,9 +116,11 @@ one entity:
 - Workloads: "Kubernetes" (not "K8s"), "Amazon S3" (not "S3 bucket"),
   "Azure Blob Storage", "Azure VM", "Amazon EC2", "SQL Server", "VMware vSphere",
   "Microsoft 365".
-- Capabilities: "immutability" (not "WORM"/"immutable backups"), "cross-region copy",
-  "soft delete", "instant restore", "deduplication", "air gap".
-- Concepts: "RPO", "RTO", "3-2-1 rule", "retention policy", "recovery point".
+- Capabilities: "immutability" (not "WORM"/"immutable vault"/"immutable
+  backups"/"immutability policy"), "cross-region copy", "soft delete",
+  "instant restore", "deduplication", "air gap".
+- Concepts: "RPO", "RTO", "3-2-1 rule", "retention policy" (not
+  "retention"/"retention rule"/"retention settings"), "recovery point".
 
 Use canonical GENERIC names for cross-vendor concepts so AWS and Azure converge
 (`immutability`, `cross-region copy`, `RPO`, `Kubernetes`). Keep VENDOR-BRANDED
