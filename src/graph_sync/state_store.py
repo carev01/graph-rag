@@ -181,6 +181,11 @@ class StateStore:
         pool = await self._get_pool()
         return await pool.fetchval("SELECT count(*) FROM semantic_jobs WHERE status='dead'")
 
+    async def job_status_counts(self) -> dict[str, int]:
+        pool = await self._get_pool()
+        rows = await pool.fetch("SELECT status, count(*) AS n FROM semantic_jobs GROUP BY status")
+        return {r["status"]: r["n"] for r in rows}
+
     async def record_tokens(self, delta: int) -> None:
         pool = await self._get_pool()
         await pool.execute(

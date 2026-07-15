@@ -123,6 +123,15 @@ async def test_reaper_dead_letters_at_max_attempts(state_store):
     assert await state_store.claim_semantic_jobs(10, True) == []  # dead, not re-claimable
 
 
+async def test_job_status_counts(state_store):
+    base = await state_store.job_status_counts()
+    await state_store.enqueue_semantic_job("qs1", "upsert", "h", "incremental")
+    [j] = await state_store.claim_semantic_jobs(10, True)
+    await state_store.complete_semantic_job(j["id"], j["claimed_at"])
+    counts = await state_store.job_status_counts()
+    assert counts.get("done", 0) == base.get("done", 0) + 1
+
+
 async def test_stale_worker_cannot_complete_after_reap(state_store):
     await state_store.enqueue_semantic_job("fz2", "upsert", "h", "incremental")
     [j] = await state_store.claim_semantic_jobs(10, True)          # claimed_at = T1
