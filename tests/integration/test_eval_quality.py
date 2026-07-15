@@ -40,3 +40,27 @@ async def test_noise_report(extract_driver):
     from graph_extract.eval import noise_report
     rep = await noise_report(extract_driver, "g2")
     assert rep["entities"]["total"] == 2 and rep["entities"]["noise"] == 1
+
+async def test_dedup_v2_distinct_tristate(extract_driver):
+    from graph_extract.eval import dedup_report_v2
+    from types import SimpleNamespace
+    g = "tri"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Entity {group_id:$g, name:'AWS Backup'})", g=g)
+        await s.run("CREATE (:Entity {group_id:$g, name:'Azure Backup'})", g=g)   # distinct pair
+        await s.run("CREATE (:Entity {group_id:$g, name:'Amazon S3'})", g=g)       # S3 present, Blob absent
+        await s.run("CREATE (:Entity {group_id:$g, name:'Shared Vault'})", g=g)    # one node for a merged pair
+    labels = SimpleNamespace(
+        SHOULD_MERGE=[],
+        SHOULD_DISTINCT=[
+            ["AWS Backup", "Azure Backup"],
+            ["Amazon S3", "Azure Blob Storage"],
+            ["Shared Vault", ["Shared Vault", "Also Shared Vault"]],  # B aliases onto the same node
+        ],
+        VENDOR_TOKENS=["aws", "amazon", "azure"],
+    )
+    rep = await dedup_report_v2(extract_driver, g, labels)
+    states = [e["state"] for e in rep["should_distinct"]]
+    assert states == ["distinct", "absent", "merged"]  # order matches SHOULD_DISTINCT
+    for e in rep["should_distinct"]:
+        assert e["collapsed"] == (e["state"] == "merged")

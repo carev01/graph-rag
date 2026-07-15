@@ -127,14 +127,32 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
                 "cross_vendor": name.lower() in cross_vendor_lower,
             }
 
-        for a, b in labels.SHOULD_DISTINCT:
+        def _forms(member):
+            return [member] if isinstance(member, str) else list(member)
+
+        async def _node_ids(forms):
             r = await s.run(
                 "MATCH (e:Entity {group_id:$g}) "
-                "WHERE toLower(e.name) IN [toLower($a),toLower($b)] "
-                "RETURN count(e) AS c", g=group_id, a=a, b=b)
-            c = (await r.single())["c"]
-            out["should_distinct"].append(
-                {"pair": [a, b], "node_count": c, "collapsed": c < 2})
+                "WHERE toLower(e.name) IN $forms "
+                "RETURN collect(DISTINCT elementId(e)) AS ids",
+                g=group_id, forms=[f.lower() for f in forms])
+            return set((await r.single())["ids"])
+
+        for a, b in labels.SHOULD_DISTINCT:
+            a_ids = await _node_ids(_forms(a))
+            b_ids = await _node_ids(_forms(b))
+            if not a_ids or not b_ids:
+                state = "absent"
+            elif a_ids & b_ids:
+                state = "merged"
+            else:
+                state = "distinct"
+            out["should_distinct"].append({
+                "pair": [a, b],
+                "state": state,
+                "collapsed": state == "merged",
+                "a_nodes": len(a_ids), "b_nodes": len(b_ids),
+            })
 
     # Vendor-branded names (contain a VENDOR_TOKENS token) that nonetheless
     # have cross-vendor episode support -> likely false merges.
