@@ -384,6 +384,27 @@ def cleanup() -> None:
     asyncio.run(_run())
 
 
+@app.command("maintenance")
+def maintenance() -> None:
+    """Full housekeeping pass: prune noise, retype regions, sweep stale facts,
+    reconcile structural<->semantic SAME_AS. Composes the deterministic jobs;
+    run weekly (scheduling is a deployment concern -- see maintenance-runbook)."""
+
+    async def _run() -> None:
+        settings = get_extract_settings()
+        driver = await _build_driver(settings)
+        try:
+            prune = await prune_noise_entities(driver, settings.group_id)
+            retype = await retype_region_entities(driver, settings.group_id)
+            sweep = await sweep_stale_facts(driver, settings.group_id)
+            reconcile = await reconcile_same_as(driver, settings.group_id)
+            _dump({"prune": prune, "retype": retype, "sweep": sweep, "reconcile": reconcile})
+        finally:
+            await driver.close()
+
+    asyncio.run(_run())
+
+
 @app.command("sweep")
 def sweep() -> None:
     """Expire RELATES_TO facts whose supporting episodes are all dead
