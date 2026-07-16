@@ -78,6 +78,28 @@ async def test_sweep_ignores_already_invalid(extract_driver):
     assert row["ex"] is False  # untouched, not re-swept
 
 
+async def test_sweep_does_not_overwrite_existing_invalid_at(extract_driver):
+    # fact IS expirable by the dead-episode rule (all episodes dead) BUT its
+    # invalid_at is ALREADY set -- simulating Graphiti having invalidated it
+    # concurrently (e.g. in the window between the sweep's scan and its
+    # SET). The sweep must never clobber Graphiti's own invalid_at/flag.
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    g = "swp6"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Episodic {uuid:'e_dead6'})")  # dead, no HAS_EPISODE
+        await s.run(
+            "CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f6', episodes:['e_dead6'], "
+            "invalid_at:datetime('2020-01-01T00:00:00Z')}]->(y:Entity)",
+            g=g)
+    await sweep_stale_facts(extract_driver, g)
+    async with extract_driver.session() as s:
+        row = await (await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:'f6'}]->() RETURN f.invalid_at AS inv, "
+            "f.expired_by_sweep AS ex")).single()
+    assert row["inv"].to_native().isoformat() == "2020-01-01T00:00:00+00:00"  # unchanged
+    assert row["ex"] is None  # never touched by the sweep
+
+
 async def test_sweep_keeps_fact_with_any_live_episode(extract_driver):
     # one dead episode + one live episode -> fact kept (any alive episode
     # is enough to keep the fact valid).

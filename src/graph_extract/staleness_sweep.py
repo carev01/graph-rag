@@ -22,21 +22,26 @@ A fact is expired iff ALL its supporting episodes are dead (no alive
 episode survives). Only facts with `invalid_at IS NULL` and a non-empty
 `episodes` list are candidates -- already-invalidated facts (by Graphiti or
 a prior sweep run) are left untouched.
+
+Find-then-SET is folded into a SINGLE Cypher statement (one transaction) so
+the `invalid_at IS NULL` candidate filter is evaluated atomically with the
+SET: if it were two separate auto-commit queries, Graphiti's own ingestion
+process could invalidate a fact in the window between them, and the SET
+(if unguarded) would clobber Graphiti's `invalid_at` with the sweep's
+timestamp -- a real race, since the sweep and ingestion are independent
+processes. Doing it as one query/transaction closes that window entirely.
+Note: the newer `CALL (eps) { ... }` call-scope syntax is rejected by the
+Neo4j 5.22 testcontainer used in tests/integration/conftest.py ("expected
+an identifier or '{'") -- the classic `CALL { WITH eps ... }` importing
+form below is what's portable and was verified against the real container,
+including with the outer SET in the same statement.
 """
 
 from __future__ import annotations
 
 from neo4j import AsyncDriver
 
-# Two-step form (compute expirable fact uuids, then SET) rather than doing
-# the SET inside the same query as the CALL subquery: kept the write
-# separate from the read/aggregate so the "which facts qualify" logic can be
-# verified independently. Also note: the newer `CALL (eps) { ... }`
-# call-scope syntax is rejected by the Neo4j 5.22 testcontainer used in
-# tests/integration/conftest.py ("expected an identifier or '{'") -- the
-# classic `CALL { WITH eps ... }` importing form below is what's portable
-# and was verified against the real container.
-_FIND_EXPIRABLE = """
+_SWEEP = """
 MATCH ()-[f:RELATES_TO {group_id:$g}]->()
 WHERE f.invalid_at IS NULL AND f.episodes IS NOT NULL AND size(f.episodes) > 0
 WITH f, f.episodes AS eps
@@ -52,14 +57,8 @@ CALL {
   ) AS alive
 }
 WITH f WHERE alive = 0
-RETURN f.uuid AS uuid
-"""
-
-_EXPIRE = """
-MATCH ()-[f:RELATES_TO {group_id:$g}]->()
-WHERE f.uuid IN $uuids
 SET f.invalid_at = datetime(), f.expired_by_sweep = true
-RETURN f.uuid AS uuid
+RETURN count(f) AS expired, collect(f.uuid)[..20] AS sample
 """
 
 _SCAN_COUNT = """
@@ -74,24 +73,24 @@ async def sweep_stale_facts(driver: AsyncDriver, group_id: str) -> dict:
 
     Returns `{"scanned": int, "expired": int, "expired_sample": list[str]}`.
     `scanned` counts every not-yet-invalidated fact in the group (the sweep's
-    candidate pool); `expired` and `expired_sample` describe what this run
-    actually flipped.
+    candidate pool, a separate read-only query -- race-free by nature);
+    `expired` and `expired_sample` describe what this run actually flipped,
+    computed and written by a single atomic query so a fact concurrently
+    invalidated by Graphiti between the scan and the sweep is never
+    overwritten.
     """
     async with driver.session() as s:
         scan_record = await (await s.run(_SCAN_COUNT, g=group_id)).single()
         assert scan_record is not None  # count() always returns exactly one row
         scanned = scan_record["c"]
 
-        find_result = await s.run(_FIND_EXPIRABLE, g=group_id)
-        expirable_uuids = [rec["uuid"] async for rec in find_result]
-
-        expired_sample: list[str] = []
-        if expirable_uuids:
-            expire_result = await s.run(_EXPIRE, g=group_id, uuids=expirable_uuids)
-            expired_sample = [rec["uuid"] async for rec in expire_result][:20]
+        sweep_record = await (await s.run(_SWEEP, g=group_id)).single()
+        assert sweep_record is not None  # count()/collect() always return exactly one row
+        expired = sweep_record["expired"]
+        expired_sample = sweep_record["sample"]
 
     return {
         "scanned": scanned,
-        "expired": len(expirable_uuids),
+        "expired": expired,
         "expired_sample": expired_sample,
     }
