@@ -226,6 +226,8 @@ async def cost_report(episodes_processed: int = 0,
     return {
         "prompt_tokens": t.prompt_tokens,
         "completion_tokens": t.completion_tokens,
+        "cached_tokens": t.cached_tokens,
+        "cache_hit_rate": (t.cached_tokens / t.prompt_tokens) if t.prompt_tokens else 0.0,
         "total_tokens": total_tokens,
         "calls": t.calls,
         "by_call": dict(t.by_call),

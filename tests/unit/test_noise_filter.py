@@ -34,6 +34,13 @@ NOISE = [
     "o-a1b2c3d4e5",
     "r-f6g7h8i9j0example",
     "InvalidOrganizationBackupPlan",
+    # Documentation / reference titles extracted as entities.
+    "Amazon Elastic Compute Cloud User Guide",
+    "Amazon Redshift Developer Guide",
+    "Amazon Redshift Getting Started Guide",
+    # CamelCase API id / identifier field names.
+    "AccountID",
+    "DBInstanceIdentifier",
 ]
 KEEP = [
     "immutability",
@@ -62,6 +69,13 @@ KEEP = [
     # (the org-id pattern requires a digit).
     "R-Studio",
     "O-Ring",
+    # Real acronyms ending in ID, not CamelCase id fields (no lowercase before ID).
+    "RAID",
+    "GRID",
+    "OpenID",
+    "WebID",
+    "Availability Zone",
+    "Veeam Backup & Replication",
 ]
 
 
