@@ -30,6 +30,19 @@ class Provenance:
                 a=article_id, u=episode_uuid, i=chunk_index, hp=heading_path,
                 tc=token_count, h=content_hash)
 
+    async def resolve_citations(self, fact_uuids: list[str]) -> dict[str, list[dict]]:
+        async with self._driver.session() as s:
+            r = await s.run(
+                "MATCH ()-[f:RELATES_TO]->() WHERE f.uuid IN $uuids "
+                "OPTIONAL MATCH (a:Article)-[:HAS_EPISODE]->(e:Episodic) "
+                "  WHERE e.uuid IN f.episodes "
+                "WITH f.uuid AS uuid, "
+                "     collect(DISTINCT CASE WHEN a IS NULL THEN NULL ELSE "
+                "       {url:a.source_url, title:a.title, article_id:a.id} END) AS raw "
+                "RETURN uuid, [x IN raw WHERE x IS NOT NULL] AS sources",
+                uuids=fact_uuids)
+            return {rec["uuid"]: rec["sources"] async for rec in r}
+
     async def resolve_chain(self, fact_edge_uuid: str) -> list[dict]:
         async with self._driver.session() as s:
             r = await s.run(

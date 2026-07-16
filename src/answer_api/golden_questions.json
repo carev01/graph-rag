@@ -1,0 +1,17 @@
+[
+  {"question": "What does AWS Backup Vault Lock enforce on recovery points?", "expected_article_ids": ["dad69d7c-189b-4d53-8d70-40697eae685a"], "vendor": null},
+  {"question": "How does AWS Backup copy backups to another AWS Region?", "expected_article_ids": ["78e2b9e5-bf0c-4e76-8b83-fc54e76f52cd"], "vendor": null},
+  {"question": "How are backups encrypted in AWS Backup?", "expected_article_ids": ["06059606-e70d-4d97-bcf3-c2bc223f1b47"], "vendor": null},
+  {"question": "How do you restore an Amazon S3 backup?", "expected_article_ids": ["49d019c4-ceb8-4a0a-b908-cd35602cab20"], "vendor": null},
+  {"question": "How does AWS Backup support continuous backups and point-in-time recovery?", "expected_article_ids": ["d4d25628-1f6e-42ea-a5c5-e66b2e1bf2f8"], "vendor": null},
+  {"question": "How are Amazon Redshift clusters backed up?", "expected_article_ids": ["d1f26f66-1acb-421e-889d-d0d79e3af387"], "vendor": null},
+  {"question": "How does AWS Backup perform cross-account backup?", "expected_article_ids": ["5d7d817e-7045-41c1-8b36-faa94a5b2c40"], "vendor": null},
+  {"question": "How do you restore an Amazon EC2 instance from a backup?", "expected_article_ids": ["82ed2eb9-24a3-4322-bccb-958dd88c0f31"], "vendor": null},
+  {"question": "What is soft delete in Azure Backup and how long does it retain deleted items?", "expected_article_ids": ["1cde879f-5152-4b0e-a9e8-9d4e762ee9ed", "b0eadd12-baf7-484e-8fb0-f0fd756aaba5"], "vendor": null},
+  {"question": "How does Azure Backup encrypt backup data?", "expected_article_ids": ["f3199c91-3ccb-4538-b3e7-b4e45521d8ec"], "vendor": null},
+  {"question": "How do you configure and run Cross Region Restore in Azure Backup?", "expected_article_ids": ["e2f3ee74-04f0-4d6f-9925-83dc0b43b193"], "vendor": null},
+  {"question": "How do you restore a SQL Server database from an Azure Backup vault?", "expected_article_ids": ["8f869443-b48d-4a45-a9fb-7d0df772e632"], "vendor": null},
+  {"question": "How do you back up an encrypted Azure VM?", "expected_article_ids": ["a0e14280-837e-4e23-a930-9119e7692e94"], "vendor": null},
+  {"question": "How do you restore VMware VMs with Azure Backup Server?", "expected_article_ids": ["9967084e-7d84-4f8f-bca7-0ce534bee0a6"], "vendor": null},
+  {"question": "How do you change the backup retention period in AWS Backup?", "expected_article_ids": ["b64e0602-ddf5-46dd-a7b5-789403ed3fd6"], "vendor": null}
+]
