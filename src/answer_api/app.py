@@ -32,7 +32,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings = get_extract_settings()
     graphiti = build_graphiti(settings)
-    driver = await _build_driver(settings)
+    # Guard the window between building graphiti and the driver: if
+    # _build_driver raises (e.g. a malformed neo4j_uri, validated
+    # synchronously), the already-built graphiti would otherwise leak
+    # (mirrors graph_extract/cli.py's build-or-cleanup pattern).
+    try:
+        driver = await _build_driver(settings)
+    except Exception:
+        await graphiti.close()
+        raise
     app.state.settings = settings
     app.state.graphiti = graphiti
     app.state.driver = driver
