@@ -1,0 +1,57 @@
+# Extraction Refresh Report — gpt-oss-120b Evaluation (NO-GO) + gpt-5-mini Re-run
+
+**Date:** 2026-07-16
+**Question:** Switch the extraction tier from Azure `gpt-5-mini` to `gpt-oss-120b` (same endpoint/key, cheaper) while re-extracting to fix the Region-magnet.
+**Verdict: NO-GO on gpt-oss-120b.** Kept `gpt-5-mini` as the production tier; kept the Region docstring fix + code cleanups (which are model-independent).
+
+---
+
+## 1. gpt-oss-120b evaluation
+
+A one-episode smoke test passed (9 clean entities / 5 facts, no reasoning leak, token capture works, via the `generic_json_schema` client path). But an **8-article sample re-run on the identical articles gpt-5-mini uses** exposed two regressions:
+
+| Metric (same 8-article sample) | gpt-5-mini (v5) | gpt-oss-120b |
+|---|---|---|
+| Wall time | ~20 min | **~37 min (~2×)** → full 39-run ≈ 4 hr |
+| Entities | ~103 | 123 |
+| **`AvailableIn` facts** | 6 | **0** |
+| **Region nodes** | 4 | **1** |
+| Region-magnet (junk `:Region`) | ~2–3 | 0 |
+| Limits facts | ~37 | 17 |
+| Noise (post-prune) | 0% | 0% |
+
+gpt-oss-120b's "0 junk Region" is an **artifact of under-extraction** (it typed only 1 region at all), not a real improvement. The decisive problem is that it produced **zero `AvailableIn` facts** — the residency-query capability ("which vendors offer backups in region X?") that the ontology was extended to support — and far fewer regions/`Limits`. Combined with ~2× latency for only "slightly lower cost," this is a poor trade.
+
+**Decision (user):** NO-GO. Revert `.env` + the committed config default to `gpt-5-mini`; the pipeline still supports gpt-oss-120b via `.env` if revisited. The Region docstring fix and the reconcile/maintenance cleanups are decoupled from the model and kept.
+
+## 2. gpt-5-mini re-run (with the Region docstring fix) — full 39 articles
+
+Re-extracted on gpt-5-mini (348 episodes, ~2.3 hr), then `maintenance` (prune → retype → sweep → reconcile).
+
+| Metric | Result | Note |
+|---|---|---|
+| Entities | 564 | (v5 baseline ~552) |
+| Facts | 2004 | |
+| **`AvailableIn` facts** | **124** | **restored** (gpt-oss-120b had 0); residency traversal works: `AWS Backup → ca-central-1`, `Azure Virtual machines → Australia East`, `archive tier → Spain Central` |
+| `Limits` facts | 148 | |
+| `Tool` entities | 62 | |
+| Noise (post-prune) | **0%** entities / 0% facts | |
+| `should_distinct` | `AWS Backup`/`Azure Backup` **distinct**, `AWS Backup Vault Lock`/`Azure immutable vault` **distinct**, `Amazon S3`/`Azure Blob Storage` **absent** (Blob not extracted) | no false merges — tri-state/alias fix holds |
+| `suspect_false_merge` | 19 | heuristic upper bound |
+| `silent_merge_suspects` (#7) | 2 | the new labelled-pair cross-vendor signal is populated |
+
+All the query-enabling models (`AvailableIn`, `Limits`, `Tool`, `Region`) are healthy on gpt-5-mini, and dedup shows no real merges.
+
+## 3. Region-magnet — partially improved, residual remains
+
+The `Region` docstring negatives (API-ops, policies, PII, `Availability Zone` are not Regions) were **kept** and help some categories, but on gpt-5-mini the magnet is **not fully closed**: of 43 `:Region` nodes, 30 are gazetteer-recognized and **13 are junk** — roughly the same junk count as the v5 baseline. The residual junk this run: doc-guide titles (`Amazon … User Guide`), API fields (`AccountID`, `DBInstanceIdentifier`, `RestoreLatestVersionsUpTo`), `subscriptions`/`subscription S1`, `private IP address`, `Availability Zone`, `Protected resources`.
+
+The docstring alone can't fully suppress this; a proper fix needs either (a) broader deterministic `noise_filter` patterns for the leaked classes (doc-titles ending "Guide", `…Identifier`/`…ID` fields, `subscription(s)`), or (b) a `Region`-type guard in `retype_region_entities` that demotes non-gazetteer `:Region` entities matching junk patterns (risky — the gazetteer isn't exhaustive). **Deferred as a follow-up.**
+
+## 4. Outcome
+
+- **Production tier stays `gpt-5-mini`** — restores `AvailableIn`/regions, ~2× faster, all features working.
+- **Durable wins kept (model-independent):** the `Region` docstring negatives (modest help), reconcile polish (kind-aware unmatched, raise-not-assert, `:Product`-path test), the `maintenance` CLI + runbook, and the config now documents the gpt-oss-120b NO-GO for future reference.
+- **The evaluation was cheap:** a 37-min sample surfaced the regressions before a 4-hr full run was spent on the wrong model.
+- **Follow-up:** the Region-magnet residual (~13 junk `:Region`) needs broader noise patterns or a Region guard — a separate deterministic pass, no re-extraction of the model needed.
+- **Reconcile note:** `reconcile` left structural Vendors `AWS`/`Microsoft` unmatched this run — the semantic Vendor entity names this extraction produced aren't in `vendor_aliases`; add them (the runbook's documented workflow).
