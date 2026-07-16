@@ -12,6 +12,9 @@ async def test_resolve_citations_batch(extract_driver):
         await s.run("CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f1', episodes:['ep1']}]->(y:Entity)", g=g)
         await s.run("CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f2', episodes:['ep_dangling']}]->(y:Entity)", g=g)
     prov = Provenance(extract_driver)
-    out = await prov.resolve_citations(["f1", "f2"])
+    out = await prov.resolve_citations(["f1", "f2", "f_absent"])
     assert out["f1"] == [{"url": "https://x/1", "title": "T1", "article_id": "art1"}]
     assert out["f2"] == []       # dangling -> empty, surfaced not dropped
+    # Contract the caller depends on (search_local uses citations.get(uuid, [])):
+    # a fact_uuid not present in the graph is ABSENT from the result dict.
+    assert "f_absent" not in out
