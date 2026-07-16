@@ -56,8 +56,10 @@ async def reconcile_same_as(driver: AsyncDriver, group_id: str) -> dict:
     across BOTH kinds (Vendor + Product) -- a running total, not the size of
     whichever kind's scan happened to run last. `linked` counts SAME_AS
     edges merged (matched-and-created-or-already-present) this run.
-    `unmatched_structural` lists structural node names that matched no
-    semantic entity at all.
+    `unmatched_structural` lists kind-qualified `"{kind}:{name}"` strings
+    (e.g. `"Vendor:Veeam"`) for structural nodes that matched no semantic
+    entity at all -- kind-qualifying keeps a same-named unmatched `:Vendor`
+    and `:Product` from collapsing into a single entry under `sorted(set(...))`.
     """
     structural_scanned = 0
     linked = 0
@@ -78,11 +80,12 @@ async def reconcile_same_as(driver: AsyncDriver, group_id: str) -> dict:
                     forms=forms,
                 )
                 link_record = await link_result.single()
-                assert link_record is not None  # count() always returns exactly one row
+                if link_record is None:
+                    raise RuntimeError("reconcile: count() returned no row")
                 c = link_record["c"]
                 linked += c
                 if c == 0:
-                    unmatched.append(st["name"])
+                    unmatched.append(f"{kind}:{st['name']}")
 
     return {
         "structural_scanned": structural_scanned,
