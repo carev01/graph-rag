@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from neo4j import AsyncDriver
 
+from graph_extract.article_filter import is_navigation_article
 from graph_extract.noise_filter import is_noise
 from graph_extract.region_names import is_region
 
@@ -67,3 +68,33 @@ async def retype_region_entities(driver: AsyncDriver, group_id: str) -> dict:
             )
     names = sorted(row["name"] for row in targets)
     return {"scanned": len(rows), "retyped": len(targets), "retyped_names": names}
+
+
+async def tombstone_navigation_articles(driver: AsyncDriver, group_id: str) -> dict:
+    """Mark the episodes of already-extracted navigation/index/changelog
+    articles (article_filter.is_navigation_article) as removed=true.
+
+    Deterministic cleanup counterpart to Task 1's ingest-time prevention:
+    already-ingested junk gets tombstoned here, then the existing
+    sweep_stale_facts expires facts whose only supporting episodes are now
+    all removed. Marks, never deletes (temporal policy #3) -- the episode
+    nodes and their HAS_EPISODE edges stay in place for provenance/history.
+    """
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (a:Article)-[:HAS_EPISODE]->(e:Episodic {group_id:$g}) "
+            "RETURN a.id AS id, a.title AS title, count(e) AS eps", g=group_id)
+        rows = [dict(rec) async for rec in r]
+        nav = [row for row in rows if is_navigation_article(row["title"] or "")]
+        ids = [row["id"] for row in nav]
+        episodes = 0
+        if ids:
+            rr = await s.run(
+                "MATCH (a:Article)-[:HAS_EPISODE]->(e:Episodic {group_id:$g}) "
+                "WHERE a.id IN $ids SET e.removed=true RETURN count(e) AS c",
+                g=group_id, ids=ids)
+            rr_record = await rr.single()
+            assert rr_record is not None  # count() always returns exactly one row
+            episodes = rr_record["c"]
+    return {"scanned": len(rows), "tombstoned_articles": len(ids),
+            "tombstoned_episodes": episodes, "titles": sorted(row["title"] for row in nav)}

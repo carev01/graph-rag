@@ -20,7 +20,11 @@ from graph_extract.eval import (
     provenance_report,
     type_precision,
 )
-from graph_extract.graph_cleanup import prune_noise_entities, retype_region_entities
+from graph_extract.graph_cleanup import (
+    prune_noise_entities,
+    retype_region_entities,
+    tombstone_navigation_articles,
+)
 from graph_extract.graphiti_client import build_graphiti, init_indices
 from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
@@ -386,9 +390,12 @@ def cleanup() -> None:
 
 @app.command("maintenance")
 def maintenance() -> None:
-    """Full housekeeping pass: prune noise, retype regions, sweep stale facts,
-    reconcile structural<->semantic SAME_AS. Composes the deterministic jobs;
-    run weekly (scheduling is a deployment concern -- see maintenance-runbook)."""
+    """Full housekeeping pass: prune noise, retype regions, tombstone
+    navigation-article episodes, sweep stale facts, reconcile structural<->
+    semantic SAME_AS. Composes the deterministic jobs; run weekly (scheduling
+    is a deployment concern -- see maintenance-runbook). Navigation
+    tombstoning runs before the sweep so the same run expires the now-
+    unsupported nav facts."""
 
     async def _run() -> None:
         settings = get_extract_settings()
@@ -396,9 +403,11 @@ def maintenance() -> None:
         try:
             prune = await prune_noise_entities(driver, settings.group_id)
             retype = await retype_region_entities(driver, settings.group_id)
+            navigation = await tombstone_navigation_articles(driver, settings.group_id)
             sweep = await sweep_stale_facts(driver, settings.group_id)
             reconcile = await reconcile_same_as(driver, settings.group_id)
-            _dump({"prune": prune, "retype": retype, "sweep": sweep, "reconcile": reconcile})
+            _dump({"prune": prune, "retype": retype, "navigation": navigation,
+                   "sweep": sweep, "reconcile": reconcile})
         finally:
             await driver.close()
 
