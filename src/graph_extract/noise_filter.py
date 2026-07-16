@@ -72,6 +72,16 @@ _API_ERR = re.compile(
 # is handled by _ARN above; prose with colons has a space and won't match.
 _SERVICE_ACTION = re.compile(r"^[a-z][a-z0-9]{1,20}:[A-Za-z][A-Za-z0-9-]*$")
 
+# Documentation / reference titles extracted as entities.
+_DOC_TITLE = re.compile(
+    r"\b(User Guide|Developer Guide|Getting Started Guide|Reference Guide|"
+    r"Administration Guide|Administrator Guide|API Reference|Documentation)$")
+
+# CamelCase API id / identifier field names ("AccountID", "DBInstanceIdentifier").
+# Require a LOWERCASE char before the terminal ID/Identifier so real acronyms
+# (RAID, GRID, UUID) are kept.
+_API_ID = re.compile(r"^[A-Z][A-Za-z0-9]*[a-z](ID|Identifier)$")
+
 
 def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name fixed by contract
     """High-confidence, pattern-matchable noise. Conservative: borderline domain
@@ -96,5 +106,9 @@ def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name f
     if _SERVICE_ACTION.match(n):
         return True
     if _API_ERR.match(n) and " " not in n:
+        return True
+    if _DOC_TITLE.search(n):
+        return True
+    if _API_ID.match(n):
         return True
     return False
