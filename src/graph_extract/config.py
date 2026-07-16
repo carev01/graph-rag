@@ -16,7 +16,11 @@ class ExtractSettings(BaseSettings):
     neo4j_user: str
     neo4j_password: str
     llm_base_url: str = "http://srv-llm.home.lan:8080/v1"
-    llm_model: str = "gpt-oss-20b"
+    # gpt-oss-120b is the chosen extraction tier, validated 2026-07 on Azure.
+    # Runs via the generic_json_schema client path (see llm_client_mode below)
+    # with reasoning_effort=low. Azure endpoint/api-version/key come from
+    # .env (never committed).
+    llm_model: str = "gpt-oss-120b"
     # API key for the LLM endpoint. Local llama-server ignores it ("not-needed");
     # a cloud endpoint (e.g. OpenRouter) needs a real key, supplied via LLM_API_KEY
     # in .env (never committed). Only the LLM/extraction path uses this — the
@@ -26,7 +30,7 @@ class ExtractSettings(BaseSettings):
     # an AsyncAzureOpenAI client is used (Responses API + structured mode). Set
     # the api version and (for reasoning models like gpt-5-mini) the effort.
     llm_api_version: str = ""
-    llm_reasoning_effort: str = "minimal"  # minimal|low|medium|high (gpt-5 family)
+    llm_reasoning_effort: str = "minimal"  # minimal|low|medium|high (gpt-5 family); gpt-oss uses low|medium|high
     embed_base_url: str = "http://srv-llm.home.lan:8082/v1"
     embed_model: str = "jinaai/jina-embeddings-v5-text-nano-retrieval"
     embed_dim: int = 768
