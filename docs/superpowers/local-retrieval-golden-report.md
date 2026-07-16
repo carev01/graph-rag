@@ -80,7 +80,10 @@ ingestion, and `tombstone_navigation_articles` (wired into `maintenance` before
 | **Azure soft delete (Q9)** | **MISS** | **HIT @ rank 10** |
 
 The investigated miss is resolved: with the blog junk expired, the soft-delete
-query now surfaces real soft-delete content. The **3 remaining misses**
+query now surfaces real soft-delete content. (The MRR gain is larger than Q9's
+rank-10 hit alone would give because de-crowding the top-k — 26 blog facts left
+the valid set — also lifted the rank of several already-passing questions.) The
+**3 remaining misses**
 (AWS cross-Region, Azure CRR, AWS retention) are unchanged and are the same
 **adjacent-article label-strictness** cases from the original report — the
 retrieval returns topic-correct facts cited to a *related* pilot article, not

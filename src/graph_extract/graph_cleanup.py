@@ -82,8 +82,8 @@ async def tombstone_navigation_articles(driver: AsyncDriver, group_id: str) -> d
     """
     async with driver.session() as s:
         r = await s.run(
-            "MATCH (a:Article)-[:HAS_EPISODE]->(e:Episodic {group_id:$g}) "
-            "RETURN a.id AS id, a.title AS title, count(e) AS eps", g=group_id)
+            "MATCH (a:Article)-[:HAS_EPISODE]->(:Episodic {group_id:$g}) "
+            "RETURN DISTINCT a.id AS id, a.title AS title", g=group_id)
         rows = [dict(rec) async for rec in r]
         nav = [row for row in rows if is_navigation_article(row["title"] or "")]
         ids = [row["id"] for row in nav]
