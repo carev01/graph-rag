@@ -72,6 +72,8 @@ KEEP = [
     # Real acronyms ending in ID, not CamelCase id fields (no lowercase before ID).
     "RAID",
     "GRID",
+    "OpenID",
+    "WebID",
     "Availability Zone",
     "Veeam Backup & Replication",
 ]

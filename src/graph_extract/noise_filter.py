@@ -79,8 +79,12 @@ _DOC_TITLE = re.compile(
 
 # CamelCase API id / identifier field names ("AccountID", "DBInstanceIdentifier").
 # Require a LOWERCASE char before the terminal ID/Identifier so real acronyms
-# (RAID, GRID, UUID) are kept.
-_API_ID = re.compile(r"^[A-Z][A-Za-z0-9]*[a-z](ID|Identifier)$")
+# (RAID, GRID, UUID) are kept. The `(?!...)` carve-out protects real proper-noun
+# "...ID" terms that share the shape (OpenID, WebID) from being pruned -- this
+# list is illustrative; extend it (or move to a stricter field-name heuristic)
+# when the corpus widens past AWS/Azure, since a proper noun concatenated with
+# "ID" (e.g. a hypothetical "VeeamID") would otherwise false-positive.
+_API_ID = re.compile(r"^(?!OpenID$|WebID$)[A-Z][A-Za-z0-9]*[a-z](ID|Identifier)$")
 
 
 def is_noise(name: str, type: str | None = None) -> bool:  # noqa: A002 - name fixed by contract
