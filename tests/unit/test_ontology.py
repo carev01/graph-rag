@@ -49,6 +49,15 @@ def test_tool_docstring_has_negative_ui_examples():
     assert "Restore pane" in doc
     assert "NOT an action" in doc
 
+
+def test_region_docstring_has_negative_examples():
+    from graph_extract.ontology import Region
+    doc = Region.__doc__ or ""
+    assert "Availability Zone" in doc
+    assert "API operation" in doc
+    assert "PII" in doc
+    assert "policy/permission/role name" in doc
+
 def test_concept_and_platform_cover_storage_classes():
     from graph_extract.ontology import Concept, Platform
     assert "S3 Standard" in (Concept.__doc__ or "")
