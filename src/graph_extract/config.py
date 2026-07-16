@@ -16,11 +16,14 @@ class ExtractSettings(BaseSettings):
     neo4j_user: str
     neo4j_password: str
     llm_base_url: str = "http://srv-llm.home.lan:8080/v1"
-    # gpt-oss-120b is the chosen extraction tier, validated 2026-07 on Azure.
-    # Runs via the generic_json_schema client path (see llm_client_mode below)
-    # with reasoning_effort=low. Azure endpoint/api-version/key come from
-    # .env (never committed).
-    llm_model: str = "gpt-oss-120b"
+    # gpt-5-mini is the chosen extraction tier (Azure Responses API,
+    # reasoning=minimal). gpt-oss-120b was evaluated 2026-07 (same Azure
+    # endpoint, cheaper) but on an identical 8-article sample it ran ~2x
+    # slower and lost AvailableIn/region extraction (0 vs 6 AvailableIn facts,
+    # 1 vs 4 regions) -> NO-GO. The pipeline still supports it via .env
+    # (LLM_MODEL=gpt-oss-120b, generic_json_schema, reasoning_effort=low) if
+    # revisited. Azure endpoint/api-version/key come from .env (never committed).
+    llm_model: str = "gpt-5-mini"
     # API key for the LLM endpoint. Local llama-server ignores it ("not-needed");
     # a cloud endpoint (e.g. OpenRouter) needs a real key, supplied via LLM_API_KEY
     # in .env (never committed). Only the LLM/extraction path uses this — the
