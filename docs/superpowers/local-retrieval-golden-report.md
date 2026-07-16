@@ -8,7 +8,7 @@
 ## Headline
 
 - **Citation precision@10 = 11/15 = 0.733** (strict: the *labeled canonical* article must appear in a returned fact's citations).
-- **MRR = 0.477**; **8 of 11 hits rank in the top 2** (six at rank 1).
+- **MRR = 0.477**; **7 of 11 hits rank in the top 2** (six at rank 1).
 - **Topic-relevant@10 ≈ 14/15 ≈ 0.93** (looser: a returned fact correctly answers the question, even if cited to an *adjacent* pilot article — see §Misses).
 - **The retrieval stack works end-to-end** on the Azure/TEI backend: RRF hybrid search runs cleanly, returns 10 ranked facts/query, and every fact resolves to a source URL by traversal. The reranker caveat is avoided (no cross-encoder dependency).
 
@@ -53,3 +53,4 @@ The Phase-2 exit criterion is "local questions answered with correct URLs at tar
 - Investigate the Azure soft-delete gap (the one genuine miss) — inspect the soft-delete articles' facts / embeddings.
 - Grow the golden set (more vendors/topics) once the corpus expands past the pilot; consider allowing multiple canonical articles per question to reduce label-strictness noise.
 - Synthesis layer (LLM writes prose citing fact-IDs → resolver expands to URLs) — the deferred next retrieval slice; it consumes exactly the `results` this endpoint returns.
+- `search_local` uses Graphiti's `_search` (RRF recipe), which is marked deprecated in graphiti-core 0.29.2 (delegates to `search_`); switch the single call site to `search_` on the next graphiti bump.
