@@ -26,6 +26,7 @@ from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
 from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
+from graph_extract.reconcile import reconcile_same_as
 from graph_extract.staleness_sweep import sweep_stale_facts
 from docext.client import make_docext_client
 
@@ -395,6 +396,26 @@ def sweep() -> None:
         driver = await _build_driver(settings)
         try:
             result = await sweep_stale_facts(driver, settings.group_id)
+            _dump(result)
+        finally:
+            await driver.close()
+
+    asyncio.run(_run())
+
+
+@app.command("reconcile")
+def reconcile() -> None:
+    """Link structural :Vendor/:Product nodes to their semantic :Entity
+    twins via alias-matched SAME_AS edges (design decision #5: link, never
+    merge). Idempotent -- safe to rerun after every bootstrap/incremental
+    batch or whenever vendor_aliases gains new entries.
+    """
+
+    async def _run() -> None:
+        settings = get_extract_settings()
+        driver = await _build_driver(settings)
+        try:
+            result = await reconcile_same_as(driver, settings.group_id)
             _dump(result)
         finally:
             await driver.close()
