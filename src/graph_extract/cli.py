@@ -26,6 +26,7 @@ from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
 from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
+from graph_extract.staleness_sweep import sweep_stale_facts
 from docext.client import make_docext_client
 
 app = typer.Typer()
@@ -376,6 +377,25 @@ def cleanup() -> None:
             prune = await prune_noise_entities(driver, settings.group_id)
             retype = await retype_region_entities(driver, settings.group_id)
             _dump({"prune": prune, "retype": retype})
+        finally:
+            await driver.close()
+
+    asyncio.run(_run())
+
+
+@app.command("sweep")
+def sweep() -> None:
+    """Expire RELATES_TO facts whose supporting episodes are all dead
+    (removed tombstones or detached HAS_EPISODE linkage) -- the deterministic
+    backstop for staleness Graphiti's own contradiction-detection can't see.
+    """
+
+    async def _run() -> None:
+        settings = get_extract_settings()
+        driver = await _build_driver(settings)
+        try:
+            result = await sweep_stale_facts(driver, settings.group_id)
+            _dump(result)
         finally:
             await driver.close()
 

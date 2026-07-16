@@ -1,0 +1,95 @@
+import pytest
+
+pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+
+async def _fact(s, g, uuid, eps):
+    # a RELATES_TO fact between two throwaway endpoint nodes, carrying an
+    # episodes list -- the shape sweep_stale_facts scans.
+    await s.run(
+        "CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:$u, episodes:$eps}]->(y:Entity)",
+        g=g, u=uuid, eps=eps)
+
+
+async def test_sweep_expires_fact_with_no_live_episodes(extract_driver):
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    g = "swp1"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Episodic {uuid:'e_dead'})")  # exists, NO HAS_EPISODE edge -> dead
+        await _fact(s, g, "f1", ["e_dead"])
+    res = await sweep_stale_facts(extract_driver, g)
+    async with extract_driver.session() as s:
+        row = await (await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:'f1'}]->() RETURN f.invalid_at AS inv, "
+            "f.expired_by_sweep AS ex")).single()
+    assert res["expired"] == 1 and row["inv"] is not None and row["ex"] is True
+
+
+async def test_sweep_keeps_fact_with_live_but_superseded_episode(extract_driver):
+    # THE #6 CASE: episode has a HAS_EPISODE edge (alive) but superseded=true
+    # -> fact must NOT be expired. superseded is never consulted.
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    g = "swp2"
+    async with extract_driver.session() as s:
+        await s.run(
+            "CREATE (:Article {removed:false})-[:HAS_EPISODE]->"
+            "(:Episodic {uuid:'e_live', superseded:true})")
+        await _fact(s, g, "f2", ["e_live"])
+    await sweep_stale_facts(extract_driver, g)
+    async with extract_driver.session() as s:
+        inv = (await (await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:'f2'}]->() RETURN f.invalid_at AS i")).single())["i"]
+    assert inv is None  # kept alive by the HAS_EPISODE edge, superseded flag ignored
+
+
+async def test_sweep_expires_removed_episode_fact(extract_driver):
+    # episode is linked via HAS_EPISODE but flagged removed=true -> dead
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    g = "swp3"
+    async with extract_driver.session() as s:
+        await s.run(
+            "CREATE (:Article {removed:false})-[:HAS_EPISODE]->"
+            "(:Episodic {uuid:'e_removed', removed:true})")
+        await _fact(s, g, "f3", ["e_removed"])
+    res = await sweep_stale_facts(extract_driver, g)
+    async with extract_driver.session() as s:
+        row = await (await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:'f3'}]->() RETURN f.invalid_at AS inv, "
+            "f.expired_by_sweep AS ex")).single()
+    assert res["expired"] == 1 and row["inv"] is not None and row["ex"] is True
+
+
+async def test_sweep_ignores_already_invalid(extract_driver):
+    # fact with invalid_at already set (e.g. Graphiti-invalidated, or a prior
+    # sweep) must not be touched again -- not a scan candidate.
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    g = "swp4"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Episodic {uuid:'e_dead4'})")  # dead, no HAS_EPISODE
+        await s.run(
+            "CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f4', episodes:['e_dead4'], "
+            "invalid_at:datetime(), expired_by_sweep:false}]->(y:Entity)",
+            g=g)
+    res = await sweep_stale_facts(extract_driver, g)
+    async with extract_driver.session() as s:
+        row = await (await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:'f4'}]->() RETURN f.expired_by_sweep AS ex")).single()
+    assert res["scanned"] == 0
+    assert row["ex"] is False  # untouched, not re-swept
+
+
+async def test_sweep_keeps_fact_with_any_live_episode(extract_driver):
+    # one dead episode + one live episode -> fact kept (any alive episode
+    # is enough to keep the fact valid).
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    g = "swp5"
+    async with extract_driver.session() as s:
+        await s.run(
+            "CREATE (:Article {removed:false})-[:HAS_EPISODE]->(:Episodic {uuid:'e_live5'})")
+        await s.run("CREATE (:Episodic {uuid:'e_dead5'})")  # no HAS_EPISODE -> dead
+        await _fact(s, g, "f5", ["e_live5", "e_dead5"])
+    await sweep_stale_facts(extract_driver, g)
+    async with extract_driver.session() as s:
+        inv = (await (await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:'f5'}]->() RETURN f.invalid_at AS i")).single())["i"]
+    assert inv is None
