@@ -54,3 +54,36 @@ The Phase-2 exit criterion is "local questions answered with correct URLs at tar
 - Grow the golden set (more vendors/topics) once the corpus expands past the pilot; consider allowing multiple canonical articles per question to reduce label-strictness noise.
 - Synthesis layer (LLM writes prose citing fact-IDs → resolver expands to URLs) — the deferred next retrieval slice; it consumes exactly the `results` this endpoint returns.
 - `search_local` uses Graphiti's `_search` (RRF recipe), which is marked deprecated in graphiti-core 0.29.2 (delegates to `search_`); switch the single call site to `search_` on the next graphiti bump.
+
+---
+
+## Update (2026-07-16): after navigation-article cleanup
+
+The primary cause of the Azure soft-delete miss — retrieval pollution from the
+*"Blogs, videos, tutorials, and other resources"* link-farm article (its
+`Blog '…' was authored with <person>` facts crowding the top-k) — was fixed by
+the navigation-article slice: `is_navigation_article` now skips such pages at
+ingestion, and `tombstone_navigation_articles` (wired into `maintenance` before
+`sweep`) deterministically expired the already-extracted junk (no re-extraction).
+
+**Cleanup result (maintenance on the current graph):**
+- nav-tombstone: 1 article (`Blogs, videos, tutorials, and other resources`), 5 episodes marked `removed`.
+- sweep: **65 nav-only facts expired** (`invalid_at`+`expired_by_sweep`); facts co-supported by a real article kept.
+- **valid blog-quote facts: 26 → 0** — the pollution is gone from retrieval (validity filter excludes expired facts).
+
+**Golden re-run (k=10), before → after:**
+
+| Metric | Before | After |
+|---|---|---|
+| citation precision@10 | 0.733 (11/15) | **0.800 (12/15)** |
+| MRR | 0.477 | **0.525** |
+| **Azure soft delete (Q9)** | **MISS** | **HIT @ rank 10** |
+
+The investigated miss is resolved: with the blog junk expired, the soft-delete
+query now surfaces real soft-delete content. The **3 remaining misses**
+(AWS cross-Region, Azure CRR, AWS retention) are unchanged and are the same
+**adjacent-article label-strictness** cases from the original report — the
+retrieval returns topic-correct facts cited to a *related* pilot article, not
+the single canonical label. Those are golden-set labeling nuance, not retrieval
+failures; the **secondary cause** (verbose/compound-query sensitivity) remains
+the deferred query-rewrite / synthesis-layer concern.
