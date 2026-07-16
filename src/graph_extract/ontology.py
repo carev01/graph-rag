@@ -26,7 +26,7 @@ class Concept(BaseModel):
     """A domain concept (e.g. RPO, RTO, 3-2-1 rule, retention policy, recovery point, backup frequency, storage classes/tiers like S3 Standard, S3 Glacier, Azure Archive tier, storage-redundancy tiers like LRS/ZRS) or a regulation/standard (e.g. SEC 17a-4, GDPR)."""
 
 class Region(BaseModel):
-    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data (e.g. Germany West Central, East US, us-east-1, Germany, EU) — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (LRS/ZRS are Concepts)."""
+    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data (e.g. Germany West Central, East US, us-east-1, Germany, EU) — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (LRS/ZRS are Concepts), NOT an API operation or field (DescribeKey, ...Arn), NOT a policy/permission/role name, NOT a scenario/section/page name, NOT a data-classification term (PII), NOT a bare "Availability Zone" — those are Tools/Requirements/Concepts/Workloads or noise, never Regions."""
 
 class Requirement(BaseModel):
     """A concrete prerequisite or constraint to USE a product: a permission, minimum version, open port, license, or required role/account (e.g. Backup Operator role, TCP 443 open, minimum agent version) — NOT general domain nouns (a recovery point is a Concept)."""

@@ -31,6 +31,13 @@ def test_probe_help():
     assert "--n" in result.stdout
 
 
+def test_maintenance_help():
+    result = runner.invoke(app, ["maintenance", "--help"])
+    assert result.exit_code == 0
+    assert "housekeeping" in result.stdout
+    assert "reconcile" in result.stdout
+
+
 def test_eval_help():
     result = runner.invoke(app, ["eval", "--help"])
     assert result.exit_code == 0

@@ -28,7 +28,7 @@ async def test_reconcile_links_aliased_vendor(extract_driver):
         )["c"]
     assert n == 1
     assert res["linked"] >= 1
-    assert "Veeam" in res["unmatched_structural"]
+    assert "Vendor:Veeam" in res["unmatched_structural"]
 
     # noise entity never gets a link
     async with extract_driver.session() as s:
@@ -72,3 +72,47 @@ async def test_reconcile_is_idempotent(extract_driver):
             ).single()
         )["c"]
     assert n == 1
+
+
+async def test_reconcile_links_aliased_product(extract_driver):
+    from graph_extract.reconcile import reconcile_same_as
+
+    # Distinct name -- exercises the :Product code path (only :Vendor was
+    # covered above). Exact normalized-name match, no alias needed.
+    g = "rec-product"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Product {name:'DistinctProdX'})")
+        await s.run(
+            "CREATE (:Entity:Product {group_id:$g, name:'DistinctProdX'})", g=g
+        )
+
+    res = await reconcile_same_as(extract_driver, g)
+
+    async with extract_driver.session() as s:
+        n = (
+            await (
+                await s.run(
+                    "MATCH (:Product {name:'DistinctProdX'})-[:SAME_AS]->"
+                    "(e:Entity:Product {name:'DistinctProdX'}) RETURN count(*) AS c"
+                )
+            ).single()
+        )["c"]
+    assert n == 1
+    assert res["linked"] >= 1
+
+
+async def test_reconcile_unmatched_is_kind_aware(extract_driver):
+    from graph_extract.reconcile import reconcile_same_as
+
+    # Same name, two different structural kinds, neither has a semantic
+    # twin -- without kind-qualifying, both would collapse into a single
+    # "ZetaX" entry under sorted(set(unmatched)).
+    g = "rec-kind-aware"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Vendor {name:'ZetaX'})")
+        await s.run("CREATE (:Product {name:'ZetaX'})")
+
+    res = await reconcile_same_as(extract_driver, g)
+
+    assert "Vendor:ZetaX" in res["unmatched_structural"]
+    assert "Product:ZetaX" in res["unmatched_structural"]
