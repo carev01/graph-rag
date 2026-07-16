@@ -5,17 +5,20 @@ from dataclasses import dataclass, field
 class UsageTally:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
     calls: int = 0
     by_call: dict = field(default_factory=dict)
 
-    def add(self, kind: str, *, prompt: int, completion: int) -> None:
+    def add(self, kind: str, *, prompt: int, completion: int, cached: int = 0) -> None:
         self.prompt_tokens += prompt
         self.completion_tokens += completion
+        self.cached_tokens += cached
         self.calls += 1
         b = self.by_call.setdefault(kind, {"prompt": 0, "completion": 0, "calls": 0})
         b["prompt"] += prompt
         b["completion"] += completion
         b["calls"] += 1
+        b["cached"] = b.setdefault("cached", 0) + cached
 
 _TALLY = UsageTally()
 def get_tally() -> UsageTally: return _TALLY
@@ -35,7 +38,9 @@ def _tally_usage(resp) -> None:
     completion = getattr(u, "completion_tokens", None)
     if completion is None:
         completion = getattr(u, "output_tokens", 0)
-    _TALLY.add("llm", prompt=prompt or 0, completion=completion or 0)
+    details = getattr(u, "prompt_tokens_details", None) or getattr(u, "input_tokens_details", None)
+    cached = getattr(details, "cached_tokens", 0) if details is not None else 0
+    _TALLY.add("llm", prompt=prompt or 0, completion=completion or 0, cached=cached or 0)
 
 
 def instrument(async_openai):
