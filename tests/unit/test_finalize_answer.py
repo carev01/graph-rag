@@ -8,6 +8,12 @@ def test_strips_url():
     assert "http" not in ans and cited == [1]
 
 
+def test_strips_url_case_insensitive():
+    # LLMs sometimes capitalize the scheme; a URL must NEVER survive.
+    ans, cited = _finalize_answer("See HTTPS://EVIL.COM/x and Http://e/y [1].", MM)
+    assert "EVIL.COM" not in ans and "Http:" not in ans and cited == [1]
+
+
 def test_keeps_valid_drops_invented_markers():
     ans, cited = _finalize_answer("Immutable [1], and cross-region [2], and made-up [9].", MM)
     assert cited == [1, 2]        # 9 not in marker_map -> dropped

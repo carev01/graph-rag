@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import instrument
 
-_URL_RE = re.compile(r"https?://\S+")
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)  # case-insensitive: a URL must NEVER survive (design-decision #2)
 _MARKER_RE = re.compile(r"\[(\d+)\]")
 
 _PROMPT = (
