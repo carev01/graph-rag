@@ -41,6 +41,36 @@ async def test_noise_report(extract_driver):
     rep = await noise_report(extract_driver, "g2")
     assert rep["entities"]["total"] == 2 and rep["entities"]["noise"] == 1
 
+async def test_silent_merge_suspects(extract_driver):
+    # Silent merge: "Amazon S3" is a SHOULD_DISTINCT member (paired against
+    # "Azure Blob Storage") but here it's mentioned by BOTH vendors' episodes
+    # -- cross-vendor support on a single labelled-distinct name is exactly
+    # the "attached to the other vendor's node without a separate node ever
+    # being created" failure mode this field surfaces. "AWS Backup" is also a
+    # labelled member but is single-vendor here, so it must NOT show up.
+    g = "silent"
+    async with extract_driver.session() as s:
+        await s.run("""
+        CREATE (vA:Vendor {id:'vA2', name:'AWS'})-[:HAS_PRODUCT]->(pA:Product {id:'pA2'})
+              -[:HAS_SOURCE]->(sA:Source {id:'sA2'})-[:HAS_ARTICLE]->(aA:Article {id:'aA2'})
+              -[:HAS_EPISODE]->(eA:Episodic {uuid:'epA2'})
+        CREATE (vM:Vendor {id:'vM2', name:'Microsoft'})-[:HAS_PRODUCT]->(pM:Product {id:'pM2'})
+              -[:HAS_SOURCE]->(sM:Source {id:'sM2'})-[:HAS_ARTICLE]->(aM:Article {id:'aM2'})
+              -[:HAS_EPISODE]->(eM:Episodic {uuid:'epM2'})
+        CREATE (s3:Entity:Workload {name:'Amazon S3', group_id:$g})
+        CREATE (eA)-[:MENTIONS]->(s3)
+        CREATE (eM)-[:MENTIONS]->(s3)
+        CREATE (backup:Entity:Product {name:'AWS Backup', group_id:$g})
+        CREATE (eA)-[:MENTIONS]->(backup)
+        """, g=g)
+    from graph_extract.eval import dedup_report_v2
+    from graph_extract import quality_labels
+    rep = await dedup_report_v2(extract_driver, g, quality_labels)
+    assert "Amazon S3" in rep["silent_merge_suspects"]["names"]
+    assert rep["silent_merge_suspects"]["count"] >= 1
+    assert "AWS Backup" not in rep["silent_merge_suspects"]["names"]
+
+
 async def test_dedup_v2_distinct_tristate(extract_driver):
     from graph_extract.eval import dedup_report_v2
     from types import SimpleNamespace

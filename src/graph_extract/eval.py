@@ -157,6 +157,19 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
                 "a_nodes": len(a_ids), "b_nodes": len(b_ids),
             })
 
+        # Labelled-distinct members whose name nonetheless has cross-vendor
+        # episode support -- a *silent* merge (mentions attached to the other
+        # vendor's node without a separate node ever being created), which
+        # the name-set-identity `should_distinct` state above misses.
+        silent = sorted({
+            form_name
+            for a, b in labels.SHOULD_DISTINCT
+            for member in (a, b)
+            for form_name in _forms(member)
+            if form_name.lower() in cross_vendor_lower
+        })
+        out["silent_merge_suspects"] = {"names": silent, "count": len(silent)}
+
     # Vendor-branded names (contain a VENDOR_TOKENS token) that nonetheless
     # have cross-vendor episode support -> likely false merges.
     suspects = sorted(
