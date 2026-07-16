@@ -29,7 +29,11 @@ SET: if it were two separate auto-commit queries, Graphiti's own ingestion
 process could invalidate a fact in the window between them, and the SET
 (if unguarded) would clobber Graphiti's `invalid_at` with the sweep's
 timestamp -- a real race, since the sweep and ingestion are independent
-processes. Doing it as one query/transaction closes that window entirely.
+processes. Doing it as one query keeps the `invalid_at IS NULL` predicate
+and the SET in a single statement, shrinking that window to negligible
+(single-statement execution is read-committed, not fully serializable, but
+a sweep-eligible fact has all-dead episodes, so a concurrent contradiction
+of the same fact is vanishingly unlikely for a weekly batch job).
 Note: the newer `CALL (eps) { ... }` call-scope syntax is rejected by the
 Neo4j 5.22 testcontainer used in tests/integration/conftest.py ("expected
 an identifier or '{'") -- the classic `CALL { WITH eps ... }` importing

@@ -111,7 +111,8 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
     """Acceptance-label dedup report. Deterministic, NO LLM.
 
     `labels` is the `graph_extract.quality_labels` module (SHOULD_MERGE,
-    SHOULD_DISTINCT, VENDOR_TOKENS as data).
+    SHOULD_DISTINCT, VENDOR_TOKENS as data). Output keys: should_merge,
+    should_distinct, suspect_false_merge, silent_merge_suspects.
     """
     out: dict = {"should_merge": {}, "should_distinct": [], "suspect_false_merge": {}}
     async with driver.session() as s:
