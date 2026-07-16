@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import httpx
 from neo4j import AsyncDriver
 from graphiti_core import Graphiti
+from graph_extract.article_filter import is_navigation_article
 from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
 from graph_extract.graphiti_client import add_text_episode
@@ -17,6 +18,7 @@ class IngestArticleResult:
     episodes_skipped: int = 0
     entities: int = 0
     edges: int = 0
+    skipped_navigation: bool = False
 
 
 @dataclass
@@ -55,6 +57,9 @@ class IngestDriver:
     async def ingest_article(self, article_id: str) -> IngestArticleResult:
         res = IngestArticleResult(article_id=article_id)
         art = await content_fetch.fetch_article(self._docext, article_id)
+        if is_navigation_article(art.title or ""):
+            res.skipped_navigation = True
+            return res      # navigation page: no chunking, no extraction, 0 tokens
         ref = _parse_ts(art)
         # content_hash: reuse the article's stored hash from the graph, else hash markdown
         content_hash = await self._content_hash(article_id) or _sha(art.content_markdown)
