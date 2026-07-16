@@ -111,7 +111,8 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
     """Acceptance-label dedup report. Deterministic, NO LLM.
 
     `labels` is the `graph_extract.quality_labels` module (SHOULD_MERGE,
-    SHOULD_DISTINCT, VENDOR_TOKENS as data).
+    SHOULD_DISTINCT, VENDOR_TOKENS as data). Output keys: should_merge,
+    should_distinct, suspect_false_merge, silent_merge_suspects.
     """
     out: dict = {"should_merge": {}, "should_distinct": [], "suspect_false_merge": {}}
     async with driver.session() as s:
@@ -156,6 +157,19 @@ async def dedup_report_v2(driver, group_id, labels) -> dict:
                 "collapsed": state == "merged",
                 "a_nodes": len(a_ids), "b_nodes": len(b_ids),
             })
+
+        # Labelled-distinct members whose name nonetheless has cross-vendor
+        # episode support -- a *silent* merge (mentions attached to the other
+        # vendor's node without a separate node ever being created), which
+        # the name-set-identity `should_distinct` state above misses.
+        silent = sorted({
+            form_name
+            for a, b in labels.SHOULD_DISTINCT
+            for member in (a, b)
+            for form_name in _forms(member)
+            if form_name.lower() in cross_vendor_lower
+        })
+        out["silent_merge_suspects"] = {"names": silent, "count": len(silent)}
 
     # Vendor-branded names (contain a VENDOR_TOKENS token) that nonetheless
     # have cross-vendor episode support -> likely false merges.
