@@ -64,7 +64,10 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
     marker_map = {i: r for i, r in enumerate(results, 1)}
     facts_block = "\n".join(f"[{i}] {r['fact']}" for i, r in marker_map.items())
     resp = await synth_client.chat.completions.create(
-        model=synth_model, temperature=0, max_tokens=800,
+        # GLM-5.2 is a reasoning model: a small cap truncates the answer to
+        # empty (finish_reason='length', content=''), so give the reasoning
+        # headroom -- same lesson as the GLM judge (type_precision).
+        model=synth_model, temperature=0, max_tokens=3000,
         messages=[{"role": "user", "content": _PROMPT.format(facts=facts_block, q=q)}])
     raw = resp.choices[0].message.content or ""
     answer, cited = _finalize_answer(raw, marker_map)
