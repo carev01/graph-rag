@@ -1,0 +1,96 @@
+"""GDS hierarchical Leiden community detection over the entity graph. The pure
+helpers (`_community_id`, `_build_communities_from_rows`) turn Leiden's per-node
+level labels into a hierarchy of communities with deterministic ids and parent
+links; `detect_communities` is the thin GDS I/O wrapper (covered by an @live
+smoke — the standard Neo4j testcontainer has no GDS plugin)."""
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+
+from neo4j import AsyncDriver
+
+
+@dataclass
+class Community:
+    community_id: str
+    level: int
+    member_uuids: list[str]
+    parent_id: str | None
+
+
+def _community_id(level: int, member_uuids: list[str]) -> str:
+    h = hashlib.sha1((f"{level}:" + ",".join(sorted(member_uuids))).encode())
+    return h.hexdigest()[:16]
+
+
+def _build_communities_from_rows(rows: list[dict], *, min_community_size: int,
+                                 max_levels: int) -> list[Community]:
+    """`rows`: [{"uuid": str, "levels": [finest, ..., coarsest]}]. Build one set of
+    communities per level (capped at max_levels), drop those below
+    min_community_size, and link each community to the level-above community that
+    contains its members (nested Leiden levels)."""
+    if not rows:
+        return []
+    n_levels = min(max(len(r["levels"]) for r in rows), max_levels)
+    # level -> {leiden_label -> [uuids]}
+    members: list[dict[int, list[str]]] = [{} for _ in range(n_levels)]
+    for r in rows:
+        for lvl in range(min(len(r["levels"]), n_levels)):
+            members[lvl].setdefault(r["levels"][lvl], []).append(r["uuid"])
+    # assign ids per surviving community; keep leiden_label -> community_id maps
+    label_to_id: list[dict[int, str]] = [{} for _ in range(n_levels)]
+    surviving: list[dict[int, list[str]]] = [{} for _ in range(n_levels)]
+    for lvl in range(n_levels):
+        for label, uuids in members[lvl].items():
+            if len(uuids) >= min_community_size:
+                cid = _community_id(lvl, uuids)
+                label_to_id[lvl][label] = cid
+                surviving[lvl][label] = uuids
+    out: list[Community] = []
+    for lvl in range(n_levels):
+        for label, uuids in surviving[lvl].items():
+            parent_id = None
+            if lvl + 1 < n_levels:
+                # every member shares the same level-(lvl+1) leiden label (nested)
+                parent_label = next(r["levels"][lvl + 1] for r in rows
+                                    if r["uuid"] == uuids[0] and len(r["levels"]) > lvl + 1)
+                parent_id = label_to_id[lvl + 1].get(parent_label)  # None if dropped
+            out.append(Community(community_id=label_to_id[lvl][label], level=lvl,
+                                 member_uuids=uuids, parent_id=parent_id))
+    return out
+
+
+_PROJECT = (
+    "MATCH (e:Entity {group_id: $g}) RETURN id(e) AS id",
+    "MATCH (a:Entity {group_id: $g})-[r:RELATES_TO {group_id: $g}]->(b:Entity {group_id: $g}) "
+    "RETURN id(a) AS source, id(b) AS target, count(r) AS weight",
+)
+
+
+async def detect_communities(driver: AsyncDriver, group_id: str, *,
+                             min_community_size: int, max_levels: int) -> list[Community]:
+    name = f"theme-{group_id}"
+    async with driver.session() as s:
+        # pre-drop a stale projection of the same name
+        await s.run("CALL gds.graph.exists($n) YIELD exists "
+                    "WITH exists WHERE exists CALL gds.graph.drop($n) YIELD graphName "
+                    "RETURN graphName", n=name)
+        try:
+            await s.run(
+                "CALL gds.graph.project.cypher($n, $nodeq, $relq, {parameters: {g: $g}}) "
+                "YIELD graphName RETURN graphName",
+                n=name, nodeq=_PROJECT[0], relq=_PROJECT[1], g=group_id)
+            r = await s.run(
+                "CALL gds.leiden.stream($n, {relationshipWeightProperty: 'weight', "
+                "includeIntermediateCommunities: true, undirectedRelationshipTypes: ['*']}) "
+                "YIELD nodeId, intermediateCommunityIds "
+                "RETURN gds.util.asNode(nodeId).uuid AS uuid, intermediateCommunityIds AS levels",
+                n=name)
+            rows = [{"uuid": rec["uuid"], "levels": list(rec["levels"])} async for rec in r]
+        finally:
+            await s.run("CALL gds.graph.exists($n) YIELD exists "
+                        "WITH exists WHERE exists CALL gds.graph.drop($n) YIELD graphName "
+                        "RETURN graphName", n=name)
+    return _build_communities_from_rows(rows, min_community_size=min_community_size,
+                                        max_levels=max_levels)
