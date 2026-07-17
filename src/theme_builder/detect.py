@@ -66,10 +66,20 @@ def _build_communities_from_rows(rows: list[dict], *, min_community_size: int,
     return out
 
 
+# GDS 2.13: project the entity graph with the modern gds.graph.project aggregation
+# function, aggregating parallel RELATES_TO into an integer `weight` and marking
+# the projection UNDIRECTED (Leiden requires undirected; the key lives on the
+# PROJECTION config, not on gds.leiden). Only entities with a RELATES_TO edge are
+# projected — isolated entities aren't clustered, which is fine.
 _PROJECT = (
-    "MATCH (e:Entity {group_id: $g}) RETURN id(e) AS id",
-    "MATCH (a:Entity {group_id: $g})-[r:RELATES_TO {group_id: $g}]->(b:Entity {group_id: $g}) "
-    "RETURN id(a) AS source, id(b) AS target, count(r) AS weight",
+    "MATCH (a:Entity {group_id: $g})-[rel:RELATES_TO {group_id: $g}]->(b:Entity {group_id: $g}) "
+    "WITH a, b, count(rel) AS w "
+    "RETURN gds.graph.project($n, a, b, {relationshipProperties: {weight: w}}, "
+    "{undirectedRelationshipTypes: ['*']}) AS res"
+)
+_DROP_IF_EXISTS = (
+    "CALL gds.graph.exists($n) YIELD exists "
+    "WITH exists WHERE exists CALL gds.graph.drop($n) YIELD graphName RETURN graphName"
 )
 
 
@@ -77,25 +87,17 @@ async def detect_communities(driver: AsyncDriver, group_id: str, *,
                              min_community_size: int, max_levels: int) -> list[Community]:
     name = f"theme-{group_id}"
     async with driver.session() as s:
-        # pre-drop a stale projection of the same name
-        await s.run("CALL gds.graph.exists($n) YIELD exists "
-                    "WITH exists WHERE exists CALL gds.graph.drop($n) YIELD graphName "
-                    "RETURN graphName", n=name)
+        await s.run(_DROP_IF_EXISTS, n=name)   # pre-drop a stale projection
         try:
-            await s.run(
-                "CALL gds.graph.project.cypher($n, $nodeq, $relq, {parameters: {g: $g}}) "
-                "YIELD graphName RETURN graphName",
-                n=name, nodeq=_PROJECT[0], relq=_PROJECT[1], g=group_id)
+            await s.run(_PROJECT, g=group_id, n=name)
             r = await s.run(
                 "CALL gds.leiden.stream($n, {relationshipWeightProperty: 'weight', "
-                "includeIntermediateCommunities: true, undirectedRelationshipTypes: ['*']}) "
+                "includeIntermediateCommunities: true}) "
                 "YIELD nodeId, intermediateCommunityIds "
                 "RETURN gds.util.asNode(nodeId).uuid AS uuid, intermediateCommunityIds AS levels",
                 n=name)
             rows = [{"uuid": rec["uuid"], "levels": list(rec["levels"])} async for rec in r]
         finally:
-            await s.run("CALL gds.graph.exists($n) YIELD exists "
-                        "WITH exists WHERE exists CALL gds.graph.drop($n) YIELD graphName "
-                        "RETURN graphName", n=name)
+            await s.run(_DROP_IF_EXISTS, n=name)
     return _build_communities_from_rows(rows, min_community_size=min_community_size,
                                         max_levels=max_levels)
