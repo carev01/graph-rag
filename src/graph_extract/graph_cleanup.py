@@ -25,10 +25,17 @@ from graph_extract.noise_filter import is_noise
 from graph_extract.region_names import is_region
 
 # Demote-guard: if a single retype pass would strip :Region from more than this
-# many nodes, treat it as a likely `is_region` regression (which would otherwise
-# silently demote every genuine region) and skip ALL demotions this run.
-_DEMOTE_GUARD_MIN = 10
-_DEMOTE_GUARD_FRACTION = 0.3
+# FRACTION of the current :Region nodes, treat it as a likely `is_region`
+# regression (which would otherwise silently demote every genuine region) and
+# skip ALL demotions this run. Fraction-dominant so it scales to any graph size
+# -- a total `is_region` regression demotes ~100% and trips even on a small
+# graph (an earlier fixed floor of 10 could never trip below ~34 regions, the
+# common bootstrap/per-vendor size). The small floor only avoids nagging on a
+# trivially tiny graph doing a legitimate 1-2 node cleanup. `force=True`
+# bypasses the guard for a confirmed large legitimate backlog (so it never gets
+# permanently stuck).
+_DEMOTE_GUARD_FLOOR = 2
+_DEMOTE_GUARD_FRACTION = 0.5
 
 
 async def prune_noise_entities(driver: AsyncDriver, group_id: str) -> dict:
@@ -49,7 +56,9 @@ async def prune_noise_entities(driver: AsyncDriver, group_id: str) -> dict:
     return {"scanned": len(rows), "pruned": len(noise), "pruned_names": noise}
 
 
-async def retype_region_entities(driver: AsyncDriver, group_id: str) -> dict:
+async def retype_region_entities(
+    driver: AsyncDriver, group_id: str, *, force: bool = False
+) -> dict:
     """Enforce the invariant `:Region label present <=> is_region(name)`.
 
     Two complementary directions in one scan:
@@ -63,9 +72,12 @@ async def retype_region_entities(driver: AsyncDriver, group_id: str) -> dict:
       `demoted_from_region=true` for audit. Any other custom-type labels stay.
 
     A guard skips ALL demotions in a run that would strip more than
-    `max(_DEMOTE_GUARD_MIN, _DEMOTE_GUARD_FRACTION * current :Region count)`
+    `max(_DEMOTE_GUARD_FLOOR, _DEMOTE_GUARD_FRACTION * current :Region count)`
     nodes -- the signature of an `is_region` regression, which would otherwise
     silently demote every genuine region. Promotions still run when tripped.
+    Pass `force=True` to bypass the guard once you've confirmed a large batch of
+    demotions is legitimate (e.g. a big junk backlog from a bad extraction run),
+    so a correct cleanup is never permanently blocked.
     """
     async with driver.session() as s:
         r = await s.run(
@@ -85,9 +97,9 @@ async def retype_region_entities(driver: AsyncDriver, group_id: str) -> dict:
             if row["is_region_lbl"] and not is_region(row["name"] or "")
         ]
         region_count = sum(1 for row in rows if row["is_region_lbl"])
-        guard_limit = max(_DEMOTE_GUARD_MIN,
+        guard_limit = max(_DEMOTE_GUARD_FLOOR,
                           math.ceil(_DEMOTE_GUARD_FRACTION * region_count))
-        guard_tripped = len(demote) > guard_limit
+        guard_tripped = (not force) and len(demote) > guard_limit
 
         for row in promote:
             # remove the wrong custom type labels, add :Region, clear any stale

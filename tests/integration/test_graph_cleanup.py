@@ -151,7 +151,7 @@ async def test_demote_guard_trips_on_mass_demotion(extract_driver):
     from graph_extract.graph_cleanup import retype_region_entities
     g = "dem-guard"
     async with extract_driver.session() as s:
-        # 3 genuine + 11 junk :Region -> 11 > max(10, ceil(0.3*14)=5) -> trips
+        # 3 genuine + 11 junk :Region -> 11 > max(2, ceil(0.5*14)=7) -> trips
         for n in ("us-east-1", "East US", "Japan East"):
             await s.run("CREATE (:Entity:Region {group_id:$g, name:$n})", g=g, n=n)
         for i in range(11):
@@ -161,3 +161,53 @@ async def test_demote_guard_trips_on_mass_demotion(extract_driver):
     assert res["demoted"] == 0 and len(res["demote_skipped_names"]) == 11
     lbls = await _labels_by_name(extract_driver, g)
     assert lbls["junk-0"] == {"Entity", "Region"}           # nothing demoted
+
+
+async def test_demote_guard_boundary_at_limit_does_not_trip(extract_driver):
+    """Exactly `guard_limit` demotions must NOT trip (guards on '>', not '>=')."""
+    from graph_extract.graph_cleanup import retype_region_entities
+    g = "dem-boundary"
+    async with extract_driver.session() as s:
+        # 5 genuine + 5 junk = 10 :Region -> limit=max(2, ceil(0.5*10)=5)=5;
+        # demote==5 is NOT > 5 -> proceeds.
+        for n in ("us-east-1", "East US", "Japan East", "Korea Central", "India West"):
+            await s.run("CREATE (:Entity:Region {group_id:$g, name:$n})", g=g, n=n)
+        for i in range(5):
+            await s.run("CREATE (:Entity:Region {group_id:$g, name:$n})", g=g, n=f"jk-{i}")
+    res = await retype_region_entities(extract_driver, g)
+    assert res["demote_guard_tripped"] is False
+    assert res["demoted"] == 5
+
+
+async def test_demote_force_bypasses_guard(extract_driver):
+    """force=True demotes a legitimate large batch the guard would otherwise block."""
+    from graph_extract.graph_cleanup import retype_region_entities
+    g = "dem-force"
+    async with extract_driver.session() as s:
+        for n in ("us-east-1", "East US"):
+            await s.run("CREATE (:Entity:Region {group_id:$g, name:$n})", g=g, n=n)
+        for i in range(11):
+            await s.run("CREATE (:Entity:Region {group_id:$g, name:$n})", g=g, n=f"jf-{i}")
+    res = await retype_region_entities(extract_driver, g, force=True)
+    assert res["demote_guard_tripped"] is False and res["demoted"] == 11
+    lbls = await _labels_by_name(extract_driver, g)
+    assert lbls["jf-0"] == {"Entity"}                       # demoted despite volume
+
+
+async def test_demote_guard_catches_isregion_regression_on_small_graph(
+        extract_driver, monkeypatch):
+    """The guard must protect a SMALL graph too: a total is_region regression
+    (rejecting every genuine region) trips even with only 4 :Region nodes --
+    the case a fixed floor of 10 could never catch."""
+    import graph_extract.graph_cleanup as gc
+    from graph_extract.graph_cleanup import retype_region_entities
+    g = "dem-small-regress"
+    async with extract_driver.session() as s:
+        for n in ("us-east-1", "East US", "Japan East", "Korea Central"):
+            await s.run("CREATE (:Entity:Region {group_id:$g, name:$n})", g=g, n=n)
+    monkeypatch.setattr(gc, "is_region", lambda name: False)   # regression
+    res = await retype_region_entities(extract_driver, g)
+    # 4 demote candidates > max(2, ceil(0.5*4)=2)=2 -> trips, nothing stripped
+    assert res["demote_guard_tripped"] is True and res["demoted"] == 0
+    lbls = await _labels_by_name(extract_driver, g)
+    assert lbls["us-east-1"] == {"Entity", "Region"}           # genuine region safe

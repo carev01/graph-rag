@@ -371,16 +371,23 @@ def quality_report(
 
 
 @app.command("cleanup")
-def cleanup() -> None:
+def cleanup(
+    force_demote: bool = typer.Option(
+        False, "--force-demote",
+        help="Bypass the region demote-guard (use after confirming a large "
+             "batch of :Region demotions is legitimate, e.g. a junk backlog).",
+    ),
+) -> None:
     """Run the deterministic post-ingest correctors: prune noise entities,
-    then retype any mistyped region entities to :Region."""
+    then retype (promote+demote) region entities against the gazetteer."""
 
     async def _run() -> None:
         settings = get_extract_settings()
         driver = await _build_driver(settings)
         try:
             prune = await prune_noise_entities(driver, settings.group_id)
-            retype = await retype_region_entities(driver, settings.group_id)
+            retype = await retype_region_entities(
+                driver, settings.group_id, force=force_demote)
             _dump({"prune": prune, "retype": retype})
         finally:
             await driver.close()
