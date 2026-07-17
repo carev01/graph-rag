@@ -29,6 +29,19 @@ def test_limits_edge_broadened_to_capability_and_platform():
     assert "Provides" in EDGE_TYPE_MAP[("Product", "Capability")]
     assert "IntegratesWith" in EDGE_TYPE_MAP[("Product", "Platform")]
 
+def test_instructions_require_extracting_the_product_subject():
+    # The product is the SUBJECT of most facts; if the model omits it as an
+    # entity, graphiti drops every edge whose endpoint is that missing node.
+    instr = EXTRACTION_INSTRUCTIONS
+    # normalise whitespace so line wraps don't hide multi-word phrases
+    flat = " ".join(instr.split())
+    lowered = flat.lower()
+    assert "always extract the backup product" in lowered
+    assert "every chunk" in lowered
+    assert "subject" in lowered
+    assert "Product entity" in flat
+
+
 def test_instructions_capture_limitation_statements():
     lowered = EXTRACTION_INSTRUCTIONS.lower()
     assert "not supported" in lowered
