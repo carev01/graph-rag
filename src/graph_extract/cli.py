@@ -25,9 +25,10 @@ from graph_extract.graph_cleanup import (
     retype_region_entities,
     tombstone_navigation_articles,
 )
-from graph_extract.graphiti_client import build_graphiti, init_indices
+from graph_extract.graphiti_client import build_graphiti, init_indices, ExtractionTier
 from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
+from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
 from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
 from graph_extract.reconcile import reconcile_same_as
@@ -85,7 +86,9 @@ async def _build_ingest_driver(
         )
         await init_indices(graphiti)
         provenance = Provenance(driver)
-        ingest = IngestDriver(settings, graphiti, docext, provenance, driver)
+        strong_tier = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS,
+                                     settings.max_chunk_tokens)
+        ingest = IngestDriver(settings, strong_tier, None, docext, provenance, driver)
     except Exception:
         for closer in (
             driver.close if driver is not None else None,

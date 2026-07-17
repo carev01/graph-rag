@@ -7,7 +7,7 @@ def _ingest_driver(extract_driver):
     # These tests only exercise Cypher-only helpers (`tombstone_article_episodes`,
     # `_supersede_trailing_episodes`) which touch only `self._driver` -- no
     # Graphiti/DocExtractor/Provenance calls happen, so stub those deps.
-    return IngestDriver(None, None, None, None, extract_driver)
+    return IngestDriver(None, None, None, None, None, extract_driver)
 
 
 async def test_tombstone_marks_removed_not_deleted(extract_driver):

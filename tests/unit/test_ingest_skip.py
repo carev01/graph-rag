@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from graph_extract import content_fetch
+from graph_extract.graphiti_client import ExtractionTier
 from graph_extract.ingest_driver import IngestDriver
+from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
 
 pytestmark = pytest.mark.asyncio
 
@@ -40,9 +42,11 @@ async def test_ingest_article_skips_navigation_page(monkeypatch):
     monkeypatch.setattr(content_fetch, "fetch_article", fake_fetch_article)
 
     graphiti = _StubGraphiti()
+    strong = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS, 1234)
     driver = IngestDriver(
         settings=object(),
-        graphiti=graphiti,
+        strong_tier=strong,
+        cheap_tier=None,
         docext=object(),
         provenance=object(),
         driver=object(),

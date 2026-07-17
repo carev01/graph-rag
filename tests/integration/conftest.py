@@ -5,8 +5,9 @@ from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
 
 from graph_extract.config import get_extract_settings
-from graph_extract.graphiti_client import build_graphiti
+from graph_extract.graphiti_client import build_graphiti, ExtractionTier
 from graph_extract.ingest_driver import IngestDriver
+from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
 from graph_extract.provenance import Provenance
 from graph_sync.neo4j_repo import Neo4jRepo
 from graph_sync.state_store import StateStore
@@ -77,6 +78,7 @@ async def live_ingest_driver(live_extract_driver, live_docext_client):
     s = get_extract_settings()
     graphiti = build_graphiti(s)
     provenance = Provenance(live_extract_driver)
-    driver = IngestDriver(s, graphiti, live_docext_client, provenance, live_extract_driver)
+    strong = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS, s.max_chunk_tokens)
+    driver = IngestDriver(s, strong, None, live_docext_client, provenance, live_extract_driver)
     yield driver
     await graphiti.close()

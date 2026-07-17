@@ -3,11 +3,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import httpx
 from neo4j import AsyncDriver
-from graphiti_core import Graphiti
 from graph_extract.article_filter import is_navigation_article
+from graph_extract.article_router import is_dense_matrix
 from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
-from graph_extract.graphiti_client import add_text_episode
+from graph_extract.graphiti_client import add_text_episode, ExtractionTier
 from graph_extract.provenance import Provenance
 
 
@@ -19,6 +19,7 @@ class IngestArticleResult:
     entities: int = 0
     edges: int = 0
     skipped_navigation: bool = False
+    tier: str = "strong"
 
 
 @dataclass
@@ -39,13 +40,23 @@ def _parse_ts(art) -> datetime:
 
 
 class IngestDriver:
-    def __init__(self, settings: ExtractSettings, graphiti: Graphiti,
-                 docext: httpx.AsyncClient, provenance: Provenance, driver: AsyncDriver):
+    def __init__(self, settings: ExtractSettings, strong_tier: ExtractionTier,
+                 cheap_tier: ExtractionTier | None, docext: httpx.AsyncClient,
+                 provenance: Provenance, driver: AsyncDriver):
         self._s = settings
-        self._g = graphiti
+        self._strong = strong_tier
+        self._cheap = cheap_tier
         self._docext = docext
         self._prov = provenance
         self._driver = driver
+
+    def _tier_for(self, markdown: str) -> ExtractionTier:
+        if self._cheap is None:
+            return self._strong
+        dense = is_dense_matrix(
+            markdown, ratio_threshold=self._s.dense_table_line_ratio,
+            pipe_threshold=self._s.dense_pipe_count)
+        return self._strong if dense else self._cheap
 
     async def list_article_ids(self, source_id: str) -> list[str]:
         async with self._driver.session() as s:
@@ -60,6 +71,8 @@ class IngestDriver:
         if is_navigation_article(art.title or ""):
             res.skipped_navigation = True
             return res      # navigation page: no chunking, no extraction, 0 tokens
+        tier = self._tier_for(art.content_markdown)
+        res.tier = tier.name
         ref = _parse_ts(art)
         # content_hash: reuse the article's stored hash from the graph, else hash markdown
         content_hash = await self._content_hash(article_id) or _sha(art.content_markdown)
@@ -69,13 +82,14 @@ class IngestDriver:
         episodes = episode_builder.build_episodes(
             article_id=art.id, title=art.title, chapter_path=chapter_path,
             content_hash=content_hash, chunks=chunks,
-            max_chunk_tokens=self._s.max_chunk_tokens, min_chunk_tokens=self._s.min_chunk_tokens)
+            max_chunk_tokens=tier.max_chunk_tokens, min_chunk_tokens=self._s.min_chunk_tokens)
         for e in episodes:
             if await self._prov.already_ingested(art.id, e.chunk_index, e.content_hash):
                 res.episodes_skipped += 1
                 continue
-            r = await add_text_episode(self._g, self._s, name=e.name, body=e.body,
-                                       source_description=art.source_url, reference_time=ref)
+            r = await add_text_episode(tier.graphiti, self._s, name=e.name, body=e.body,
+                                       source_description=art.source_url, reference_time=ref,
+                                       instructions=tier.instructions)
             await self._prov.link(art.id, r.episode.uuid, chunk_index=e.chunk_index,
                                   heading_path=e.heading_path, token_count=e.token_count,
                                   content_hash=e.content_hash)
