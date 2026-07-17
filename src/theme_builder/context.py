@@ -53,7 +53,14 @@ def assemble_context(members: list[EntityRow], facts: list[FactRow], *,
         suffix = (f" (valid {f.valid_at}" + (f", invalid {f.invalid_at})" if f.invalid_at else ")")) \
             if f.valid_at else ""
         line = f"[{f.uuid}] {f.fact}{suffix}"
-        if used + len(line) + 1 > char_budget and included:
+        if used + len(line) + 1 > char_budget:
+            if included:
+                break
+            # must include at least one fact, but never blow the budget: clip it,
+            # preserving the leading [uuid] label so it stays citable.
+            room = max(len(f"[{f.uuid}] "), char_budget - used - 1)
+            lines.append(line[:room])
+            included.add(f.uuid)
             break
         lines.append(line)
         included.add(f.uuid)

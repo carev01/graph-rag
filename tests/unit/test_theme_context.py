@@ -29,3 +29,11 @@ def test_token_budget_truncates_facts():
     res = assemble_context([], facts, top_entities=30, token_budget=200)  # ~800 chars
     assert len(res.fact_uuids) < 200          # truncated
     assert len(res.text) <= 200 * 4 + 200     # roughly within budget (chars ~= 4*tokens)
+
+
+def test_single_oversized_fact_is_clipped_not_blown():
+    big = FactRow(uuid="big", fact="x" * 10000, valid_at="2020", invalid_at=None, name="Provides")
+    res = assemble_context([], [big], top_entities=30, token_budget=10)  # char_budget=40
+    assert "big" in res.fact_uuids                      # still included (>=1 guarantee)
+    assert len(res.text) <= 40 + 60                     # clipped, not a 10k overshoot
+    assert res.text.rstrip().endswith(("x", "]")) or "[big]" in res.text  # label preserved
