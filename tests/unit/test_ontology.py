@@ -29,6 +29,15 @@ def test_limits_edge_broadened_to_capability_and_platform():
     assert "Provides" in EDGE_TYPE_MAP[("Product", "Capability")]
     assert "IntegratesWith" in EDGE_TYPE_MAP[("Product", "Platform")]
 
+def test_no_entity_type_has_attributes():
+    # `version` was dropped from Product (low value for backup products, and it
+    # made the cheap extraction model balloon/truncate during graphiti's
+    # attribute-extraction step). With NO entity type carrying attributes,
+    # graphiti skips that step entirely.
+    for name, model in ENTITY_TYPES.items():
+        assert model.model_fields == {}, f"{name} unexpectedly declares attributes"
+
+
 def test_instructions_require_extracting_the_product_subject():
     # The product is the SUBJECT of most facts; if the model omits it as an
     # entity, graphiti drops every edge whose endpoint is that missing node.

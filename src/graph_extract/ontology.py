@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # Entity types. Attributes are minimal (a small model extracts them more
 # reliably). Descriptions guide extraction; keep them tight.
@@ -8,7 +8,10 @@ class Vendor(BaseModel):
 
 class Product(BaseModel):
     """A backup product or service (e.g. AWS Backup, Azure Backup, Veeam Backup & Replication, NetBackup) — NOT CLIs, SDKs, or consoles (those are Tools)."""
-    version: str | None = Field(default=None, description="Product version if stated")
+    # No attributes: a `version` field was dropped (low value for backup products
+    # — many are rolling-release with no version — and it made the cheap
+    # extraction model balloon/truncate during graphiti's attribute-extraction
+    # step). With NO entity type carrying attributes, graphiti skips that step.
 
 class Tool(BaseModel):
     """A NAMED, installable-or-invocable tool application used to operate or administer a backup product: a command-line tool, SDK, API client, or a named management console/portal APPLICATION (e.g. AWS CLI, PowerShell Az module, Veeam Console, NetBackup Administration Console, Azure portal) — NOT the product itself, NOT a Platform, NOT a UI pane/tab/button/menu item/wizard/page name (e.g. "Restore pane", "Jobs", "Delete Protected Item", "Protected resources"), NOT an action or operation (e.g. "Recover", "Stop protection with retain data"), NOT a documentation section (e.g. "AWS Backup pricing")."""
