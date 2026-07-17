@@ -82,8 +82,9 @@ the rest are **valid domain concepts merely mis-typed as Region** — so the
 "Region guard" that demotes non-gazetteer `:Region`, risks demoting genuine
 regions absent from the gazetteer (`Australia Central 2`, `Poland Central`,
 `Israel Central`, `Norway West`, …). The right fix is a **demote-not-delete**
-retype pass gated on a verified-complete gazetteer — a deliberate decision, and
-it mutates the production graph. Deferred.
+retype pass gated on a verified-complete gazetteer. **Shipped** as the
+promote+demote `retype_region_entities` (see §6 for the fraction-dominant guard
+and the production apply result).
 
 **Reconcile — the aliases are already present; the real gap is upstream typing.**
 `vendor_aliases` already maps `aws`/`amazon`/`microsoft`/`azure`. The production
@@ -91,4 +92,34 @@ semantic graph has **no `:Vendor` entity named AWS/Microsoft at all** (only
 `Sysinternals` and a junk `awsbackup Amazon Resource Names (ARNs)`). AWS/Microsoft
 are extracted as other types (Platform), so a `:Vendor`-scoped `reconcile` match
 finds nothing. Fixing this is a reconcile-matching-strategy or extraction-typing
-question, not an alias addition — deeper than the original note implied. Deferred.
+question, not an alias addition — deeper than the original note implied.
+**Shipped** as read-only `unmatched_detail` classification (matching unchanged;
+no false cross-type link) — see §6.
+
+## 6. Applied to production (2026-07-17)
+
+Both fixes landed on `main` (commits `6d28a26` region demote, `4230661` reconcile
+classification, `2ae40d1` guard hardening) and were applied to the live
+`backup-docs` graph.
+
+**Region demote (surgical `retype_region_entities`, not full `cleanup`):**
+`38 → 30 :Region`. Exactly the **8 junk demoted** to bare `:Entity` +
+`demoted_from_region=true` (`Availability Zone`, `private IP address`,
+`Protected resources`, `subscriptions`, `subscription S1`, `requester comment`,
+`RestoreLatestVersionsUpTo`, `Backup Fairfax Microsoft Entra application`).
+**0 genuine regions lost**, guard not tripped (8 ≤ `max(2, 50%·38)=19`).
+Reversible via the audit stamp; self-heals if any name is later gazetteered.
+
+**Demote-guard hardening (post-review):** the guard is now fraction-dominant —
+`skip demotions if > max(2, 50% of :Region count)` — replacing a fixed floor of
+10 that could never trip below ~34 regions (so it now protects small
+bootstrap/per-vendor graphs from an `is_region` regression). A `cleanup
+--force-demote` bypass handles a confirmed large legitimate backlog so cleanup is
+never permanently stuck.
+
+**Reconcile classification (live):** `linked=2` (the Product bridges `AWS Backup`,
+`Azure Backup`, idempotent), `unmatched_detail = {Vendor:AWS → no_candidate
+(expected), Vendor:Microsoft → wrong_type_candidate [Azure:Platform]}`. No
+cross-type SAME_AS was created. The permanent false-alarm is now a self-labelling
+report: `no_candidate` needs no action; a `wrong_type_candidate` is the only
+actionable signal (an upstream extraction-typing gap for a future session).
