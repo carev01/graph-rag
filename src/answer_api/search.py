@@ -15,16 +15,21 @@ async def _vendor_episode_uuids(driver, vendor: str) -> set[str]:
         return set(rec["u"]) if rec else set()
 
 
+async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id) -> list:
+    # `SearchConfig.limit` (graphiti_core.search.search_config) is the
+    # top-level fetch cap consulted by Graphiti._search; confirmed against
+    # the installed graphiti-core==0.29.2 SearchConfig model.
+    config = EDGE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+    config.limit = fetch_limit
+    results = await graphiti._search(q, config, group_ids=[group_id])
+    return list(results.edges)
+
+
 async def search_local(graphiti, driver, *, q, k=10, vendor=None,
                        include_invalid=False, group_id):
     # Over-fetch so post-filters (validity, vendor scope) still leave ~k
-    # results. `SearchConfig.limit` (graphiti_core.search.search_config) is
-    # the top-level fetch cap consulted by Graphiti._search; confirmed
-    # against the installed graphiti-core==0.29.2 SearchConfig model.
-    config = EDGE_HYBRID_SEARCH_RRF.model_copy(deep=True)
-    config.limit = max(k * 3, k)
-    results = await graphiti._search(q, config, group_ids=[group_id])
-    edges = list(results.edges)
+    # results.
+    edges = await _retrieve_edges(graphiti, q, fetch_limit=max(k * 3, k), group_id=group_id)
     if not include_invalid:
         edges = [e for e in edges if getattr(e, "invalid_at", None) is None]
     if vendor:
