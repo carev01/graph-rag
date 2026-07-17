@@ -64,13 +64,18 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
     skipped = 0
     try:
         for c in communities:
-            members = await _fetch_members(driver, settings.group_id, c.member_uuids)
-            facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
-            ctx = assemble_context(members, facts,
-                                   top_entities=settings.report_top_entities,
-                                   token_budget=settings.report_token_budget)
-            rep = await generate_report(client, model, ctx)
+            try:
+                members = await _fetch_members(driver, settings.group_id, c.member_uuids)
+                facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
+                ctx = assemble_context(members, facts,
+                                       top_entities=settings.report_top_entities,
+                                       token_budget=settings.report_token_budget)
+                rep = await generate_report(client, model, ctx)
+            except Exception:
+                logger.exception("theme-build: community %s errored; skipping", c.community_id)
+                rep = None
             if rep is None:
+                logger.info("theme-build: community %s produced no report; skipping", c.community_id)
                 skipped += 1
                 continue
             reports[c.community_id] = rep
