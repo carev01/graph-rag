@@ -25,7 +25,10 @@ def test_routing_defaults_on_with_cheap_ling():
     assert s.cheap_llm_model == "inclusionai/ling-2.6-flash"
     assert s.cheap_llm_base_url == "https://openrouter.ai/api/v1"
     assert s.cheap_llm_client_mode == "generic_json_schema"
-    assert s.cheap_llm_api_key == ""            # must be supplied via .env
+    # the FIELD default is empty (a key must be supplied via .env); assert the
+    # declared default directly so a real key in the deployment .env can't leak
+    # into this hermetic check.
+    assert ExtractSettings.model_fields["cheap_llm_api_key"].default == ""
     assert s.cheap_max_chunk_tokens == 900
 
 

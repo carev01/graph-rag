@@ -173,7 +173,11 @@ async def test_build_ingest_driver_strong_only_without_cheap_key(monkeypatch):
     async def _noop(g): return None
     monkeypatch.setattr(cli, "init_indices", _noop)
 
-    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
-                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")  # no cheap key
+    # cheap_llm_api_key set empty EXPLICITLY (init kwargs beat .env) so this "no
+    # cheap key -> strong only" test is hermetic even when the deployment .env
+    # supplies a real CHEAP_LLM_API_KEY.
+    s = ExtractSettings(_env_file=None, cheap_llm_api_key="", docext_base_url="http://x",
+                        docext_read_key="k", neo4j_uri="bolt://x", neo4j_user="u",
+                        neo4j_password="p")
     ingest, g, dx, drv = await cli._build_ingest_driver(s)
     assert ingest._cheap is None
