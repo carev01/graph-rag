@@ -8,7 +8,10 @@ from answer_api import search as search_mod
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import instrument
 
-_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)  # case-insensitive: a URL must NEVER survive (design-decision #2)
+# Case-insensitive: a URL must NEVER survive (design-decision #2). Stop the
+# match at brackets so a URL written flush against a marker ("https://x[1]")
+# doesn't swallow the legitimate [1] citation along with it.
+_URL_RE = re.compile(r"https?://[^\s\[\]]+", re.IGNORECASE)
 _MARKER_RE = re.compile(r"\[(\d+)\]")
 
 _PROMPT = (
