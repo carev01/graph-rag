@@ -53,6 +53,15 @@ class ExtractSettings(BaseSettings):
     judge_base_url: str = ""
     judge_model: str = ""
     judge_api_key: str = ""  # if empty, the judge reuses llm_api_key (fallback path)
+    # --- theme-builder / community layer (design: theme-builder-community-layer) ---
+    # Report tier defaults to the synthesis/judge tier (GLM-5.2) when left empty.
+    report_llm_base_url: str = ""
+    report_llm_model: str = ""
+    report_llm_api_key: str = ""
+    leiden_min_community_size: int = 3   # drop dust communities smaller than this
+    leiden_max_levels: int = 3           # cap on intermediate Leiden levels
+    report_token_budget: int = 12000     # per-community context budget (~chars/4)
+    report_top_entities: int = 30        # member entities included in a report's context
     # --- hybrid extraction routing (design: hybrid-extraction-router) ---
     # ON by default; degrades to strong-only when cheap_llm_api_key is empty.
     extraction_routing: bool = True
