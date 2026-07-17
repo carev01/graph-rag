@@ -4,6 +4,7 @@ import re
 
 from openai import AsyncOpenAI
 
+from answer_api import search as search_mod
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import instrument
 
@@ -46,3 +47,29 @@ def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI,
     client = instrument(AsyncOpenAI(
         api_key=settings.judge_api_key or "not-needed", base_url=settings.judge_base_url))
     return client, settings.judge_model
+
+
+async def answer_local(graphiti, driver, synth_client, synth_model, *,
+                       q, k=15, vendor=None, group_id) -> dict:
+    """Retrieve facts via search_local, number them [1..N], let the LLM cite
+    by marker only (design-decision #2: the LLM never writes a URL), then
+    resolve citations deterministically from the marker map. Zero-retrieval
+    short-circuits to the fixed refusal without spending any LLM tokens."""
+    res = await search_mod.search_local(
+        graphiti, driver, q=q, k=k, vendor=vendor, group_id=group_id)
+    results = res["results"]
+    if not results:
+        return {"query": q, "answer": _REFUSAL, "citations": [],
+                "retrieved": 0, "cited": 0}
+    marker_map = {i: r for i, r in enumerate(results, 1)}
+    facts_block = "\n".join(f"[{i}] {r['fact']}" for i, r in marker_map.items())
+    resp = await synth_client.chat.completions.create(
+        model=synth_model, temperature=0, max_tokens=800,
+        messages=[{"role": "user", "content": _PROMPT.format(facts=facts_block, q=q)}])
+    raw = resp.choices[0].message.content or ""
+    answer, cited = _finalize_answer(raw, marker_map)
+    citations = [{"marker": m, "fact": marker_map[m]["fact"],
+                  "fact_uuid": marker_map[m]["fact_uuid"],
+                  "sources": marker_map[m]["sources"]} for m in cited]
+    return {"query": q, "answer": answer, "citations": citations,
+            "retrieved": len(results), "cited": len(cited)}
