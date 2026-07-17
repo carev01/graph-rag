@@ -21,8 +21,9 @@ from neo4j import AsyncGraphDatabase
 
 from graph_extract.config import get_extract_settings
 from graph_extract.eval import cost_report
-from graph_extract.graphiti_client import build_graphiti, init_indices
+from graph_extract.graphiti_client import build_graphiti, init_indices, ExtractionTier
 from graph_extract.ingest_driver import IngestDriver
+from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
 from graph_extract.provenance import Provenance
 from graph_sync.delta_client import make_client
 
@@ -51,7 +52,8 @@ async def main() -> None:
     graphiti = build_graphiti(s)
     await init_indices(graphiti)
     prov = Provenance(driver)
-    ingest = IngestDriver(s, graphiti, docext, prov, driver)
+    strong_tier = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS, s.max_chunk_tokens)
+    ingest = IngestDriver(s, strong_tier, None, docext, prov, driver)
 
     total_added = total_skipped = 0
     t0 = time.time()
