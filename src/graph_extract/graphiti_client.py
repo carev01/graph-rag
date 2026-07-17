@@ -160,6 +160,8 @@ def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
     cheap = s.model_copy(update=dict(
         llm_base_url=s.cheap_llm_base_url, llm_model=s.cheap_llm_model,
         llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode))
+    # The reranker built by build_graphiti is harmless here: it is not invoked
+    # during add_episode (the cheap client is used for ingestion only).
     return build_graphiti(cheap)
 
 async def init_indices(graphiti: Graphiti) -> None:

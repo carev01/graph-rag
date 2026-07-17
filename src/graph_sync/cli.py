@@ -223,6 +223,8 @@ def worker(
             await driver.close()
             await docext.aclose()
             await graphiti.close()
+            if ingest._cheap is not None:
+                await ingest._cheap.graphiti.close()
 
     asyncio.run(_run())
 
