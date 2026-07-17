@@ -1,6 +1,44 @@
 from graph_extract.chonkie_client import Chunk
 from graph_extract.episode_builder import build_episodes, needs_presplit, _split_oversize
 
+
+def test_split_cuts_on_line_boundaries():
+    # 4 paragraphs, each ~600 "tokens"; max 1000 -> must cut BETWEEN lines,
+    # never mid-line, so every piece but the last ends at a newline.
+    paras = [f"para{i} " + ("w " * 600) for i in range(4)]
+    text = "\n".join(paras)
+    chunk = Chunk(text=text, start_index=0, end_index=len(text), token_count=2400)
+    pieces = _split_oversize(chunk, 1000)
+    assert "".join(p.text for p in pieces) == text          # content-preserving
+    assert len(pieces) >= 2
+    for p in pieces[:-1]:
+        assert p.text.endswith("\n")                        # cut landed on a line break
+    assert all(p.token_count <= 1000 for p in pieces)
+
+
+def test_split_table_rows_stay_intact():
+    # a markdown availability table must split BETWEEN rows, not mid-cell.
+    header = "| Feature | Region |\n|---|---|\n"
+    rows = "".join(f"| feature{i} | us-east-{i} |\n" for i in range(60))
+    text = header + rows
+    chunk = Chunk(text=text, start_index=0, end_index=len(text), token_count=2400)
+    pieces = _split_oversize(chunk, 800)
+    assert "".join(p.text for p in pieces) == text
+    assert len(pieces) >= 2
+    for p in pieces:
+        for line in p.text.splitlines():
+            assert line.startswith("|")                     # only whole table rows
+
+
+def test_split_giant_single_line_falls_back_to_char():
+    # one line, no breaks, far over max -> equal-char fallback still splits it.
+    text = "x" * 8000
+    chunk = Chunk(text=text, start_index=0, end_index=8000, token_count=4000)
+    pieces = _split_oversize(chunk, 1800)
+    assert len(pieces) >= 2
+    assert "".join(p.text for p in pieces) == text
+    assert all(p.token_count <= 1800 for p in pieces)
+
 def _mk(toks):  # chunks with given token counts, text length ~4 chars/token
     out, pos = [], 0
     for i, t in enumerate(toks):

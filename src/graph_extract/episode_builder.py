@@ -27,34 +27,74 @@ def _merge_tiny(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[C
             out.append(c)
     return out
 
+def _equal_char_segments(text: str, max_tokens: int, tok_per_char: float) -> list[str]:
+    """Equal-character split of a single oversized run of text — the fallback
+    used only when there is no line boundary to cut on (e.g. one giant line).
+    Content-preserving: the segments concatenate back to `text`."""
+    n = len(text)
+    if n == 0:
+        return [text]
+    parts = math.ceil((tok_per_char * n) / max_tokens)
+    # Degenerate guard: declared tokens wildly exceed char length, which would
+    # otherwise produce more parts than there are characters (empty pieces).
+    parts = min(parts, max(1, n))
+    bounds = [round(i * n / parts) for i in range(parts + 1)]
+    bounds[-1] = n
+    return [text[bounds[i]:bounds[i + 1]] for i in range(parts)]
+
+
 def _split_oversize(c: Chunk, max_tokens: int) -> list[Chunk]:
-    if c.token_count <= max_tokens:
+    """Split a chunk exceeding max_tokens into pieces that each fit.
+
+    Cuts on LINE boundaries (paragraph / markdown table-row breaks) so document
+    structure survives — a dense availability table splits BETWEEN rows, not
+    mid-cell, which keeps the model from seeing half a row. Only a single line
+    that alone exceeds max_tokens falls back to an equal-character split. The
+    concatenation of the piece texts always equals the original text
+    (content-preserving), and every piece's estimated token_count stays <= max.
+    """
+    if c.token_count <= max_tokens or len(c.text) == 0:
         return [c]
-    if len(c.text) == 0:
-        return [c]
-    parts = math.ceil(c.token_count / max_tokens)
     text_len = len(c.text)
-    # Degenerate guard: declared token_count wildly exceeds text length,
-    # which would otherwise produce more parts than there are characters
-    # (and thus empty-text pieces).
-    parts = min(parts, max(1, text_len))
-    # Equal-ish char boundaries covering the FULL text (last boundary == text_len).
-    boundaries = [round(i * text_len / parts) for i in range(parts + 1)]
-    boundaries[-1] = text_len
+    tok_per_char = c.token_count / text_len
+
+    # 1) atomic segments = lines (newlines kept); char-split any single line
+    #    that is itself too big. Concatenation of segments == original text.
+    segments: list[str] = []
+    for line in c.text.splitlines(keepends=True):
+        if tok_per_char * len(line) <= max_tokens:
+            segments.append(line)
+        else:
+            segments.extend(_equal_char_segments(line, max_tokens, tok_per_char))
+
+    # 2) greedily pack consecutive segments into pieces up to max_tokens, so a
+    #    cut only ever lands at a segment (line) boundary.
+    pieces_text: list[str] = []
+    cur = ""
+    cur_tok = 0.0
+    for seg in segments:
+        seg_tok = tok_per_char * len(seg)
+        if cur and cur_tok + seg_tok > max_tokens:
+            pieces_text.append(cur)
+            cur, cur_tok = seg, seg_tok
+        else:
+            cur += seg
+            cur_tok += seg_tok
+    if cur:
+        pieces_text.append(cur)
+
+    # 3) build Chunks with span-proportional token_count, clamped <= max.
     pieces: list[Chunk] = []
-    for i in range(parts):
-        start, end = boundaries[i], boundaries[i + 1]
-        seg = c.text[start:end]
-        # Proportional-by-char-span estimate, clamped so rounding can never
-        # push a piece's declared token_count over max_tokens (the ≤max
-        # invariant is a hard constraint; a slight under-estimate is fine).
-        token_count = min(round(c.token_count * len(seg) / text_len), max_tokens)
+    pos = 0
+    for seg in pieces_text:
+        token_count = min(round(tok_per_char * len(seg)), max_tokens)
         pieces.append(Chunk(
             text=seg,
-            start_index=c.start_index + start,
-            end_index=c.start_index + end,
+            start_index=c.start_index + pos,
+            end_index=c.start_index + pos + len(seg),
             token_count=token_count,
         ))
+        pos += len(seg)
     return pieces
 
 def build_episodes(*, article_id: str, title: str, chapter_path: str, content_hash: str,
