@@ -16,11 +16,19 @@ This is a label change, not a delete: :Entity and every edge are preserved.
 
 from __future__ import annotations
 
+import math
+
 from neo4j import AsyncDriver
 
 from graph_extract.article_filter import is_navigation_article
 from graph_extract.noise_filter import is_noise
 from graph_extract.region_names import is_region
+
+# Demote-guard: if a single retype pass would strip :Region from more than this
+# many nodes, treat it as a likely `is_region` regression (which would otherwise
+# silently demote every genuine region) and skip ALL demotions this run.
+_DEMOTE_GUARD_MIN = 10
+_DEMOTE_GUARD_FRACTION = 0.3
 
 
 async def prune_noise_entities(driver: AsyncDriver, group_id: str) -> dict:
@@ -42,6 +50,23 @@ async def prune_noise_entities(driver: AsyncDriver, group_id: str) -> dict:
 
 
 async def retype_region_entities(driver: AsyncDriver, group_id: str) -> dict:
+    """Enforce the invariant `:Region label present <=> is_region(name)`.
+
+    Two complementary directions in one scan:
+    - PROMOTE: an :Entity whose name is a gazetteer region but lacks :Region
+      gets :Region, its wrong custom-type labels removed, and any stale demote
+      audit stamp cleared (self-healing: a name added to the gazetteer after a
+      prior demotion is re-promoted on the next run).
+    - DEMOTE: an :Entity the extraction model self-typed :Region but the
+      gazetteer does NOT recognise loses ONLY its :Region label (a reversible
+      relabel, not a delete -- temporal policy #3) and is stamped
+      `demoted_from_region=true` for audit. Any other custom-type labels stay.
+
+    A guard skips ALL demotions in a run that would strip more than
+    `max(_DEMOTE_GUARD_MIN, _DEMOTE_GUARD_FRACTION * current :Region count)`
+    nodes -- the signature of an `is_region` regression, which would otherwise
+    silently demote every genuine region. Promotions still run when tripped.
+    """
     async with driver.session() as s:
         r = await s.run(
             "MATCH (e:Entity {group_id:$g}) "
@@ -51,23 +76,49 @@ async def retype_region_entities(driver: AsyncDriver, group_id: str) -> dict:
             g=group_id,
         )
         rows = [dict(rec) async for rec in r]
-        targets = [
-            row
-            for row in rows
+        promote = [
+            row for row in rows
             if is_region(row["name"] or "") and not row["is_region_lbl"]
         ]
-        for row in targets:
-            # remove the wrong custom type labels, add :Region (labels can't
-            # be parameterised; these come from labels(e), not user input,
-            # so the f-string interpolation is safe -- still backtick-quoted)
+        demote = [
+            row for row in rows
+            if row["is_region_lbl"] and not is_region(row["name"] or "")
+        ]
+        region_count = sum(1 for row in rows if row["is_region_lbl"])
+        guard_limit = max(_DEMOTE_GUARD_MIN,
+                          math.ceil(_DEMOTE_GUARD_FRACTION * region_count))
+        guard_tripped = len(demote) > guard_limit
+
+        for row in promote:
+            # remove the wrong custom type labels, add :Region, clear any stale
+            # demote stamp (labels can't be parameterised; these come from
+            # labels(e), not user input, so the f-string is safe -- backticked)
             remove = "".join(f" REMOVE e:`{t}`" for t in row["types"])
             await s.run(
-                f"MATCH (e:Entity {{group_id:$g}}) WHERE elementId(e)=$id SET e:Region{remove}",
-                g=group_id,
-                id=row["id"],
+                f"MATCH (e:Entity {{group_id:$g}}) WHERE elementId(e)=$id "
+                f"SET e:Region{remove} "
+                f"REMOVE e.demoted_from_region, e.demoted_at",
+                g=group_id, id=row["id"],
             )
-    names = sorted(row["name"] for row in targets)
-    return {"scanned": len(rows), "retyped": len(targets), "retyped_names": names}
+        if not guard_tripped:
+            for row in demote:
+                await s.run(
+                    "MATCH (e:Entity {group_id:$g}) WHERE elementId(e)=$id "
+                    "REMOVE e:Region "
+                    "SET e.demoted_from_region=true, e.demoted_at=datetime()",
+                    g=group_id, id=row["id"],
+                )
+
+    demote_names = sorted(row["name"] for row in demote)
+    return {
+        "scanned": len(rows),
+        "retyped": len(promote),
+        "retyped_names": sorted(row["name"] for row in promote),
+        "demoted": 0 if guard_tripped else len(demote),
+        "demoted_names": [] if guard_tripped else demote_names,
+        "demote_guard_tripped": guard_tripped,
+        "demote_skipped_names": demote_names if guard_tripped else [],
+    }
 
 
 async def tombstone_navigation_articles(driver: AsyncDriver, group_id: str) -> dict:
