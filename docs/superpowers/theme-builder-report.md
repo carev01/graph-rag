@@ -21,20 +21,22 @@ in the next slices.
 `uv run --extra dev python -m theme_builder.cli theme-build`:
 
 ```json
-{ "communities_detected": 71, "reports_written": 54,
-  "by_level": {"0": 32, "1": 12, "2": 10},
-  "facts_cited": 393, "reports_skipped": 17 }
+{ "communities_detected": 69, "reports_written": 66,
+  "by_level": {"0": 35, "1": 19, "2": 12},
+  "facts_cited": 1324, "reports_skipped": 3 }
 ```
 
-- **71 communities detected** across 3 Leiden levels; **54 reports written**
-  (32 leaf / 12 mid / 10 top). Dust communities (`< min_community_size=3`) dropped
+- **69 communities detected** across 3 Leiden levels; **66 reports written**
+  (35 leaf / 19 mid / 12 top). Dust communities (`< min_community_size=3`) dropped
   at detection.
-- **393 fact UUIDs cited** across all reports — every one validated against its
+- **1324 fact UUIDs cited** across all reports — every one validated against its
   community's real facts (hallucinated ids dropped) before write-back.
-- `PARENT_OF` = 31 hierarchy edges; `IN_COMMUNITY` = 750 membership edges.
-- **17 reports skipped** (GLM-5.2 returned unparseable JSON after one retry) —
-  graceful degradation, counted, build continues. ~24% skip rate is the main
-  quality follow-up (below).
+- Hierarchy present via `PARENT_OF`; membership via `IN_COMMUNITY`.
+- **Only 3 reports skipped** (~4%). The initial run skipped 17 (~24%) because
+  GLM-5.2's reasoning truncated the report JSON to empty at `max_tokens=3000`
+  (`finish_reason=length`); a live probe confirmed this, and raising the report
+  cap to 8000 (reasoning headroom — same lesson as `synthesize`/the judge)
+  dropped the skip rate to ~4% and lifted citations 393 → 1324.
 
 ## A real community + its resolvable citations
 
@@ -95,9 +97,9 @@ concrete, verifiable source URLs, not hand-wave at "the community."
 
 - **Global map-reduce `/search/global`** over this layer (the next slice) —
   shortlist reports by embedding + rating, map/reduce, cite fact UUIDs → URLs.
-- **Report skip rate (~24%):** GLM-5.2 JSON adherence — add a stricter
-  JSON/schema mode or a second retry, or route reports to a more JSON-reliable
-  model tier (the report tier is already config-swappable).
+- **Report skip rate — ADDRESSED:** raised `max_tokens` 3000 → 8000 (GLM reasoning
+  truncation); skip rate ~24% → ~4%. The residual ~4% could use a stricter JSON
+  mode or a config-swapped report tier if it matters.
 - **Incremental refresh:** dirty-marking from graph-sync, Jaccard-stable community
   ids, regenerate only dirty/new reports, `corpus_cursor`-driven staleness (this
   slice is full-rebuild + content-hash ids).
