@@ -65,3 +65,38 @@ def test_report_tier_defaults_to_judge():
                         judge_api_key="jk", **_MIN)
     client, model = _report_client_and_model(s)
     assert model == "glm-5.2:cloud"
+
+
+@pytest.mark.asyncio
+async def test_url_in_tag_is_stripped():
+    payload = json.dumps({"title": "T", "summary": "S",
+        "full_report": [{"finding": "f", "fact_ids": ["u1"]}], "rating": 5,
+        "rating_explanation": "", "tags": ["see http://evil.com/leak", "AWS"]})
+    rep = await generate_report(_FakeClient([payload]), "m", _ctx())
+    assert all("http" not in t for t in rep.tags)
+
+
+@pytest.mark.asyncio
+async def test_unknown_finding_key_does_not_leak_url():
+    payload = json.dumps({"title": "T", "summary": "S",
+        "full_report": [{"finding": "ok", "fact_ids": ["u1"], "evidence_url": "http://leak/x"}],
+        "rating": 5, "rating_explanation": "", "tags": []})
+    rep = await generate_report(_FakeClient([payload]), "m", _ctx())
+    assert "http" not in rep.full_report and rep.cited_fact_uuids == ["u1"]
+
+
+@pytest.mark.asyncio
+async def test_non_dict_findings_do_not_crash():
+    payload = json.dumps({"title": "T", "summary": "S",
+        "full_report": ["just a string finding"], "rating": 5,
+        "rating_explanation": "", "tags": []})
+    rep = await generate_report(_FakeClient([payload]), "m", _ctx())
+    assert rep is not None and rep.cited_fact_uuids == []
+
+
+@pytest.mark.asyncio
+async def test_chatty_suffix_with_braces_parses():
+    payload = ('{"title":"T","summary":"S","full_report":[{"finding":"f","fact_ids":["u1"]}],'
+               '"rating":3,"rating_explanation":"","tags":[]}  note: see {1} above.')
+    rep = await generate_report(_FakeClient([payload]), "m", _ctx())
+    assert rep is not None and rep.cited_fact_uuids == ["u1"]

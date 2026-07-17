@@ -63,14 +63,14 @@ def _extract_json(raw: str) -> dict | None:
         text = text.split("```", 2)[1]
         if text.startswith("json"):
             text = text[4:]
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
+    start = text.find("{")
+    if start < 0:
         return None
     try:
-        obj = json.loads(text[start:end + 1])
-        return obj if isinstance(obj, dict) else None
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
     except (json.JSONDecodeError, ValueError):
         return None
+    return obj if isinstance(obj, dict) else None
 
 
 def _strip(s: str) -> str:
@@ -93,13 +93,20 @@ async def generate_report(client: AsyncOpenAI, model: str,
             break
     if obj is None:
         return None
-    findings = obj.get("full_report") or []
+    raw_findings = obj.get("full_report")
+    findings: list[dict] = []
     cited: list[str] = []
-    for f in findings:
-        for fid in (f.get("fact_ids") or []):
-            if fid in context.fact_uuids and fid not in cited:
-                cited.append(fid)
-        f["finding"] = _strip(str(f.get("finding", "")))
+    if isinstance(raw_findings, list):
+        for f in raw_findings:
+            if not isinstance(f, dict):
+                continue  # structurally-off finding -> skip, don't crash
+            fids = [fid for fid in (f.get("fact_ids") or []) if fid in context.fact_uuids]
+            for fid in fids:
+                if fid not in cited:
+                    cited.append(fid)
+            # carry ONLY sanitized finding text + validated ids (drop unknown keys,
+            # which could smuggle a model-authored URL past the strip)
+            findings.append({"finding": _strip(str(f.get("finding", ""))), "fact_ids": fids})
     try:
         rating = float(obj.get("rating", 0) or 0)
     except (TypeError, ValueError):
@@ -110,5 +117,5 @@ async def generate_report(client: AsyncOpenAI, model: str,
         full_report=json.dumps(findings),
         rating=rating,
         rating_explanation=_strip(str(obj.get("rating_explanation", ""))),
-        tags=[str(t) for t in (obj.get("tags") or [])],
+        tags=[_strip(str(t)) for t in (obj.get("tags") or [])],
         cited_fact_uuids=cited)
