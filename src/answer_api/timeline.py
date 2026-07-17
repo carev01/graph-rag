@@ -1,7 +1,29 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from answer_api.search import _retrieve_edges, _vendor_episode_uuids
 from graph_extract.provenance import Provenance
+
+# Sorts after any real timestamp, so a fact with no valid_at lands last.
+_VALID_AT_MAX = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _valid_at_sort_key(edge) -> tuple[int, datetime]:
+    """Chronological sort key for an edge's valid_at.
+
+    Order by the true UTC instant, not the stringified local wall-clock: a
+    fact at 08:00+05:00 (03:00 UTC) precedes one at 05:00+00:00 (05:00 UTC),
+    which a string compare of the ISO forms would get backwards. A naive
+    (tz-unaware) datetime is treated as UTC so it never raises when compared
+    with aware ones. A None valid_at sorts last (leading 1 vs 0).
+    """
+    va = getattr(edge, "valid_at", None)
+    if not isinstance(va, datetime):   # None, or an unexpected non-datetime
+        return (1, _VALID_AT_MAX)
+    if va.tzinfo is None:
+        va = va.replace(tzinfo=timezone.utc)
+    return (0, va.astimezone(timezone.utc))
 
 
 def _fact_status(invalid_at, expired_by_sweep) -> str:
@@ -31,9 +53,8 @@ async def timeline_local(graphiti, driver, *, q, limit=30, vendor=None, group_id
     if vendor:
         scope = await _vendor_episode_uuids(driver, vendor)
         edges = [e for e in edges if scope.intersection(e.episodes or [])]
-    # ascending by valid_at; facts without valid_at sort last
-    edges.sort(key=lambda e: (getattr(e, "valid_at", None) is None,
-                              str(getattr(e, "valid_at", "") or "")))
+    # ascending by valid_at (true UTC instant); facts without valid_at sort last
+    edges.sort(key=_valid_at_sort_key)
     edges = edges[:limit]
     uuids = [e.uuid for e in edges]
     swept = await _sweep_flags(driver, uuids, group_id)
