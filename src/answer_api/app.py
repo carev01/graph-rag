@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from answer_api import search as search_mod
+from answer_api import synthesize as synth_mod
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_graphiti
 from graphiti_core import Graphiti
@@ -41,13 +42,30 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         await graphiti.close()
         raise
+    # Same guard, extended: if building the synthesis client fails (e.g.
+    # judge_base_url unset), close both already-built graphiti and driver
+    # before re-raising.
+    try:
+        from answer_api.synthesize import _synthesis_client_and_model
+
+        synth_client, synth_model = _synthesis_client_and_model(settings)
+    except Exception:
+        await graphiti.close()
+        await driver.close()
+        raise
     app.state.settings = settings
     app.state.graphiti = graphiti
     app.state.driver = driver
+    app.state.synth_client = synth_client
+    app.state.synth_model = synth_model
     try:
         yield
     finally:
-        for name, closer in (("graphiti", graphiti.close), ("driver", driver.close)):
+        for name, closer in (
+            ("graphiti", graphiti.close),
+            ("driver", driver.close),
+            ("synth_client", synth_client.close),
+        ):
             try:
                 await closer()
             except Exception:
@@ -72,6 +90,21 @@ def create_app() -> FastAPI:
             k=k,
             vendor=vendor,
             include_invalid=include_invalid,
+            group_id=app.state.settings.group_id,
+        )
+
+    @app.get("/answer")
+    async def answer(
+        q: str, k: int = 15, vendor: str | None = None
+    ) -> dict[str, Any]:
+        return await synth_mod.answer_local(
+            app.state.graphiti,
+            app.state.driver,
+            app.state.synth_client,
+            app.state.synth_model,
+            q=q,
+            k=k,
+            vendor=vendor,
             group_id=app.state.settings.group_id,
         )
 
