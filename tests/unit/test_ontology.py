@@ -149,3 +149,11 @@ def test_region_type_and_edge():
     instr = o.EXTRACTION_INSTRUCTIONS.lower()
     assert "available in" in instr
     assert "specific geographic regions" not in instr  # regions are now extracted
+
+
+def test_cheap_tier_salience_present_and_not_global():
+    from graph_extract.ontology import CHEAP_TIER_SALIENCE, EXTRACTION_INSTRUCTIONS
+    assert "BE SELECTIVE" in CHEAP_TIER_SALIENCE
+    assert "AvailableIn" in CHEAP_TIER_SALIENCE and "Limits" in CHEAP_TIER_SALIENCE
+    # cheap-tier-only: the salience text must NOT be in the global instructions
+    assert "BE SELECTIVE" not in EXTRACTION_INSTRUCTIONS

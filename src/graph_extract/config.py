@@ -53,6 +53,19 @@ class ExtractSettings(BaseSettings):
     judge_base_url: str = ""
     judge_model: str = ""
     judge_api_key: str = ""  # if empty, the judge reuses llm_api_key (fallback path)
+    # --- hybrid extraction routing (design: hybrid-extraction-router) ---
+    # ON by default; degrades to strong-only when cheap_llm_api_key is empty.
+    extraction_routing: bool = True
+    # Cheap tier = ling-2.6-flash via OpenRouter. api_key from .env (never committed).
+    cheap_llm_base_url: str = "https://openrouter.ai/api/v1"
+    cheap_llm_model: str = "inclusionai/ling-2.6-flash"
+    cheap_llm_api_key: str = ""
+    cheap_llm_client_mode: Literal[
+        "structured", "generic_json_schema", "generic_json_object"] = "generic_json_schema"
+    cheap_max_chunk_tokens: int = 900   # smaller chunks for the verbose cheap model
+    # Route an article to the STRONG tier when it is a dense table:
+    dense_table_line_ratio: float = 0.25
+    dense_pipe_count: int = 200
 
 
 @lru_cache

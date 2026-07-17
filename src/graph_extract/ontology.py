@@ -140,3 +140,23 @@ features vendor-specific and DISTINCT (`AWS Backup Vault Lock`,
 `Azure immutable vault`, `Amazon S3`, `Azure Blob Storage`) — do not merge these
 across vendors. Likewise keep AWS Backup and Azure Backup as DISTINCT products.
 """
+
+# Cheap-tier-only salience appendix (ling-2.6-flash over-enumerates dense tables).
+# Appended to EXTRACTION_INSTRUCTIONS for the cheap tier ONLY -- do NOT add to the
+# global instructions (it slightly reduces the strong model's extraction).
+CHEAP_TIER_SALIENCE = (
+    "\n\nBE SELECTIVE, NOT EXHAUSTIVE — never emit one fact per table cell, row, "
+    "or feature-x-region combination.\n"
+    "For availability/support MATRICES: extract each feature or capability ONCE "
+    "(the product provides/supports it), and express availability by EXCEPTION — "
+    "state where something is NOT available or is limited (these gaps are the "
+    "valuable signal; a wall of checkmarks is not). Type those negative/partial "
+    "statements as Limits facts ('not supported', 'only', 'except') and positive "
+    "residency statements as AvailableIn facts. Availability and limitation "
+    "statements are the HIGHEST-VALUE facts: keep them, but state each ONCE at "
+    "the most general level that is TRUE (e.g. '<feature> is not available in "
+    "China regions') — never over-generalize an exception into a global claim.\n"
+    "Use short canonical entity names ('Amazon S3', 'cross-Region copy'), never "
+    "descriptive phrases. A dense table chunk should yield roughly 10-25 facts "
+    "total, not dozens."
+)
