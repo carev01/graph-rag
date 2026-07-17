@@ -56,11 +56,21 @@ The docstring alone can't fully suppress this; a proper fix needs either (a) bro
 - **Follow-up:** the Region-magnet residual (~13 junk `:Region`) needs broader noise patterns or a Region guard — a separate deterministic pass, no re-extraction of the model needed.
 - **Reconcile note:** `reconcile` left structural Vendors `AWS`/`Microsoft` unmatched this run — the semantic Vendor entity names this extraction produced aren't in `vendor_aliases`; add them (the runbook's documented workflow).
 
-## 5. Addendum (2026-07-16) — closer look at the two follow-ups; both deferred
+## 5. Addendum (2026-07-16) — both follow-ups RESOLVED
 
-Investigated while tackling documented minors. Both turn out to be **nuanced
-decisions requiring a production graph mutation, not clean unsupervised fixes** —
-deferred to a supervised session.
+Investigated, then fixed (strategy vetted by a `fable` subagent). Summary of the
+decisions; details in the two paragraphs below.
+
+- **Region-magnet → RESOLVED (code).** `retype_region_entities` now demotes
+  self-typed non-gazetteer `:Region` to bare `:Entity` + a `demoted_from_region`
+  audit stamp (reversible, self-healing, guard-limited). Verified against the
+  live graph to target exactly the 8 junk `:Region`, 0 genuine regions; applied
+  via `cleanup`/`maintenance`.
+- **Reconcile → RESOLVED (reframed).** Not a matching bug: the valuable
+  Product-level bridges already link; only the two Vendors are unmatched because
+  their semantic twins don't exist. Matching left unchanged; added
+  `unmatched_detail` classification (`no_candidate` vs `wrong_type_candidate`) so
+  the expected misses stop looking like a bug.
 
 **Region-magnet — prune vs. demote is a real design choice.** The current 38
 `:Region` nodes are ~30 genuine regions + ~8 mistyped: `Availability Zone`,

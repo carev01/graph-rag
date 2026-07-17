@@ -10,9 +10,9 @@ documents *what* to run and *how often*, not the scheduler itself.
 | Job | What it does | Command |
 |---|---|---|
 | **prune** | `DETACH DELETE`s `:Entity` nodes matching `noise_filter` (ARNs, error codes, IAM actions, API-field names, numeric/org IDs, regions-as-words). Returns an audit of pruned names. | (part of `cleanup`/`maintenance`) |
-| **retype** | Relabels a mistyped region entity to `:Region` (removes the wrong custom type label), keyed on the `region_names` gazetteer. | (part of `cleanup`/`maintenance`) |
+| **retype** | Enforces `:Region ⇔ region_names` gazetteer, both directions: **promotes** a mistyped region to `:Region` (removing the wrong custom label), and **demotes** an entity the model self-typed `:Region` that the gazetteer doesn't recognise (e.g. `Availability Zone`, `subscriptions`) to a bare `:Entity` + a `demoted_from_region` audit stamp. Demote is a reversible relabel (no delete) and self-heals: add the name to `region_names.py` and the next run re-promotes it. A guard skips all demotions in a run exceeding `max(10, 30% of :Region count)` — the signature of an `is_region` regression; if it trips, check the gazetteer before re-running. | (part of `cleanup`/`maintenance`) |
 | **sweep** | Expires `RELATES_TO` facts whose supporting episodes are all dead (`removed`, or no `HAS_EPISODE` from a non-removed `:Article`) — sets `invalid_at` + `expired_by_sweep`. Never deletes; never touches Graphiti's own invalidations. | `sweep` |
-| **reconcile** | Links structural `:Vendor`/`:Product` to the matching semantic `:Entity` via `SAME_AS` (alias-matched, link-not-merge). Reports unmatched structural nodes (add an alias in `vendor_aliases.py`). | `reconcile` |
+| **reconcile** | Links structural `:Vendor`/`:Product` to the matching semantic `:Entity` via `SAME_AS` (alias-matched, link-not-merge). Reports unmatched structurals, classified in `unmatched_detail`: `no_candidate` (no alias-named entity exists — **expected** when the corpus never names the vendor as an actor, e.g. `AWS`; not an error) vs `wrong_type_candidate` (an alias-named entity exists but is the wrong kind, e.g. Vendor `Microsoft` vs semantic `Azure:Platform` — **not** auto-linked, since that would assert a false identity; a human decides). | `reconcile` |
 
 ## CLI
 
@@ -47,8 +47,11 @@ uv run --extra dev python -m graph_sync.cli queue-status
 ## Operational notes
 
 - Every job prints a JSON audit (counts + samples). Watch the `sweep` `expired`
-  count and the `reconcile` `unmatched_structural` list — a growing unmatched
-  list means `vendor_aliases.py` needs new entries.
+  count and the `reconcile` `unmatched_detail` — a **`wrong_type_candidate`** is
+  the actionable signal (an alias or an upstream extraction-typing gap);
+  `no_candidate` entries are expected and need no action. Watch `retype`'s
+  `demoted_names` (junk `:Region` cleaned up) and `demote_guard_tripped` (should
+  be `false`; `true` means investigate the gazetteer before trusting the run).
 - `queue-status` surfaces `dead` semantic-ingestion jobs (articles that failed
   `max_attempts` times) — investigate and re-enqueue as needed.
 - The jobs are safe to run concurrently with ingestion (they're idempotent and
