@@ -20,6 +20,13 @@ app = typer.Typer()
 logger = logging.getLogger(__name__)
 
 
+@app.callback()
+def _root() -> None:
+    """Community-report layer (theme-builder) commands."""
+    # Presence of a callback keeps typer in multi-command mode, so the single
+    # `theme-build` command must be named explicitly on the CLI.
+
+
 async def _fetch_members(driver: AsyncDriver, group_id: str, uuids: list[str]) -> list[EntityRow]:
     async with driver.session() as s:
         r = await s.run(
