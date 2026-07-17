@@ -37,3 +37,14 @@ def test_max_levels_caps_hierarchy():
     rows = [{"uuid": "A", "levels": [0, 5, 8]}, {"uuid": "B", "levels": [0, 5, 8]}]
     comms = _build_communities_from_rows(rows, min_community_size=1, max_levels=2)
     assert max(c.level for c in comms) == 1                  # levels 0,1 only
+
+
+def test_ragged_levels_do_not_crash():
+    # A has only a level-0 label; B has level-0 and level-1. Must NOT raise.
+    rows = [{"uuid": "A", "levels": [0]}, {"uuid": "B", "levels": [0, 5]}]
+    comms = _build_communities_from_rows(rows, min_community_size=1, max_levels=3)
+    lvl0 = [c for c in comms if c.level == 0]
+    assert len(lvl0) == 1 and set(lvl0[0].member_uuids) == {"A", "B"}
+    lvl1_ids = {c.community_id for c in comms if c.level == 1}
+    # parent derived from B (the member that HAS a level-1 label) -> a real level-1 id
+    assert lvl0[0].parent_id in lvl1_ids

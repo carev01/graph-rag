@@ -47,15 +47,20 @@ def _build_communities_from_rows(rows: list[dict], *, min_community_size: int,
                 cid = _community_id(lvl, uuids)
                 label_to_id[lvl][label] = cid
                 surviving[lvl][label] = uuids
+    row_by_uuid = {r["uuid"]: r for r in rows}
     out: list[Community] = []
     for lvl in range(n_levels):
         for label, uuids in surviving[lvl].items():
             parent_id = None
             if lvl + 1 < n_levels:
-                # every member shares the same level-(lvl+1) leiden label (nested)
-                parent_label = next(r["levels"][lvl + 1] for r in rows
-                                    if r["uuid"] == uuids[0] and len(r["levels"]) > lvl + 1)
-                parent_id = label_to_id[lvl + 1].get(parent_label)  # None if dropped
+                parent_label = None
+                for mu in uuids:
+                    levels = row_by_uuid[mu]["levels"]
+                    if len(levels) > lvl + 1:
+                        parent_label = levels[lvl + 1]
+                        break
+                if parent_label is not None:
+                    parent_id = label_to_id[lvl + 1].get(parent_label)
             out.append(Community(community_id=label_to_id[lvl][label], level=lvl,
                                  member_uuids=uuids, parent_id=parent_id))
     return out
