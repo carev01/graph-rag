@@ -9,6 +9,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from answer_api import search as search_mod
 from answer_api import synthesize as synth_mod
+from answer_api import timeline as timeline_mod
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_graphiti
 from graphiti_core import Graphiti
@@ -104,6 +105,19 @@ def create_app() -> FastAPI:
             app.state.synth_model,
             q=q,
             k=k,
+            vendor=vendor,
+            group_id=app.state.settings.group_id,
+        )
+
+    @app.get("/timeline")
+    async def timeline(
+        q: str, limit: int = 30, vendor: str | None = None
+    ) -> dict[str, Any]:
+        return await timeline_mod.timeline_local(
+            app.state.graphiti,
+            app.state.driver,
+            q=q,
+            limit=limit,
             vendor=vendor,
             group_id=app.state.settings.group_id,
         )
