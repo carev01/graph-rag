@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from answer_api import search as search_mod
@@ -82,7 +82,8 @@ def create_app() -> FastAPI:
 
     @app.get("/search/local")
     async def search_local(
-        q: str, k: int = 10, vendor: str | None = None, include_invalid: bool = False
+        q: str, k: int = Query(10, ge=1), vendor: str | None = None,
+        include_invalid: bool = False
     ) -> dict[str, Any]:
         return await search_mod.search_local(
             app.state.graphiti,
@@ -96,7 +97,7 @@ def create_app() -> FastAPI:
 
     @app.get("/answer")
     async def answer(
-        q: str, k: int = 15, vendor: str | None = None
+        q: str, k: int = Query(15, ge=1), vendor: str | None = None
     ) -> dict[str, Any]:
         return await synth_mod.answer_local(
             app.state.graphiti,
@@ -111,7 +112,7 @@ def create_app() -> FastAPI:
 
     @app.get("/timeline")
     async def timeline(
-        q: str, limit: int = 30, vendor: str | None = None
+        q: str, limit: int = Query(30, ge=1), vendor: str | None = None
     ) -> dict[str, Any]:
         return await timeline_mod.timeline_local(
             app.state.graphiti,

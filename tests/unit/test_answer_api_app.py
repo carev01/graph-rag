@@ -170,3 +170,38 @@ async def test_timeline_requires_q():
         async with app.router.lifespan_context(app):
             resp = await c.get("/timeline")
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "path,params",
+    [
+        ("/timeline", {"q": "x", "limit": 0}),
+        ("/timeline", {"q": "x", "limit": -1}),
+        ("/search/local", {"q": "x", "k": 0}),
+        ("/search/local", {"q": "x", "k": -3}),
+        ("/answer", {"q": "x", "k": 0}),
+    ],
+)
+async def test_nonpositive_limit_is_422(path, params):
+    # limit/k <= 0 must be rejected, not silently drop the last edge (edges[:-1]).
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get(path, params=params)
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "path,params",
+    [
+        ("/timeline", {"q": "x", "limit": 1}),
+        ("/search/local", {"q": "x", "k": 1}),
+        ("/answer", {"q": "x", "k": 1}),
+    ],
+)
+async def test_limit_one_is_allowed(path, params):
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get(path, params=params)
+    assert resp.status_code == 200
