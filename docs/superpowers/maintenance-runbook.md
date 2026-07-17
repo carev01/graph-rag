@@ -57,3 +57,25 @@ uv run --extra dev python -m graph_sync.cli queue-status
 - The jobs are safe to run concurrently with ingestion (they're idempotent and
   the sweep's expiry is a single atomic statement that never clobbers Graphiti's
   own `invalid_at`), but running them during a quiet window is preferable.
+
+## Extraction routing (ingestion)
+
+`ingest` uses a **hybrid extraction router** (design:
+`specs/2026-07-17-hybrid-extraction-router-design.md`): each article is sent to a
+cheap model (`ling-2.6-flash`) or the strong model (`gpt-5-mini`) by table
+density, since the cheap model over-generates on dense availability matrices (see
+`ling-production-readiness.md`). Both tiers write the same group / embedding space.
+
+- **Default ON.** Set `CHEAP_LLM_API_KEY` (OpenRouter) in `.env` to enable the
+  cheap tier; without it (or with `EXTRACTION_ROUTING=false`) the pipeline runs
+  **strong-only** — byte-for-byte the pre-router behaviour. `ingest` echoes
+  `routing=hybrid` or `routing=strong-only`.
+- **Routing rule:** an article goes to the strong tier when its table-line ratio
+  ≥ `DENSE_TABLE_LINE_RATIO` (default 0.25) OR its `|` count ≥ `DENSE_PIPE_COUNT`
+  (default 200); everything else goes to the cheap tier. The decision is
+  deterministic (markdown only, no LLM). `IngestArticleResult.tier` reports which
+  handled each article.
+- The cheap tier uses smaller chunks (`CHEAP_MAX_CHUNK_TOKENS`, default 900) and a
+  salience appendix to the extraction instructions; the strong tier uses the
+  production instructions and `MAX_CHUNK_TOKENS` (1800). Tune the `DENSE_*`
+  thresholds if the corpus widens past AWS/Azure.
