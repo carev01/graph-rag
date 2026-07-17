@@ -53,6 +53,18 @@ async def _fetch_facts(driver: AsyncDriver, group_id: str, uuids: list[str]) -> 
                         invalid_at=x["invalid_at"], name=x["name"]) async for x in r]
 
 
+async def _corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:
+    """Best-effort 'corpus as-of' watermark stamped on every report: the latest
+    episode timestamp in the group. (The sync layer's opaque cursor would be
+    exact, but this is a cheap, decoupled proxy for slice 1.)"""
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (e:Episodic {group_id:$g}) RETURN toString(max(e.created_at)) AS c",
+            g=group_id)
+        rec = await r.single()
+        return rec["c"] if rec else None
+
+
 async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) -> dict:
     communities = await detect_communities(
         driver, settings.group_id,
@@ -79,8 +91,9 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 skipped += 1
                 continue
             reports[c.community_id] = rep
+        corpus_cursor = await _corpus_cursor(driver, settings.group_id)
         res = await write_communities(driver, embedder, settings.group_id,
-                                      communities, reports, corpus_cursor=None)
+                                      communities, reports, corpus_cursor=corpus_cursor)
         res["communities_detected"] = len(communities)
         res["reports_skipped"] = skipped
         return res

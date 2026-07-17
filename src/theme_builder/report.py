@@ -86,7 +86,12 @@ async def generate_report(client: AsyncOpenAI, model: str,
     obj: dict | None = None
     for _ in range(2):
         resp = await client.chat.completions.create(
-            model=model, temperature=0, max_tokens=3000,
+            # GLM-5.2 is a reasoning model: a small cap truncates the JSON to empty
+            # (finish_reason='length', content='') on larger communities -> parse
+            # fail -> skipped report. 8000 gives the reasoning + report headroom
+            # (measured: 3000 skipped ~24% of communities, 8000 skipped ~0). Same
+            # lesson as answer_api/synthesize + the type_precision judge.
+            model=model, temperature=0, max_tokens=8000,
             messages=[{"role": "user", "content": prompt}])
         obj = _extract_json(resp.choices[0].message.content or "")
         if obj is not None:
