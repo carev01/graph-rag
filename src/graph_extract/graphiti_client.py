@@ -148,10 +148,11 @@ async def init_indices(graphiti: Graphiti) -> None:
 
 async def add_text_episode(graphiti: Graphiti, s: ExtractSettings, *, name: str,
                            body: str, source_description: str,
-                           reference_time: datetime) -> AddEpisodeResults:
+                           reference_time: datetime,
+                           instructions: str = EXTRACTION_INSTRUCTIONS) -> AddEpisodeResults:
     return await graphiti.add_episode(
         name=name, episode_body=body, source_description=source_description,
         reference_time=reference_time, source=EpisodeType.text, group_id=s.group_id,
         entity_types=ENTITY_TYPES, excluded_entity_types=EXCLUDED_ENTITY_TYPES,
         edge_types=EDGE_TYPES, edge_type_map=EDGE_TYPE_MAP,
-        custom_extraction_instructions=EXTRACTION_INSTRUCTIONS)
+        custom_extraction_instructions=instructions)
