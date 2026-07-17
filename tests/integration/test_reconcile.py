@@ -116,3 +116,60 @@ async def test_reconcile_unmatched_is_kind_aware(extract_driver):
 
     assert "Vendor:ZetaX" in res["unmatched_structural"]
     assert "Product:ZetaX" in res["unmatched_structural"]
+
+
+async def test_unmatched_no_candidate_classified(extract_driver):
+    """A structural node whose aliases match NO semantic entity of any type is
+    classified 'no_candidate' -- the expected, not-an-error case (e.g. a vendor
+    the corpus never mentions as an actor)."""
+    from graph_extract.reconcile import reconcile_same_as
+
+    g = "rec-nocand"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Vendor {name:'OrphanVendorZZ'})")
+
+    res = await reconcile_same_as(extract_driver, g)
+
+    assert "Vendor:OrphanVendorZZ" in res["unmatched_structural"]
+    assert res["unmatched_detail"]["Vendor:OrphanVendorZZ"] == {"reason": "no_candidate"}
+
+
+async def test_unmatched_wrong_type_candidate_and_no_crosstype_link(extract_driver):
+    """A structural :Vendor whose alias matches a semantic entity of a DIFFERENT
+    kind (Microsoft's 'azure' form -> Azure typed :Platform) is classified
+    'wrong_type_candidate' with the candidate + its labels, and NO cross-type
+    SAME_AS is created (that would assert a false vendor==platform identity)."""
+    from graph_extract.reconcile import reconcile_same_as
+
+    g = "rec-wrongtype"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Vendor {name:'Microsoft'})")
+        await s.run("CREATE (:Entity:Platform {group_id:$g, name:'Azure'})", g=g)
+
+    res = await reconcile_same_as(extract_driver, g)
+
+    detail = res["unmatched_detail"]["Vendor:Microsoft"]
+    assert detail["reason"] == "wrong_type_candidate"
+    cand = {c["name"]: set(c["labels"]) for c in detail["candidates"]}
+    assert "Azure" in cand and cand["Azure"] == {"Entity", "Platform"}
+    # read-only probe: no SAME_AS edge minted from Microsoft
+    async with extract_driver.session() as s:
+        n = (await (await s.run(
+            "MATCH (:Vendor {name:'Microsoft'})-[:SAME_AS]->() RETURN count(*) AS c"
+        )).single())["c"]
+    assert n == 0
+
+
+async def test_matched_structural_absent_from_detail(extract_driver):
+    """A structural node that DID link is in neither unmatched list nor detail."""
+    from graph_extract.reconcile import reconcile_same_as
+
+    g = "rec-detail-matched"
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Product {name:'ReconDetailProd'})")
+        await s.run("CREATE (:Entity:Product {group_id:$g, name:'ReconDetailProd'})", g=g)
+
+    res = await reconcile_same_as(extract_driver, g)
+
+    assert "Product:ReconDetailProd" not in res["unmatched_structural"]
+    assert "Product:ReconDetailProd" not in res["unmatched_detail"]

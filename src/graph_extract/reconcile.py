@@ -42,6 +42,17 @@ _LINK = (
     "RETURN count(e) AS c"
 )
 
+# Read-only probe for an unmatched structural: is there ANY semantic entity
+# (any custom type, not just same-kind) whose name is an accepted alias form?
+# Distinguishes an expected "no candidate exists" from a "candidate exists but
+# is the wrong kind" (e.g. structural Vendor Microsoft vs semantic Azure typed
+# :Platform) -- reported, never linked, since a cross-type SAME_AS would assert
+# a false identity.
+_PROBE = (
+    "MATCH (e:Entity {group_id: $g}) WHERE toLower(e.name) IN $forms "
+    "RETURN e.name AS name, labels(e) AS labels"
+)
+
 
 async def reconcile_same_as(driver: AsyncDriver, group_id: str) -> dict:
     """Link structural Vendor/Product nodes to their semantic Entity twins.
@@ -52,18 +63,31 @@ async def reconcile_same_as(driver: AsyncDriver, group_id: str) -> dict:
     one of those forms.
 
     Returns `{"structural_scanned": int, "linked": int,
-    "unmatched_structural": list[str]}`. `structural_scanned` accumulates
-    across BOTH kinds (Vendor + Product) -- a running total, not the size of
-    whichever kind's scan happened to run last. `linked` counts SAME_AS
-    edges merged (matched-and-created-or-already-present) this run.
-    `unmatched_structural` lists kind-qualified `"{kind}:{name}"` strings
-    (e.g. `"Vendor:Veeam"`) for structural nodes that matched no semantic
-    entity at all -- kind-qualifying keeps a same-named unmatched `:Vendor`
-    and `:Product` from collapsing into a single entry under `sorted(set(...))`.
+    "unmatched_structural": list[str], "unmatched_detail": dict}`.
+    `structural_scanned` accumulates across BOTH kinds (Vendor + Product) -- a
+    running total, not the size of whichever kind's scan happened to run last.
+    `linked` counts SAME_AS edges merged (matched-and-created-or-already-present)
+    this run. `unmatched_structural` lists kind-qualified `"{kind}:{name}"`
+    strings (e.g. `"Vendor:Veeam"`) for structural nodes that matched no
+    same-kind semantic entity -- kind-qualifying keeps a same-named unmatched
+    `:Vendor` and `:Product` from collapsing into a single entry under
+    `sorted(set(...))`.
+
+    `unmatched_detail` classifies each unmatched structural (keyed by the same
+    `"{kind}:{name}"`) to separate an expected miss from a suspicious one:
+    - `{"reason": "no_candidate"}` -- no semantic entity of ANY type carries an
+      accepted alias form. Expected when the corpus never names the vendor as an
+      actor (e.g. docs say "AWS Backup", never "AWS" the vendor). NOT an error.
+    - `{"reason": "wrong_type_candidate", "candidates": [{"name", "labels"}]}` --
+      an alias-named entity EXISTS but is the wrong kind (e.g. structural Vendor
+      Microsoft vs semantic Azure typed `:Platform`). Reported for a human to
+      judge; deliberately NOT linked, since a cross-type SAME_AS would assert a
+      false vendor==platform identity (design decision #5 links true twins only).
     """
     structural_scanned = 0
     linked = 0
     unmatched: list[str] = []
+    unmatched_detail: dict[str, dict] = {}
 
     async with driver.session() as s:
         for kind in _KINDS:
@@ -85,10 +109,21 @@ async def reconcile_same_as(driver: AsyncDriver, group_id: str) -> dict:
                 c = link_record["c"]
                 linked += c
                 if c == 0:
-                    unmatched.append(f"{kind}:{st['name']}")
+                    key = f"{kind}:{st['name']}"
+                    unmatched.append(key)
+                    probe = await s.run(_PROBE, g=group_id, forms=forms)
+                    candidates = [
+                        {"name": rec["name"], "labels": rec["labels"]}
+                        async for rec in probe
+                    ]
+                    unmatched_detail[key] = (
+                        {"reason": "wrong_type_candidate", "candidates": candidates}
+                        if candidates else {"reason": "no_candidate"}
+                    )
 
     return {
         "structural_scanned": structural_scanned,
         "linked": linked,
         "unmatched_structural": sorted(set(unmatched)),
+        "unmatched_detail": unmatched_detail,
     }
