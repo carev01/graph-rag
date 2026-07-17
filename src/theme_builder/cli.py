@@ -67,13 +67,16 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 skipped += 1
                 continue
             reports[c.community_id] = rep
+        res = await write_communities(driver, embedder, settings.group_id,
+                                      communities, reports, corpus_cursor=None)
+        res["communities_detected"] = len(communities)
+        res["reports_skipped"] = skipped
+        return res
     finally:
+        # close both owned clients (report LLM + embedder) so a repeated caller
+        # doesn't leak httpx pools; the injected driver is the caller's to close.
         await client.close()
-    res = await write_communities(driver, embedder, settings.group_id,
-                                  communities, reports, corpus_cursor=None)
-    res["communities_detected"] = len(communities)
-    res["reports_skipped"] = skipped
-    return res
+        await embedder.client.close()
 
 
 @app.command("theme-build")
