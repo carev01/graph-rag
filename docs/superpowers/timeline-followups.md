@@ -7,22 +7,18 @@ plus the spec's deferred work. None blocks anything.
 
 ## Minor review findings (from final whole-branch review, 2026-07-16)
 
-1. **Cross-timezone string ordering in `timeline_local` sort key**
-   (`src/answer_api/timeline.py`, sort key `(valid_at is None, str(valid_at or ""))`).
-   The sort stringifies `valid_at` (a `datetime`) and compares lexicographically.
-   Lexicographic == chronological **only when all offsets are identical**. Graphiti
-   normalizes to UTC (`+00:00`) today, so this cannot misorder on current data —
-   hence Minor. Concrete latent failure: an edge at `08:24:39+05:00` (03:24 UTC)
-   would sort *after* `05:00:00+00:00` (05:00 UTC) despite being earlier.
-   **Fix:** sort by the raw `datetime` with a `datetime.min/max` sentinel for
-   `None`, instead of a stringified key. Removes the reliance on UTC normalization.
+1. **✅ RESOLVED — Cross-timezone string ordering in `timeline_local` sort key.**
+   The sort stringified `valid_at` and compared lexicographically, which equals
+   chronological order only when all offsets are identical. Fixed in
+   `_valid_at_sort_key` (`src/answer_api/timeline.py`): sorts by the tz-normalized
+   `datetime` (naive→UTC, `astimezone(UTC)`), `None` last via a `datetime.max`
+   sentinel. Tests: `test_timeline_orders_by_utc_instant_across_offsets` (a
+   mixed-offset case that fails under string compare) + `test_timeline_naive_and_none_valid_at_sort`.
 
-2. **No lower bound on `limit` (parity nit shared with `search_local`)**
-   (`src/answer_api/app.py` `/timeline`, and `/search/local`, `/answer`).
-   `limit=-1` → `fetch_limit=max(-3,-1)=-1` → `edges[:-1]` silently drops the last
-   edge instead of erroring. Pre-existing pattern (`search_local`'s `[:k]` behaves
-   the same), so it's a parity nit, not a regression. **Fix:** add `Query(ge=1)`
-   bounds to `limit`/`k` on all three endpoints in one pass.
+2. **✅ RESOLVED — No lower bound on `limit`/`k`.** `limit=-1` → `edges[:-1]`
+   silently dropped the last edge. Fixed with `Query(ge=1)` on `/timeline` `limit`
+   and `/search/local` + `/answer` `k` (`src/answer_api/app.py`): `<=0` → 422.
+   Tests: parametrized `test_nonpositive_limit_is_422` + `test_limit_one_is_allowed`.
 
 3. **`group_id` asymmetry: `_sweep_flags` vs `resolve_citations`** (not a bug today)
    (`src/answer_api/timeline.py` `_sweep_flags` filters `RELATES_TO {group_id:$g}`;

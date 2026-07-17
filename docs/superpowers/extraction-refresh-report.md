@@ -55,3 +55,30 @@ The docstring alone can't fully suppress this; a proper fix needs either (a) bro
 - **The evaluation was cheap:** a 37-min sample surfaced the regressions before a 4-hr full run was spent on the wrong model.
 - **Follow-up:** the Region-magnet residual (~13 junk `:Region`) needs broader noise patterns or a Region guard — a separate deterministic pass, no re-extraction of the model needed.
 - **Reconcile note:** `reconcile` left structural Vendors `AWS`/`Microsoft` unmatched this run — the semantic Vendor entity names this extraction produced aren't in `vendor_aliases`; add them (the runbook's documented workflow).
+
+## 5. Addendum (2026-07-16) — closer look at the two follow-ups; both deferred
+
+Investigated while tackling documented minors. Both turn out to be **nuanced
+decisions requiring a production graph mutation, not clean unsupervised fixes** —
+deferred to a supervised session.
+
+**Region-magnet — prune vs. demote is a real design choice.** The current 38
+`:Region` nodes are ~30 genuine regions + ~8 mistyped: `Availability Zone`,
+`private IP address`, `Protected resources`, `subscriptions`, `subscription S1`,
+`requester comment`, `RestoreLatestVersionsUpTo`, `Backup Fairfax Microsoft Entra
+application`. Only `RestoreLatestVersionsUpTo`/`subscription S1` are true junk;
+the rest are **valid domain concepts merely mis-typed as Region** — so the
+`noise_filter` route would *delete legitimate entities*. The alternative, a
+"Region guard" that demotes non-gazetteer `:Region`, risks demoting genuine
+regions absent from the gazetteer (`Australia Central 2`, `Poland Central`,
+`Israel Central`, `Norway West`, …). The right fix is a **demote-not-delete**
+retype pass gated on a verified-complete gazetteer — a deliberate decision, and
+it mutates the production graph. Deferred.
+
+**Reconcile — the aliases are already present; the real gap is upstream typing.**
+`vendor_aliases` already maps `aws`/`amazon`/`microsoft`/`azure`. The production
+semantic graph has **no `:Vendor` entity named AWS/Microsoft at all** (only
+`Sysinternals` and a junk `awsbackup Amazon Resource Names (ARNs)`). AWS/Microsoft
+are extracted as other types (Platform), so a `:Vendor`-scoped `reconcile` match
+finds nothing. Fixing this is a reconcile-matching-strategy or extraction-typing
+question, not an alias addition — deeper than the original note implied. Deferred.
