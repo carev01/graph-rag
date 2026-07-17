@@ -2,11 +2,21 @@
 constructing any live dependency (graphiti/neo4j/docext), since Typer
 short-circuits on --help before the command body ever runs.
 """
+import pytest
 from typer.testing import CliRunner
 
 from graph_extract.cli import _render_quality_report_md, app
 
 runner = CliRunner()
+
+
+class _FakeAsync:
+    async def aclose(self): pass
+    async def close(self): pass
+
+
+class _FakeNeo:
+    def driver(self, *a, **k): return _FakeAsync()
 
 
 def test_root_help():
@@ -127,3 +137,43 @@ def test_render_quality_report_md_handles_aliased_should_distinct_pair():
     assert isinstance(markdown, str)
     assert "AWS Backup Vault Lock" in markdown
     assert "Azure immutable vault" in markdown
+
+
+@pytest.mark.asyncio
+async def test_build_ingest_driver_builds_cheap_tier_when_configured(monkeypatch):
+    import graph_extract.cli as cli
+    from graph_extract.config import ExtractSettings
+
+    built = []
+    monkeypatch.setattr(cli, "build_graphiti", lambda s: built.append("strong") or "SG")
+    monkeypatch.setattr(cli, "build_cheap_graphiti", lambda s: built.append("cheap") or "CG")
+    monkeypatch.setattr(cli, "make_docext_client", lambda **k: _FakeAsync())
+    monkeypatch.setattr(cli, "AsyncGraphDatabase", _FakeNeo())
+    async def _noop(g): return None
+    monkeypatch.setattr(cli, "init_indices", _noop)
+
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                        cheap_llm_api_key="or-key")   # routing on by default
+    ingest, g, dx, drv = await cli._build_ingest_driver(s)
+    assert "cheap" in built and ingest._cheap is not None
+    assert ingest._cheap.instructions.endswith(cli.CHEAP_TIER_SALIENCE[-40:])
+    assert ingest._cheap.max_chunk_tokens == s.cheap_max_chunk_tokens
+
+
+@pytest.mark.asyncio
+async def test_build_ingest_driver_strong_only_without_cheap_key(monkeypatch):
+    import graph_extract.cli as cli
+    from graph_extract.config import ExtractSettings
+
+    monkeypatch.setattr(cli, "build_graphiti", lambda s: "SG")
+    monkeypatch.setattr(cli, "build_cheap_graphiti", lambda s: (_ for _ in ()).throw(AssertionError("must not build cheap")))
+    monkeypatch.setattr(cli, "make_docext_client", lambda **k: _FakeAsync())
+    monkeypatch.setattr(cli, "AsyncGraphDatabase", _FakeNeo())
+    async def _noop(g): return None
+    monkeypatch.setattr(cli, "init_indices", _noop)
+
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")  # no cheap key
+    ingest, g, dx, drv = await cli._build_ingest_driver(s)
+    assert ingest._cheap is None

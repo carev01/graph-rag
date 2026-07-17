@@ -25,10 +25,12 @@ from graph_extract.graph_cleanup import (
     retype_region_entities,
     tombstone_navigation_articles,
 )
-from graph_extract.graphiti_client import build_graphiti, init_indices, ExtractionTier
+from graph_extract.graphiti_client import (
+    build_graphiti, build_cheap_graphiti, init_indices, ExtractionTier,
+)
 from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
-from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
+from graph_extract.ontology import EXTRACTION_INSTRUCTIONS, CHEAP_TIER_SALIENCE
 from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
 from graph_extract.reconcile import reconcile_same_as
@@ -73,6 +75,7 @@ async def _build_ingest_driver(
     graphiti/client/driver would leak.
     """
     graphiti = build_graphiti(settings)
+    cheap_graphiti: Graphiti | None = None
     docext: httpx.AsyncClient | None = None
     driver: AsyncDriver | None = None
     try:
@@ -88,9 +91,18 @@ async def _build_ingest_driver(
         provenance = Provenance(driver)
         strong_tier = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS,
                                      settings.max_chunk_tokens)
-        ingest = IngestDriver(settings, strong_tier, None, docext, provenance, driver)
+        cheap_tier: ExtractionTier | None = None
+        if settings.extraction_routing and settings.cheap_llm_api_key:
+            cheap_graphiti = build_cheap_graphiti(settings)
+            await init_indices(cheap_graphiti)
+            cheap_tier = ExtractionTier(
+                "cheap", cheap_graphiti,
+                EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,
+                settings.cheap_max_chunk_tokens)
+        ingest = IngestDriver(settings, strong_tier, cheap_tier, docext, provenance, driver)
     except Exception:
         for closer in (
+            cheap_graphiti.close if cheap_graphiti is not None else None,
             driver.close if driver is not None else None,
             docext.aclose if docext is not None else None,
             graphiti.close,
@@ -223,7 +235,8 @@ def ingest(
             typer.echo(
                 f"ingest complete: articles={res.articles} "
                 f"episodes_added={res.episodes_added} "
-                f"episodes_skipped={res.episodes_skipped}"
+                f"episodes_skipped={res.episodes_skipped} "
+                f"routing={'hybrid' if ingest_driver._cheap is not None else 'strong-only'}"
             )
             # Emit the cost report HERE, in-process: the usage tally is
             # process-local, so a separate `eval cost` invocation would see an
@@ -237,6 +250,8 @@ def ingest(
             await driver.close()
             await docext.aclose()
             await graphiti.close()
+            if ingest_driver._cheap is not None:
+                await ingest_driver._cheap.graphiti.close()
 
     asyncio.run(_run())
 
