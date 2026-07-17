@@ -29,7 +29,10 @@ async def test_run_theme_build_end_to_end(extract_driver, monkeypatch):
         async def close(self): pass
     monkeypatch.setattr(tc, "_report_client_and_model", lambda s: (_Closeable(), "m"))
 
-    class _FakeEmb:
+    class _FakeEmb:                     # mirror OpenAIEmbedder: has .client to close
+        class _C:
+            async def close(self): pass
+        client = _C()
         async def create_batch(self, texts): return [[0.0] for _ in texts]
     monkeypatch.setattr(tc, "build_embedder", lambda s: _FakeEmb())
 
