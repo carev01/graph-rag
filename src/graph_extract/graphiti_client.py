@@ -164,6 +164,17 @@ def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
     # during add_episode (the cheap client is used for ingestion only).
     return build_graphiti(cheap)
 
+def build_embedder(s: ExtractSettings) -> OpenAIEmbedder:
+    """The single shared embedder (TEI/Jina) used everywhere — extracted so the
+    theme-builder can embed community title+summary in the same space (design
+    decision #4)."""
+    client = _batch_capped_embeddings(
+        AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
+                    timeout=90.0, max_retries=4), s.embed_max_batch)
+    return OpenAIEmbedder(config=OpenAIEmbedderConfig(
+        api_key="not-needed", embedding_model=s.embed_model,
+        embedding_dim=s.embed_dim, base_url=s.embed_base_url), client=client)
+
 async def init_indices(graphiti: Graphiti) -> None:
     await graphiti.build_indices_and_constraints()
 
