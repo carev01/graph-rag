@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 from openai import AsyncAzureOpenAI, AsyncOpenAI
@@ -15,6 +16,15 @@ from graph_extract.ontology import (
     ENTITY_TYPES, EDGE_TYPES, EDGE_TYPE_MAP, EXCLUDED_ENTITY_TYPES,
     EXTRACTION_INSTRUCTIONS,
 )
+
+@dataclass
+class ExtractionTier:
+    """One extraction tier: which graphiti client, which instructions, which chunk
+    size. Two are used by the hybrid router (cheap=ling, strong=gpt-5-mini)."""
+    name: str            # "cheap" | "strong" -> IngestArticleResult.tier
+    graphiti: Graphiti
+    instructions: str
+    max_chunk_tokens: int
 
 def _llm_config(s: ExtractSettings) -> LLMConfig:
     return LLMConfig(api_key=s.llm_api_key, model=s.llm_model,
@@ -142,6 +152,15 @@ def build_graphiti(s: ExtractSettings) -> Graphiti:
 
     g.close = _close  # type: ignore[method-assign]
     return g
+
+def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
+    """Build a Graphiti whose LLM points at the cheap model (ling). Reuses
+    build_graphiti with a cheap-tier settings view; embedder/reranker/Neo4j and
+    the group_id are unchanged, so both tiers share one embedding space."""
+    cheap = s.model_copy(update=dict(
+        llm_base_url=s.cheap_llm_base_url, llm_model=s.cheap_llm_model,
+        llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode))
+    return build_graphiti(cheap)
 
 async def init_indices(graphiti: Graphiti) -> None:
     await graphiti.build_indices_and_constraints()
