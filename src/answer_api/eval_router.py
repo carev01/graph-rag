@@ -36,7 +36,12 @@ _JUDGE_PROMPT = (
 async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int:
     facts_block = "\n".join(f"- {f}" for f in cited_facts) or "(none)"
     resp = await client.chat.completions.create(
-        model=model, temperature=0, max_tokens=8,
+        # GLM-5.2 is a reasoning model: a tiny cap burns the whole budget on
+        # reasoning tokens and returns EMPTY content (finish_reason='stop',
+        # content='') -> _parse_judge_score -> 0 for every question. Give reasoning
+        # headroom; the final content is then just the bare integer. (Same lesson as
+        # theme-builder reports / the type_precision judge.)
+        model=model, temperature=0, max_tokens=2000,
         messages=[{"role": "user", "content": _JUDGE_PROMPT.format(
             q=q, answer=answer, facts=facts_block)}])
     return _parse_judge_score(resp.choices[0].message.content or "")
