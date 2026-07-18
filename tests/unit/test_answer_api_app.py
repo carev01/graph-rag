@@ -84,6 +84,14 @@ async def _fake_timeline_local(graphiti, driver, *, q, limit=30, vendor=None,
     }
 
 
+async def _fake_global_search(driver, embedder, map_client, map_model, synth_client,
+                              synth_model, *, q, level, k, group_id, relevance_min):
+    return {"query": q, "answer": "AWS and Azure both back up S3 [1].",
+            "citations": [{"marker": 1, "fact_uuid": "f1",
+                           "sources": [{"article_id": "art1", "source_url": "https://x/art1"}]}],
+            "communities_used": [{"community_id": "c1", "title": "S3", "relevance": 9}]}
+
+
 @pytest.fixture(autouse=True)
 def _stub_deps(monkeypatch):
     """Avoid building a real Graphiti/Neo4jDriver/synthesis client in the
@@ -97,6 +105,11 @@ def _stub_deps(monkeypatch):
     )
     monkeypatch.setattr(synth_mod, "answer_local", _fake_answer_local)
     monkeypatch.setattr(timeline_mod, "timeline_local", _fake_timeline_local)
+    import answer_api.global_search as global_mod
+    monkeypatch.setattr(app_mod, "build_embedder", lambda s: object())
+    monkeypatch.setattr(global_mod, "_map_client_and_model",
+                        lambda s: (FakeSynthClient(), "map-model"))
+    monkeypatch.setattr(global_mod, "global_search", _fake_global_search)
 
 
 async def test_health():
@@ -169,6 +182,25 @@ async def test_timeline_requires_q():
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
         async with app.router.lifespan_context(app):
             resp = await c.get("/timeline")
+    assert resp.status_code == 422
+
+
+async def test_global_returns_stubbed_answer():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/global", params={"q": "compare vendors on S3"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"query", "answer", "citations", "communities_used"}
+    assert body["citations"][0]["fact_uuid"] == "f1"
+
+
+async def test_global_requires_q():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/global")
     assert resp.status_code == 422
 
 

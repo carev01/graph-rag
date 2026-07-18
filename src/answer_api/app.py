@@ -7,11 +7,12 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Query
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
+from answer_api import global_search as global_mod
 from answer_api import search as search_mod
 from answer_api import synthesize as synth_mod
 from answer_api import timeline as timeline_mod
 from graph_extract.config import ExtractSettings, get_extract_settings
-from graph_extract.graphiti_client import build_graphiti
+from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graphiti_core import Graphiti
 
 logger = logging.getLogger(__name__)
@@ -54,11 +55,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await graphiti.close()
         await driver.close()
         raise
+    # Same guard, extended again: if building the embedder or map client
+    # fails, close graphiti, driver, and synth_client before re-raising.
+    try:
+        embedder = build_embedder(settings)
+        map_client, map_model = global_mod._map_client_and_model(settings)
+    except Exception:
+        await graphiti.close()
+        await driver.close()
+        await synth_client.close()
+        raise
     app.state.settings = settings
     app.state.graphiti = graphiti
     app.state.driver = driver
     app.state.synth_client = synth_client
     app.state.synth_model = synth_model
+    app.state.embedder = embedder
+    app.state.map_client = map_client
+    app.state.map_model = map_model
     try:
         yield
     finally:
@@ -66,6 +80,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             ("graphiti", graphiti.close),
             ("driver", driver.close),
             ("synth_client", synth_client.close),
+            ("map_client", map_client.close),
         ):
             try:
                 await closer()
@@ -109,6 +124,19 @@ def create_app() -> FastAPI:
             vendor=vendor,
             group_id=app.state.settings.group_id,
         )
+
+    @app.get("/search/global")
+    async def search_global(
+        q: str, level: int | None = Query(None, ge=0), k: int | None = Query(None, ge=1)
+    ) -> dict[str, Any]:
+        st = app.state
+        return await global_mod.global_search(
+            st.driver, st.embedder, st.map_client, st.map_model,
+            st.synth_client, st.synth_model,
+            q=q, level=st.settings.global_default_level if level is None else level,
+            k=st.settings.global_shortlist_k if k is None else k,
+            group_id=st.settings.group_id,
+            relevance_min=st.settings.global_map_relevance_min)
 
     @app.get("/timeline")
     async def timeline(
