@@ -101,6 +101,15 @@ async def _fake_global_search(driver, embedder, map_client, map_model, synth_cli
             "communities_used": [{"community_id": "c1", "title": "S3", "relevance": 9}]}
 
 
+async def _fake_drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
+                             q, level, iterations, primer_k, max_followups, followup_k, group_id):
+    return {"query": q, "answer": "cross-vendor DRIFT answer [1].",
+            "citations": [{"marker": 1, "fact_uuid": "f1",
+                           "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],
+            "follow_ups": [{"query": "how retained", "community_id": "c1", "iteration": 1}],
+            "communities_used": [{"community_id": "c1", "title": "S3"}]}
+
+
 @pytest.fixture(autouse=True)
 def _stub_deps(monkeypatch):
     """Avoid building a real Graphiti/Neo4jDriver/synthesis client in the
@@ -119,6 +128,8 @@ def _stub_deps(monkeypatch):
     monkeypatch.setattr(global_mod, "_map_client_and_model",
                         lambda s: (FakeSynthClient(), "map-model"))
     monkeypatch.setattr(global_mod, "global_search", _fake_global_search)
+    import answer_api.drift as drift_mod
+    monkeypatch.setattr(drift_mod, "drift_search", _fake_drift_search)
 
 
 async def test_health():
@@ -210,6 +221,33 @@ async def test_global_requires_q():
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
         async with app.router.lifespan_context(app):
             resp = await c.get("/search/global")
+    assert resp.status_code == 422
+
+
+async def test_drift_returns_stubbed_answer():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/drift", params={"q": "plan retention across vendors"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"query", "answer", "citations", "follow_ups", "communities_used"}
+    assert body["citations"][0]["fact_uuid"] == "f1"
+
+
+async def test_drift_requires_q():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/drift")
+    assert resp.status_code == 422
+
+
+async def test_drift_iterations_over_two_is_422():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/drift", params={"q": "x", "iterations": 3})
     assert resp.status_code == 422
 
 

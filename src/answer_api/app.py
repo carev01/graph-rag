@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Query
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
+from answer_api import drift as drift_mod
 from answer_api import global_search as global_mod
 from answer_api import search as search_mod
 from answer_api import synthesize as synth_mod
@@ -148,6 +149,21 @@ def create_app() -> FastAPI:
             k=st.settings.global_shortlist_k if k is None else k,
             group_id=st.settings.group_id,
             relevance_min=st.settings.global_map_relevance_min)
+
+    @app.get("/search/drift")
+    async def search_drift(
+        q: str, level: int | None = Query(None, ge=0),
+        iterations: int | None = Query(None, ge=1, le=2)
+    ) -> dict[str, Any]:
+        st = app.state
+        s = st.settings
+        return await drift_mod.drift_search(
+            st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
+            q=q,
+            level=s.drift_primer_level if level is None else level,
+            iterations=s.drift_iterations if iterations is None else iterations,
+            primer_k=s.drift_primer_k, max_followups=s.drift_max_followups,
+            followup_k=s.drift_followup_k, group_id=s.group_id)
 
     @app.get("/timeline")
     async def timeline(
