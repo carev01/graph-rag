@@ -9,9 +9,10 @@ from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from answer_api import drift as drift_mod
 from answer_api import global_search as global_mod
+from answer_api import router as router_mod
 from answer_api import search as search_mod
-from answer_api import synthesize as synth_mod
 from answer_api import timeline as timeline_mod
+from answer_api.router import Mode
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graphiti_core import Graphiti
@@ -76,6 +77,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await synth_client.close()
         await embedder.client.close()
         raise
+    cheap_client, cheap_model = router_mod._cheap_classify_client(settings)
     app.state.settings = settings
     app.state.graphiti = graphiti
     app.state.driver = driver
@@ -84,16 +86,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.embedder = embedder
     app.state.map_client = map_client
     app.state.map_model = map_model
+    app.state.cheap_client = cheap_client
+    app.state.cheap_model = cheap_model
     try:
         yield
     finally:
-        for name, closer in (
+        closers = [
             ("graphiti", graphiti.close),
             ("driver", driver.close),
             ("synth_client", synth_client.close),
             ("map_client", map_client.close),
             ("embedder", lambda: embedder.client.close()),
-        ):
+        ]
+        if cheap_client is not None:
+            closers.append(("cheap_client", cheap_client.close))
+        for name, closer in closers:
             try:
                 await closer()
             except Exception:
@@ -124,18 +131,13 @@ def create_app() -> FastAPI:
 
     @app.get("/answer")
     async def answer(
-        q: str, k: int = Query(15, ge=1), vendor: str | None = None
+        q: str, mode: Mode | None = None, vendor: str | None = None
     ) -> dict[str, Any]:
-        return await synth_mod.answer_local(
-            app.state.graphiti,
-            app.state.driver,
-            app.state.synth_client,
-            app.state.synth_model,
-            q=q,
-            k=k,
-            vendor=vendor,
-            group_id=app.state.settings.group_id,
-        )
+        st = app.state
+        return await router_mod.answer_router(
+            st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
+            st.map_client, st.map_model, st.cheap_client, st.cheap_model,
+            q=q, mode_override=mode, vendor=vendor, settings=st.settings)
 
     @app.get("/search/global")
     async def search_global(

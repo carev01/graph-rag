@@ -57,3 +57,10 @@ def test_drift_defaults():
     assert s.drift_max_followups == 4
     assert s.drift_followup_k == 8
     assert s.drift_iterations == 1
+
+
+def test_router_default_mode():
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.router_default_mode == "drift"
