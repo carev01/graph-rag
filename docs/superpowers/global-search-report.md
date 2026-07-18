@@ -128,8 +128,8 @@ concrete, verifiable AWS **and** Azure documentation URLs — not a hand-wave at
   dropped); empty-shortlist → refusal with **no LLM call**.
 - **App (`tests/unit/test_answer_api_app.py`):** `GET /search/global` returns the
   `{query, answer, citations, communities_used}` shape; missing `q` → 422;
-  lifespan builds the shared embedder + map client and closes the map client on
-  shutdown (embedder shares TEI, not closed); all pre-existing endpoints
+  lifespan builds the shared embedder + map client and closes both on shutdown
+  (each is a dedicated `AsyncOpenAI` pool); all pre-existing endpoints
   (`/health`, `/search/local`, `/answer`, `/timeline`) unchanged — 17 app tests.
 - **`@live` smoke (`tests/integration/test_global_search_live.py`):**
   `/search/global` on `backup-docs` returns a non-empty answer, `communities_used`,
