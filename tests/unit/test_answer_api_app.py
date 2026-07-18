@@ -57,24 +57,6 @@ def _fake_synthesis_client_and_model(settings):
     return FakeSynthClient(), "glm"
 
 
-async def _fake_answer_local(graphiti, driver, synth_client, synth_model, *,
-                              q, k=15, vendor=None, group_id):
-    return {
-        "query": q,
-        "answer": "AWS Backup Vault Lock requires compliance mode [1].",
-        "citations": [
-            {
-                "marker": 1,
-                "fact": "AWS Backup Vault Lock requires compliance mode",
-                "fact_uuid": "f1",
-                "sources": [{"article_id": "art1", "source_url": "https://x/art1"}],
-            }
-        ],
-        "retrieved": 1,
-        "cited": 1,
-    }
-
-
 async def _fake_answer_router(graphiti, driver, embedder, synth_client, synth_model,
                               map_client, map_model, cheap_client, cheap_model, *,
                               q, mode_override, vendor, settings):
@@ -131,7 +113,6 @@ def _stub_deps(monkeypatch):
     monkeypatch.setattr(
         synth_mod, "_synthesis_client_and_model", _fake_synthesis_client_and_model
     )
-    monkeypatch.setattr(synth_mod, "answer_local", _fake_answer_local)
     monkeypatch.setattr(timeline_mod, "timeline_local", _fake_timeline_local)
     import answer_api.global_search as global_mod
     monkeypatch.setattr(app_mod, "build_embedder", lambda s: FakeEmbedder())
