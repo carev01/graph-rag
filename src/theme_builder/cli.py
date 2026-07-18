@@ -122,6 +122,12 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     persisted = await load_persisted(driver, settings.group_id)
     prev_cursor = await prev_corpus_cursor(driver, settings.group_id)
     touched = await touched_entities(driver, settings.group_id, prev_cursor)
+    # Snapshot the new watermark HERE (start of run, alongside `touched`), not
+    # after report generation — otherwise a fact ingested during the run would be
+    # stamped "already covered" (created_at <= a late cursor) yet was never in this
+    # run's touched set, so its community would never regenerate. A start snapshot
+    # leaves such writes strictly after the stored cursor -> caught next run.
+    new_cursor = await _corpus_cursor(driver, settings.group_id)
     matches = match_communities(communities, persisted,
                                 tau=settings.theme_refresh_jaccard_tau)
     dirty, clean = classify(communities, matches, touched)
@@ -174,7 +180,6 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                             "cited_fact_uuids": rep.cited_fact_uuids,
                             "embedding": emb, "generated_at": now})
             regenerated += 1
-        new_cursor = await _corpus_cursor(driver, settings.group_id)
         res = await write_communities_incremental(driver, settings.group_id, entries,
                                                   corpus_cursor=new_cursor)
         matched_persisted = sum(1 for i in matches if matches[i] is not None)
