@@ -75,3 +75,74 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
             g=group_id, lvl=level)
         rows = [dict(rec) async for rec in r if rec["embedding"]]
     return _rank_hits(query_vec, rows, k=k, rating_boost=rating_boost)
+
+
+@dataclass
+class MapResult:
+    community_id: str
+    title: str
+    relevance: int
+    key_points: list[str]
+    fact_ids: list[str]
+
+
+_MAP_PROMPT = (
+    "You are assessing one COMMUNITY report for relevance to a QUESTION. Using ONLY "
+    "the report, respond with JSON: {{\"relevance\": 0-10 (how useful for the question), "
+    "\"key_points\": [short strings relevant to the question], \"fact_ids\": [the fact "
+    "uuids from the report that support those points]}}. fact_ids MUST be uuids that "
+    "appear in the report. Do NOT write URLs.\n\n"
+    "QUESTION: {q}\n\nCOMMUNITY \"{title}\": {summary}\nFINDINGS: {full_report}"
+)
+
+
+def _map_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
+    base = settings.map_llm_base_url or settings.judge_base_url
+    model = settings.map_llm_model or settings.judge_model
+    key = settings.map_llm_api_key or settings.judge_api_key or "not-needed"
+    if not base or not model:
+        raise ValueError("No map model configured. Set map_llm_* or judge_* (GLM-5.2).")
+    return instrument(AsyncOpenAI(api_key=key, base_url=base)), model
+
+
+def _extract_json(raw: str) -> dict | None:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1]
+        if text.startswith("json"):
+            text = text[4:]
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit, *,
+                     relevance_min: int) -> MapResult | None:
+    prompt = _MAP_PROMPT.format(q=q, title=hit.title, summary=hit.summary,
+                                full_report=hit.full_report)
+    obj: dict | None = None
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}])
+        obj = _extract_json(resp.choices[0].message.content or "")
+        if obj is not None:
+            break
+    if obj is None:
+        return None
+    try:
+        relevance = int(obj.get("relevance", 0) or 0)
+    except (TypeError, ValueError):
+        relevance = 0
+    if relevance < relevance_min:
+        return None
+    valid = {u for u in hit.cited_fact_uuids}
+    fact_ids = [f for f in (obj.get("fact_ids") or []) if f in valid]
+    key_points = [str(p) for p in (obj.get("key_points") or [])]
+    return MapResult(community_id=hit.community_id, title=hit.title, relevance=relevance,
+                     key_points=key_points, fact_ids=fact_ids)
