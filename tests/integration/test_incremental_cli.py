@@ -103,3 +103,19 @@ async def test_incremental_no_change_regenerates_nothing(extract_driver, monkeyp
     res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
     assert calls["n"] == 0                    # THE headline: zero LLM report calls
     assert res["reports_reused"] == 2 and res["reports_regenerated"] == 0
+
+
+async def test_corpus_cursor_covers_entity_and_fact_created_at(extract_driver):
+    # Regression: _corpus_cursor must be the max created_at across Episodic,
+    # Entity, AND RELATES_TO. Graphiti writes entities/facts slightly after their
+    # episode, so an Episodic-only max would leave them "after the cursor" and mark
+    # every community dirty on an unchanged graph.
+    import theme_builder.cli as cli
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (:Episodic {group_id:$g, uuid:'ep1', created_at: datetime('2026-01-01T00:00:00Z')})", g=G)
+        await s.run("CREATE (:Entity {group_id:$g, uuid:'e1', created_at: datetime('2026-01-02T00:00:00Z')})", g=G)
+        await s.run("CREATE (a:Entity {group_id:$g, uuid:'e2'})-[:RELATES_TO {group_id:$g, uuid:'f1', "
+                    "created_at: datetime('2026-01-03T00:00:00Z')}]->(b:Entity {group_id:$g, uuid:'e3'})", g=G)
+    cur = await cli._corpus_cursor(extract_driver, G)
+    assert cur.startswith("2026-01-03")     # the fact's created_at, not the episode's

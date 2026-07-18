@@ -57,12 +57,19 @@ async def _fetch_facts(driver: AsyncDriver, group_id: str, uuids: list[str]) -> 
 
 
 async def _corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:
-    """Best-effort 'corpus as-of' watermark stamped on every report: the latest
-    episode timestamp in the group. (The sync layer's opaque cursor would be
-    exact, but this is a cheap, decoupled proxy for slice 1.)"""
+    """The 'corpus as-of' watermark stamped on every report: the latest write time
+    across Episodic, Entity, AND RELATES_TO. It must cover all three because
+    incremental refresh's dirty-detection (theme_builder.incremental.touched_entities)
+    tests Entity/RELATES_TO `created_at` against this stored cursor — and graphiti
+    creates entities/facts slightly AFTER their episode, so an Episodic-only max
+    would leave those newer nodes forever 'after the cursor' and mark every
+    community dirty on an unchanged graph."""
     async with driver.session() as s:
         r = await s.run(
-            "MATCH (e:Episodic {group_id:$g}) RETURN toString(max(e.created_at)) AS c",
+            "CALL { MATCH (e:Episodic {group_id:$g}) RETURN e.created_at AS t "
+            "UNION ALL MATCH (n:Entity {group_id:$g}) RETURN n.created_at AS t "
+            "UNION ALL MATCH ()-[f:RELATES_TO {group_id:$g}]->() RETURN f.created_at AS t } "
+            "RETURN toString(max(t)) AS c",
             g=group_id)
         rec = await r.single()
         return rec["c"] if rec else None
