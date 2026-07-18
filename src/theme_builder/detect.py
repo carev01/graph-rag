@@ -91,8 +91,14 @@ async def detect_communities(driver: AsyncDriver, group_id: str, *,
         try:
             await s.run(_PROJECT, g=group_id, n=name)
             r = await s.run(
+                # Seed Leiden so a re-run over the SAME graph reproduces the SAME
+                # partition (randomSeed only determinism-guarantees at concurrency 1
+                # per GDS). This is what lets incremental refresh recognize an
+                # unchanged community as unchanged instead of regenerating it on
+                # partition wobble; Jaccard matching still absorbs the real drift
+                # when the graph actually changes.
                 "CALL gds.leiden.stream($n, {relationshipWeightProperty: 'weight', "
-                "includeIntermediateCommunities: true}) "
+                "includeIntermediateCommunities: true, randomSeed: 42, concurrency: 1}) "
                 "YIELD nodeId, intermediateCommunityIds "
                 "RETURN gds.util.asNode(nodeId).uuid AS uuid, intermediateCommunityIds AS levels",
                 n=name)
