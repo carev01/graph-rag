@@ -9,7 +9,9 @@ _MIN = dict(docext_base_url="http://x", docext_read_key="k", neo4j_uri="bolt://x
 
 class _FakeClient:
     def __init__(self, contents):
-        self._c = list(contents); self.chat = self; self.completions = self
+        self._c = list(contents)
+        self.chat = self
+        self.completions = self
     async def create(self, **kw):
         c = self._c.pop(0)
         return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": c})()})()]})

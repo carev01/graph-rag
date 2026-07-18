@@ -42,13 +42,17 @@ async def test_global_search_end_to_end(extract_driver):
         async def create_batch(self, texts): return [[1.0, 0.0] for _ in texts]
 
     class _MapClient:   # returns a valid map result citing f1
-        def __init__(self): self.chat = self; self.completions = self
+        def __init__(self):
+            self.chat = self
+            self.completions = self
         async def create(self, **kw):
             c = json.dumps({"relevance": 9, "key_points": ["S3 supported"], "fact_ids": ["f1"]})
             return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": c})()})()]})
 
     class _ReduceClient:  # cites [1] and (badly) writes a URL + an invalid marker
-        def __init__(self): self.chat = self; self.completions = self
+        def __init__(self):
+            self.chat = self
+            self.completions = self
         async def create(self, **kw):
             c = "AWS Backup supports S3 [1]. See https://evil/x [9]."
             return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": c})()})()]})
@@ -71,9 +75,45 @@ async def test_global_search_empty_shortlist_refuses(extract_driver):
         async def create_batch(self, texts): return [[1.0, 0.0] for _ in texts]
 
     class _Boom:   # must NOT be called (no communities -> no LLM)
-        def __init__(self): self.chat = self; self.completions = self
+        def __init__(self):
+            self.chat = self
+            self.completions = self
         async def create(self, **kw): raise AssertionError("no LLM on empty shortlist")
 
     res = await global_search(extract_driver, _Emb(), _Boom(), "mm", _Boom(), "rm",
                               q="x", level=1, k=5, group_id=g, relevance_min=2)
     assert res["answer"] == _REFUSAL and res["citations"] == []
+
+
+async def test_global_search_all_maps_filtered_refuses(extract_driver):
+    # Shortlist is non-empty, but every map result is below the relevance floor,
+    # so `results` is empty -> refusal, and the reduce tier must NOT be called.
+    from answer_api.global_search import global_search, _REFUSAL
+    import json
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (:Community {group_id:$g, level:1, community_id:'c1', title:'S3', "
+                    "summary:'s', rating:8.0, cited_fact_uuids:['f1'], full_report:'[]', embedding:[1.0,0.0]})", g=g)
+
+    class _Emb:
+        async def create_batch(self, texts): return [[1.0, 0.0] for _ in texts]
+
+    class _LowRelevanceMap:   # shortlisted + called, but relevance below the floor -> None
+        def __init__(self):
+            self.chat = self
+            self.completions = self
+        async def create(self, **kw):
+            c = json.dumps({"relevance": 0, "key_points": ["x"], "fact_ids": ["f1"]})
+            return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": c})()})()]})
+
+    class _Boom:   # the reduce tier must NOT run when nothing survives the map
+        def __init__(self):
+            self.chat = self
+            self.completions = self
+        async def create(self, **kw): raise AssertionError("no reduce call when all maps filtered")
+
+    res = await global_search(extract_driver, _Emb(), _LowRelevanceMap(), "mm", _Boom(), "rm",
+                              q="x", level=1, k=5, group_id=g, relevance_min=2)
+    assert res["answer"] == _REFUSAL
+    assert res["citations"] == [] and res["communities_used"] == []
