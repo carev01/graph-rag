@@ -93,6 +93,7 @@ def _render_timeline(timeline_result: dict) -> tuple[str, list[dict]]:
             span += f", invalid_at {invalid}"
         lines.append(f"- **{e['fact']}** — {span} ({e.get('status', '')}) [{i}]")
         citations.append({"marker": i, "fact_uuid": e["fact_uuid"],
+                          "valid_at": e.get("valid_at"), "invalid_at": e.get("invalid_at"),
                           "sources": e.get("sources", [])})
     return "\n".join(lines), citations
 

@@ -66,5 +66,5 @@ async def timeline_local(graphiti, driver, *, q, limit=30, vendor=None, group_id
                       "invalid_at": getattr(e, "invalid_at", None),
                       "status": _fact_status(getattr(e, "invalid_at", None),
                                              swept.get(e.uuid, False)),
-                      "sources": citations.get(e.uuid, [])} for e in edges],
+                      "sources": citations.get(e.uuid, {}).get("sources", [])} for e in edges],
     }

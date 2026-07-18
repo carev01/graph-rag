@@ -193,7 +193,10 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = [{"marker": m, "fact_uuid": marker_map[m]["fact_uuid"],
-                  "sources": resolved.get(marker_map[m]["fact_uuid"], [])} for m in cited]
+                  "valid_at": resolved.get(marker_map[m]["fact_uuid"], {}).get("valid_at"),
+                  "invalid_at": resolved.get(marker_map[m]["fact_uuid"], {}).get("invalid_at"),
+                  "sources": resolved.get(marker_map[m]["fact_uuid"], {}).get("sources", [])}
+                 for m in cited]
     return {"query": q, "answer": answer, "citations": citations,
             "communities_used": [{"community_id": m.community_id, "title": m.title,
                                   "relevance": m.relevance} for m in results]}

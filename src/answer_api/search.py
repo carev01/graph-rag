@@ -45,5 +45,6 @@ async def search_local(graphiti, driver, *, q, k=10, vendor=None,
         "query": q, "count": len(edges),
         "results": [{"fact": e.fact, "fact_uuid": e.uuid,
                      "valid_at": getattr(e, "valid_at", None),
-                     "sources": citations.get(e.uuid, [])} for e in edges],
+                     "invalid_at": getattr(e, "invalid_at", None),
+                     "sources": citations.get(e.uuid, {}).get("sources", [])} for e in edges],
     }
