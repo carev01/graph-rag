@@ -62,6 +62,8 @@ class ExtractSettings(BaseSettings):
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
     report_token_budget: int = 12000     # per-community context budget (~chars/4)
     report_top_entities: int = 30        # member entities included in a report's context
+    # --- incremental community refresh (design: incremental-community-refresh) ---
+    theme_refresh_jaccard_tau: float = 0.5   # min member-set Jaccard to treat a fresh community as the same as a persisted one
     # --- global (map-reduce) search (design: global-search) ---
     map_llm_base_url: str = ""   # map tier; defaults to the judge/synthesis tier when empty
     map_llm_model: str = ""
