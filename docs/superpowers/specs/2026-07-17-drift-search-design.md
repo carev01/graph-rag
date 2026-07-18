@@ -243,3 +243,8 @@ drift_iterations: int = 1        # follow-up rounds; clamped to [1,2]
 - `/answer` router + uniform `mode` contract (Phase 4 slice 2); iterations > 2 /
   adaptive depth by query breadth; cross-encoder reranking for follow-ups; caching
   primer shortlists across requests; per-follow-up (vs merged) evidence attribution.
+- **Normalize the empty-shortlist degrade response shape.** In v1, that path
+  returns `answer_local`'s shape (`retrieved`/`cited`, no `follow_ups`/
+  `communities_used`) plus a `degraded` flag — a documented divergence from the
+  DRIFT response shape. The `/answer` router slice (which owns the uniform `mode`
+  contract) should reconcile it so every mode returns one shape.
