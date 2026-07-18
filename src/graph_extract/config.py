@@ -75,6 +75,8 @@ class ExtractSettings(BaseSettings):
     drift_max_followups: int = 4     # follow-ups kept per round (relevance-budgeted)
     drift_followup_k: int = 8        # local-search k per follow-up
     drift_iterations: int = 1        # follow-up rounds; clamped to [1,2] at call time
+    # --- /answer router (design: answer-router) ---
+    router_default_mode: str = "drift"   # mode when no heuristic fires and the cheap classifier is absent/uncertain
     # --- hybrid extraction routing (design: hybrid-extraction-router) ---
     # ON by default; degrades to strong-only when cheap_llm_api_key is empty.
     extraction_routing: bool = True
