@@ -136,6 +136,7 @@ async def main() -> None:
         await driver.close()
         await sc.close()
         await mc.close()
+        await embedder.client.close()   # standalone embedder owns a dedicated pool
         if cc is not None:
             await cc.close()
 
