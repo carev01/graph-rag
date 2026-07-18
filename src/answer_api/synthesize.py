@@ -76,6 +76,8 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
     answer, cited = _finalize_answer(raw, marker_map)
     citations = [{"marker": m, "fact": marker_map[m]["fact"],
                   "fact_uuid": marker_map[m]["fact_uuid"],
+                  "valid_at": marker_map[m].get("valid_at"),
+                  "invalid_at": marker_map[m].get("invalid_at"),
                   "sources": marker_map[m]["sources"]} for m in cited]
     return {"query": q, "answer": answer, "citations": citations,
             "retrieved": len(results), "cited": len(cited)}

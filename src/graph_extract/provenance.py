@@ -30,18 +30,24 @@ class Provenance:
                 a=article_id, u=episode_uuid, i=chunk_index, hp=heading_path,
                 tc=token_count, h=content_hash)
 
-    async def resolve_citations(self, fact_uuids: list[str]) -> dict[str, list[dict]]:
+    async def resolve_citations(self, fact_uuids: list[str]) -> dict[str, dict]:
         async with self._driver.session() as s:
             r = await s.run(
                 "MATCH ()-[f:RELATES_TO]->() WHERE f.uuid IN $uuids "
-                "OPTIONAL MATCH (a:Article)-[:HAS_EPISODE]->(e:Episodic) "
+                "OPTIONAL MATCH (a:Article)-[he:HAS_EPISODE]->(e:Episodic) "
                 "  WHERE e.uuid IN f.episodes "
-                "WITH f.uuid AS uuid, "
+                "OPTIONAL MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->"
+                "  (:Source)-[:HAS_ARTICLE]->(a) "
+                "WITH f.uuid AS uuid, toString(f.valid_at) AS valid_at, "
+                "     toString(f.invalid_at) AS invalid_at, "
                 "     collect(DISTINCT CASE WHEN a IS NULL THEN NULL ELSE "
-                "       {url:a.source_url, title:a.title, article_id:a.id} END) AS raw "
-                "RETURN uuid, [x IN raw WHERE x IS NOT NULL] AS sources",
+                "       {url:a.source_url, title:a.title, article_id:a.id, "
+                "        section:he.heading_path, vendor:v.name, product:p.name} END) AS raw "
+                "RETURN uuid, valid_at, invalid_at, [x IN raw WHERE x IS NOT NULL] AS sources",
                 uuids=fact_uuids)
-            return {rec["uuid"]: rec["sources"] async for rec in r}
+            return {rec["uuid"]: {"valid_at": rec["valid_at"],
+                                  "invalid_at": rec["invalid_at"],
+                                  "sources": rec["sources"]} async for rec in r}
 
     async def resolve_chain(self, fact_edge_uuid: str) -> list[dict]:
         async with self._driver.session() as s:

@@ -162,7 +162,10 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = [{"marker": m, "fact_uuid": marker_map[m]["fact_uuid"],
-                  "sources": resolved.get(marker_map[m]["fact_uuid"], [])} for m in cited]
+                  "valid_at": resolved.get(marker_map[m]["fact_uuid"], {}).get("valid_at"),
+                  "invalid_at": resolved.get(marker_map[m]["fact_uuid"], {}).get("invalid_at"),
+                  "sources": resolved.get(marker_map[m]["fact_uuid"], {}).get("sources", [])}
+                 for m in cited]
     return answer, citations
 
 

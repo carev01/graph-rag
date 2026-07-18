@@ -19,6 +19,7 @@ from answer_api import synthesize as synth_mod
 from answer_api import global_search as global_mod
 from answer_api import drift as drift_mod
 from answer_api import timeline as timeline_mod
+from answer_api import freshness as freshness_mod
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ def _render_timeline(timeline_result: dict) -> tuple[str, list[dict]]:
             span += f", invalid_at {invalid}"
         lines.append(f"- **{e['fact']}** — {span} ({e.get('status', '')}) [{i}]")
         citations.append({"marker": i, "fact_uuid": e["fact_uuid"],
+                          "valid_at": e.get("valid_at"), "invalid_at": e.get("invalid_at"),
                           "sources": e.get("sources", [])})
     return "\n".join(lines), citations
 
@@ -154,4 +156,13 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         raw = await _dispatch("drift", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, vendor=vendor,
                               settings=settings)
-    return _normalize(mode, via, fallback_from, raw, q)
+    elif mode == "global" and not raw.get("communities_used"):
+        fallback_from = "global"
+        mode = "local"
+        raw = await _dispatch("local", graphiti, driver, embedder, synth_client,
+                              synth_model, map_client, map_model, q=q, vendor=vendor,
+                              settings=settings)
+    env = _normalize(mode, via, fallback_from, raw, q)
+    env["freshness"] = await freshness_mod.freshness(
+        driver, settings.group_id, reports=mode in ("global", "drift"))
+    return env
