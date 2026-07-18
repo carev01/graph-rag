@@ -146,3 +146,56 @@ async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit,
     key_points = [str(p) for p in (obj.get("key_points") or [])]
     return MapResult(community_id=hit.community_id, title=hit.title, relevance=relevance,
                      key_points=key_points, fact_ids=fact_ids)
+
+
+_REDUCE_PROMPT = (
+    "Answer the QUESTION by synthesizing across these community findings, organized "
+    "by theme and vendor. Cite every claim with the [N] fact markers shown. Use ONLY "
+    "these findings. Do NOT write any URL. If nothing is relevant, reply exactly: "
+    "\"" + _REFUSAL + "\"\n\nQUESTION: {q}\n\nFINDINGS:\n{blocks}\n\nAnswer:"
+)
+
+
+async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: str,
+                        synth_client: AsyncOpenAI, synth_model: str, *, q: str,
+                        level: int, k: int, group_id: str, relevance_min: int) -> dict:
+    hits = await shortlist_communities(driver, embedder, q, level=level, k=k, group_id=group_id)
+    if not hits:
+        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+    maps = await asyncio.gather(
+        *[map_report(map_client, map_model, q, h, relevance_min=relevance_min) for h in hits],
+        return_exceptions=True)
+    results: list[MapResult] = []
+    for m in maps:
+        if isinstance(m, Exception):
+            logger.warning("global map failed: %s", m)
+        elif m is not None:
+            results.append(m)
+    if not results:
+        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+    # number the ordered-unique union of fact ids -> marker_map
+    marker_map: dict[int, dict] = {}
+    fact_to_marker: dict[str, int] = {}
+    for m in results:
+        for fid in m.fact_ids:
+            if fid not in fact_to_marker:
+                idx = len(fact_to_marker) + 1
+                fact_to_marker[fid] = idx
+                marker_map[idx] = {"fact_uuid": fid}
+    blocks = []
+    for m in results:
+        markers = " ".join(f"[{fact_to_marker[f]}]" for f in m.fact_ids)
+        pts = "\n".join(f"- {p}" for p in m.key_points)
+        blocks.append(f"COMMUNITY \"{m.title}\" (relevance {m.relevance}):\n{pts}\n"
+                      f"Supporting facts: {markers}")
+    resp = await synth_client.chat.completions.create(
+        model=synth_model, temperature=0, max_tokens=3000,
+        messages=[{"role": "user", "content": _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks))}])
+    answer, cited = _finalize_answer(resp.choices[0].message.content or "", marker_map)
+    resolved = await Provenance(driver).resolve_citations(
+        [marker_map[m]["fact_uuid"] for m in cited])
+    citations = [{"marker": m, "fact_uuid": marker_map[m]["fact_uuid"],
+                  "sources": resolved.get(marker_map[m]["fact_uuid"], [])} for m in cited]
+    return {"query": q, "answer": answer, "citations": citations,
+            "communities_used": [{"community_id": m.community_id, "title": m.title,
+                                  "relevance": m.relevance} for m in results]}
