@@ -132,3 +132,22 @@ async def test_corpus_cursor_includes_sweep_invalid_at(extract_driver):
                     "(b:Entity {group_id:$g, uuid:'e2', created_at: datetime('2026-01-02')})", g=G)
     cur = await cli._corpus_cursor(extract_driver, G)
     assert cur.startswith("2026-05-01")     # sweep invalid_at dominates the created_ats
+
+
+async def test_swept_community_regenerates_once(extract_driver, monkeypatch):
+    import theme_builder.cli as cli
+    calls = _patch(monkeypatch)
+    # persisted A {e1,e2}, B {e3,e4}, corpus_cursor 2026-03-01; nothing created after it
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-01-01")
+    # a fact among A's members is silently swept AFTER the community's corpus_cursor
+    async with extract_driver.session() as s:
+        await s.run("MATCH (a:Entity {uuid:'e1', group_id:$g}), (b:Entity {uuid:'e2', group_id:$g}) "
+                    "CREATE (a)-[:RELATES_TO {group_id:$g, uuid:'fx', created_at: datetime('2026-01-01'), "
+                    "expired_by_sweep: true, invalid_at: datetime('2026-06-01')}]->(b)", g=G)
+    r1 = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+    assert calls["n"] == 1                       # only community A regenerated (its fact was swept)
+    assert r1["reports_regenerated"] == 1 and r1["reports_reused"] == 1
+    # second run: the watermark now covers the sweep invalid_at -> A clean -> zero regen
+    r2 = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+    assert calls["n"] == 1                       # unchanged: no further regeneration
+    assert r2["reports_regenerated"] == 0 and r2["reports_reused"] == 2
