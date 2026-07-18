@@ -36,3 +36,13 @@ def test_dense_thresholds_default():
     s = ExtractSettings(_env_file=None, **_MIN)
     assert s.dense_table_line_ratio == 0.25
     assert s.dense_pipe_count == 200
+
+
+def test_global_search_defaults():
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert ExtractSettings.model_fields["map_llm_base_url"].default == ""
+    assert s.global_shortlist_k == 10
+    assert s.global_default_level == 1
+    assert s.global_map_relevance_min == 2
