@@ -189,9 +189,10 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
         except Exception:
             logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
         executed.append(fu)
-    if rounds == 2 and _dedup_facts(facts):
+    round1_facts = _dedup_facts(facts)
+    if rounds == 2 and round1_facts:
         refined = await _refine_followups(synth_client, synth_model, q=q,
-                                          facts=_dedup_facts(facts),
+                                          facts=round1_facts,
                                           max_followups=max_followups, hit_ids=hit_ids)
         for fu in refined:
             try:
@@ -203,10 +204,11 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
     follow_ups_meta = [{"query": fu.query, "community_id": fu.community_id,
                         "iteration": fu.iteration} for fu in executed]
     communities_used = [{"community_id": h.community_id, "title": h.title} for h in hits]
-    if not _dedup_facts(facts):
+    deduped = _dedup_facts(facts)
+    if not deduped:
         return {"query": q, "answer": _REFUSAL, "citations": [],
                 "follow_ups": follow_ups_meta, "communities_used": communities_used}
     answer, citations = await _synthesize(synth_client, synth_model, driver, q=q,
-                                          preliminary_answer=preliminary, facts=facts)
+                                          preliminary_answer=preliminary, facts=deduped)
     return {"query": q, "answer": answer, "citations": citations,
             "follow_ups": follow_ups_meta, "communities_used": communities_used}

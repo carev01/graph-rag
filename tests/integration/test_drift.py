@@ -68,6 +68,22 @@ async def test_primer_bad_json_falls_back_to_single_query(extract_driver):
     assert [(f.query, f.community_id) for f in fus] == [("original q", None)]   # single fallback
 
 
+async def test_primer_zero_valid_followups_falls_back_keeping_preliminary(extract_driver):
+    from answer_api.drift import _primer
+    await _seed_community(extract_driver)
+    # valid JSON with a non-empty preliminary, but every follow-up is unusable
+    # (blank query) -> _parse_followups returns [] -> single-q fallback, and the
+    # PARSED preliminary is retained (unlike the unparseable-JSON path above).
+    payload = json.dumps({"preliminary_answer": "kept draft",
+                          "follow_ups": [{"query": "", "community_id": "c1", "relevance": 9}]})
+    out = await _primer(_FakeEmbedder([1.0, 0.0]), _FakeLLM([payload]), "m", extract_driver,
+                        q="original q", level=1, k=5, max_followups=4, group_id=GROUP_ID)
+    assert out is not None
+    preliminary, fus, hits = out
+    assert preliminary == "kept draft"                    # parsed draft kept, not blanked
+    assert [(f.query, f.community_id) for f in fus] == [("original q", None)]   # single fallback
+
+
 async def test_top_member_entity_picks_highest_degree(extract_driver):
     from answer_api.drift import _top_member_entity
     async with extract_driver.session() as s:
