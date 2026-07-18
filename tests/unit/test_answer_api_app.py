@@ -24,6 +24,15 @@ class FakeSynthClient:
         pass
 
 
+class FakeEmbedder:
+    class _Client:
+        async def close(self) -> None:
+            pass
+
+    def __init__(self) -> None:
+        self.client = FakeEmbedder._Client()
+
+
 async def _fake_search_local(graphiti, driver, *, q, k=10, vendor=None,
                               include_invalid=False, group_id):
     return {
@@ -106,7 +115,7 @@ def _stub_deps(monkeypatch):
     monkeypatch.setattr(synth_mod, "answer_local", _fake_answer_local)
     monkeypatch.setattr(timeline_mod, "timeline_local", _fake_timeline_local)
     import answer_api.global_search as global_mod
-    monkeypatch.setattr(app_mod, "build_embedder", lambda s: object())
+    monkeypatch.setattr(app_mod, "build_embedder", lambda s: FakeEmbedder())
     monkeypatch.setattr(global_mod, "_map_client_and_model",
                         lambda s: (FakeSynthClient(), "map-model"))
     monkeypatch.setattr(global_mod, "global_search", _fake_global_search)

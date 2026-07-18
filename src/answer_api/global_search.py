@@ -8,7 +8,6 @@ import asyncio
 import json
 import logging
 import math
-import re
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
@@ -21,7 +20,6 @@ from answer_api.synthesize import _finalize_answer
 logger = logging.getLogger(__name__)
 
 _REFUSAL = "I don't have enough thematic coverage to answer that from the community reports."
-_URL_RE = re.compile(r"https?://[^\s\[\]]+", re.IGNORECASE)   # local copy (answer_api-independent)
 
 
 @dataclass

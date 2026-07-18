@@ -55,15 +55,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await graphiti.close()
         await driver.close()
         raise
-    # Same guard, extended again: if building the embedder or map client
-    # fails, close graphiti, driver, and synth_client before re-raising.
+    # Same guard, extended again: if building the embedder fails, close
+    # graphiti, driver, and synth_client before re-raising.
     try:
         embedder = build_embedder(settings)
+    except Exception:
+        await graphiti.close()
+        await driver.close()
+        await synth_client.close()
+        raise
+    # Same guard, extended once more: if building the map client fails,
+    # close graphiti, driver, synth_client, and the already-built embedder's
+    # dedicated client before re-raising.
+    try:
         map_client, map_model = global_mod._map_client_and_model(settings)
     except Exception:
         await graphiti.close()
         await driver.close()
         await synth_client.close()
+        await embedder.client.close()
         raise
     app.state.settings = settings
     app.state.graphiti = graphiti
@@ -81,6 +91,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             ("driver", driver.close),
             ("synth_client", synth_client.close),
             ("map_client", map_client.close),
+            ("embedder", lambda: embedder.client.close()),
         ):
             try:
                 await closer()
