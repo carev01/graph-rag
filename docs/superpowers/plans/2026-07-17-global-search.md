@@ -441,12 +441,12 @@ git commit -m "feat(global): per-report map (relevance + key points + validated 
 ```python
 # add to tests/integration/test_global_search.py
 async def test_global_search_end_to_end(extract_driver):
-    from answer_api.global_search import global_search, CommunityHit
-    import answer_api.global_search as gs
+    from answer_api.global_search import global_search
     import json
     g = "backup-docs"
     # seed a community + a real fact whose provenance resolves to a URL
     async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")   # isolate: shared module-scoped container
         await s.run("CREATE (a:Article {id:'art1', source_url:'https://x/art1', title:'T'})"
                     "-[:HAS_EPISODE]->(:Episodic {uuid:'ep1', group_id:$g})", g=g)
         await s.run("CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f1', episodes:['ep1'], "
@@ -472,7 +472,8 @@ async def test_global_search_end_to_end(extract_driver):
     res = await global_search(extract_driver, _Emb(), _MapClient(), "mm", _ReduceClient(), "rm",
                               q="how is S3 backed up", level=1, k=5, group_id=g, relevance_min=2)
     assert res["citations"][0]["fact_uuid"] == "f1"
-    assert res["citations"][0]["sources"][0]["source_url"] == "https://x/art1"   # #2 chain
+    # Provenance.resolve_citations returns sources keyed {url, title, article_id}
+    assert res["citations"][0]["sources"][0]["url"] == "https://x/art1"          # #2 chain
     assert "http" not in res["answer"]                     # URL stripped
     assert [c["marker"] for c in res["citations"]] == [1]  # invalid [9] dropped
     assert res["communities_used"][0]["community_id"] == "c1"
