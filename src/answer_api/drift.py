@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 
 from answer_api.search import search_local
-from answer_api.synthesize import _finalize_answer, answer_local
+from answer_api.synthesize import _finalize_answer, _build_citations, answer_local
 from answer_api.global_search import shortlist_communities, _extract_json
 from graph_extract.provenance import Provenance
 
@@ -161,11 +161,7 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
     answer, cited = _finalize_answer(resp.choices[0].message.content or "", marker_map)
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
-    citations = [{"marker": m, "fact_uuid": marker_map[m]["fact_uuid"],
-                  "valid_at": resolved.get(marker_map[m]["fact_uuid"], {}).get("valid_at"),
-                  "invalid_at": resolved.get(marker_map[m]["fact_uuid"], {}).get("invalid_at"),
-                  "sources": resolved.get(marker_map[m]["fact_uuid"], {}).get("sources", [])}
-                 for m in cited]
+    citations = _build_citations(cited, marker_map, resolved)
     return answer, citations
 
 

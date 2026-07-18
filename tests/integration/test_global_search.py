@@ -60,7 +60,7 @@ async def test_global_search_end_to_end(extract_driver):
     res = await global_search(extract_driver, _Emb(), _MapClient(), "mm", _ReduceClient(), "rm",
                               q="how is S3 backed up", level=1, k=5, group_id=g, relevance_min=2)
     assert res["citations"][0]["fact_uuid"] == "f1"
-    # Provenance.resolve_citations returns sources keyed {url, title, article_id}
+    # Provenance.resolve_citations returns sources keyed {url, title, article_id, vendor, product, section}
     assert res["citations"][0]["sources"][0]["url"] == "https://x/art1"          # #2 chain
     assert "http" not in res["answer"]                     # URL stripped
     assert [c["marker"] for c in res["citations"]] == [1]  # invalid [9] dropped

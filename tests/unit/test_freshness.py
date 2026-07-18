@@ -24,7 +24,9 @@ class _FakeSession:
 class _FakeDriver:
     def __init__(self, values):
         self._values = list(values)
+        self.session_calls = 0
     def session(self):
+        self.session_calls += 1
         return _FakeSession(self._values.pop(0))
 
 
@@ -42,6 +44,10 @@ async def test_freshness_without_reports_skips_community_query():
     out = await freshness(d, "backup-docs", reports=False)
     assert out["graph_cursor_time"] == "2026-07-18T00:00:00Z"
     assert out["reports_as_of"] is None
+    # regression-proof the gate: the community query must NOT run when reports=False
+    # (this assertion lives outside freshness's broad except, so a gate regression
+    # would surface here rather than being swallowed into a None).
+    assert d.session_calls == 1
 
 
 async def test_freshness_resilient_on_error():

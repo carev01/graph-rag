@@ -39,6 +39,20 @@ def _finalize_answer(raw: str, marker_map: dict[int, dict]) -> tuple[str, list[i
     return text, cited
 
 
+def _build_citations(cited: list[int], marker_map: dict, resolved: dict) -> list[dict]:
+    """Assemble citation objects from resolved provenance — one per cited marker
+    (design #2: every field is graph-derived, none LLM-authored). Shared by the
+    global and DRIFT reducers, whose citation shape is identical."""
+    out: list[dict] = []
+    for m in cited:
+        uuid = marker_map[m]["fact_uuid"]
+        r = resolved.get(uuid, {})
+        out.append({"marker": m, "fact_uuid": uuid,
+                    "valid_at": r.get("valid_at"), "invalid_at": r.get("invalid_at"),
+                    "sources": r.get("sources", [])})
+    return out
+
+
 def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
     """Synthesis LLM = GLM-5.2 via the judge_* config (shared endpoint for now;
     point at a dedicated synthesis model later without touching the judge)."""
