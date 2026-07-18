@@ -73,3 +73,55 @@ def classify(fresh: list[Community], matches: dict[int, "PersistedCommunity | No
         else:
             clean.append(i)
     return dirty, clean
+
+
+async def touched_entities(driver: AsyncDriver, group_id: str,
+                           prev_cursor: str | None) -> set[str] | None:
+    """Entity uuids whose data changed since prev_cursor: entities created after it,
+    plus both endpoints of RELATES_TO facts created after it. prev_cursor=None
+    (no prior layer) -> None, meaning 'treat everything as new'."""
+    if prev_cursor is None:
+        return None
+    touched: set[str] = set()
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (e:Entity {group_id:$g}) WHERE e.created_at > datetime($c) "
+            "RETURN e.uuid AS uuid", g=group_id, c=prev_cursor)
+        touched |= {rec["uuid"] async for rec in r}
+        r = await s.run(
+            "MATCH (a:Entity {group_id:$g})-[f:RELATES_TO {group_id:$g}]->"
+            "(b:Entity {group_id:$g}) WHERE f.created_at > datetime($c) "
+            "RETURN a.uuid AS a, b.uuid AS b", g=group_id, c=prev_cursor)
+        async for rec in r:
+            touched.add(rec["a"])
+            touched.add(rec["b"])
+    return touched
+
+
+async def load_persisted(driver: AsyncDriver, group_id: str) -> list[PersistedCommunity]:
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (c:Community {group_id:$g}) "
+            "OPTIONAL MATCH (c)<-[:IN_COMMUNITY]-(e:Entity) "
+            "WITH c, collect(e.uuid) AS members "
+            "RETURN c.community_id AS community_id, c.level AS level, members, "
+            "c.title AS title, coalesce(c.summary,'') AS summary, "
+            "coalesce(c.full_report,'[]') AS full_report, coalesce(c.rating,0.0) AS rating, "
+            "coalesce(c.rating_explanation,'') AS rating_explanation, "
+            "coalesce(c.tags,[]) AS tags, coalesce(c.cited_fact_uuids,[]) AS cited_fact_uuids, "
+            "c.embedding AS embedding, c.generated_at AS generated_at", g=group_id)
+        return [PersistedCommunity(
+            community_id=x["community_id"], level=x["level"], members=set(x["members"]),
+            title=x["title"], summary=x["summary"], full_report=x["full_report"],
+            rating=x["rating"], rating_explanation=x["rating_explanation"], tags=x["tags"],
+            cited_fact_uuids=x["cited_fact_uuids"], embedding=x["embedding"],
+            generated_at=x["generated_at"]) async for x in r]
+
+
+async def prev_corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (c:Community {group_id:$g}) RETURN toString(max(c.corpus_cursor)) AS c",
+            g=group_id)
+        rec = await r.single()
+        return rec["c"] if rec else None
