@@ -330,9 +330,9 @@ _PRIMER_PROMPT = (
     "Use the COMMUNITY themes below as leads (not as the final answer). Draft a "
     "brief preliminary answer and 3-6 targeted follow-up questions that would "
     "retrieve concrete supporting facts. Tag each follow-up with the community_id "
-    "it draws from, or null. Respond with ONLY JSON: {\"preliminary_answer\": str, "
-    "\"follow_ups\": [{\"query\": str, \"community_id\": str|null, "
-    "\"relevance\": 0-10}]}. Do NOT write URLs.\n\n"
+    "it draws from, or null. Respond with ONLY JSON: {{\"preliminary_answer\": str, "
+    "\"follow_ups\": [{{\"query\": str, \"community_id\": str|null, "
+    "\"relevance\": 0-10}}]}}. Do NOT write URLs.\n\n"
     "QUESTION: {q}\n\nCOMMUNITIES:\n{blocks}"
 )
 
@@ -532,9 +532,11 @@ top import block should read
 ```python
 import json
 import pytest
-from answer_api.drift import FollowUp, _parse_followups, _refine_followups
+from answer_api.drift import _parse_followups, _refine_followups
 ```
-(merging Task 3's `from answer_api.drift import FollowUp, _parse_followups`). Then
+(replacing Task 3's `from answer_api.drift import FollowUp, _parse_followups` — drop
+`FollowUp`, which no test in this file constructs by name; leaving it imported is an
+unused-import F401 that fails the CI `ruff check src tests` gate). Then
 append the `_FakeLLM` class + the two async tests below:
 
 ```python
