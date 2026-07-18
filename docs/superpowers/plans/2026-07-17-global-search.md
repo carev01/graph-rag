@@ -522,7 +522,7 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
         return_exceptions=True)
     results: list[MapResult] = []
     for m in maps:
-        if isinstance(m, Exception):
+        if isinstance(m, BaseException):   # gather(return_exceptions=True) yields BaseException; narrows else to MapResult
             logger.warning("global map failed: %s", m)
         elif m is not None:
             results.append(m)
