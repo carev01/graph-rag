@@ -75,6 +75,16 @@ async def _fake_answer_local(graphiti, driver, synth_client, synth_model, *,
     }
 
 
+async def _fake_answer_router(graphiti, driver, embedder, synth_client, synth_model,
+                              map_client, map_model, cheap_client, cheap_model, *,
+                              q, mode_override, vendor, settings):
+    return {"mode": mode_override or "drift", "query": q, "answer": "routed answer [1].",
+            "citations": [{"marker": 1, "fact_uuid": "f1",
+                           "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],
+            "routing": {"chosen": mode_override or "drift", "via": "override" if mode_override else "default",
+                        "fallback_from": None}}
+
+
 async def _fake_timeline_local(graphiti, driver, *, q, limit=30, vendor=None,
                                 group_id):
     return {
@@ -130,6 +140,9 @@ def _stub_deps(monkeypatch):
     monkeypatch.setattr(global_mod, "global_search", _fake_global_search)
     import answer_api.drift as drift_mod
     monkeypatch.setattr(drift_mod, "drift_search", _fake_drift_search)
+    import answer_api.router as router_mod
+    monkeypatch.setattr(router_mod, "answer_router", _fake_answer_router)
+    monkeypatch.setattr(router_mod, "_cheap_classify_client", lambda s: (None, ""))
 
 
 async def test_health():
@@ -161,18 +174,33 @@ async def test_search_local_requires_q():
     assert resp.status_code == 422
 
 
-async def test_answer_returns_stubbed_synthesis():
+async def test_answer_router_returns_envelope():
     app = app_mod.create_app()
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
         async with app.router.lifespan_context(app):
-            resp = await c.get("/answer", params={"q": "vault lock"})
+            resp = await c.get("/answer", params={"q": "plan retention"})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"query", "answer", "citations", "retrieved", "cited"}
-    assert body["query"] == "vault lock"
-    assert body["retrieved"] == 1
-    assert body["cited"] == 1
+    assert body["mode"] == "drift"
+    assert body["routing"]["chosen"] == "drift"
     assert body["citations"][0]["fact_uuid"] == "f1"
+
+
+async def test_answer_mode_override_forces_mode():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/answer", params={"q": "x", "mode": "timeline"})
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "timeline"
+
+
+async def test_answer_invalid_mode_is_422():
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/answer", params={"q": "x", "mode": "bogus"})
+    assert resp.status_code == 422
 
 
 async def test_answer_requires_q():
@@ -258,7 +286,6 @@ async def test_drift_iterations_over_two_is_422():
         ("/timeline", {"q": "x", "limit": -1}),
         ("/search/local", {"q": "x", "k": 0}),
         ("/search/local", {"q": "x", "k": -3}),
-        ("/answer", {"q": "x", "k": 0}),
     ],
 )
 async def test_nonpositive_limit_is_422(path, params):
@@ -275,7 +302,6 @@ async def test_nonpositive_limit_is_422(path, params):
     [
         ("/timeline", {"q": "x", "limit": 1}),
         ("/search/local", {"q": "x", "k": 1}),
-        ("/answer", {"q": "x", "k": 1}),
     ],
 )
 async def test_limit_one_is_allowed(path, params):
