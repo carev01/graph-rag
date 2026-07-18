@@ -123,3 +123,136 @@ async def test_run_followup_biases_by_center_node(extract_driver):
     g2 = _CapGraphiti()
     await _run_followup(g2, extract_driver, FollowUp("q", None, 1), k=8, group_id=GROUP_ID)
     assert g2.last_center is None                   # untagged -> plain local
+
+
+async def _seed_fact_provenance(driver, cid="c1"):
+    async with driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (a:Article {id:'art1', source_url:'https://x/art1', title:'T'})"
+                    "-[:HAS_EPISODE]->(:Episodic {uuid:'ep1', group_id:$g})", g=GROUP_ID)
+        await s.run("CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f1', episodes:['ep1'], "
+                    "fact:'AWS Backup supports S3'}]->(y:Entity)", g=GROUP_ID)
+        await s.run("CREATE (c:Community {group_id:$g, level:1, community_id:$cid, title:'S3', "
+                    "summary:'s', rating:8.0, cited_fact_uuids:['f1'], full_report:'[]', "
+                    "embedding:[1.0,0.0]}) "
+                    "CREATE (m:Entity {uuid:'m1'})-[:IN_COMMUNITY]->(c) "
+                    "CREATE (m)-[:RELATES_TO {group_id:$g, uuid:'r1'}]->(:Entity)", g=GROUP_ID, cid=cid)
+
+
+class _Edge:
+    def __init__(self, uuid, fact):
+        self.uuid = uuid
+        self.fact = fact
+        self.episodes = ["ep1"]
+        self.valid_at = None
+        self.invalid_at = None
+
+
+class _Results:
+    def __init__(self, edges):
+        self.edges = edges
+
+
+class _FactGraphiti:               # returns fact f1 for any follow-up search
+    async def _search(self, query, config, group_ids=None, **kw):
+        return _Results([_Edge("f1", "AWS Backup supports S3")])
+
+
+async def test_drift_search_end_to_end(extract_driver):
+    from answer_api.drift import drift_search
+    await _seed_fact_provenance(extract_driver)
+    primer = json.dumps({"preliminary_answer": "S3 is supported",
+                         "follow_ups": [{"query": "how", "community_id": "c1", "relevance": 9}]})
+    synth = "AWS Backup supports S3 [1]. See https://evil/x [9]."   # bad URL + invalid marker
+    llm = _FakeLLM([primer, synth])
+    res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             llm, "m", q="s3 retention", level=1, iterations=1,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+    assert res["citations"][0]["fact_uuid"] == "f1"
+    assert res["citations"][0]["sources"][0]["url"] == "https://x/art1"
+    assert "http" not in res["answer"]                         # URL stripped
+    assert [c["marker"] for c in res["citations"]] == [1]      # invalid [9] dropped
+    assert res["follow_ups"][0]["community_id"] == "c1"
+    assert res["communities_used"][0]["community_id"] == "c1"
+
+
+async def test_drift_search_empty_shortlist_degrades_to_local(extract_driver):
+    from answer_api.drift import drift_search
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")   # no communities
+    # No community shortlist -> _primer short-circuits before any LLM call. The
+    # degrade path still delegates to answer_local, which runs its own
+    # search_local via the (fake) graphiti; _FactGraphiti always returns a fact
+    # regardless of driver state, so one synthesis call happens -> 1 canned reply.
+    llm = _FakeLLM(["n/a"])
+    res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             llm, "m", q="q", level=1, iterations=1,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+    assert res["degraded"] == "no-primer-communities"
+
+
+async def test_drift_search_zero_facts_refuses(extract_driver):
+    from answer_api.drift import drift_search, _REFUSAL
+
+    class _NoFacts:
+        async def _search(self, query, config, group_ids=None, **kw):
+            return _Results([])
+
+    await _seed_fact_provenance(extract_driver)
+    primer = json.dumps({"preliminary_answer": "d",
+                         "follow_ups": [{"query": "how", "community_id": "c1", "relevance": 9}]})
+
+    class _Boom:
+        def __init__(self, contents):
+            self._c = list(contents)
+            self.chat = self
+            self.completions = self
+        async def create(self, **kw):
+            if not self._c:
+                raise AssertionError("no synthesis call when zero facts")
+            return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": self._c.pop(0)})()})()]})
+
+    res = await drift_search(_NoFacts(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             _Boom([primer]), "m", q="q", level=1, iterations=1,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+    assert res["answer"] == _REFUSAL and res["citations"] == []
+
+
+async def test_drift_search_iterations_two_runs_refinement(extract_driver):
+    from answer_api.drift import drift_search
+    await _seed_fact_provenance(extract_driver)
+    primer = json.dumps({"preliminary_answer": "d",
+                         "follow_ups": [{"query": "round1", "community_id": "c1", "relevance": 9}]})
+    refine = json.dumps({"follow_ups": [{"query": "round2", "community_id": "c1", "relevance": 9}]})
+    synth = "Answer [1]."
+    # 3 LLM calls expected for iterations=2: primer, refine, synth
+    llm = _FakeLLM([primer, refine, synth])
+    res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             llm, "m", q="q", level=1, iterations=2,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+    iters = {f["iteration"] for f in res["follow_ups"]}
+    assert iters == {1, 2}                                   # both rounds executed
+    assert res["citations"][0]["fact_uuid"] == "f1"
+
+
+async def test_drift_search_one_followup_raises_does_not_abort(extract_driver):
+    from answer_api.drift import drift_search
+
+    class _FlakyGraphiti:   # first follow-up raises, second returns a fact
+        def __init__(self):
+            self._n = 0
+        async def _search(self, query, config, group_ids=None, **kw):
+            self._n += 1
+            if self._n == 1:
+                raise RuntimeError("boom")
+            return _Results([_Edge("f1", "AWS Backup supports S3")])
+
+    await _seed_fact_provenance(extract_driver)
+    primer = json.dumps({"preliminary_answer": "d", "follow_ups": [
+        {"query": "a", "community_id": "c1", "relevance": 9},
+        {"query": "b", "community_id": None, "relevance": 8}]})
+    synth = "Answer [1]."
+    res = await drift_search(_FlakyGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             _FakeLLM([primer, synth]), "m", q="q", level=1, iterations=1,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+    assert res["citations"][0]["fact_uuid"] == "f1"          # survived the raising follow-up

@@ -127,3 +127,86 @@ async def _refine_followups(synth_client, synth_model, *, q, facts, max_followup
     if obj is None:
         return []
     return _parse_followups(obj, set(hit_ids), max_followups, iteration=2)
+
+
+_SYNTH_PROMPT = (
+    "Answer the QUESTION using ONLY the numbered FACTS, refining the DRAFT where "
+    "the facts support it. Cite every claim inline with its [N] marker. Do NOT use "
+    "outside knowledge. Do NOT write any URL. If the facts do not answer the "
+    "question, reply exactly: \"{refusal}\"\n\n"
+    "QUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
+)
+
+
+def _dedup_facts(facts: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for f in facts:
+        u = f["fact_uuid"]
+        if u not in seen:
+            seen.add(u)
+            out.append(f)
+    return out
+
+
+async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answer,
+                      facts) -> tuple[str, list[dict]]:
+    facts = _dedup_facts(facts)
+    marker_map = {i: f for i, f in enumerate(facts, 1)}
+    facts_block = "\n".join(f"[{i}] {f['fact']}" for i, f in marker_map.items())
+    resp = await synth_client.chat.completions.create(
+        model=synth_model, temperature=0, max_tokens=3000,
+        messages=[{"role": "user", "content": _SYNTH_PROMPT.format(
+            refusal=_REFUSAL, q=q, draft=preliminary_answer or "(none)", facts=facts_block)}])
+    answer, cited = _finalize_answer(resp.choices[0].message.content or "", marker_map)
+    resolved = await Provenance(driver).resolve_citations(
+        [marker_map[m]["fact_uuid"] for m in cited])
+    citations = [{"marker": m, "fact_uuid": marker_map[m]["fact_uuid"],
+                  "sources": resolved.get(marker_map[m]["fact_uuid"], [])} for m in cited]
+    return answer, citations
+
+
+async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
+                       q, level, iterations, primer_k, max_followups, followup_k,
+                       group_id) -> dict:
+    rounds = max(1, min(iterations, 2))
+    primed = await _primer(embedder, synth_client, synth_model, driver, q=q,
+                           level=level, k=primer_k, max_followups=max_followups,
+                           group_id=group_id)
+    if primed is None:
+        res = await answer_local(graphiti, driver, synth_client, synth_model,
+                                 q=q, group_id=group_id)
+        res["degraded"] = "no-primer-communities"
+        return res
+    preliminary, followups, hits = primed
+    hit_ids = {h.community_id for h in hits}
+    facts: list[dict] = []
+    executed: list[FollowUp] = []
+    for fu in followups:
+        try:
+            facts.extend(await _run_followup(graphiti, driver, fu, k=followup_k,
+                                             group_id=group_id))
+        except Exception:
+            logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
+        executed.append(fu)
+    if rounds == 2 and _dedup_facts(facts):
+        refined = await _refine_followups(synth_client, synth_model, q=q,
+                                          facts=_dedup_facts(facts),
+                                          max_followups=max_followups, hit_ids=hit_ids)
+        for fu in refined:
+            try:
+                facts.extend(await _run_followup(graphiti, driver, fu, k=followup_k,
+                                                 group_id=group_id))
+            except Exception:
+                logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
+            executed.append(fu)
+    follow_ups_meta = [{"query": fu.query, "community_id": fu.community_id,
+                        "iteration": fu.iteration} for fu in executed]
+    communities_used = [{"community_id": h.community_id, "title": h.title} for h in hits]
+    if not _dedup_facts(facts):
+        return {"query": q, "answer": _REFUSAL, "citations": [],
+                "follow_ups": follow_ups_meta, "communities_used": communities_used}
+    answer, citations = await _synthesize(synth_client, synth_model, driver, q=q,
+                                          preliminary_answer=preliminary, facts=facts)
+    return {"query": q, "answer": answer, "citations": citations,
+            "follow_ups": follow_ups_meta, "communities_used": communities_used}

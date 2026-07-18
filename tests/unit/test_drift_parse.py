@@ -58,3 +58,12 @@ async def test_refine_followups_bad_json_returns_empty():
                                   facts=[{"fact": "f", "fact_uuid": "u1"}],
                                   max_followups=4, hit_ids=set())
     assert fus == []
+
+
+def test_dedup_facts_preserves_first_seen_order():
+    from answer_api.drift import _dedup_facts
+    facts = [{"fact_uuid": "a", "fact": "A"}, {"fact_uuid": "b", "fact": "B"},
+             {"fact_uuid": "a", "fact": "A2"}]
+    out = _dedup_facts(facts)
+    assert [f["fact_uuid"] for f in out] == ["a", "b"]
+    assert out[0]["fact"] == "A"        # first occurrence kept
