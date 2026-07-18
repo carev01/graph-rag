@@ -95,6 +95,17 @@ async def touched_entities(driver: AsyncDriver, group_id: str,
         async for rec in r:
             touched.add(rec["a"])
             touched.add(rec["b"])
+        # Facts silently expired by the staleness sweep carry no new created_at:
+        # the sweep sets invalid_at=now + expired_by_sweep=true (never deletes the
+        # edge). Key the dirty signal on those markers so the community regenerates.
+        r = await s.run(
+            "MATCH (a:Entity {group_id:$g})-[f:RELATES_TO {group_id:$g}]->"
+            "(b:Entity {group_id:$g}) "
+            "WHERE f.expired_by_sweep = true AND f.invalid_at > datetime($c) "
+            "RETURN a.uuid AS a, b.uuid AS b", g=group_id, c=prev_cursor)
+        async for rec in r:
+            touched.add(rec["a"])
+            touched.add(rec["b"])
     return touched
 
 

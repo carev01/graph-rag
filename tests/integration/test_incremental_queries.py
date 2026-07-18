@@ -43,3 +43,27 @@ async def test_load_persisted_and_prev_cursor(extract_driver):
     assert p.title == "T" and p.rating == 7.0 and p.cited_fact_uuids == ["fa"]
     assert p.embedding == [1.0, 2.0]
     assert (await prev_corpus_cursor(extract_driver, G)) == "2026-03-01T00:00:00Z"
+
+
+async def test_touched_includes_swept_fact_endpoints(extract_driver):
+    from theme_builder.incremental import touched_entities
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        # swept fact: expired_by_sweep + invalid_at AFTER cursor -> endpoints touched
+        await s.run("CREATE (a:Entity {group_id:$g, uuid:'sa', created_at: datetime('2026-01-01')})"
+                    "-[:RELATES_TO {group_id:$g, uuid:'fs', created_at: datetime('2026-01-01'), "
+                    "expired_by_sweep: true, invalid_at: datetime('2026-02-01')}]->"
+                    "(b:Entity {group_id:$g, uuid:'sb', created_at: datetime('2026-01-01')})", g=g)
+        # graphiti-style invalidation: invalid_at after cursor but NO expired_by_sweep -> NOT touched
+        await s.run("CREATE (a:Entity {group_id:$g, uuid:'ga', created_at: datetime('2026-01-01')})"
+                    "-[:RELATES_TO {group_id:$g, uuid:'fg', created_at: datetime('2026-01-01'), "
+                    "invalid_at: datetime('2026-02-01')}]->"
+                    "(b:Entity {group_id:$g, uuid:'gb', created_at: datetime('2026-01-01')})", g=g)
+        # swept fact but invalid_at BEFORE cursor -> already accounted -> NOT touched
+        await s.run("CREATE (a:Entity {group_id:$g, uuid:'oa', created_at: datetime('2026-01-01')})"
+                    "-[:RELATES_TO {group_id:$g, uuid:'fo', created_at: datetime('2026-01-01'), "
+                    "expired_by_sweep: true, invalid_at: datetime('2026-01-10')}]->"
+                    "(b:Entity {group_id:$g, uuid:'ob', created_at: datetime('2026-01-01')})", g=g)
+    out = await touched_entities(extract_driver, g, "2026-01-15T00:00:00Z")
+    assert out == {"sa", "sb"}
