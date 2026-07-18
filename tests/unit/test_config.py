@@ -46,3 +46,14 @@ def test_global_search_defaults():
     assert s.global_shortlist_k == 10
     assert s.global_default_level == 1
     assert s.global_map_relevance_min == 2
+
+
+def test_drift_defaults():
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.drift_primer_level == 1
+    assert s.drift_primer_k == 5
+    assert s.drift_max_followups == 4
+    assert s.drift_followup_k == 8
+    assert s.drift_iterations == 1

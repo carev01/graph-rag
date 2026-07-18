@@ -69,6 +69,12 @@ class ExtractSettings(BaseSettings):
     global_shortlist_k: int = 10
     global_default_level: int = 1
     global_map_relevance_min: int = 2
+    # --- DRIFT search (design: drift-search) ---
+    drift_primer_level: int = 1      # community level the primer shortlists at
+    drift_primer_k: int = 5          # reports shortlisted for the primer
+    drift_max_followups: int = 4     # follow-ups kept per round (relevance-budgeted)
+    drift_followup_k: int = 8        # local-search k per follow-up
+    drift_iterations: int = 1        # follow-up rounds; clamped to [1,2] at call time
     # --- hybrid extraction routing (design: hybrid-extraction-router) ---
     # ON by default; degrades to strong-only when cheap_llm_api_key is empty.
     extraction_routing: bool = True
