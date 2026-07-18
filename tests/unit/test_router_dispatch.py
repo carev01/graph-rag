@@ -4,6 +4,7 @@ import answer_api.synthesize as synth_mod
 import answer_api.global_search as global_mod
 import answer_api.drift as drift_mod
 import answer_api.timeline as timeline_mod
+import answer_api.freshness as freshness_mod
 from answer_api.router import answer_router
 from graph_extract.config import ExtractSettings
 
@@ -42,12 +43,22 @@ async def _fake_timeline(*a, **k):
                           "invalid_at": None, "status": "current", "sources": []}]}
 
 
+async def _fake_freshness(driver, group_id, *, reports):
+    return {"graph_cursor_time": "2026-07-18T00:00:00Z",
+            "reports_as_of": "2026-07-17T00:00:00Z" if reports else None}
+
+
+async def _fake_global_empty(*a, **k):
+    return {"query": k["q"], "answer": "refusal", "citations": [], "communities_used": []}
+
+
 @pytest.fixture(autouse=True)
 def _patch_modes(monkeypatch):
     monkeypatch.setattr(synth_mod, "answer_local", _fake_local)
     monkeypatch.setattr(global_mod, "global_search", _fake_global)
     monkeypatch.setattr(drift_mod, "drift_search", _fake_drift)
     monkeypatch.setattr(timeline_mod, "timeline_local", _fake_timeline)
+    monkeypatch.setattr(freshness_mod, "freshness", _fake_freshness)
 
 
 async def _route(mode_override, **over):
@@ -94,3 +105,30 @@ async def test_drift_degrade_normalized(monkeypatch):
     env = await _route("drift")
     assert env["routing"]["degraded"] == "no-primer-communities"
     assert env["answer"] == "local fallback"
+
+
+async def test_envelope_carries_freshness_reports_for_drift():
+    env = await _route("drift")
+    assert env["freshness"]["graph_cursor_time"] == "2026-07-18T00:00:00Z"
+    assert env["freshness"]["reports_as_of"] == "2026-07-17T00:00:00Z"
+
+
+async def test_envelope_freshness_reports_none_for_local():
+    env = await _route("local")
+    assert env["freshness"]["reports_as_of"] is None      # local isn't community-based
+
+
+async def test_global_empty_escalates_to_local(monkeypatch):
+    monkeypatch.setattr(global_mod, "global_search", _fake_global_empty)
+    env = await _route("global")
+    assert env["mode"] == "local"
+    assert env["routing"]["fallback_from"] == "global"
+    assert env["citations"][0]["fact_uuid"] == "f1"       # local fake's citation
+    assert env["freshness"]["reports_as_of"] is None      # final mode is local
+
+
+async def test_global_with_communities_stays_global():
+    env = await _route("global")
+    assert env["mode"] == "global"
+    assert env["routing"]["fallback_from"] is None
+    assert env["freshness"]["reports_as_of"] == "2026-07-17T00:00:00Z"
