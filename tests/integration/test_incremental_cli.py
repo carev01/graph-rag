@@ -119,3 +119,16 @@ async def test_corpus_cursor_covers_entity_and_fact_created_at(extract_driver):
                     "created_at: datetime('2026-01-03T00:00:00Z')}]->(b:Entity {group_id:$g, uuid:'e3'})", g=G)
     cur = await cli._corpus_cursor(extract_driver, G)
     assert cur.startswith("2026-01-03")     # the fact's created_at, not the episode's
+
+
+async def test_corpus_cursor_includes_sweep_invalid_at(extract_driver):
+    import theme_builder.cli as cli
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (:Episodic {group_id:$g, uuid:'ep', created_at: datetime('2026-01-01')})", g=G)
+        await s.run("CREATE (a:Entity {group_id:$g, uuid:'e1', created_at: datetime('2026-01-02')})"
+                    "-[:RELATES_TO {group_id:$g, uuid:'f1', created_at: datetime('2026-01-03'), "
+                    "expired_by_sweep: true, invalid_at: datetime('2026-05-01')}]->"
+                    "(b:Entity {group_id:$g, uuid:'e2', created_at: datetime('2026-01-02')})", g=G)
+    cur = await cli._corpus_cursor(extract_driver, G)
+    assert cur.startswith("2026-05-01")     # sweep invalid_at dominates the created_ats

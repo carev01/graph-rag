@@ -68,7 +68,9 @@ async def _corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:
         r = await s.run(
             "CALL { MATCH (e:Episodic {group_id:$g}) RETURN e.created_at AS t "
             "UNION ALL MATCH (n:Entity {group_id:$g}) RETURN n.created_at AS t "
-            "UNION ALL MATCH ()-[f:RELATES_TO {group_id:$g}]->() RETURN f.created_at AS t } "
+            "UNION ALL MATCH ()-[f:RELATES_TO {group_id:$g}]->() RETURN f.created_at AS t "
+            "UNION ALL MATCH ()-[f:RELATES_TO {group_id:$g}]->() "
+            "WHERE f.expired_by_sweep = true RETURN f.invalid_at AS t } "
             "RETURN toString(max(t)) AS c",
             g=group_id)
         rec = await r.single()
