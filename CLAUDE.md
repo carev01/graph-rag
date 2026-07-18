@@ -4,12 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-**Planning stage — no code yet.** The repository currently contains two documents and nothing else:
+**Implementation underway (Phases 0–4 slice 1 merged).** Ingestion, semantic
+extraction, the community layer, and three of four retrieval modes are built and
+tested. Authoritative references:
 
-- `graphrag-docextractor-plan.md` — the architecture & implementation plan. This is the authoritative design spec; read it before writing any code.
-- `CLIENT-USAGE-GUIDE.md` — the DocExtractor REST API contract this system consumes (the upstream data source). Read it before touching ingestion.
+- `graphrag-docextractor-plan.md` — the architecture & implementation plan / design spec. Read it before non-trivial work.
+- `CLIENT-USAGE-GUIDE.md` — the DocExtractor REST API contract (the upstream data source). Read it before touching ingestion.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — per-slice design specs and implementation plans; `docs/superpowers/*-report.md` — per-slice demonstration reports (what was built, live results, verification).
 
-When implementation begins, this file should be updated with real build/lint/test commands and the actual module layout.
+**What's built:** `graph-sync` ingestion (delta feed → chunking → structural + semantic graph writes, cursor/state), `graph_extract` (Graphiti semantic extraction + the hybrid extraction router + provenance resolver), `theme-builder` (GDS Leiden communities + fact-cited reports), and `answer-api` retrieval modes `/search/local`, `/answer` (local synthesis), `/timeline`, `/search/global` (community map-reduce), `/search/drift` (primer→follow-up→synthesis). **Not yet built:** the unifying `/answer` *router* (Phase 4 slice 2) and Copilot/MCP exposure (Phase 5).
+
+## Build / lint / test commands
+
+Dependency + venv management is **`uv`**. All commands run through `uv run`:
+
+- **Install:** `uv sync --extra dev`
+- **Tests (default, excludes `@live`):** `uv run --extra dev pytest -m "not live"` — `addopts` already sets `-m 'not live'`, so plain `uv run --extra dev pytest` is equivalent. Integration tests spin up Neo4j/Postgres **testcontainers** (Docker required).
+- **A single test:** `uv run --extra dev pytest tests/unit/test_config.py::test_drift_defaults -q`
+- **`@live` tests (opt-in, hit the real compose Neo4j 5.26 + LLM/embedder endpoints):** `uv run --extra dev pytest -m live tests/integration/<file>.py` — need `.env` configured (never committed).
+- **Lint (the CI gate — lints tests too):** `uv run ruff check src tests`. E7 rules are on: **no semicolons in test fakes** (E702), imports at file top (E402).
+- **Types:** `uv run mypy src`
+- **Run a service:** answer-api — `uv run --extra dev uvicorn answer_api.app:main --factory`; theme-build — `uv run --extra dev python -m theme_builder.cli theme-build`; ingestion — `uv run --extra dev python -m graph_extract.cli ingest ...`; graph-sync — `uvicorn graph_sync.app:main --factory`.
+
+CI (`.github/workflows/ci.yml`) runs exactly: `uv run ruff check src tests`, `uv run mypy src`, `uv run pytest -m "not live"`.
+
+## Module layout (`src/`)
+
+- **`graph_sync/`** — ingestion service: `app.py` (FastAPI + webhook), `cli.py`, `delta_client.py`, `mapper.py`/`toc_mapper.py` (structural mapping), plus state/cursor.
+- **`graph_extract/`** — semantic layer + shared config: `config.py` (`ExtractSettings` — the one settings object all services import), `cli.py` (`ingest`), `graphiti_client.py` (`build_graphiti`/`build_embedder`), `provenance.py` (the citation resolver — `resolve_citations` returns sources keyed `{url,title,article_id}`), the hybrid extraction router, `usage.py` (`instrument`).
+- **`theme_builder/`** — community layer: `detect.py` (GDS Leiden), `context.py`, `report.py` (fact-cited reports), `writeback.py`, `cli.py` (`theme-build`).
+- **`answer_api/`** — retrieval: `app.py` (FastAPI routes + lifespan → `app.state`), `search.py` (`search_local`, optional center-node recipe), `synthesize.py` (`answer_local`, `_finalize_answer`, `_synthesis_client_and_model`), `global_search.py`, `drift.py`, `timeline.py`, eval harness.
+- **`docext/`** — DocExtractor API client types.
+
+**Tests:** `tests/unit/` (hermetic — `ExtractSettings(_env_file=None, ...)`, fake clients) and `tests/integration/` (Neo4j/Postgres testcontainers via a module-scoped fixture; wipe with `MATCH (n) DETACH DELETE n` per test since the container is shared). `@live` tests target the real compose stack.
 
 ## What this project is
 
