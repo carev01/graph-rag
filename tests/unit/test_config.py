@@ -64,3 +64,10 @@ def test_router_default_mode():
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                         neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
     assert s.router_default_mode == "drift"
+
+
+def test_theme_refresh_tau_default():
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.theme_refresh_jaccard_tau == 0.5
