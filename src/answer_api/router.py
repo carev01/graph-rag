@@ -72,3 +72,42 @@ async def classify(q: str, *, cheap_client, cheap_model,
         except Exception:
             logger.warning("cheap classifier failed; defaulting", exc_info=True)
     return cast(Mode, chosen), via
+
+
+def _render_timeline(timeline_result: dict) -> tuple[str, list[dict]]:
+    events = timeline_result.get("timeline", [])
+    if not events:
+        return "No recorded changes for that query.", []
+    lines: list[str] = []
+    citations: list[dict] = []
+    for i, e in enumerate(events, 1):
+        valid = e.get("valid_at")
+        invalid = e.get("invalid_at")
+        span = f"valid_at {valid}" if valid else "no recorded start"
+        if invalid:
+            span += f", invalid_at {invalid}"
+        lines.append(f"- **{e['fact']}** — {span} ({e.get('status', '')}) [{i}]")
+        citations.append({"marker": i, "fact_uuid": e["fact_uuid"],
+                          "sources": e.get("sources", [])})
+    return "\n".join(lines), citations
+
+
+def _normalize(mode: Mode, via: str, fallback_from: str | None, raw: dict,
+               q: str) -> dict:
+    routing: dict = {"chosen": mode, "via": via, "fallback_from": fallback_from}
+    if "degraded" in raw:
+        routing["degraded"] = raw["degraded"]
+    if mode == "timeline":
+        answer, citations = _render_timeline(raw)
+    else:
+        answer = raw.get("answer", "")
+        citations = raw.get("citations", [])
+    env: dict = {"mode": mode, "query": q, "answer": answer,
+                 "citations": citations, "routing": routing}
+    if mode == "timeline":
+        env["timeline"] = raw.get("timeline", [])
+    if "communities_used" in raw:
+        env["communities_used"] = raw["communities_used"]
+    if "follow_ups" in raw:
+        env["follow_ups"] = raw["follow_ups"]
+    return env
