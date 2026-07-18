@@ -15,6 +15,11 @@ from openai import AsyncOpenAI
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import instrument
 
+from answer_api import synthesize as synth_mod
+from answer_api import global_search as global_mod
+from answer_api import drift as drift_mod
+from answer_api import timeline as timeline_mod
+
 logger = logging.getLogger(__name__)
 
 Mode = Literal["local", "global", "drift", "timeline"]
@@ -111,3 +116,42 @@ def _normalize(mode: Mode, via: str, fallback_from: str | None, raw: dict,
     if "follow_ups" in raw:
         env["follow_ups"] = raw["follow_ups"]
     return env
+
+
+async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
+                    map_client, map_model, *, q, vendor, settings) -> dict:
+    g = settings.group_id
+    if mode == "local":
+        return await synth_mod.answer_local(
+            graphiti, driver, synth_client, synth_model, q=q, vendor=vendor, group_id=g)
+    if mode == "global":
+        return await global_mod.global_search(
+            driver, embedder, map_client, map_model, synth_client, synth_model,
+            q=q, level=settings.global_default_level, k=settings.global_shortlist_k,
+            group_id=g, relevance_min=settings.global_map_relevance_min)
+    if mode == "drift":
+        return await drift_mod.drift_search(
+            graphiti, driver, embedder, synth_client, synth_model, q=q,
+            level=settings.drift_primer_level, iterations=settings.drift_iterations,
+            primer_k=settings.drift_primer_k, max_followups=settings.drift_max_followups,
+            followup_k=settings.drift_followup_k, group_id=g)
+    return await timeline_mod.timeline_local(
+        graphiti, driver, q=q, vendor=vendor, group_id=g)
+
+
+async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
+                        map_client, map_model, cheap_client, cheap_model, *,
+                        q, mode_override, vendor, settings) -> dict:
+    mode, via = await classify(q, cheap_client=cheap_client, cheap_model=cheap_model,
+                               mode_override=mode_override,
+                               default_mode=settings.router_default_mode)
+    raw = await _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
+                          map_client, map_model, q=q, vendor=vendor, settings=settings)
+    fallback_from: str | None = None
+    if mode == "local" and raw.get("retrieved") == 0:
+        fallback_from = "local"
+        mode = "drift"
+        raw = await _dispatch("drift", graphiti, driver, embedder, synth_client,
+                              synth_model, map_client, map_model, q=q, vendor=vendor,
+                              settings=settings)
+    return _normalize(mode, via, fallback_from, raw, q)
