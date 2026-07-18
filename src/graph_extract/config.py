@@ -62,6 +62,13 @@ class ExtractSettings(BaseSettings):
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
     report_token_budget: int = 12000     # per-community context budget (~chars/4)
     report_top_entities: int = 30        # member entities included in a report's context
+    # --- global (map-reduce) search (design: global-search) ---
+    map_llm_base_url: str = ""   # map tier; defaults to the judge/synthesis tier when empty
+    map_llm_model: str = ""
+    map_llm_api_key: str = ""
+    global_shortlist_k: int = 10
+    global_default_level: int = 1
+    global_map_relevance_min: int = 2
     # --- hybrid extraction routing (design: hybrid-extraction-router) ---
     # ON by default; degrades to strong-only when cheap_llm_api_key is empty.
     extraction_routing: bool = True
