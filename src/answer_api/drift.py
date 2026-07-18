@@ -81,3 +81,49 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
     if not fus:
         fus = [FollowUp(query=q, community_id=None, iteration=1)]
     return preliminary, fus, hits
+
+
+async def _top_member_entity(driver, group_id, community_id) -> str | None:
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH (c:Community {group_id:$g, community_id:$cid})<-[:IN_COMMUNITY]-(e:Entity) "
+            "OPTIONAL MATCH (e)-[rel:RELATES_TO {group_id:$g}]-() "
+            "WITH e, count(rel) AS deg ORDER BY deg DESC LIMIT 1 "
+            "RETURN e.uuid AS uuid", g=group_id, cid=community_id)
+        rec = await r.single()
+        return rec["uuid"] if rec else None
+
+
+async def _run_followup(graphiti, driver, fu: FollowUp, *, k, group_id) -> list[dict]:
+    center = (await _top_member_entity(driver, group_id, fu.community_id)
+              if fu.community_id else None)
+    res = await search_local(graphiti, driver, q=fu.query, k=k,
+                             center_node_uuid=center, group_id=group_id)
+    return res["results"]
+
+
+_REFINE_PROMPT = (
+    "You are investigating a QUESTION and have gathered these FACTS. Draft up to "
+    "{n} refined follow-up questions that fill the biggest remaining gaps. Tag each "
+    "with a community_id from the list, or null. Respond with ONLY JSON: "
+    "{{\"follow_ups\": [{{\"query\": str, \"community_id\": str|null, "
+    "\"relevance\": 0-10}}]}}. Do NOT write URLs.\n\n"
+    "QUESTION: {q}\n\nCOMMUNITY IDS: {cids}\n\nFACTS:\n{facts}"
+)
+
+
+async def _refine_followups(synth_client, synth_model, *, q, facts, max_followups,
+                            hit_ids) -> list[FollowUp]:
+    facts_block = "\n".join(f"- {f['fact']}" for f in facts)
+    obj: dict | None = None
+    for _ in range(2):
+        resp = await synth_client.chat.completions.create(
+            model=synth_model, temperature=0, max_tokens=1500,
+            messages=[{"role": "user", "content": _REFINE_PROMPT.format(
+                n=max_followups, q=q, cids=sorted(hit_ids), facts=facts_block)}])
+        obj = _extract_json(resp.choices[0].message.content or "")
+        if obj is not None:
+            break
+    if obj is None:
+        return []
+    return _parse_followups(obj, set(hit_ids), max_followups, iteration=2)
