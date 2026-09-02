@@ -1,9 +1,10 @@
 """Executes compatibility checks against a target Neo4j.
 
-Two guarantees: (1) one check's failure never aborts the run — every exception is
-contained and recorded; (2) a failed CypherCheck is automatically re-run prefixed
-`CYPHER 5`, so the report can distinguish "needs a server config change" from
-"needs a code change"."""
+Two guarantees: (1) one check's failure never aborts the run — every logic or
+connectivity exception is contained and recorded (task cancellation, e.g.
+`asyncio.CancelledError`, still propagates, as it should); (2) a failed CypherCheck
+is automatically re-run prefixed `CYPHER 5`, so the report can distinguish "needs a
+server config change" from "needs a code change"."""
 from __future__ import annotations
 
 import logging
@@ -105,13 +106,10 @@ async def teardown(driver) -> str | None:
     against a populated instance."""
     try:
         async with driver.session() as s:
-            # COMPAT_GROUP_ID is a hardcoded internal constant (never attacker- or
-            # user-controlled), so inlining it is safe and lets tests/operators see
-            # the exact scope in the query text rather than a bound parameter.
             await s.run(
-                f"MATCH ()-[r {{group_id:'{COMPAT_GROUP_ID}'}}]-() DELETE r")
+                "MATCH ()-[r {group_id:$g}]-() DELETE r", g=COMPAT_GROUP_ID)
             await s.run(
-                f"MATCH (n {{group_id:'{COMPAT_GROUP_ID}'}}) DETACH DELETE n")
+                "MATCH (n {group_id:$g}) DETACH DELETE n", g=COMPAT_GROUP_ID)
             result = await s.run(
                 "SHOW INDEXES YIELD name WHERE name STARTS WITH 'compat_' "
                 "RETURN collect(name) AS names")

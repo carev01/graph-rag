@@ -24,10 +24,12 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Records every statement; raises for statements listed in `fail_on`."""
+    """Records every statement (and its bound params); raises for statements listed
+    in `fail_on`."""
 
-    def __init__(self, calls, fail_on, rows):
+    def __init__(self, calls, fail_on, rows, params_log):
         self.calls, self.fail_on, self.rows = calls, fail_on, rows
+        self.params_log = params_log
 
     async def __aenter__(self):
         return self
@@ -37,6 +39,7 @@ class _FakeSession:
 
     async def run(self, cypher, **params):
         self.calls.append(cypher)
+        self.params_log.append(params)
         for needle in self.fail_on:
             if cypher.startswith(needle):
                 raise RuntimeError("SyntaxError: nope")
@@ -46,10 +49,11 @@ class _FakeSession:
 class _FakeDriver:
     def __init__(self, fail_on=(), rows=()):
         self.calls: list[str] = []
+        self.params_log: list[dict] = []
         self.fail_on, self.rows = fail_on, list(rows)
 
     def session(self):
-        return _FakeSession(self.calls, self.fail_on, self.rows)
+        return _FakeSession(self.calls, self.fail_on, self.rows, self.params_log)
 
 
 def test_compat_target_falls_back_to_main_neo4j_settings():
@@ -159,7 +163,7 @@ async def test_run_all_preserves_informational_flag():
 async def test_teardown_scopes_deletes_to_the_compat_group_and_reports_errors():
     d = _FakeDriver()
     assert await runner.teardown(d) is None
-    assert any("compat-check" in c for c in d.calls)
+    assert any(p.get("g") == "compat-check" for p in d.params_log)
     assert not any(c.strip().startswith("MATCH (n) DETACH DELETE") for c in d.calls)
 
     boom = _FakeDriver(fail_on=["MATCH"])
