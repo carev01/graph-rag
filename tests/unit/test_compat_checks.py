@@ -61,3 +61,53 @@ def test_lucene_escaping_check_covers_the_metacharacters():
     ft = [c for c in checks.fulltext_checks() if "lucene" in c.name.lower()]
     assert len(ft) == 1
     assert isinstance(ft[0], CallableCheck)
+
+
+def _later():
+    return (checks.graphiti_write_checks() + checks.graphiti_search_checks()
+            + checks.our_cypher_checks())
+
+
+def test_later_group_labels_are_the_spec_names():
+    assert {c.group for c in _later()} == {
+        "graphiti-write", "graphiti-search", "our-cypher"}
+
+
+def test_search_checks_cover_exactly_the_two_recipes_used_in_src():
+    names = " ".join(c.name.lower() for c in checks.graphiti_search_checks())
+    assert "rrf" in names
+    assert "node_distance" in names or "node distance" in names
+
+
+def test_our_cypher_group_covers_the_two_bare_call_subquery_sites():
+    names = " ".join(c.name.lower() for c in checks.our_cypher_checks())
+    assert "corpus cursor" in names       # theme_builder/cli.py:69
+    assert "staleness sweep" in names     # graph_extract/staleness_sweep.py:52
+
+
+def test_our_cypher_group_covers_every_module_the_spec_lists():
+    names = " ".join(c.name.lower() for c in checks.our_cypher_checks())
+    for needle in ["resolve_citations", "vendor", "freshness", "timeline",
+                   "touched_entities", "load_persisted", "leiden"]:
+        assert needle in names, f"missing a check for {needle}"
+
+
+def test_our_cypher_checks_are_all_callable_so_failures_report_procedural():
+    from compat.model import CallableCheck as CC
+    for c in checks.our_cypher_checks():
+        assert isinstance(c, CC)
+
+
+def test_graphiti_write_group_exercises_the_bulk_dynamic_label_construct():
+    """`.save()` interpolates labels as literal text; only the BULK save uses
+    Cypher's native `SET n:$(node.labels)`. That construct is the 5.22 fault line,
+    so it must be asserted explicitly."""
+    ddl = [c for c in checks.graphiti_write_checks()
+           if isinstance(c, CypherCheck) and "SET n:$(" in c.cypher]
+    assert len(ddl) == 1
+
+
+def test_all_synthetic_uuids_are_compat_prefixed():
+    for value in [checks.EP_UUID, checks.ENT_A, checks.ENT_B, checks.ENT_C,
+                  checks.FACT_AB, checks.FACT_BC]:
+        assert value.startswith("compat-")

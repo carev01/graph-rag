@@ -210,3 +210,245 @@ def fulltext_checks() -> list[Check]:
             expect=lambda rows: len(rows) >= 1),
         CallableCheck("lucene metacharacter escaping", "fulltext", _lucene_escaping),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Group 5: graphiti-write  (dynamic labels + bi-temporal edges, NO LLM)
+# --------------------------------------------------------------------------- #
+# Builds the synthetic graph that groups 6 and 7 query. Embeddings are fabricated,
+# so this group costs nothing and needs no embedder.
+
+async def _write_synthetic_graph(ctx: CheckContext) -> str:
+    from datetime import datetime, timezone
+
+    from graphiti_core.edges import EntityEdge
+    from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+
+    now = datetime.now(timezone.utc)
+    gdriver = ctx.graphiti.driver
+
+    episode = EpisodicNode(
+        uuid=EP_UUID, name="compat episode", group_id=COMPAT_GROUP_ID, created_at=now,
+        source=EpisodeType.text, source_description="compatibility harness",
+        content="AWS Backup Vault Lock enforces immutable retention on recovery points.",
+        valid_at=now)
+    await episode.save(gdriver)
+
+    entities = [
+        EntityNode(uuid=ENT_A, name="AWS Backup", group_id=COMPAT_GROUP_ID,
+                   labels=["Entity", "Product"], created_at=now,
+                   name_embedding=ctx.embedding, summary="a backup service"),
+        EntityNode(uuid=ENT_B, name="Vault Lock", group_id=COMPAT_GROUP_ID,
+                   labels=["Entity", "Feature"], created_at=now,
+                   name_embedding=ctx.embedding, summary="an immutability control"),
+        EntityNode(uuid=ENT_C, name="Recovery Point", group_id=COMPAT_GROUP_ID,
+                   labels=["Entity", "Concept"], created_at=now,
+                   name_embedding=ctx.embedding, summary="a stored backup"),
+    ]
+    for entity in entities:
+        await entity.save(gdriver)
+
+    edges = [
+        EntityEdge(uuid=FACT_AB, group_id=COMPAT_GROUP_ID, source_node_uuid=ENT_A,
+                   target_node_uuid=ENT_B, created_at=now, name="HAS_FEATURE",
+                   fact="AWS Backup provides Vault Lock.",
+                   fact_embedding=ctx.embedding, episodes=[EP_UUID],
+                   valid_at=now, invalid_at=None),
+        EntityEdge(uuid=FACT_BC, group_id=COMPAT_GROUP_ID, source_node_uuid=ENT_B,
+                   target_node_uuid=ENT_C, created_at=now, name="PROTECTS",
+                   fact="Vault Lock enforces immutable retention on recovery points.",
+                   fact_embedding=ctx.embedding, episodes=[EP_UUID],
+                   valid_at=now, invalid_at=None),
+    ]
+    for edge in edges:
+        await edge.save(gdriver)
+    return "1 episode, 3 entities, 2 bi-temporal facts written"
+
+
+async def _dynamic_labels_persisted(ctx: CheckContext) -> str:
+    """Graphiti writes extra labels alongside :Entity. On Neo4j 5.22 the bulk form
+    `SET n:$(node.labels)` is a syntax error; here we assert the labels landed."""
+    async with ctx.driver.session() as s:
+        result = await s.run(
+            "MATCH (n:Entity {uuid:$u}) RETURN labels(n) AS labels", u=ENT_A)
+        rows = [dict(rec) async for rec in result]
+    if not rows:
+        raise RuntimeError(f"entity {ENT_A} was not persisted")
+    labels = set(rows[0]["labels"])
+    if "Product" not in labels:
+        raise RuntimeError(f"dynamic label not applied; got {sorted(labels)}")
+    return f"labels persisted: {sorted(labels)}"
+
+
+async def _bitemporal_properties_persisted(ctx: CheckContext) -> str:
+    async with ctx.driver.session() as s:
+        result = await s.run(
+            "MATCH ()-[f:RELATES_TO {uuid:$u}]->() "
+            "RETURN f.valid_at IS NOT NULL AS has_valid, "
+            "       f.invalid_at IS NULL AS open, "
+            "       size(f.fact_embedding) AS dim", u=FACT_AB)
+        rows = [dict(rec) async for rec in result]
+    if not rows:
+        raise RuntimeError(f"fact {FACT_AB} was not persisted")
+    row = rows[0]
+    if not (row["has_valid"] and row["open"]):
+        raise RuntimeError(f"bi-temporal properties wrong: {row}")
+    return f"valid_at set, invalid_at null, embedding dim {row['dim']}"
+
+
+def graphiti_write_checks() -> list[Check]:
+    return [
+        CallableCheck("write synthetic graph via graphiti models", "graphiti-write",
+                      _write_synthetic_graph),
+        CallableCheck("dynamic entity labels persisted", "graphiti-write",
+                      _dynamic_labels_persisted),
+        # The construct from graphiti's BULK node save
+        # (models/nodes/node_db_queries.py:260). `.save()` interpolates labels as
+        # literal query text, so only this exercises Cypher's native dynamic-label
+        # expression -- the exact statement Neo4j 5.22 cannot parse. Declarative so
+        # a failure is auto-retried under CYPHER 5.
+        CypherCheck(
+            "bulk dynamic-label expression SET n:$(node.labels)", "graphiti-write",
+            "UNWIND $nodes AS node "
+            "MERGE (n:Entity {uuid: node.uuid}) "
+            "SET n:$(node.labels) "
+            "SET n.group_id = node.group_id "
+            "RETURN labels(n) AS labels",
+            params={"nodes": [{"uuid": "compat-bulk-1",
+                               "labels": ["Product", "Feature"],
+                               "group_id": COMPAT_GROUP_ID}]},
+            expect=lambda rows: bool(rows) and "Product" in rows[0]["labels"]),
+        CallableCheck("bi-temporal fact properties persisted", "graphiti-write",
+                      _bitemporal_properties_persisted),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Group 6: graphiti-search  (the two recipes this codebase actually uses)
+# --------------------------------------------------------------------------- #
+
+async def _search_rrf(ctx: CheckContext) -> str:
+    from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
+    config = EDGE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+    config.limit = 10
+    results = await ctx.graphiti._search(
+        "vault lock immutable retention", config, group_ids=[COMPAT_GROUP_ID])
+    return f"RRF recipe returned {len(results.edges)} edges"
+
+
+async def _search_node_distance(ctx: CheckContext) -> str:
+    from graphiti_core.search.search_config_recipes import (
+        EDGE_HYBRID_SEARCH_NODE_DISTANCE)
+    config = EDGE_HYBRID_SEARCH_NODE_DISTANCE.model_copy(deep=True)
+    config.limit = 10
+    results = await ctx.graphiti._search(
+        "vault lock immutable retention", config, group_ids=[COMPAT_GROUP_ID],
+        center_node_uuid=ENT_A)
+    return f"node_distance recipe returned {len(results.edges)} edges"
+
+
+def graphiti_search_checks() -> list[Check]:
+    # Only these two recipes appear anywhere in src/ (answer_api/search.py:3-4):
+    # global_search ranks communities with its own Python cosine and drift reuses
+    # search_local, so no node or community recipe is exercised by this codebase.
+    return [
+        CallableCheck("EDGE_HYBRID_SEARCH_RRF recipe", "graphiti-search", _search_rrf),
+        CallableCheck("EDGE_HYBRID_SEARCH_NODE_DISTANCE recipe", "graphiti-search",
+                      _search_node_distance),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Group 7: our-cypher  (every query we own, run against the synthetic graph)
+# --------------------------------------------------------------------------- #
+
+async def _resolve_citations(ctx: CheckContext) -> str:
+    from graph_extract.provenance import Provenance
+    resolved = await Provenance(ctx.driver).resolve_citations([FACT_AB, FACT_BC])
+    return f"resolve_citations returned {len(resolved)} entries"
+
+
+async def _vendor_scope(ctx: CheckContext) -> str:
+    from answer_api.search import _vendor_episode_uuids
+    uuids = await _vendor_episode_uuids(ctx.driver, "AWS")
+    return f"vendor episode scope query ran, {len(uuids)} uuids"
+
+
+async def _freshness(ctx: CheckContext) -> str:
+    """freshness() swallows its own errors by design (it must never fail an answer),
+    so assert the returned SHAPE instead of relying on an exception."""
+    from answer_api.freshness import freshness
+    stamps = await freshness(ctx.driver, COMPAT_GROUP_ID, reports=True)
+    if set(stamps) != {"graph_cursor_time", "reports_as_of"}:
+        raise RuntimeError(f"unexpected freshness shape: {stamps}")
+    if stamps["graph_cursor_time"] is None:
+        raise RuntimeError("graph_cursor_time is None despite a written episode — "
+                           "the freshness query failed and was swallowed")
+    return f"freshness stamps resolved: {stamps}"
+
+
+async def _timeline_sweep_flags(ctx: CheckContext) -> str:
+    from answer_api.timeline import _sweep_flags
+    flags = await _sweep_flags(ctx.driver, [FACT_AB, FACT_BC], COMPAT_GROUP_ID)
+    return f"timeline sweep-flag query ran, {len(flags)} flags"
+
+
+async def _corpus_cursor_subquery(ctx: CheckContext) -> str:
+    """theme_builder/cli.py's watermark — a CALL {} UNION ALL subquery."""
+    from theme_builder.cli import _corpus_cursor
+    cursor = await _corpus_cursor(ctx.driver, COMPAT_GROUP_ID)
+    if cursor is None:
+        raise RuntimeError("corpus cursor is None despite a written episode")
+    return f"corpus cursor subquery ran: {cursor}"
+
+
+async def _staleness_sweep(ctx: CheckContext) -> str:
+    """graph_extract/staleness_sweep.py — a CALL {} importing-WITH subquery. The
+    synthetic facts have a live episode, so nothing should be expired."""
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    outcome = await sweep_stale_facts(ctx.driver, COMPAT_GROUP_ID)
+    return f"staleness sweep subquery ran: expired={outcome.get('expired')}"
+
+
+async def _touched_entities(ctx: CheckContext) -> str:
+    from theme_builder.incremental import touched_entities
+    touched = await touched_entities(ctx.driver, COMPAT_GROUP_ID, None)
+    count = "all (None sentinel)" if touched is None else len(touched)
+    return f"touched_entities ran: {count}"
+
+
+async def _load_persisted(ctx: CheckContext) -> str:
+    from theme_builder.incremental import load_persisted, prev_corpus_cursor
+    persisted = await load_persisted(ctx.driver, COMPAT_GROUP_ID)
+    cursor = await prev_corpus_cursor(ctx.driver, COMPAT_GROUP_ID)
+    return f"load_persisted={len(persisted)} communities, prev_cursor={cursor}"
+
+
+async def _leiden_detect(ctx: CheckContext) -> str:
+    """GDS projection + seeded Leiden. GDS is a plugin: absence is a skip."""
+    from theme_builder.detect import detect_communities
+    try:
+        async with ctx.driver.session() as s:
+            await s.run("CALL gds.version() YIELD gdsVersion RETURN gdsVersion")
+    except Exception as exc:  # noqa: BLE001
+        raise SkipCheck(f"GDS not available: {type(exc).__name__}") from exc
+    communities = await detect_communities(
+        ctx.driver, COMPAT_GROUP_ID, min_community_size=1, max_levels=2)
+    return f"GDS projection + seeded Leiden ran: {len(communities)} communities"
+
+
+def our_cypher_checks() -> list[Check]:
+    return [
+        CallableCheck("provenance resolve_citations", "our-cypher", _resolve_citations),
+        CallableCheck("vendor episode scope", "our-cypher", _vendor_scope),
+        CallableCheck("freshness stamps", "our-cypher", _freshness),
+        CallableCheck("timeline sweep flags", "our-cypher", _timeline_sweep_flags),
+        CallableCheck("theme-builder corpus cursor (CALL {} UNION ALL)", "our-cypher",
+                      _corpus_cursor_subquery),
+        CallableCheck("staleness sweep (CALL {} importing WITH)", "our-cypher",
+                      _staleness_sweep),
+        CallableCheck("incremental touched_entities", "our-cypher", _touched_entities),
+        CallableCheck("incremental load_persisted", "our-cypher", _load_persisted),
+        CallableCheck("GDS projection + seeded leiden detect", "our-cypher",
+                      _leiden_detect),
+    ]
