@@ -49,10 +49,13 @@ def test_render_contains_verdict_matrix_and_sections():
     assert "GO_WITH_CONFIG" in out
     assert "| kernel version |" in out
     assert "(info)" in out                    # informational marker
-    assert "## Not verified" in out
-    assert "embedder unreachable" in out
     assert "db.query.default_language=CYPHER_5" in out   # recommended action
     assert "bolt://h:7687" in out
+    # Strengthen skip detection: skipped check appears in "Not verified" section,
+    # non-skipped check does not.
+    not_verified_section = out.split("## Not verified")[1].split("##")[0]
+    assert "e2e ingest" in not_verified_section
+    assert "kernel version" not in not_verified_section
 
 
 def test_render_reports_teardown_error_prominently():
@@ -66,3 +69,11 @@ def test_render_marks_procedural_retry_as_not_applicable():
     out = render([_r("a", "fail", group="e2e", cypher5_retry=None, detail="x")],
                  target={"uri": "u"})
     assert "n/a (procedural)" in out
+
+
+def test_render_escapes_pipes_in_detail_so_table_rows_survive():
+    out = render([_r("a", "fail", group="g", cypher5_retry="fail",
+                     detail="SyntaxError: bad | pipe")], target={"uri": "u"})
+    row = [ln for ln in out.splitlines() if ln.startswith("| g |")][0]
+    assert row.count("|") == 7          # 6 delimiters for a 5-column row + 1 escaped pipe
+    assert "bad \\| pipe" in row

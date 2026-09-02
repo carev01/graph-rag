@@ -7,6 +7,12 @@ from compat.model import COMPAT_GROUP_ID, CheckResult, Verdict
 _STATUS_ICON = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}
 
 
+def _cell(text: str) -> str:
+    """Escape a value for a markdown table cell. Details carry Neo4j error text and
+    Cypher fragments, where a literal | would break the row."""
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
 def _scored(results: list[CheckResult]) -> list[CheckResult]:
     """Only non-informational, non-skipped results move the verdict."""
     return [r for r in results if not r.informational and r.status != "skip"]
@@ -74,8 +80,8 @@ def render(results: list[CheckResult], *, target: dict[str, str],
               "|---|---|---|---|---|"]
     for r in results:
         name = f"{r.name} (info)" if r.informational else r.name
-        lines.append(f"| {r.group} | {name} | {_STATUS_ICON[r.status]} | "
-                     f"{_retry_cell(r)} | {r.detail} |")
+        lines.append(f"| {r.group} | {_cell(name)} | {_STATUS_ICON[r.status]} | "
+                     f"{_retry_cell(r)} | {_cell(r.detail)} |")
 
     skipped = [r for r in results if r.status == "skip"]
     lines += ["", "## Not verified", ""]
