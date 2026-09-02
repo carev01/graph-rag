@@ -32,7 +32,7 @@ async def _gds_version(ctx: CheckContext) -> str:
             result = await s.run("CALL gds.version() YIELD gdsVersion RETURN gdsVersion")
             rows = [dict(rec) async for rec in result]
     except Exception as exc:  # noqa: BLE001
-        raise SkipCheck(f"GDS not available: {type(exc).__name__}") from exc
+        raise SkipCheck(f"GDS not available: {type(exc).__name__}: {exc}") from exc
     return f"GDS {rows[0]['gdsVersion']}" if rows else "GDS present, no version row"
 
 
@@ -180,11 +180,20 @@ async def _lucene_escaping(ctx: CheckContext) -> str:
 
 
 def fulltext_checks() -> list[Check]:
+    # Two distinct awaits are needed, for two distinct reasons:
+    #   db.awaitIndexes waits for the just-created index to finish its initial
+    #   POPULATING phase and come ONLINE. Skipping this risks querying an index
+    #   that isn't ready yet — a false compatibility failure, not a real one.
+    #   awaitEventuallyConsistentIndexRefresh (below, after seeding) instead waits
+    #   for newly-written nodes to become visible to an already-ONLINE index.
     return [
         CypherCheck(
             "CREATE FULLTEXT INDEX accepted", "fulltext",
             "CREATE FULLTEXT INDEX compat_ft_probe IF NOT EXISTS "
             "FOR (n:CompatFt) ON EACH [n.name, n.summary]"),
+        CypherCheck(
+            "await fulltext index online", "fulltext",
+            "CALL db.awaitIndexes(120)"),
         CypherCheck(
             "seed fulltext probe node", "fulltext",
             "CREATE (n:CompatFt {uuid:'compat-ft-a', group_id:$g, "
