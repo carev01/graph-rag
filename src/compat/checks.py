@@ -5,9 +5,17 @@ graph that groups 6 (`graphiti-search`) and 7 (`our-cypher`) query. run_all
 executes sequentially in this order."""
 from __future__ import annotations
 
+import httpx
+import openai
+
 from compat.model import (
     COMPAT_GROUP_ID, CallableCheck, Check, CheckContext, CypherCheck, SkipCheck,
 )
+
+#: An unreachable LLM/embedder endpoint is not a Neo4j incompatibility — the e2e
+#: check skips on these rather than failing. openai.APIConnectionError is the base
+#: class of openai.APITimeoutError, so both are covered.
+_ENDPOINT_DOWN = (httpx.ConnectError, httpx.ConnectTimeout, openai.APIConnectionError)
 
 # --- synthetic fixture identifiers (stable so checks can reference each other) ---
 EP_UUID = "compat-ep-1"
@@ -452,3 +460,92 @@ def our_cypher_checks() -> list[Check]:
         CallableCheck("GDS projection + seeded leiden detect", "our-cypher",
                       _leiden_detect),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Group 8: e2e  (ONE real article: extraction + retrieval, never synthesis)
+# --------------------------------------------------------------------------- #
+
+_E2E_ARTICLE = """# AWS Backup Vault Lock
+
+AWS Backup Vault Lock enforces a write-once, read-many (WORM) setting on a backup
+vault. Once a vault lock is in compliance mode, the retention period of a recovery
+point cannot be shortened and recovery points cannot be deleted before they expire.
+
+## Retention
+
+The minimum retention period defines the shortest retention any backup plan may
+assign to recovery points in the locked vault.
+"""
+
+
+async def _e2e_ingest_and_retrieve(ctx: CheckContext) -> str:
+    """One inlined article through the real extraction pipeline, then retrieval.
+
+    Inlined rather than fetched so the check does not depend on DocExtractor being
+    up. Extraction + retrieval only: no synthesis, so this never touches the
+    strong evaluation tier."""
+    from datetime import datetime, timezone
+
+    from answer_api.search import search_local
+    from graph_extract.graphiti_client import add_text_episode
+
+    harness_settings = ctx.settings.model_copy(update={"group_id": COMPAT_GROUP_ID})
+    try:
+        await add_text_episode(
+            ctx.graphiti, harness_settings, name="compat-e2e-article",
+            body=_E2E_ARTICLE, source_description="compatibility harness",
+            reference_time=datetime.now(timezone.utc))
+    except _ENDPOINT_DOWN as exc:
+        # An unreachable LLM/embedder endpoint is not a Neo4j incompatibility.
+        raise SkipCheck(f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
+
+    async with ctx.driver.session() as s:
+        result = await s.run(
+            "MATCH (e:Episodic {group_id:$g}) "
+            "OPTIONAL MATCH (n:Entity {group_id:$g}) "
+            "OPTIONAL MATCH ()-[f:RELATES_TO {group_id:$g}]->() "
+            "RETURN count(DISTINCT e) AS episodes, count(DISTINCT n) AS entities, "
+            "       count(DISTINCT f) AS facts", g=COMPAT_GROUP_ID)
+        rows = [dict(rec) async for rec in result]
+    counts = rows[0] if rows else {}
+    if not counts.get("facts"):
+        raise RuntimeError(f"ingest produced no facts: {counts}")
+
+    found = await search_local(
+        ctx.graphiti, ctx.driver, q="What does Vault Lock enforce?", k=5,
+        group_id=COMPAT_GROUP_ID)
+    if found["count"] == 0:
+        raise RuntimeError("search_local returned no results after ingest")
+    return (f"ingested {counts}; search_local returned {found['count']} results "
+            f"with {sum(len(r['sources']) for r in found['results'])} resolved sources")
+
+
+def e2e_checks() -> list[Check]:
+    return [CallableCheck("one article: extract then retrieve", "e2e",
+                          _e2e_ingest_and_retrieve)]
+
+
+# --------------------------------------------------------------------------- #
+# Registry
+# --------------------------------------------------------------------------- #
+
+def all_checks(embedding: list[float]) -> list[Check]:
+    """Every group, in execution order. Group 5 writes the synthetic graph that
+    groups 6 and 7 query, so this order is load-bearing.
+
+    CypherChecks declare their vector parameter as `{"v": None}`; the fabricated
+    768-d vector is substituted here so the registry stays a pure literal."""
+    registry = (server_checks() + bootstrap_checks() + vector_checks()
+                + fulltext_checks() + graphiti_write_checks()
+                + graphiti_search_checks() + our_cypher_checks() + e2e_checks())
+    resolved: list[Check] = []
+    for check in registry:
+        if isinstance(check, CypherCheck) and check.params.get("v", "") is None:
+            params = dict(check.params)
+            params["v"] = embedding
+            check = CypherCheck(
+                name=check.name, group=check.group, cypher=check.cypher,
+                params=params, expect=check.expect, informational=check.informational)
+        resolved.append(check)
+    return resolved

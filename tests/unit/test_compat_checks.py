@@ -111,3 +111,30 @@ def test_all_synthetic_uuids_are_compat_prefixed():
     for value in [checks.EP_UUID, checks.ENT_A, checks.ENT_B, checks.ENT_C,
                   checks.FACT_AB, checks.FACT_BC]:
         assert value.startswith("compat-")
+
+
+def test_all_checks_returns_every_group_in_registry_order():
+    groups = [c.group for c in checks.all_checks([0.5] * 768)]
+    first_seen = list(dict.fromkeys(groups))
+    assert first_seen == ["server", "bootstrap", "vector", "fulltext",
+                          "graphiti-write", "graphiti-search", "our-cypher", "e2e"]
+
+
+def test_all_checks_substitutes_the_fabricated_vector():
+    from compat.model import CypherCheck as CypherC
+    vector = [0.25] * 768
+    for c in checks.all_checks(vector):
+        if isinstance(c, CypherC) and "v" in c.params:
+            assert c.params["v"] == vector, f"{c.name} kept a None placeholder"
+
+
+def test_e2e_check_never_references_synthesis():
+    """Scoped to the e2e function's own source (not the whole module) so that
+    explanatory comments elsewhere naming global_search/drift don't trip it."""
+    import inspect
+
+    from compat.checks import _e2e_ingest_and_retrieve
+    source = inspect.getsource(_e2e_ingest_and_retrieve)
+    for banned in ["answer_local", "synthesize", "_synthesis_client_and_model",
+                   "judge", "global_search", "drift_search"]:
+        assert banned not in source, f"e2e must not depend on the synthesis tier ({banned})"
