@@ -596,7 +596,7 @@ async def _staleness_sweep(ctx: CheckContext) -> str:
     from graph_extract.staleness_sweep import sweep_stale_facts
 
     outcome = await sweep_stale_facts(ctx.driver, COMPAT_GROUP_ID)
-    expired = set(outcome.get("sample") or [])
+    expired = set(outcome.get("expired_sample") or [])
     if expired != {FACT_ORPHAN}:
         raise RuntimeError(f"sweep expired {sorted(expired)}, expected exactly "
                            f"{{{FACT_ORPHAN}}} (count={outcome.get('expired')})")
@@ -685,45 +685,72 @@ assign to recovery points in the locked vault.
 
 
 async def _e2e_ingest_and_retrieve(ctx: CheckContext) -> str:
-    """One inlined article through the real extraction pipeline, then retrieval.
+    """One inlined article through the REAL pipeline: structural write -> extraction
+    -> provenance link -> retrieval -> resolved citations.
 
-    Inlined rather than fetched so the check does not depend on DocExtractor being
-    up. Extraction + retrieval only: no synthesis, so this never touches the
-    strong evaluation tier."""
+    The link step matters. add_text_episode creates episodes but never attaches them
+    to an :Article -- in production that is graph-sync's job. Without it, retrieval
+    returns results whose citations resolve to nothing, which is exactly how this
+    check used to pass while proving nothing about provenance.
+
+    Inlined rather than fetched so the check does not depend on DocExtractor. Only
+    extraction and retrieval -- never synthesis -- so it does not need the strong
+    evaluation tier."""
     from datetime import datetime, timezone
 
     from answer_api.search import search_local
+    from compat.runner import compat_target
     from graph_extract.graphiti_client import add_text_episode
+    from graph_extract.provenance import Provenance
+    from graph_sync.models import StructuralWrite
+    from graph_sync.neo4j_repo import Neo4jRepo
+
+    uri, user, password = compat_target(ctx.settings)
+    repo = Neo4jRepo(uri, user, password)
+    try:
+        await repo.apply_structural(StructuralWrite(
+            vendor={"id": VENDOR_ID, "name": VENDOR_NAME, "group_id": COMPAT_GROUP_ID},
+            product={"id": PRODUCT_ID, "name": PRODUCT_NAME,
+                     "group_id": COMPAT_GROUP_ID},
+            source={"id": SOURCE_ID, "name": "compat source",
+                    "group_id": COMPAT_GROUP_ID},
+            article={"id": E2E_ARTICLE_ID, "title": "Vault Lock (e2e)",
+                     "source_url": E2E_ARTICLE_URL, "source_id": SOURCE_ID,
+                     "group_id": COMPAT_GROUP_ID}))
+    finally:
+        await repo.close()
 
     harness_settings = ctx.settings.model_copy(update={"group_id": COMPAT_GROUP_ID})
     try:
-        await add_text_episode(
+        added = await add_text_episode(
             ctx.graphiti, harness_settings, name="compat-e2e-article",
             body=_E2E_ARTICLE, source_description="compatibility harness",
             reference_time=datetime.now(timezone.utc))
     except _ENDPOINT_DOWN as exc:
-        # An unreachable LLM/embedder endpoint is not a Neo4j incompatibility.
-        raise SkipCheck(f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
+        raise SkipCheck(
+            f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
 
-    async with ctx.driver.session() as s:
-        result = await s.run(
-            "MATCH (e:Episodic {group_id:$g}) "
-            "OPTIONAL MATCH (n:Entity {group_id:$g}) "
-            "OPTIONAL MATCH ()-[f:RELATES_TO {group_id:$g}]->() "
-            "RETURN count(DISTINCT e) AS episodes, count(DISTINCT n) AS entities, "
-            "       count(DISTINCT f) AS facts", g=COMPAT_GROUP_ID)
-        rows = [dict(rec) async for rec in result]
-    counts = rows[0] if rows else {}
-    if not counts.get("facts"):
-        raise RuntimeError(f"ingest produced no facts: {counts}")
+    await Provenance(ctx.driver).link(
+        E2E_ARTICLE_ID, added.episode.uuid, chunk_index=0,
+        heading_path=HEADING_PATH, token_count=len(_E2E_ARTICLE.split()),
+        content_hash="compat-check-e2e-hash")
 
     found = await search_local(
         ctx.graphiti, ctx.driver, q="What does Vault Lock enforce?", k=5,
         group_id=COMPAT_GROUP_ID)
     if found["count"] == 0:
         raise RuntimeError("search_local returned no results after ingest")
-    return (f"ingested {counts}; search_local returned {found['count']} results "
-            f"with {sum(len(r['sources']) for r in found['results'])} resolved sources")
+    resolved = [s for r in found["results"] for s in r["sources"]]
+    if not resolved:
+        raise RuntimeError(
+            "search_local returned results but NO resolved sources -- the provenance "
+            "chain (fact -> episode -> article -> url) did not resolve end to end")
+    urls = {s["url"] for s in resolved}
+    if E2E_ARTICLE_URL not in urls:
+        raise RuntimeError(f"expected {E2E_ARTICLE_URL} among resolved sources, "
+                           f"got {sorted(urls)}")
+    return (f"ingested + linked; search_local returned {found['count']} result(s) "
+            f"with {len(resolved)} resolved source(s)")
 
 
 def e2e_checks() -> list[Check]:

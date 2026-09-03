@@ -18,8 +18,14 @@ async def test_harness_runs_end_to_end_against_a_testcontainer(
     uri, user, password = extract_neo4j
     # Point graphiti at the CONTAINER: the graphiti-* groups reach Neo4j through
     # ctx.graphiti, whose driver comes from settings, not through ctx.driver.
+    # Clear compat_neo4j_* too: compat_target() prefers it over neo4j_*, and a
+    # developer's .env commonly sets it to the LIVE production target for Step 5's
+    # live run. Left unset here, this test would silently write the structural
+    # fixture (and, for e2e, apply_structural) to production instead of the
+    # testcontainer -- exactly what happened before this override was added.
     settings = get_extract_settings().model_copy(update={
-        "neo4j_uri": uri, "neo4j_user": user, "neo4j_password": password})
+        "neo4j_uri": uri, "neo4j_user": user, "neo4j_password": password,
+        "compat_neo4j_uri": "", "compat_neo4j_user": "", "compat_neo4j_password": ""})
     graphiti = build_graphiti(settings)
     embedding = fabricate_embedding(settings.embed_dim)
     ctx = CheckContext(driver=extract_driver, graphiti=graphiti, settings=settings,
@@ -53,8 +59,12 @@ async def test_harness_runs_end_to_end_against_a_testcontainer(
 
 
 async def test_teardown_leaves_no_harness_data(extract_driver):
+    """Teardown must remove the structural and community nodes too, not just the
+    graphiti ones -- they are created through the real write path and would
+    otherwise be left behind on a production instance."""
     async with extract_driver.session() as s:
         result = await s.run(
-            "MATCH (n {group_id:'compat-check'}) RETURN count(n) AS n")
+            "MATCH (n {group_id:'compat-check'}) "
+            "RETURN labels(n) AS labels, count(n) AS n")
         rows = [dict(rec) async for rec in result]
-    assert rows[0]["n"] == 0
+    assert rows == [], f"residual harness nodes: {rows}"
