@@ -6,8 +6,15 @@ from graph_extract.config import ExtractSettings
 
 
 def _settings(**kw):
+    # compat_neo4j_* explicitly zeroed: graphiti-core's import (elsewhere in the
+    # suite, before this module runs) calls python-dotenv's load_dotenv(), which
+    # mutates the real process environment from .env. `_env_file=None` only skips
+    # re-reading the .env FILE -- it does not stop pydantic-settings from reading
+    # already-set OS env vars, so a real COMPAT_NEO4J_* in .env would otherwise
+    # leak into "hermetic" settings that don't override every field explicitly.
     base = dict(_env_file=None, docext_base_url="http://x", docext_read_key="k",
-                neo4j_uri="bolt://main", neo4j_user="mu", neo4j_password="mp")
+                neo4j_uri="bolt://main", neo4j_user="mu", neo4j_password="mp",
+                compat_neo4j_uri="", compat_neo4j_user="", compat_neo4j_password="")
     base.update(kw)
     return ExtractSettings(**base)
 

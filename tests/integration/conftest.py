@@ -33,12 +33,20 @@ async def state_store():
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def extract_driver():
+async def extract_neo4j():
+    """The Neo4j testcontainer for graph_extract tests, yielding its connection
+    details so callers can point OTHER clients (e.g. a Graphiti instance) at the
+    same container rather than at whatever .env names."""
     with Neo4jContainer("neo4j:2026.07.1-community") as neo:
-        driver = AsyncGraphDatabase.driver(
-            neo.get_connection_url(), auth=("neo4j", neo.password))
-        yield driver
-        await driver.close()
+        yield neo.get_connection_url(), "neo4j", neo.password
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def extract_driver(extract_neo4j):
+    uri, user, password = extract_neo4j
+    driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    yield driver
+    await driver.close()
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")

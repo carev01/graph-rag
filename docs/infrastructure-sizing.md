@@ -125,6 +125,14 @@ retrieval, plus heap for queries and the GDS Leiden projection:
   nightly Leiden time becomes a problem, revisit the determinism/concurrency
   trade-off.)
 
+> **Correction (2026-09-02).** graphiti-core 0.29.2 creates **no vector indexes** and
+> scores similarity with brute-force `vector.similarity.cosine` scans in Cypher
+> (`search_ops.py:148-160`). The vector-index line in the disk table above is
+> therefore not what the current code produces, and at 3-5 M facts every hybrid
+> search would scan every fact embedding. This is a scaling blocker for broad
+> ingestion, tracked as its own slice; see
+> `docs/superpowers/specs/2026-09-02-neo4j-compat-check-design.md` section 9.
+
 ## 5. Sizing is proportional — you don't have to jump to full corpus
 
 Resources scale with **ingested** articles, not the 105k target. A phased,
