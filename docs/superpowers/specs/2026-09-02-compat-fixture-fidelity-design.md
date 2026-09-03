@@ -92,13 +92,16 @@ its embedding is the fabricated vector.
 
 Two details that decide whether the read-back checks see anything:
 
-- The entry's **`level` and `rating` must match what the reading check asks for.**
-  `global_search.shortlist_communities(driver, embedder, q, *, level, k, group_id,
-  min_rating)` filters on both, so a community written at a different level, or with a
-  rating below `min_rating`, yields an empty shortlist and the new check would pass
-  vacuously — the exact failure this slice exists to remove. The implementation pins the
-  written `level` and `rating` and the queried `level`/`min_rating` to the same
-  constants.
+- **The entry must satisfy every filter the reading check applies.** Verified against
+  the source: `global_search.shortlist_communities(driver, embedder, q, *, level, k,
+  group_id, rating_boost=0.1)` takes **no `min_rating`**. Its real filters are the
+  Cypher's `level` match, a truthy `embedding`, and — inside `_rank_hits` — a
+  **non-empty `cited_fact_uuids`**, since rows without citable facts are skipped as
+  "useless for a cited answer". A community written at a different level, or with an
+  empty `cited_fact_uuids`, yields an empty shortlist and the new check passes
+  vacuously — the exact failure this slice exists to remove. The implementation pins
+  the written `level` to the queried `level` and gives the entry non-empty
+  `cited_fact_uuids` and a real embedding.
 - `write_communities_incremental` **dissolves communities absent from `entries`**, but
   it is scoped by `group_id`, so it can only ever affect the `compat-check` namespace.
   It cannot touch a real community layer on the target.
