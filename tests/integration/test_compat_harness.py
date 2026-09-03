@@ -17,15 +17,14 @@ async def test_harness_runs_end_to_end_against_a_testcontainer(
     from this environment."""
     uri, user, password = extract_neo4j
     # Point graphiti at the CONTAINER: the graphiti-* groups reach Neo4j through
-    # ctx.graphiti, whose driver comes from settings, not through ctx.driver.
-    # Clear compat_neo4j_* too: compat_target() prefers it over neo4j_*, and a
-    # developer's .env commonly sets it to the LIVE production target for Step 5's
-    # live run. Left unset here, this test would silently write the structural
-    # fixture (and, for e2e, apply_structural) to production instead of the
-    # testcontainer -- exactly what happened before this override was added.
+    # ctx.graphiti, whose driver comes from settings, not through ctx.driver. The
+    # checks that build their own Neo4jRepo (structural schema/fixture, e2e) now
+    # read ctx.settings.neo4j_uri/user/password directly rather than re-resolving
+    # compat_target() themselves, so overriding neo4j_uri/user/password here is
+    # sufficient to keep every write inside this test pointed at the container --
+    # there is no second override left to clear.
     settings = get_extract_settings().model_copy(update={
-        "neo4j_uri": uri, "neo4j_user": user, "neo4j_password": password,
-        "compat_neo4j_uri": "", "compat_neo4j_user": "", "compat_neo4j_password": ""})
+        "neo4j_uri": uri, "neo4j_user": user, "neo4j_password": password})
     graphiti = build_graphiti(settings)
     embedding = fabricate_embedding(settings.embed_dim)
     ctx = CheckContext(driver=extract_driver, graphiti=graphiti, settings=settings,

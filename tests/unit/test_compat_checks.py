@@ -9,6 +9,13 @@ def _all():
             + checks.vector_checks() + checks.fulltext_checks())
 
 
+def _every_check():
+    """Every group in the registry, not just groups 1-4 -- used by the safety
+    invariants below so the guarantee holds as the registry grows (e.g. a future
+    group adding a CREATE INDEX or DELETE statement)."""
+    return checks.all_checks([0.5] * 768)
+
+
 def test_every_check_has_a_nonempty_name_and_group():
     for c in _all():
         assert c.name and c.group
@@ -48,13 +55,13 @@ def test_no_check_calls_apoc_procedures():
 
 
 def test_every_harness_index_is_compat_prefixed():
-    for c in _all():
+    for c in _every_check():
         if isinstance(c, CypherCheck) and "CREATE " in c.cypher and "INDEX" in c.cypher:
             assert "compat_" in c.cypher
 
 
 def test_cypher_checks_never_issue_an_unscoped_delete():
-    for c in _all():
+    for c in _every_check():
         if isinstance(c, CypherCheck) and "DELETE" in c.cypher.upper():
             assert "compat-check" in c.cypher or "$g" in c.cypher
 

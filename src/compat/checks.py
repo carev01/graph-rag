@@ -1,8 +1,16 @@
 """The compatibility check registry.
 
-Registry ORDER IS SIGNIFICANT: group 5 (`graphiti-write`) creates the synthetic
-graph that groups 6 (`graphiti-search`) and 7 (`our-cypher`) query. run_all
-executes sequentially in this order."""
+Registry ORDER IS SIGNIFICANT. run_all executes sequentially in this order, and
+several groups depend on state a prior group left behind:
+- group 2 (`bootstrap`) writes the structural fixture chain that group 5's
+  provenance link and group 7's citation/vendor-scope checks resolve against,
+  and the schema/constraints group 5 and group 7's writes rely on.
+- group 5 (`graphiti-write`) creates the synthetic entity/fact graph that group 6
+  (`graphiti-search`) and group 7 (`our-cypher`) query.
+- within group 7, `_write_community` writes the Community node that
+  `_load_persisted`, `_shortlist_communities`, and `_freshness` read back, and
+  `_staleness_sweep` must run before `_timeline_sweep_flags`, which asserts the
+  sweep already flagged the orphan fact."""
 from __future__ import annotations
 
 import httpx
@@ -146,10 +154,14 @@ async def _graphiti_bootstrap(ctx: CheckContext) -> str:
 
 
 async def _structural_schema(ctx: CheckContext) -> str:
-    from compat.runner import compat_target
+    # ctx.settings is already resolved (cli.py builds it from compat_target() before
+    # constructing CheckContext); re-resolving here would re-apply the COMPAT_NEO4J_*
+    # override a second time and could point this write at a DIFFERENT database than
+    # ctx.driver/ctx.graphiti — the split-brain that once wrote compat-check- nodes
+    # to production.
     from graph_sync.neo4j_repo import Neo4jRepo
-    uri, user, password = compat_target(ctx.settings)
-    repo = Neo4jRepo(uri, user, password)
+    repo = Neo4jRepo(ctx.settings.neo4j_uri, ctx.settings.neo4j_user,
+                      ctx.settings.neo4j_password)
     try:
         await repo.init_schema()
     finally:
@@ -163,12 +175,11 @@ async def _structural_fixture(ctx: CheckContext) -> str:
     covers a write query that was previously untested, and because _APPLY_STRUCTURAL
     is `MERGE ... SET v += $vendor`, passing group_id puts every created node inside
     teardown's scoped sweep."""
-    from compat.runner import compat_target
     from graph_sync.models import StructuralWrite
     from graph_sync.neo4j_repo import Neo4jRepo
 
-    uri, user, password = compat_target(ctx.settings)
-    repo = Neo4jRepo(uri, user, password)
+    repo = Neo4jRepo(ctx.settings.neo4j_uri, ctx.settings.neo4j_user,
+                      ctx.settings.neo4j_password)
     try:
         await repo.apply_structural(StructuralWrite(
             vendor={"id": VENDOR_ID, "name": VENDOR_NAME, "group_id": COMPAT_GROUP_ID},
@@ -459,6 +470,11 @@ async def _search_rrf(ctx: CheckContext) -> str:
     config.limit = 10
     results = await ctx.graphiti._search(
         "vault lock immutable retention", config, group_ids=[COMPAT_GROUP_ID])
+    if not results.edges:
+        raise RuntimeError(
+            "EDGE_HYBRID_SEARCH_RRF returned zero edges -- the fixture guarantees "
+            "matching facts (FACT_AB/FACT_BC), so an empty result means retrieval "
+            "on the hybrid-search path behind /search/local is broken")
     return f"RRF recipe returned {len(results.edges)} edges"
 
 
@@ -470,6 +486,11 @@ async def _search_node_distance(ctx: CheckContext) -> str:
     results = await ctx.graphiti._search(
         "vault lock immutable retention", config, group_ids=[COMPAT_GROUP_ID],
         center_node_uuid=ENT_A)
+    if not results.edges:
+        raise RuntimeError(
+            "EDGE_HYBRID_SEARCH_NODE_DISTANCE returned zero edges -- the fixture "
+            "guarantees matching facts (FACT_AB/FACT_BC), so an empty result means "
+            "retrieval on the hybrid-search path behind /search/local is broken")
     return f"node_distance recipe returned {len(results.edges)} edges"
 
 
@@ -564,6 +585,10 @@ async def _freshness(ctx: CheckContext) -> str:
     if stamps["graph_cursor_time"] is None:
         raise RuntimeError("graph_cursor_time is None despite a written episode — "
                            "the freshness query failed and was swallowed")
+    if stamps["reports_as_of"] is None:
+        raise RuntimeError("reports_as_of is None despite the community write "
+                           "(_write_community) preceding this check — the freshness "
+                           "query failed and was swallowed")
     return f"freshness stamps resolved: {stamps}"
 
 
@@ -614,6 +639,10 @@ async def _touched_entities(ctx: CheckContext) -> str:
     query actually runs."""
     from theme_builder.incremental import touched_entities
     touched = await touched_entities(ctx.driver, COMPAT_GROUP_ID, "2000-01-01T00:00:00Z")
+    if touched is not None and len(touched) == 0:
+        raise RuntimeError(
+            "touched_entities returned zero entities despite the synthetic graph "
+            "having 3 (compat-ent-a/b/c) touched since the passed cursor")
     count = "all (None sentinel)" if touched is None else len(touched)
     return f"touched_entities ran: {count}"
 
@@ -644,6 +673,10 @@ async def _leiden_detect(ctx: CheckContext) -> str:
         raise SkipCheck(f"GDS not available: {type(exc).__name__}") from exc
     communities = await detect_communities(
         ctx.driver, COMPAT_GROUP_ID, min_community_size=1, max_levels=2)
+    if len(communities) == 0:
+        raise RuntimeError(
+            "GDS Leiden detected zero communities despite the synthetic graph "
+            "(3 entities, 2 connecting facts) forming at least 1")
     return f"GDS projection + seeded Leiden ran: {len(communities)} communities"
 
 
@@ -699,14 +732,13 @@ async def _e2e_ingest_and_retrieve(ctx: CheckContext) -> str:
     from datetime import datetime, timezone
 
     from answer_api.search import search_local
-    from compat.runner import compat_target
     from graph_extract.graphiti_client import add_text_episode
     from graph_extract.provenance import Provenance
     from graph_sync.models import StructuralWrite
     from graph_sync.neo4j_repo import Neo4jRepo
 
-    uri, user, password = compat_target(ctx.settings)
-    repo = Neo4jRepo(uri, user, password)
+    repo = Neo4jRepo(ctx.settings.neo4j_uri, ctx.settings.neo4j_user,
+                      ctx.settings.neo4j_password)
     try:
         await repo.apply_structural(StructuralWrite(
             vendor={"id": VENDOR_ID, "name": VENDOR_NAME, "group_id": COMPAT_GROUP_ID},
@@ -735,9 +767,15 @@ async def _e2e_ingest_and_retrieve(ctx: CheckContext) -> str:
         heading_path=HEADING_PATH, token_count=len(_E2E_ARTICLE.split()),
         content_hash="compat-check-e2e-hash")
 
-    found = await search_local(
-        ctx.graphiti, ctx.driver, q="What does Vault Lock enforce?", k=5,
-        group_id=COMPAT_GROUP_ID)
+    try:
+        found = await search_local(
+            ctx.graphiti, ctx.driver, q="What does Vault Lock enforce?", k=5,
+            group_id=COMPAT_GROUP_ID)
+    except _ENDPOINT_DOWN as exc:
+        # search_local also hits the embedder; a mid-check endpoint drop here must
+        # report skip, not fail, same as the add_text_episode call above.
+        raise SkipCheck(
+            f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
     if found["count"] == 0:
         raise RuntimeError("search_local returned no results after ingest")
     resolved = [s for r in found["results"] for s in r["sources"]]
@@ -763,8 +801,11 @@ def e2e_checks() -> list[Check]:
 # --------------------------------------------------------------------------- #
 
 def all_checks(embedding: list[float]) -> list[Check]:
-    """Every group, in execution order. Group 5 writes the synthetic graph that
-    groups 6 and 7 query, so this order is load-bearing.
+    """Every group, in execution order. This order is load-bearing: group 2
+    (bootstrap) writes the structural fixture that groups 5 and 7 read; group 5
+    (graphiti-write) writes the synthetic entity/fact graph that groups 6 and 7
+    query; within group 7 the community write precedes its readers and the
+    staleness sweep precedes the timeline-flags check.
 
     CypherChecks declare their vector parameter as `{"v": None}`; the fabricated
     768-d vector is substituted here so the registry stays a pure literal."""
