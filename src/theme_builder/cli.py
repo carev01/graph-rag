@@ -66,7 +66,7 @@ async def _corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:
     community dirty on an unchanged graph."""
     async with driver.session() as s:
         r = await s.run(
-            "CALL { MATCH (e:Episodic {group_id:$g}) RETURN e.created_at AS t "
+            "CALL () { MATCH (e:Episodic {group_id:$g}) RETURN e.created_at AS t "
             "UNION ALL MATCH (n:Entity {group_id:$g}) RETURN n.created_at AS t "
             "UNION ALL MATCH ()-[f:RELATES_TO {group_id:$g}]->() RETURN f.created_at AS t "
             "UNION ALL MATCH ()-[f:RELATES_TO {group_id:$g}]->() "

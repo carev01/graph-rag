@@ -34,11 +34,9 @@ and the SET in a single statement, shrinking that window to negligible
 (single-statement execution is read-committed, not fully serializable, but
 a sweep-eligible fact has all-dead episodes, so a concurrent contradiction
 of the same fact is vanishingly unlikely for a weekly batch job).
-Note: the newer `CALL (eps) { ... }` call-scope syntax is rejected by the
-Neo4j 5.22 testcontainer used in tests/integration/conftest.py ("expected
-an identifier or '{'") -- the classic `CALL { WITH eps ... }` importing
-form below is what's portable and was verified against the real container,
-including with the outer SET in the same statement.
+Uses the scoped `CALL (eps) { ... }` call-scope form (Neo4j 5.23+). The target is
+Neo4j 2026.07 and nothing older is deployed, so the legacy importing-WITH form is
+no longer needed.
 """
 
 from __future__ import annotations
@@ -49,8 +47,7 @@ _SWEEP = """
 MATCH ()-[f:RELATES_TO {group_id:$g}]->()
 WHERE f.invalid_at IS NULL AND f.episodes IS NOT NULL AND size(f.episodes) > 0
 WITH f, f.episodes AS eps
-CALL {
-  WITH eps
+CALL (eps) {
   UNWIND eps AS epu
   OPTIONAL MATCH (e:Episodic {uuid: epu})
   OPTIONAL MATCH (a:Article)-[:HAS_EPISODE]->(e) WHERE coalesce(a.removed, false) = false
