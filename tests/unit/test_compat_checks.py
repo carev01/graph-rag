@@ -138,3 +138,44 @@ def test_e2e_check_never_references_synthesis():
     for banned in ["answer_local", "synthesize", "_synthesis_client_and_model",
                    "judge", "global_search", "drift_search"]:
         assert banned not in source, f"e2e must not depend on the synthesis tier ({banned})"
+
+
+def test_every_structural_id_is_compat_prefixed():
+    """SAFETY: MERGE against a real vendor/article id would stamp group_id onto a
+    production node, which teardown would then DELETE. Ids must be literal and
+    unmistakably ours."""
+    for value in [checks.VENDOR_ID, checks.PRODUCT_ID, checks.SOURCE_ID,
+                  checks.ARTICLE_ID, checks.E2E_ARTICLE_ID]:
+        assert value.startswith("compat-check-"), value
+
+
+def test_orphan_ids_are_compat_prefixed():
+    for value in [checks.EP_ORPHAN, checks.FACT_ORPHAN]:
+        assert value.startswith("compat-")
+
+
+def test_article_urls_use_the_reserved_invalid_tld():
+    """A fabricated URL must never look like real documentation in a report."""
+    for url in [checks.ARTICLE_URL, checks.E2E_ARTICLE_URL]:
+        assert ".invalid/" in url
+
+
+def test_bootstrap_group_writes_the_structural_chain():
+    names = " ".join(c.name.lower() for c in checks.bootstrap_checks())
+    assert "structural fixture" in names
+
+
+def test_graphiti_write_group_links_the_article_to_the_episode():
+    names = [c.name.lower() for c in checks.graphiti_write_checks()]
+    joined = " ".join(names)
+    assert "provenance link" in joined
+    # The link must come AFTER the episode write: registry order is execution order,
+    # and Provenance.link MATCHes an existing (:Episodic).
+    write_idx = next(i for i, n in enumerate(names) if "synthetic graph" in n)
+    link_idx = next(i for i, n in enumerate(names) if "provenance link" in n)
+    assert write_idx < link_idx
+
+
+def test_structural_write_precedes_the_episode_write_across_groups():
+    groups = [c.group for c in checks.all_checks([0.5] * 768)]
+    assert groups.index("bootstrap") < groups.index("graphiti-write")

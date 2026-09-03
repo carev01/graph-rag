@@ -22,6 +22,30 @@ EP_UUID = "compat-ep-1"
 ENT_A, ENT_B, ENT_C = "compat-ent-a", "compat-ent-b", "compat-ent-c"
 FACT_AB, FACT_BC = "compat-fact-ab", "compat-fact-bc"
 
+# --- structural fixture ids -------------------------------------------------
+# SAFETY: these are LITERAL and `compat-check-`-prefixed on purpose. apply_structural
+# runs `MERGE (v:Vendor {id: $vendor.id}) SET v += $vendor`, so a collision with a real
+# vendor/article id would stamp group_id="compat-check" onto a PRODUCTION node -- which
+# teardown would then delete. Never derive these from settings or from the target.
+VENDOR_ID = "compat-check-vendor"
+PRODUCT_ID = "compat-check-product"
+SOURCE_ID = "compat-check-source"
+ARTICLE_ID = "compat-check-article"
+E2E_ARTICLE_ID = "compat-check-article-e2e"
+# .invalid is a reserved non-resolving TLD (RFC 2606): a fabricated URL appearing in a
+# report must never be clickable or mistakable for real vendor documentation.
+ARTICLE_URL = "https://example.invalid/compat-check/vault-lock"
+E2E_ARTICLE_URL = "https://example.invalid/compat-check/e2e"
+HEADING_PATH = "Retention"
+VENDOR_NAME = "AWS"          # _vendor_episode_uuids(driver, "AWS") must find this
+PRODUCT_NAME = "AWS Backup"
+
+# An episode deliberately NEVER linked to an :Article, plus a fact supported only by
+# it. The staleness sweep must expire exactly this fact and leave the supported ones
+# alone -- covering both directions of a query that silently invalidates data.
+EP_ORPHAN = "compat-ep-orphan"
+FACT_ORPHAN = "compat-fact-orphan"
+
 _GRAPHITI_FULLTEXT_INDEXES = [
     "episode_content", "node_name_and_summary", "community_name", "edge_name_and_fact",
 ]
@@ -101,6 +125,33 @@ async def _structural_schema(ctx: CheckContext) -> str:
     return "graph_sync init_schema() completed"
 
 
+async def _structural_fixture(ctx: CheckContext) -> str:
+    """Write the Vendor->Product->Source->Article chain through the REAL ingestion
+    path (graph_sync.neo4j_repo.apply_structural), not hand-written Cypher. This
+    covers a write query that was previously untested, and because _APPLY_STRUCTURAL
+    is `MERGE ... SET v += $vendor`, passing group_id puts every created node inside
+    teardown's scoped sweep."""
+    from compat.runner import compat_target
+    from graph_sync.models import StructuralWrite
+    from graph_sync.neo4j_repo import Neo4jRepo
+
+    uri, user, password = compat_target(ctx.settings)
+    repo = Neo4jRepo(uri, user, password)
+    try:
+        await repo.apply_structural(StructuralWrite(
+            vendor={"id": VENDOR_ID, "name": VENDOR_NAME, "group_id": COMPAT_GROUP_ID},
+            product={"id": PRODUCT_ID, "name": PRODUCT_NAME,
+                     "group_id": COMPAT_GROUP_ID},
+            source={"id": SOURCE_ID, "name": "compat source",
+                    "group_id": COMPAT_GROUP_ID},
+            article={"id": ARTICLE_ID, "title": "Vault Lock",
+                     "source_url": ARTICLE_URL, "source_id": SOURCE_ID,
+                     "group_id": COMPAT_GROUP_ID}))
+    finally:
+        await repo.close()
+    return f"structural chain written: {VENDOR_ID} -> {ARTICLE_ID}"
+
+
 def bootstrap_checks() -> list[Check]:
     return [
         CallableCheck("graphiti build_indices_and_constraints", "bootstrap",
@@ -117,6 +168,7 @@ def bootstrap_checks() -> list[Check]:
             "RETURN count(*) AS n",
             expect=lambda rows: bool(rows) and rows[0]["n"] > 0),
         CallableCheck("graph_sync structural schema", "bootstrap", _structural_schema),
+        CallableCheck("structural fixture chain", "bootstrap", _structural_fixture),
     ]
 
 
@@ -242,6 +294,14 @@ async def _write_synthetic_graph(ctx: CheckContext) -> str:
         valid_at=now)
     await episode.save(gdriver)
 
+    orphan_episode = EpisodicNode(
+        uuid=EP_ORPHAN, name="compat orphan episode", group_id=COMPAT_GROUP_ID,
+        created_at=now, source=EpisodeType.text,
+        source_description="compatibility harness (deliberately unlinked)",
+        content="An episode intentionally never linked to an :Article.",
+        valid_at=now)
+    await orphan_episode.save(gdriver)
+
     entities = [
         EntityNode(uuid=ENT_A, name="AWS Backup", group_id=COMPAT_GROUP_ID,
                    labels=["Entity", "Product"], created_at=now,
@@ -267,10 +327,15 @@ async def _write_synthetic_graph(ctx: CheckContext) -> str:
                    fact="Vault Lock enforces immutable retention on recovery points.",
                    fact_embedding=ctx.embedding, episodes=[EP_UUID],
                    valid_at=now, invalid_at=None),
+        EntityEdge(uuid=FACT_ORPHAN, group_id=COMPAT_GROUP_ID, source_node_uuid=ENT_A,
+                   target_node_uuid=ENT_C, created_at=now, name="UNSUPPORTED",
+                   fact="A fact whose only supporting episode has no article.",
+                   fact_embedding=ctx.embedding, episodes=[EP_ORPHAN],
+                   valid_at=now, invalid_at=None),
     ]
     for edge in edges:
         await edge.save(gdriver)
-    return "1 episode, 3 entities, 2 bi-temporal facts written"
+    return "2 episodes (1 orphan), 3 entities, 3 bi-temporal facts written"
 
 
 async def _dynamic_labels_persisted(ctx: CheckContext) -> str:
@@ -304,6 +369,25 @@ async def _bitemporal_properties_persisted(ctx: CheckContext) -> str:
     return f"valid_at set, invalid_at null, embedding dim {row['dim']}"
 
 
+async def _link_episode(ctx: CheckContext) -> str:
+    """Attach the Article to the episode via the REAL provenance writer. In production
+    this edge is graph-sync's job, never graphiti's -- which is why the fixture had no
+    HAS_EPISODE chain and resolve_citations returned zero sources."""
+    from graph_extract.provenance import Provenance
+
+    await Provenance(ctx.driver).link(
+        ARTICLE_ID, EP_UUID, chunk_index=0, heading_path=HEADING_PATH,
+        token_count=42, content_hash="compat-check-hash")
+    async with ctx.driver.session() as s:
+        result = await s.run(
+            "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->(e:Episodic {uuid:$u}) "
+            "RETURN r.heading_path AS section", a=ARTICLE_ID, u=EP_UUID)
+        rows = [dict(rec) async for rec in result]
+    if not rows:
+        raise RuntimeError("Provenance.link did not create the HAS_EPISODE edge")
+    return f"article linked to episode, section={rows[0]['section']!r}"
+
+
 def graphiti_write_checks() -> list[Check]:
     return [
         CallableCheck("write synthetic graph via graphiti models", "graphiti-write",
@@ -328,6 +412,8 @@ def graphiti_write_checks() -> list[Check]:
             expect=lambda rows: bool(rows) and "Product" in rows[0]["labels"]),
         CallableCheck("bi-temporal fact properties persisted", "graphiti-write",
                       _bitemporal_properties_persisted),
+        CallableCheck("provenance link (Article HAS_EPISODE)", "graphiti-write",
+                      _link_episode),
     ]
 
 
