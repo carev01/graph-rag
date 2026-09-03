@@ -66,6 +66,12 @@ class ExtractSettings(BaseSettings):
     # comma tokens progressively less attractive so ']' eventually wins.
     # Default 0.0 = inject nothing, preserving the proven gpt-5-mini behaviour; raise
     # only for models that need it.
+    # Cap on graphiti's three unbounded array<integer> schema fields
+    # (episode_indices, duplicate_facts, contradicted_facts). These are index lists
+    # whose legitimate length is tiny (one entry per episode/candidate), so a generous
+    # cap is inert for a well-behaved model but makes the ascending-integer runaway
+    # unrepresentable. 0 disables the bound.
+    llm_max_index_array: int = 25
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
     judge_base_url: str = ""
