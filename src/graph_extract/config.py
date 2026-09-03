@@ -56,6 +56,18 @@ class ExtractSettings(BaseSettings):
     # with json_schema extracts cleanly. Task 7's probe compares json_schema
     # vs json_object and confirms this.
     llm_client_mode: Literal["structured", "generic_json_schema", "generic_json_object"] = "generic_json_schema"
+    # Repetition penalties for the extraction tier. graphiti never sends these (its
+    # client passes only model/messages/temperature/max_tokens/response_format) and we
+    # pin temperature=0.0, so a weaker model that starts an ascending-integer run in an
+    # unbounded list[int] field (prompts/extract_edges.py: episode_indices has no
+    # maxItems) cannot escape it -- under a strict JSON schema the only legal next
+    # tokens there are digits, ',' and ']'. It then burns the whole max_tokens budget
+    # and truncates into invalid JSON. A frequency penalty makes the repeated digit and
+    # comma tokens progressively less attractive so ']' eventually wins.
+    # Default 0.0 = inject nothing, preserving the proven gpt-5-mini behaviour; raise
+    # only for models that need it.
+    llm_frequency_penalty: float = 0.0
+    llm_presence_penalty: float = 0.0
     judge_base_url: str = ""
     judge_model: str = ""
     judge_api_key: str = ""  # if empty, the judge reuses llm_api_key (fallback path)

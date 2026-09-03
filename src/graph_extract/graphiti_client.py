@@ -58,6 +58,34 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
     return client
 
 
+def _inject_penalties(client: AsyncOpenAI, *, frequency_penalty: float,
+                      presence_penalty: float) -> AsyncOpenAI:
+    """Attach repetition penalties to every chat completion.
+
+    Why this exists: graphiti's `episode_indices` field is an unbounded `list[int]`
+    (prompts/extract_edges.py) and we pin temperature=0.0. Greedy decoding plus an
+    unbounded array is a trap -- once a weaker model emits `[0, 1, 2` the most likely
+    continuation is another integer, and under a strict JSON schema the grammar masks
+    out every token that could break the pattern (prose, another key), leaving only
+    digits, ',' and ']'. The model counts until it exhausts max_tokens and the reply
+    truncates into invalid JSON. Observed on mistral-nemo and solar-pro4; gpt-5-mini
+    escapes it only by assigning low probability to continuing the run.
+
+    A frequency penalty scales with how often a token has already been emitted, so the
+    repeated digit/comma tokens decay in attractiveness until ']' wins. This is a
+    decoding-level fix, so it protects every unbounded field, not just this one.
+    """
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        kwargs.setdefault("frequency_penalty", frequency_penalty)
+        kwargs.setdefault("presence_penalty", presence_penalty)
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
 def _is_azure(base_url: str) -> bool:
     return "azure.com" in base_url or "cognitiveservices" in base_url
 
@@ -78,6 +106,11 @@ def _llm_client(s: ExtractSettings):
                                  timeout=90.0, max_retries=4))
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
+    # Only wrap when configured: 0.0/0.0 leaves the proven gpt-5-mini path untouched
+    # (and avoids sending params some reasoning endpoints reject).
+    if s.llm_frequency_penalty or s.llm_presence_penalty:
+        raw = _inject_penalties(raw, frequency_penalty=s.llm_frequency_penalty,
+                                presence_penalty=s.llm_presence_penalty)
     if s.llm_client_mode == "structured":
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
