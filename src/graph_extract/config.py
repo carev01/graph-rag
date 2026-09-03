@@ -15,6 +15,12 @@ class ExtractSettings(BaseSettings):
     neo4j_uri: str
     neo4j_user: str
     neo4j_password: str
+    # Optional overrides letting the compatibility harness (src/compat/) target a
+    # DIFFERENT Neo4j than the one the rest of the stack uses, without editing the
+    # neo4j_* values. Empty means "fall back to the neo4j_* value", field by field.
+    compat_neo4j_uri: str = ""
+    compat_neo4j_user: str = ""
+    compat_neo4j_password: str = ""
     llm_base_url: str = "http://srv-llm.home.lan:8080/v1"
     # gpt-5-mini is the chosen extraction tier (Azure Responses API,
     # reasoning=minimal). gpt-oss-120b was evaluated 2026-07 (same Azure

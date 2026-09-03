@@ -15,7 +15,7 @@ from graph_sync.state_store import StateStore
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def neo4j_repo():
-    with Neo4jContainer("neo4j:5.22") as neo:
+    with Neo4jContainer("neo4j:2026.07.1-community") as neo:
         repo = Neo4jRepo(neo.get_connection_url(), "neo4j", neo.password)
         await repo.init_schema()
         yield repo
@@ -33,12 +33,20 @@ async def state_store():
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def extract_driver():
-    with Neo4jContainer("neo4j:5.22") as neo:
-        driver = AsyncGraphDatabase.driver(
-            neo.get_connection_url(), auth=("neo4j", neo.password))
-        yield driver
-        await driver.close()
+async def extract_neo4j():
+    """The Neo4j testcontainer for graph_extract tests, yielding its connection
+    details so callers can point OTHER clients (e.g. a Graphiti instance) at the
+    same container rather than at whatever .env names."""
+    with Neo4jContainer("neo4j:2026.07.1-community") as neo:
+        yield neo.get_connection_url(), "neo4j", neo.password
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def extract_driver(extract_neo4j):
+    uri, user, password = extract_neo4j
+    driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    yield driver
+    await driver.close()
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -46,11 +54,11 @@ async def extract_provenance(extract_driver):
     return Provenance(extract_driver)
 
 
-# --- Live fixtures: target the docker-compose Neo4j (5.26), NOT a
-# testcontainer. graphiti-core 0.29.2 issues dynamic-label Cypher that
-# Neo4j 5.22 (the testcontainer image above) rejects, so the live e2e test
-# needs the real, already-bootstrapped compose instance (bolt://localhost:7687
-# per .env) where the AWS Backup source's articles already exist.
+# --- Live fixtures: target the instance named by the .env neo4j_* settings, NOT a
+# testcontainer. The testcontainers above now run the same image as production
+# (neo4j:2026.07.1-community), so the historical "graphiti's dynamic-label Cypher
+# needs 5.26" caveat no longer applies; these fixtures exist because the live
+# tests need a POPULATED graph plus reachable LLM/embedder endpoints.
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def live_extract_driver():
