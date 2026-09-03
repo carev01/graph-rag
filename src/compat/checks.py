@@ -512,6 +512,12 @@ async def _shortlist_communities(ctx: CheckContext) -> str:
     if not hits:
         raise RuntimeError("shortlist_communities returned no hits despite a written "
                            "community at the queried level")
+    ids = [h.community_id for h in hits]
+    if COMMUNITY_ID not in ids:
+        raise RuntimeError(
+            f"shortlist did not return the harness community {COMMUNITY_ID}; "
+            f"got {ids} -- a non-empty shortlist of OTHER communities would "
+            f"otherwise mask a broken group_id filter")
     return f"shortlist returned {len(hits)} hit(s), top={hits[0].community_id}"
 
 
@@ -594,6 +600,9 @@ async def _staleness_sweep(ctx: CheckContext) -> str:
     if expired != {FACT_ORPHAN}:
         raise RuntimeError(f"sweep expired {sorted(expired)}, expected exactly "
                            f"{{{FACT_ORPHAN}}} (count={outcome.get('expired')})")
+    if outcome.get("expired") != 1:
+        raise RuntimeError(f"sweep sample matched but count did not: "
+                           f"expired={outcome.get('expired')!r}, sample={sorted(expired)}")
     return f"sweep expired exactly the unsupported fact: {outcome}"
 
 
