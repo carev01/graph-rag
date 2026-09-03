@@ -13,9 +13,10 @@
 
 ## Scope of this verdict
 
-**What this GO does establish:** every query in `src/` — structural writes, the
-retrieval-mode queries, the theme-builder subqueries, the staleness sweep — and
-graphiti-core's own write and search paths parse, plan, and execute successfully
+**What this GO does establish:** the queries this harness exercises — the
+retrieval-mode queries, the theme-builder subqueries and watermark, the staleness
+sweep, and the schema-declaration DDL — together with
+graphiti-core's own write and search paths, parse, plan, and execute successfully
 against Neo4j 2026.07.1 under its default `CYPHER_25` language setting. Graphiti's
 dynamic-label writes (`SET n:$(node.labels)`) and its bi-temporal fact properties
 (`valid_at`/`invalid_at`) also write and read back correctly. That is a real,
