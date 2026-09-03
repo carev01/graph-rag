@@ -1,3 +1,5 @@
+import asyncio
+
 from compat import checks
 from compat.model import CallableCheck, CypherCheck
 
@@ -179,3 +181,40 @@ def test_graphiti_write_group_links_the_article_to_the_episode():
 def test_structural_write_precedes_the_episode_write_across_groups():
     groups = [c.group for c in checks.all_checks([0.5] * 768)]
     assert groups.index("bootstrap") < groups.index("graphiti-write")
+
+
+def test_our_cypher_group_writes_then_reads_the_community():
+    names = [c.name.lower() for c in checks.our_cypher_checks()]
+    write_idx = next(i for i, n in enumerate(names) if "write community" in n)
+    read_idx = next(i for i, n in enumerate(names) if "load_persisted" in n)
+    shortlist_idx = next(i for i, n in enumerate(names) if "shortlist" in n)
+    assert write_idx < read_idx
+    assert write_idx < shortlist_idx
+
+
+def test_sweep_runs_before_the_timeline_flag_check():
+    """_timeline_sweep_flags asserts the orphan carries expired_by_sweep, so the
+    sweep must have already run."""
+    names = [c.name.lower() for c in checks.our_cypher_checks()]
+    sweep_idx = next(i for i, n in enumerate(names) if "staleness sweep" in n)
+    flags_idx = next(i for i, n in enumerate(names) if "timeline sweep flags" in n)
+    assert sweep_idx < flags_idx
+
+
+def test_fake_embedder_returns_the_vector_shortlist_expects():
+    # `import asyncio` goes at the TOP of the test file, not here: CI runs
+    # `ruff check src tests` and E402 applies to test files too.
+    emb = checks._FakeEmbedder([0.25] * 768)
+    got = asyncio.run(emb.create_batch(["anything"]))
+    assert got == [[0.25] * 768]
+
+
+def test_community_entry_satisfies_every_shortlist_filter():
+    """shortlist_communities drops rows with a falsy embedding, and _rank_hits SKIPS
+    rows whose cited_fact_uuids is empty. A community failing either would make the
+    shortlist check pass vacuously."""
+    entry = checks._community_entry([0.5] * 768)
+    assert entry["level"] == checks.COMMUNITY_LEVEL
+    assert entry["cited_fact_uuids"]
+    assert entry["embedding"]
+    assert entry["member_uuids"]

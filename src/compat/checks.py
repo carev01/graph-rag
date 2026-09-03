@@ -46,6 +46,38 @@ PRODUCT_NAME = "AWS Backup"
 EP_ORPHAN = "compat-ep-orphan"
 FACT_ORPHAN = "compat-fact-orphan"
 
+COMMUNITY_ID = "compat-check-community"
+COMMUNITY_LEVEL = 0          # written AND queried at this level; they must match
+
+
+class _FakeEmbedder:
+    """The one method shortlist_communities calls. Keeps group 7 free of network I/O
+    while still exercising the real shortlist query and ranking."""
+
+    def __init__(self, vector: list[float]) -> None:
+        self._vector = vector
+
+    async def create_batch(self, inputs: list[str]) -> list[list[float]]:
+        return [self._vector for _ in inputs]
+
+
+def _community_entry(embedding: list[float]) -> dict:
+    """A complete writeback entry. cited_fact_uuids MUST be non-empty: _rank_hits
+    skips rows without citable facts, so an empty list would silently produce an
+    empty shortlist and a vacuous pass."""
+    return {
+        "community_id": COMMUNITY_ID, "level": COMMUNITY_LEVEL,
+        "title": "Compat immutability theme",
+        "summary": "Vault Lock enforces immutable retention.",
+        "full_report": "[]", "rating": 7.5,
+        "rating_explanation": "fixture", "tags": ["compat"],
+        "cited_fact_uuids": [FACT_AB, FACT_BC],
+        "embedding": embedding,
+        "member_uuids": [ENT_A, ENT_B, ENT_C],
+        "generated_at": "2026-09-02T00:00:00Z",
+    }
+
+
 _GRAPHITI_FULLTEXT_INDEXES = [
     "episode_content", "node_name_and_summary", "community_name", "edge_name_and_fact",
 ]
@@ -456,16 +488,64 @@ def graphiti_search_checks() -> list[Check]:
 # Group 7: our-cypher  (every query we own, run against the synthetic graph)
 # --------------------------------------------------------------------------- #
 
+async def _write_community(ctx: CheckContext) -> str:
+    """Write one :Community through the REAL writeback. write_communities_incremental
+    needs no embedder (entries carry their own vector), so this stays LLM-free. It
+    dissolves communities absent from `entries`, but is group_id-scoped and so can
+    only ever affect the compat-check namespace."""
+    from theme_builder.writeback import write_communities_incremental
+
+    outcome = await write_communities_incremental(
+        ctx.driver, COMPAT_GROUP_ID, [_community_entry(ctx.embedding)],
+        corpus_cursor="2026-09-02T00:00:00Z")
+    if outcome.get("reports_written") != 1:
+        raise RuntimeError(f"expected 1 community written, got {outcome}")
+    return f"community layer written: {outcome}"
+
+
+async def _shortlist_communities(ctx: CheckContext) -> str:
+    from answer_api.global_search import shortlist_communities
+
+    hits = await shortlist_communities(
+        ctx.driver, _FakeEmbedder(ctx.embedding), "immutable retention",
+        level=COMMUNITY_LEVEL, k=5, group_id=COMPAT_GROUP_ID)
+    if not hits:
+        raise RuntimeError("shortlist_communities returned no hits despite a written "
+                           "community at the queried level")
+    return f"shortlist returned {len(hits)} hit(s), top={hits[0].community_id}"
+
+
 async def _resolve_citations(ctx: CheckContext) -> str:
+    """The provenance join -- design decision #2, the system's core citation
+    guarantee. Asserts the resolved VALUES, not just that the query ran: with no
+    structural chain this previously returned entries with empty `sources`."""
     from graph_extract.provenance import Provenance
+
     resolved = await Provenance(ctx.driver).resolve_citations([FACT_AB, FACT_BC])
-    return f"resolve_citations returned {len(resolved)} entries"
+    entry = resolved.get(FACT_AB)
+    if entry is None:
+        raise RuntimeError(f"{FACT_AB} absent from resolve_citations: {resolved}")
+    sources = entry.get("sources") or []
+    if not sources:
+        raise RuntimeError("resolve_citations returned no sources -- the provenance "
+                           "join (fact -> episode -> article -> url) did not resolve")
+    src = sources[0]
+    expected = {"url": ARTICLE_URL, "article_id": ARTICLE_ID, "vendor": VENDOR_NAME,
+                "product": PRODUCT_NAME, "section": HEADING_PATH}
+    wrong = {k: (src.get(k), v) for k, v in expected.items() if src.get(k) != v}
+    if wrong:
+        raise RuntimeError(f"resolved source has wrong values (got, expected): {wrong}")
+    return f"provenance join resolved: {src['vendor']}/{src['product']} {src['url']}"
 
 
 async def _vendor_scope(ctx: CheckContext) -> str:
     from answer_api.search import _vendor_episode_uuids
-    uuids = await _vendor_episode_uuids(ctx.driver, "AWS")
-    return f"vendor episode scope query ran, {len(uuids)} uuids"
+
+    uuids = await _vendor_episode_uuids(ctx.driver, VENDOR_NAME)
+    if EP_UUID not in uuids:
+        raise RuntimeError(f"vendor scope for {VENDOR_NAME!r} did not find {EP_UUID}; "
+                           f"got {sorted(uuids)}")
+    return f"vendor scope resolved {len(uuids)} episode uuid(s) for {VENDOR_NAME}"
 
 
 async def _freshness(ctx: CheckContext) -> str:
@@ -482,9 +562,16 @@ async def _freshness(ctx: CheckContext) -> str:
 
 
 async def _timeline_sweep_flags(ctx: CheckContext) -> str:
+    """Runs AFTER the sweep, so the orphan must be flagged and the supported fact
+    must not."""
     from answer_api.timeline import _sweep_flags
-    flags = await _sweep_flags(ctx.driver, [FACT_AB, FACT_BC], COMPAT_GROUP_ID)
-    return f"timeline sweep-flag query ran, {len(flags)} flags"
+
+    flags = await _sweep_flags(ctx.driver, [FACT_AB, FACT_ORPHAN], COMPAT_GROUP_ID)
+    if not flags.get(FACT_ORPHAN):
+        raise RuntimeError(f"{FACT_ORPHAN} not flagged expired_by_sweep: {flags}")
+    if flags.get(FACT_AB):
+        raise RuntimeError(f"{FACT_AB} wrongly flagged expired_by_sweep: {flags}")
+    return f"sweep flags correct: {flags}"
 
 
 async def _corpus_cursor_subquery(ctx: CheckContext) -> str:
@@ -497,14 +584,17 @@ async def _corpus_cursor_subquery(ctx: CheckContext) -> str:
 
 
 async def _staleness_sweep(ctx: CheckContext) -> str:
-    """graph_extract/staleness_sweep.py — a scoped `CALL (eps) {...}` subquery
-    (Neo4j 5.23+ call-scope form). The synthetic facts' only supporting episode
-    (EP_UUID) is never linked to an :Article, so the sweep correctly treats it as
-    unsupported and expires both facts — this is expected, not a bug: it confirms
-    the sweep's "no surviving support" logic actually runs and fires."""
+    """Both directions of a query that silently invalidates data: it must expire the
+    orphan fact (whose only episode has no article) and leave the supported facts
+    alone."""
     from graph_extract.staleness_sweep import sweep_stale_facts
+
     outcome = await sweep_stale_facts(ctx.driver, COMPAT_GROUP_ID)
-    return f"staleness sweep subquery ran: expired={outcome.get('expired')}"
+    expired = set(outcome.get("sample") or [])
+    if expired != {FACT_ORPHAN}:
+        raise RuntimeError(f"sweep expired {sorted(expired)}, expected exactly "
+                           f"{{{FACT_ORPHAN}}} (count={outcome.get('expired')})")
+    return f"sweep expired exactly the unsupported fact: {outcome}"
 
 
 async def _touched_entities(ctx: CheckContext) -> str:
@@ -521,9 +611,18 @@ async def _touched_entities(ctx: CheckContext) -> str:
 
 async def _load_persisted(ctx: CheckContext) -> str:
     from theme_builder.incremental import load_persisted, prev_corpus_cursor
+
     persisted = await load_persisted(ctx.driver, COMPAT_GROUP_ID)
+    if not persisted:
+        raise RuntimeError("load_persisted returned no communities despite the "
+                           "community layer having been written")
     cursor = await prev_corpus_cursor(ctx.driver, COMPAT_GROUP_ID)
-    return f"load_persisted={len(persisted)} communities, prev_cursor={cursor}"
+    if cursor is None:
+        raise RuntimeError("prev_corpus_cursor is None despite a written community")
+    members = persisted[0].members
+    if ENT_A not in members:
+        raise RuntimeError(f"community membership did not resolve: {members}")
+    return f"load_persisted={len(persisted)} community(ies), prev_cursor={cursor}"
 
 
 async def _leiden_detect(ctx: CheckContext) -> str:
@@ -541,16 +640,19 @@ async def _leiden_detect(ctx: CheckContext) -> str:
 
 def our_cypher_checks() -> list[Check]:
     return [
+        CallableCheck("write community layer", "our-cypher", _write_community),
         CallableCheck("provenance resolve_citations", "our-cypher", _resolve_citations),
         CallableCheck("vendor episode scope", "our-cypher", _vendor_scope),
         CallableCheck("freshness stamps", "our-cypher", _freshness),
-        CallableCheck("timeline sweep flags", "our-cypher", _timeline_sweep_flags),
         CallableCheck("theme-builder corpus cursor (CALL {} UNION ALL)", "our-cypher",
                       _corpus_cursor_subquery),
-        CallableCheck("staleness sweep (scoped CALL (eps) {...})", "our-cypher",
-                      _staleness_sweep),
         CallableCheck("incremental touched_entities", "our-cypher", _touched_entities),
         CallableCheck("incremental load_persisted", "our-cypher", _load_persisted),
+        CallableCheck("global-search community shortlist", "our-cypher",
+                      _shortlist_communities),
+        CallableCheck("staleness sweep (scoped CALL (eps))", "our-cypher",
+                      _staleness_sweep),
+        CallableCheck("timeline sweep flags", "our-cypher", _timeline_sweep_flags),
         CallableCheck("GDS projection + seeded leiden detect", "our-cypher",
                       _leiden_detect),
     ]
