@@ -85,8 +85,11 @@ async def run_callable_check(ctx: CheckContext, check: CallableCheck) -> CheckRe
 
 
 async def run_all(ctx: CheckContext, checks: list[Check]) -> list[CheckResult]:
-    """Run every check in registry order. Order matters: group 5 writes the synthetic
-    graph that groups 6 and 7 query."""
+    """Run every check in registry order. Order matters: group 2 (bootstrap) writes
+    the structural fixture that groups 5 and 7 read; group 5 (graphiti-write) writes
+    the synthetic graph that groups 6 and 7 query; group 7 writes the community layer
+    before reading it back, and the staleness sweep must precede the
+    timeline-flags check."""
     results: list[CheckResult] = []
     for check in checks:
         if isinstance(check, CypherCheck):

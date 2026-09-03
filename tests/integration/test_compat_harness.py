@@ -17,7 +17,12 @@ async def test_harness_runs_end_to_end_against_a_testcontainer(
     from this environment."""
     uri, user, password = extract_neo4j
     # Point graphiti at the CONTAINER: the graphiti-* groups reach Neo4j through
-    # ctx.graphiti, whose driver comes from settings, not through ctx.driver.
+    # ctx.graphiti, whose driver comes from settings, not through ctx.driver. The
+    # checks that build their own Neo4jRepo (structural schema/fixture, e2e) now
+    # read ctx.settings.neo4j_uri/user/password directly rather than re-resolving
+    # compat_target() themselves, so overriding neo4j_uri/user/password here is
+    # sufficient to keep every write inside this test pointed at the container --
+    # there is no second override left to clear.
     settings = get_extract_settings().model_copy(update={
         "neo4j_uri": uri, "neo4j_user": user, "neo4j_password": password})
     graphiti = build_graphiti(settings)
@@ -53,8 +58,12 @@ async def test_harness_runs_end_to_end_against_a_testcontainer(
 
 
 async def test_teardown_leaves_no_harness_data(extract_driver):
+    """Teardown must remove the structural and community nodes too, not just the
+    graphiti ones -- they are created through the real write path and would
+    otherwise be left behind on a production instance."""
     async with extract_driver.session() as s:
         result = await s.run(
-            "MATCH (n {group_id:'compat-check'}) RETURN count(n) AS n")
+            "MATCH (n {group_id:'compat-check'}) "
+            "RETURN labels(n) AS labels, count(n) AS n")
         rows = [dict(rec) async for rec in result]
-    assert rows[0]["n"] == 0
+    assert rows == [], f"residual harness nodes: {rows}"

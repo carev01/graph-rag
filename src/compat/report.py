@@ -97,7 +97,13 @@ def render(results: list[CheckResult], *, target: dict[str, str],
         "",
         "Graphiti's own indexes (created by `build_indices_and_constraints()`) are "
         "left in place deliberately — the call is idempotent and those indexes are "
-        "exactly what a real bootstrap needs. All harness *data* "
+        "exactly what a real bootstrap needs. `graph_sync.neo4j_repo.init_schema()` "
+        "(run by the `graph_sync structural schema` check) similarly leaves 5 global "
+        "constraints (`vendor_id`, `product_id`, `source_id`, `article_id`, "
+        "`chapter_id`) and 2 indexes (`article_source`, `chapter_source`) on the "
+        "target — harmless and arguably desirable (a real bootstrap needs them too), "
+        "but disclosed here since they are not `compat_`-prefixed and teardown does "
+        "not drop them. All harness *data* "
         f"(`group_id='{COMPAT_GROUP_ID}'`) and all `compat_`-prefixed indexes are "
         "removed in teardown.",
         "",

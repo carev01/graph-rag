@@ -1,8 +1,16 @@
 """The compatibility check registry.
 
-Registry ORDER IS SIGNIFICANT: group 5 (`graphiti-write`) creates the synthetic
-graph that groups 6 (`graphiti-search`) and 7 (`our-cypher`) query. run_all
-executes sequentially in this order."""
+Registry ORDER IS SIGNIFICANT. run_all executes sequentially in this order, and
+several groups depend on state a prior group left behind:
+- group 2 (`bootstrap`) writes the structural fixture chain that group 5's
+  provenance link and group 7's citation/vendor-scope checks resolve against,
+  and the schema/constraints group 5 and group 7's writes rely on.
+- group 5 (`graphiti-write`) creates the synthetic entity/fact graph that group 6
+  (`graphiti-search`) and group 7 (`our-cypher`) query.
+- within group 7, `_write_community` writes the Community node that
+  `_load_persisted`, `_shortlist_communities`, and `_freshness` read back, and
+  `_staleness_sweep` must run before `_timeline_sweep_flags`, which asserts the
+  sweep already flagged the orphan fact."""
 from __future__ import annotations
 
 import httpx
@@ -21,6 +29,62 @@ _ENDPOINT_DOWN = (httpx.ConnectError, httpx.ConnectTimeout, openai.APIConnection
 EP_UUID = "compat-ep-1"
 ENT_A, ENT_B, ENT_C = "compat-ent-a", "compat-ent-b", "compat-ent-c"
 FACT_AB, FACT_BC = "compat-fact-ab", "compat-fact-bc"
+
+# --- structural fixture ids -------------------------------------------------
+# SAFETY: these are LITERAL and `compat-check-`-prefixed on purpose. apply_structural
+# runs `MERGE (v:Vendor {id: $vendor.id}) SET v += $vendor`, so a collision with a real
+# vendor/article id would stamp group_id="compat-check" onto a PRODUCTION node -- which
+# teardown would then delete. Never derive these from settings or from the target.
+VENDOR_ID = "compat-check-vendor"
+PRODUCT_ID = "compat-check-product"
+SOURCE_ID = "compat-check-source"
+ARTICLE_ID = "compat-check-article"
+E2E_ARTICLE_ID = "compat-check-article-e2e"
+# .invalid is a reserved non-resolving TLD (RFC 2606): a fabricated URL appearing in a
+# report must never be clickable or mistakable for real vendor documentation.
+ARTICLE_URL = "https://example.invalid/compat-check/vault-lock"
+E2E_ARTICLE_URL = "https://example.invalid/compat-check/e2e"
+HEADING_PATH = "Retention"
+VENDOR_NAME = "AWS"          # _vendor_episode_uuids(driver, "AWS") must find this
+PRODUCT_NAME = "AWS Backup"
+
+# An episode deliberately NEVER linked to an :Article, plus a fact supported only by
+# it. The staleness sweep must expire exactly this fact and leave the supported ones
+# alone -- covering both directions of a query that silently invalidates data.
+EP_ORPHAN = "compat-ep-orphan"
+FACT_ORPHAN = "compat-fact-orphan"
+
+COMMUNITY_ID = "compat-check-community"
+COMMUNITY_LEVEL = 0          # written AND queried at this level; they must match
+
+
+class _FakeEmbedder:
+    """The one method shortlist_communities calls. Keeps group 7 free of network I/O
+    while still exercising the real shortlist query and ranking."""
+
+    def __init__(self, vector: list[float]) -> None:
+        self._vector = vector
+
+    async def create_batch(self, inputs: list[str]) -> list[list[float]]:
+        return [self._vector for _ in inputs]
+
+
+def _community_entry(embedding: list[float]) -> dict:
+    """A complete writeback entry. cited_fact_uuids MUST be non-empty: _rank_hits
+    skips rows without citable facts, so an empty list would silently produce an
+    empty shortlist and a vacuous pass."""
+    return {
+        "community_id": COMMUNITY_ID, "level": COMMUNITY_LEVEL,
+        "title": "Compat immutability theme",
+        "summary": "Vault Lock enforces immutable retention.",
+        "full_report": "[]", "rating": 7.5,
+        "rating_explanation": "fixture", "tags": ["compat"],
+        "cited_fact_uuids": [FACT_AB, FACT_BC],
+        "embedding": embedding,
+        "member_uuids": [ENT_A, ENT_B, ENT_C],
+        "generated_at": "2026-09-02T00:00:00Z",
+    }
+
 
 _GRAPHITI_FULLTEXT_INDEXES = [
     "episode_content", "node_name_and_summary", "community_name", "edge_name_and_fact",
@@ -90,15 +154,45 @@ async def _graphiti_bootstrap(ctx: CheckContext) -> str:
 
 
 async def _structural_schema(ctx: CheckContext) -> str:
-    from compat.runner import compat_target
+    # ctx.settings is already resolved (cli.py builds it from compat_target() before
+    # constructing CheckContext); re-resolving here would re-apply the COMPAT_NEO4J_*
+    # override a second time and could point this write at a DIFFERENT database than
+    # ctx.driver/ctx.graphiti — the split-brain that once wrote compat-check- nodes
+    # to production.
     from graph_sync.neo4j_repo import Neo4jRepo
-    uri, user, password = compat_target(ctx.settings)
-    repo = Neo4jRepo(uri, user, password)
+    repo = Neo4jRepo(ctx.settings.neo4j_uri, ctx.settings.neo4j_user,
+                      ctx.settings.neo4j_password)
     try:
         await repo.init_schema()
     finally:
         await repo.close()
     return "graph_sync init_schema() completed"
+
+
+async def _structural_fixture(ctx: CheckContext) -> str:
+    """Write the Vendor->Product->Source->Article chain through the REAL ingestion
+    path (graph_sync.neo4j_repo.apply_structural), not hand-written Cypher. This
+    covers a write query that was previously untested, and because _APPLY_STRUCTURAL
+    is `MERGE ... SET v += $vendor`, passing group_id puts every created node inside
+    teardown's scoped sweep."""
+    from graph_sync.models import StructuralWrite
+    from graph_sync.neo4j_repo import Neo4jRepo
+
+    repo = Neo4jRepo(ctx.settings.neo4j_uri, ctx.settings.neo4j_user,
+                      ctx.settings.neo4j_password)
+    try:
+        await repo.apply_structural(StructuralWrite(
+            vendor={"id": VENDOR_ID, "name": VENDOR_NAME, "group_id": COMPAT_GROUP_ID},
+            product={"id": PRODUCT_ID, "name": PRODUCT_NAME,
+                     "group_id": COMPAT_GROUP_ID},
+            source={"id": SOURCE_ID, "name": "compat source",
+                    "group_id": COMPAT_GROUP_ID},
+            article={"id": ARTICLE_ID, "title": "Vault Lock",
+                     "source_url": ARTICLE_URL, "source_id": SOURCE_ID,
+                     "group_id": COMPAT_GROUP_ID}))
+    finally:
+        await repo.close()
+    return f"structural chain written: {VENDOR_ID} -> {ARTICLE_ID}"
 
 
 def bootstrap_checks() -> list[Check]:
@@ -117,6 +211,7 @@ def bootstrap_checks() -> list[Check]:
             "RETURN count(*) AS n",
             expect=lambda rows: bool(rows) and rows[0]["n"] > 0),
         CallableCheck("graph_sync structural schema", "bootstrap", _structural_schema),
+        CallableCheck("structural fixture chain", "bootstrap", _structural_fixture),
     ]
 
 
@@ -242,6 +337,14 @@ async def _write_synthetic_graph(ctx: CheckContext) -> str:
         valid_at=now)
     await episode.save(gdriver)
 
+    orphan_episode = EpisodicNode(
+        uuid=EP_ORPHAN, name="compat orphan episode", group_id=COMPAT_GROUP_ID,
+        created_at=now, source=EpisodeType.text,
+        source_description="compatibility harness (deliberately unlinked)",
+        content="An episode intentionally never linked to an :Article.",
+        valid_at=now)
+    await orphan_episode.save(gdriver)
+
     entities = [
         EntityNode(uuid=ENT_A, name="AWS Backup", group_id=COMPAT_GROUP_ID,
                    labels=["Entity", "Product"], created_at=now,
@@ -267,10 +370,15 @@ async def _write_synthetic_graph(ctx: CheckContext) -> str:
                    fact="Vault Lock enforces immutable retention on recovery points.",
                    fact_embedding=ctx.embedding, episodes=[EP_UUID],
                    valid_at=now, invalid_at=None),
+        EntityEdge(uuid=FACT_ORPHAN, group_id=COMPAT_GROUP_ID, source_node_uuid=ENT_A,
+                   target_node_uuid=ENT_C, created_at=now, name="UNSUPPORTED",
+                   fact="A fact whose only supporting episode has no article.",
+                   fact_embedding=ctx.embedding, episodes=[EP_ORPHAN],
+                   valid_at=now, invalid_at=None),
     ]
     for edge in edges:
         await edge.save(gdriver)
-    return "1 episode, 3 entities, 2 bi-temporal facts written"
+    return "2 episodes (1 orphan), 3 entities, 3 bi-temporal facts written"
 
 
 async def _dynamic_labels_persisted(ctx: CheckContext) -> str:
@@ -304,6 +412,25 @@ async def _bitemporal_properties_persisted(ctx: CheckContext) -> str:
     return f"valid_at set, invalid_at null, embedding dim {row['dim']}"
 
 
+async def _link_episode(ctx: CheckContext) -> str:
+    """Attach the Article to the episode via the REAL provenance writer. In production
+    this edge is graph-sync's job, never graphiti's -- which is why the fixture had no
+    HAS_EPISODE chain and resolve_citations returned zero sources."""
+    from graph_extract.provenance import Provenance
+
+    await Provenance(ctx.driver).link(
+        ARTICLE_ID, EP_UUID, chunk_index=0, heading_path=HEADING_PATH,
+        token_count=42, content_hash="compat-check-hash")
+    async with ctx.driver.session() as s:
+        result = await s.run(
+            "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->(e:Episodic {uuid:$u}) "
+            "RETURN r.heading_path AS section", a=ARTICLE_ID, u=EP_UUID)
+        rows = [dict(rec) async for rec in result]
+    if not rows:
+        raise RuntimeError("Provenance.link did not create the HAS_EPISODE edge")
+    return f"article linked to episode, section={rows[0]['section']!r}"
+
+
 def graphiti_write_checks() -> list[Check]:
     return [
         CallableCheck("write synthetic graph via graphiti models", "graphiti-write",
@@ -328,6 +455,8 @@ def graphiti_write_checks() -> list[Check]:
             expect=lambda rows: bool(rows) and "Product" in rows[0]["labels"]),
         CallableCheck("bi-temporal fact properties persisted", "graphiti-write",
                       _bitemporal_properties_persisted),
+        CallableCheck("provenance link (Article HAS_EPISODE)", "graphiti-write",
+                      _link_episode),
     ]
 
 
@@ -341,6 +470,11 @@ async def _search_rrf(ctx: CheckContext) -> str:
     config.limit = 10
     results = await ctx.graphiti._search(
         "vault lock immutable retention", config, group_ids=[COMPAT_GROUP_ID])
+    if not results.edges:
+        raise RuntimeError(
+            "EDGE_HYBRID_SEARCH_RRF returned zero edges -- the fixture guarantees "
+            "matching facts (FACT_AB/FACT_BC), so an empty result means retrieval "
+            "on the hybrid-search path behind /search/local is broken")
     return f"RRF recipe returned {len(results.edges)} edges"
 
 
@@ -352,6 +486,11 @@ async def _search_node_distance(ctx: CheckContext) -> str:
     results = await ctx.graphiti._search(
         "vault lock immutable retention", config, group_ids=[COMPAT_GROUP_ID],
         center_node_uuid=ENT_A)
+    if not results.edges:
+        raise RuntimeError(
+            "EDGE_HYBRID_SEARCH_NODE_DISTANCE returned zero edges -- the fixture "
+            "guarantees matching facts (FACT_AB/FACT_BC), so an empty result means "
+            "retrieval on the hybrid-search path behind /search/local is broken")
     return f"node_distance recipe returned {len(results.edges)} edges"
 
 
@@ -370,16 +509,70 @@ def graphiti_search_checks() -> list[Check]:
 # Group 7: our-cypher  (every query we own, run against the synthetic graph)
 # --------------------------------------------------------------------------- #
 
+async def _write_community(ctx: CheckContext) -> str:
+    """Write one :Community through the REAL writeback. write_communities_incremental
+    needs no embedder (entries carry their own vector), so this stays LLM-free. It
+    dissolves communities absent from `entries`, but is group_id-scoped and so can
+    only ever affect the compat-check namespace."""
+    from theme_builder.writeback import write_communities_incremental
+
+    outcome = await write_communities_incremental(
+        ctx.driver, COMPAT_GROUP_ID, [_community_entry(ctx.embedding)],
+        corpus_cursor="2026-09-02T00:00:00Z")
+    if outcome.get("reports_written") != 1:
+        raise RuntimeError(f"expected 1 community written, got {outcome}")
+    return f"community layer written: {outcome}"
+
+
+async def _shortlist_communities(ctx: CheckContext) -> str:
+    from answer_api.global_search import shortlist_communities
+
+    hits = await shortlist_communities(
+        ctx.driver, _FakeEmbedder(ctx.embedding), "immutable retention",
+        level=COMMUNITY_LEVEL, k=5, group_id=COMPAT_GROUP_ID)
+    if not hits:
+        raise RuntimeError("shortlist_communities returned no hits despite a written "
+                           "community at the queried level")
+    ids = [h.community_id for h in hits]
+    if COMMUNITY_ID not in ids:
+        raise RuntimeError(
+            f"shortlist did not return the harness community {COMMUNITY_ID}; "
+            f"got {ids} -- a non-empty shortlist of OTHER communities would "
+            f"otherwise mask a broken group_id filter")
+    return f"shortlist returned {len(hits)} hit(s), top={hits[0].community_id}"
+
+
 async def _resolve_citations(ctx: CheckContext) -> str:
+    """The provenance join -- design decision #2, the system's core citation
+    guarantee. Asserts the resolved VALUES, not just that the query ran: with no
+    structural chain this previously returned entries with empty `sources`."""
     from graph_extract.provenance import Provenance
+
     resolved = await Provenance(ctx.driver).resolve_citations([FACT_AB, FACT_BC])
-    return f"resolve_citations returned {len(resolved)} entries"
+    entry = resolved.get(FACT_AB)
+    if entry is None:
+        raise RuntimeError(f"{FACT_AB} absent from resolve_citations: {resolved}")
+    sources = entry.get("sources") or []
+    if not sources:
+        raise RuntimeError("resolve_citations returned no sources -- the provenance "
+                           "join (fact -> episode -> article -> url) did not resolve")
+    src = sources[0]
+    expected = {"url": ARTICLE_URL, "article_id": ARTICLE_ID, "vendor": VENDOR_NAME,
+                "product": PRODUCT_NAME, "section": HEADING_PATH}
+    wrong = {k: (src.get(k), v) for k, v in expected.items() if src.get(k) != v}
+    if wrong:
+        raise RuntimeError(f"resolved source has wrong values (got, expected): {wrong}")
+    return f"provenance join resolved: {src['vendor']}/{src['product']} {src['url']}"
 
 
 async def _vendor_scope(ctx: CheckContext) -> str:
     from answer_api.search import _vendor_episode_uuids
-    uuids = await _vendor_episode_uuids(ctx.driver, "AWS")
-    return f"vendor episode scope query ran, {len(uuids)} uuids"
+
+    uuids = await _vendor_episode_uuids(ctx.driver, VENDOR_NAME)
+    if EP_UUID not in uuids:
+        raise RuntimeError(f"vendor scope for {VENDOR_NAME!r} did not find {EP_UUID}; "
+                           f"got {sorted(uuids)}")
+    return f"vendor scope resolved {len(uuids)} episode uuid(s) for {VENDOR_NAME}"
 
 
 async def _freshness(ctx: CheckContext) -> str:
@@ -392,13 +585,24 @@ async def _freshness(ctx: CheckContext) -> str:
     if stamps["graph_cursor_time"] is None:
         raise RuntimeError("graph_cursor_time is None despite a written episode — "
                            "the freshness query failed and was swallowed")
+    if stamps["reports_as_of"] is None:
+        raise RuntimeError("reports_as_of is None despite the community write "
+                           "(_write_community) preceding this check — the freshness "
+                           "query failed and was swallowed")
     return f"freshness stamps resolved: {stamps}"
 
 
 async def _timeline_sweep_flags(ctx: CheckContext) -> str:
+    """Runs AFTER the sweep, so the orphan must be flagged and the supported fact
+    must not."""
     from answer_api.timeline import _sweep_flags
-    flags = await _sweep_flags(ctx.driver, [FACT_AB, FACT_BC], COMPAT_GROUP_ID)
-    return f"timeline sweep-flag query ran, {len(flags)} flags"
+
+    flags = await _sweep_flags(ctx.driver, [FACT_AB, FACT_ORPHAN], COMPAT_GROUP_ID)
+    if not flags.get(FACT_ORPHAN):
+        raise RuntimeError(f"{FACT_ORPHAN} not flagged expired_by_sweep: {flags}")
+    if flags.get(FACT_AB):
+        raise RuntimeError(f"{FACT_AB} wrongly flagged expired_by_sweep: {flags}")
+    return f"sweep flags correct: {flags}"
 
 
 async def _corpus_cursor_subquery(ctx: CheckContext) -> str:
@@ -411,14 +615,20 @@ async def _corpus_cursor_subquery(ctx: CheckContext) -> str:
 
 
 async def _staleness_sweep(ctx: CheckContext) -> str:
-    """graph_extract/staleness_sweep.py — a scoped `CALL (eps) {...}` subquery
-    (Neo4j 5.23+ call-scope form). The synthetic facts' only supporting episode
-    (EP_UUID) is never linked to an :Article, so the sweep correctly treats it as
-    unsupported and expires both facts — this is expected, not a bug: it confirms
-    the sweep's "no surviving support" logic actually runs and fires."""
+    """Both directions of a query that silently invalidates data: it must expire the
+    orphan fact (whose only episode has no article) and leave the supported facts
+    alone."""
     from graph_extract.staleness_sweep import sweep_stale_facts
+
     outcome = await sweep_stale_facts(ctx.driver, COMPAT_GROUP_ID)
-    return f"staleness sweep subquery ran: expired={outcome.get('expired')}"
+    expired = set(outcome.get("expired_sample") or [])
+    if expired != {FACT_ORPHAN}:
+        raise RuntimeError(f"sweep expired {sorted(expired)}, expected exactly "
+                           f"{{{FACT_ORPHAN}}} (count={outcome.get('expired')})")
+    if outcome.get("expired") != 1:
+        raise RuntimeError(f"sweep sample matched but count did not: "
+                           f"expired={outcome.get('expired')!r}, sample={sorted(expired)}")
+    return f"sweep expired exactly the unsupported fact: {outcome}"
 
 
 async def _touched_entities(ctx: CheckContext) -> str:
@@ -429,15 +639,28 @@ async def _touched_entities(ctx: CheckContext) -> str:
     query actually runs."""
     from theme_builder.incremental import touched_entities
     touched = await touched_entities(ctx.driver, COMPAT_GROUP_ID, "2000-01-01T00:00:00Z")
+    if touched is not None and len(touched) == 0:
+        raise RuntimeError(
+            "touched_entities returned zero entities despite the synthetic graph "
+            "having 3 (compat-ent-a/b/c) touched since the passed cursor")
     count = "all (None sentinel)" if touched is None else len(touched)
     return f"touched_entities ran: {count}"
 
 
 async def _load_persisted(ctx: CheckContext) -> str:
     from theme_builder.incremental import load_persisted, prev_corpus_cursor
+
     persisted = await load_persisted(ctx.driver, COMPAT_GROUP_ID)
+    if not persisted:
+        raise RuntimeError("load_persisted returned no communities despite the "
+                           "community layer having been written")
     cursor = await prev_corpus_cursor(ctx.driver, COMPAT_GROUP_ID)
-    return f"load_persisted={len(persisted)} communities, prev_cursor={cursor}"
+    if cursor is None:
+        raise RuntimeError("prev_corpus_cursor is None despite a written community")
+    members = persisted[0].members
+    if ENT_A not in members:
+        raise RuntimeError(f"community membership did not resolve: {members}")
+    return f"load_persisted={len(persisted)} community(ies), prev_cursor={cursor}"
 
 
 async def _leiden_detect(ctx: CheckContext) -> str:
@@ -450,21 +673,28 @@ async def _leiden_detect(ctx: CheckContext) -> str:
         raise SkipCheck(f"GDS not available: {type(exc).__name__}") from exc
     communities = await detect_communities(
         ctx.driver, COMPAT_GROUP_ID, min_community_size=1, max_levels=2)
+    if len(communities) == 0:
+        raise RuntimeError(
+            "GDS Leiden detected zero communities despite the synthetic graph "
+            "(3 entities, 2 connecting facts) forming at least 1")
     return f"GDS projection + seeded Leiden ran: {len(communities)} communities"
 
 
 def our_cypher_checks() -> list[Check]:
     return [
+        CallableCheck("write community layer", "our-cypher", _write_community),
         CallableCheck("provenance resolve_citations", "our-cypher", _resolve_citations),
         CallableCheck("vendor episode scope", "our-cypher", _vendor_scope),
         CallableCheck("freshness stamps", "our-cypher", _freshness),
-        CallableCheck("timeline sweep flags", "our-cypher", _timeline_sweep_flags),
         CallableCheck("theme-builder corpus cursor (CALL {} UNION ALL)", "our-cypher",
                       _corpus_cursor_subquery),
-        CallableCheck("staleness sweep (scoped CALL (eps) {...})", "our-cypher",
-                      _staleness_sweep),
         CallableCheck("incremental touched_entities", "our-cypher", _touched_entities),
         CallableCheck("incremental load_persisted", "our-cypher", _load_persisted),
+        CallableCheck("global-search community shortlist", "our-cypher",
+                      _shortlist_communities),
+        CallableCheck("staleness sweep (scoped CALL (eps))", "our-cypher",
+                      _staleness_sweep),
+        CallableCheck("timeline sweep flags", "our-cypher", _timeline_sweep_flags),
         CallableCheck("GDS projection + seeded leiden detect", "our-cypher",
                       _leiden_detect),
     ]
@@ -488,45 +718,77 @@ assign to recovery points in the locked vault.
 
 
 async def _e2e_ingest_and_retrieve(ctx: CheckContext) -> str:
-    """One inlined article through the real extraction pipeline, then retrieval.
+    """One inlined article through the REAL pipeline: structural write -> extraction
+    -> provenance link -> retrieval -> resolved citations.
 
-    Inlined rather than fetched so the check does not depend on DocExtractor being
-    up. Extraction + retrieval only: no synthesis, so this never touches the
-    strong evaluation tier."""
+    The link step matters. add_text_episode creates episodes but never attaches them
+    to an :Article -- in production that is graph-sync's job. Without it, retrieval
+    returns results whose citations resolve to nothing, which is exactly how this
+    check used to pass while proving nothing about provenance.
+
+    Inlined rather than fetched so the check does not depend on DocExtractor. Only
+    extraction and retrieval -- never synthesis -- so it does not need the strong
+    evaluation tier."""
     from datetime import datetime, timezone
 
     from answer_api.search import search_local
     from graph_extract.graphiti_client import add_text_episode
+    from graph_extract.provenance import Provenance
+    from graph_sync.models import StructuralWrite
+    from graph_sync.neo4j_repo import Neo4jRepo
+
+    repo = Neo4jRepo(ctx.settings.neo4j_uri, ctx.settings.neo4j_user,
+                      ctx.settings.neo4j_password)
+    try:
+        await repo.apply_structural(StructuralWrite(
+            vendor={"id": VENDOR_ID, "name": VENDOR_NAME, "group_id": COMPAT_GROUP_ID},
+            product={"id": PRODUCT_ID, "name": PRODUCT_NAME,
+                     "group_id": COMPAT_GROUP_ID},
+            source={"id": SOURCE_ID, "name": "compat source",
+                    "group_id": COMPAT_GROUP_ID},
+            article={"id": E2E_ARTICLE_ID, "title": "Vault Lock (e2e)",
+                     "source_url": E2E_ARTICLE_URL, "source_id": SOURCE_ID,
+                     "group_id": COMPAT_GROUP_ID}))
+    finally:
+        await repo.close()
 
     harness_settings = ctx.settings.model_copy(update={"group_id": COMPAT_GROUP_ID})
     try:
-        await add_text_episode(
+        added = await add_text_episode(
             ctx.graphiti, harness_settings, name="compat-e2e-article",
             body=_E2E_ARTICLE, source_description="compatibility harness",
             reference_time=datetime.now(timezone.utc))
     except _ENDPOINT_DOWN as exc:
-        # An unreachable LLM/embedder endpoint is not a Neo4j incompatibility.
-        raise SkipCheck(f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
+        raise SkipCheck(
+            f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
 
-    async with ctx.driver.session() as s:
-        result = await s.run(
-            "MATCH (e:Episodic {group_id:$g}) "
-            "OPTIONAL MATCH (n:Entity {group_id:$g}) "
-            "OPTIONAL MATCH ()-[f:RELATES_TO {group_id:$g}]->() "
-            "RETURN count(DISTINCT e) AS episodes, count(DISTINCT n) AS entities, "
-            "       count(DISTINCT f) AS facts", g=COMPAT_GROUP_ID)
-        rows = [dict(rec) async for rec in result]
-    counts = rows[0] if rows else {}
-    if not counts.get("facts"):
-        raise RuntimeError(f"ingest produced no facts: {counts}")
+    await Provenance(ctx.driver).link(
+        E2E_ARTICLE_ID, added.episode.uuid, chunk_index=0,
+        heading_path=HEADING_PATH, token_count=len(_E2E_ARTICLE.split()),
+        content_hash="compat-check-e2e-hash")
 
-    found = await search_local(
-        ctx.graphiti, ctx.driver, q="What does Vault Lock enforce?", k=5,
-        group_id=COMPAT_GROUP_ID)
+    try:
+        found = await search_local(
+            ctx.graphiti, ctx.driver, q="What does Vault Lock enforce?", k=5,
+            group_id=COMPAT_GROUP_ID)
+    except _ENDPOINT_DOWN as exc:
+        # search_local also hits the embedder; a mid-check endpoint drop here must
+        # report skip, not fail, same as the add_text_episode call above.
+        raise SkipCheck(
+            f"model endpoint unreachable ({type(exc).__name__}: {exc})") from exc
     if found["count"] == 0:
         raise RuntimeError("search_local returned no results after ingest")
-    return (f"ingested {counts}; search_local returned {found['count']} results "
-            f"with {sum(len(r['sources']) for r in found['results'])} resolved sources")
+    resolved = [s for r in found["results"] for s in r["sources"]]
+    if not resolved:
+        raise RuntimeError(
+            "search_local returned results but NO resolved sources -- the provenance "
+            "chain (fact -> episode -> article -> url) did not resolve end to end")
+    urls = {s["url"] for s in resolved}
+    if E2E_ARTICLE_URL not in urls:
+        raise RuntimeError(f"expected {E2E_ARTICLE_URL} among resolved sources, "
+                           f"got {sorted(urls)}")
+    return (f"ingested + linked; search_local returned {found['count']} result(s) "
+            f"with {len(resolved)} resolved source(s)")
 
 
 def e2e_checks() -> list[Check]:
@@ -539,8 +801,11 @@ def e2e_checks() -> list[Check]:
 # --------------------------------------------------------------------------- #
 
 def all_checks(embedding: list[float]) -> list[Check]:
-    """Every group, in execution order. Group 5 writes the synthetic graph that
-    groups 6 and 7 query, so this order is load-bearing.
+    """Every group, in execution order. This order is load-bearing: group 2
+    (bootstrap) writes the structural fixture that groups 5 and 7 read; group 5
+    (graphiti-write) writes the synthetic entity/fact graph that groups 6 and 7
+    query; within group 7 the community write precedes its readers and the
+    staleness sweep precedes the timeline-flags check.
 
     CypherChecks declare their vector parameter as `{"v": None}`; the fabricated
     768-d vector is substituted here so the registry stays a pure literal."""

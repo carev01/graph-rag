@@ -1,3 +1,5 @@
+import asyncio
+
 from compat import checks
 from compat.model import CallableCheck, CypherCheck
 
@@ -5,6 +7,13 @@ from compat.model import CallableCheck, CypherCheck
 def _all():
     return (checks.server_checks() + checks.bootstrap_checks()
             + checks.vector_checks() + checks.fulltext_checks())
+
+
+def _every_check():
+    """Every group in the registry, not just groups 1-4 -- used by the safety
+    invariants below so the guarantee holds as the registry grows (e.g. a future
+    group adding a CREATE INDEX or DELETE statement)."""
+    return checks.all_checks([0.5] * 768)
 
 
 def test_every_check_has_a_nonempty_name_and_group():
@@ -46,13 +55,13 @@ def test_no_check_calls_apoc_procedures():
 
 
 def test_every_harness_index_is_compat_prefixed():
-    for c in _all():
+    for c in _every_check():
         if isinstance(c, CypherCheck) and "CREATE " in c.cypher and "INDEX" in c.cypher:
             assert "compat_" in c.cypher
 
 
 def test_cypher_checks_never_issue_an_unscoped_delete():
-    for c in _all():
+    for c in _every_check():
         if isinstance(c, CypherCheck) and "DELETE" in c.cypher.upper():
             assert "compat-check" in c.cypher or "$g" in c.cypher
 
@@ -138,3 +147,81 @@ def test_e2e_check_never_references_synthesis():
     for banned in ["answer_local", "synthesize", "_synthesis_client_and_model",
                    "judge", "global_search", "drift_search"]:
         assert banned not in source, f"e2e must not depend on the synthesis tier ({banned})"
+
+
+def test_every_structural_id_is_compat_prefixed():
+    """SAFETY: MERGE against a real vendor/article id would stamp group_id onto a
+    production node, which teardown would then DELETE. Ids must be literal and
+    unmistakably ours."""
+    for value in [checks.VENDOR_ID, checks.PRODUCT_ID, checks.SOURCE_ID,
+                  checks.ARTICLE_ID, checks.E2E_ARTICLE_ID]:
+        assert value.startswith("compat-check-"), value
+
+
+def test_orphan_ids_are_compat_prefixed():
+    for value in [checks.EP_ORPHAN, checks.FACT_ORPHAN]:
+        assert value.startswith("compat-")
+
+
+def test_article_urls_use_the_reserved_invalid_tld():
+    """A fabricated URL must never look like real documentation in a report."""
+    for url in [checks.ARTICLE_URL, checks.E2E_ARTICLE_URL]:
+        assert ".invalid/" in url
+
+
+def test_bootstrap_group_writes_the_structural_chain():
+    names = " ".join(c.name.lower() for c in checks.bootstrap_checks())
+    assert "structural fixture" in names
+
+
+def test_graphiti_write_group_links_the_article_to_the_episode():
+    names = [c.name.lower() for c in checks.graphiti_write_checks()]
+    joined = " ".join(names)
+    assert "provenance link" in joined
+    # The link must come AFTER the episode write: registry order is execution order,
+    # and Provenance.link MATCHes an existing (:Episodic).
+    write_idx = next(i for i, n in enumerate(names) if "synthetic graph" in n)
+    link_idx = next(i for i, n in enumerate(names) if "provenance link" in n)
+    assert write_idx < link_idx
+
+
+def test_structural_write_precedes_the_episode_write_across_groups():
+    groups = [c.group for c in checks.all_checks([0.5] * 768)]
+    assert groups.index("bootstrap") < groups.index("graphiti-write")
+
+
+def test_our_cypher_group_writes_then_reads_the_community():
+    names = [c.name.lower() for c in checks.our_cypher_checks()]
+    write_idx = next(i for i, n in enumerate(names) if "write community" in n)
+    read_idx = next(i for i, n in enumerate(names) if "load_persisted" in n)
+    shortlist_idx = next(i for i, n in enumerate(names) if "shortlist" in n)
+    assert write_idx < read_idx
+    assert write_idx < shortlist_idx
+
+
+def test_sweep_runs_before_the_timeline_flag_check():
+    """_timeline_sweep_flags asserts the orphan carries expired_by_sweep, so the
+    sweep must have already run."""
+    names = [c.name.lower() for c in checks.our_cypher_checks()]
+    sweep_idx = next(i for i, n in enumerate(names) if "staleness sweep" in n)
+    flags_idx = next(i for i, n in enumerate(names) if "timeline sweep flags" in n)
+    assert sweep_idx < flags_idx
+
+
+def test_fake_embedder_returns_the_vector_shortlist_expects():
+    # `import asyncio` goes at the TOP of the test file, not here: CI runs
+    # `ruff check src tests` and E402 applies to test files too.
+    emb = checks._FakeEmbedder([0.25] * 768)
+    got = asyncio.run(emb.create_batch(["anything"]))
+    assert got == [[0.25] * 768]
+
+
+def test_community_entry_satisfies_every_shortlist_filter():
+    """shortlist_communities drops rows with a falsy embedding, and _rank_hits SKIPS
+    rows whose cited_fact_uuids is empty. A community failing either would make the
+    shortlist check pass vacuously."""
+    entry = checks._community_entry([0.5] * 768)
+    assert entry["level"] == checks.COMMUNITY_LEVEL
+    assert entry["cited_fact_uuids"]
+    assert entry["embedding"]
+    assert entry["member_uuids"]
