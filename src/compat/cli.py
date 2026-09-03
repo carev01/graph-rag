@@ -63,8 +63,12 @@ async def main() -> None:
     ctx = CheckContext(driver=driver, graphiti=graphiti, settings=compat_settings,
                        embedding=fabricate_embedding(settings.embed_dim))
     try:
-        results = await run_all(ctx, all_checks(ctx.embedding))
-        teardown_error = await teardown(driver)
+        try:
+            results = await run_all(ctx, all_checks(ctx.embedding))
+        finally:
+            # Always run teardown, even on KeyboardInterrupt during a slow live run
+            # — otherwise compat-check data is left behind on a production instance.
+            teardown_error = await teardown(driver)
         facts = await _target_facts(driver, uri)
         rendered = report_mod.render(results, target=facts,
                                      teardown_error=teardown_error)

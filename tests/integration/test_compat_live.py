@@ -26,8 +26,12 @@ async def test_compat_harness_live_against_target():
     ctx = CheckContext(driver=driver, graphiti=graphiti, settings=compat_settings,
                        embedding=embedding)
     try:
-        results = await run_all(ctx, all_checks(embedding))
-        teardown_error = await teardown(driver)
+        try:
+            results = await run_all(ctx, all_checks(embedding))
+        finally:
+            # Always run teardown, even on KeyboardInterrupt during a slow live run
+            # — otherwise compat-check data is left behind on a production instance.
+            teardown_error = await teardown(driver)
         rendered = render(results, target={"uri": uri},
                           teardown_error=teardown_error)
         assert teardown_error is None, teardown_error

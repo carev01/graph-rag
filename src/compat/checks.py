@@ -411,16 +411,24 @@ async def _corpus_cursor_subquery(ctx: CheckContext) -> str:
 
 
 async def _staleness_sweep(ctx: CheckContext) -> str:
-    """graph_extract/staleness_sweep.py — a CALL {} importing-WITH subquery. The
-    synthetic facts have a live episode, so nothing should be expired."""
+    """graph_extract/staleness_sweep.py — a scoped `CALL (eps) {...}` subquery
+    (Neo4j 5.23+ call-scope form). The synthetic facts' only supporting episode
+    (EP_UUID) is never linked to an :Article, so the sweep correctly treats it as
+    unsupported and expires both facts — this is expected, not a bug: it confirms
+    the sweep's "no surviving support" logic actually runs and fires."""
     from graph_extract.staleness_sweep import sweep_stale_facts
     outcome = await sweep_stale_facts(ctx.driver, COMPAT_GROUP_ID)
     return f"staleness sweep subquery ran: expired={outcome.get('expired')}"
 
 
 async def _touched_entities(ctx: CheckContext) -> str:
+    """A None cursor short-circuits touched_entities with no Cypher at all (see
+    theme_builder/incremental.py's `if prev_cursor is None: return None`), which
+    would make this check report success without exercising anything. Pass a past
+    ISO-8601 timestamp — the format its `datetime($c)` Cypher expects — so the
+    query actually runs."""
     from theme_builder.incremental import touched_entities
-    touched = await touched_entities(ctx.driver, COMPAT_GROUP_ID, None)
+    touched = await touched_entities(ctx.driver, COMPAT_GROUP_ID, "2000-01-01T00:00:00Z")
     count = "all (None sentinel)" if touched is None else len(touched)
     return f"touched_entities ran: {count}"
 
@@ -453,7 +461,7 @@ def our_cypher_checks() -> list[Check]:
         CallableCheck("timeline sweep flags", "our-cypher", _timeline_sweep_flags),
         CallableCheck("theme-builder corpus cursor (CALL {} UNION ALL)", "our-cypher",
                       _corpus_cursor_subquery),
-        CallableCheck("staleness sweep (CALL {} importing WITH)", "our-cypher",
+        CallableCheck("staleness sweep (scoped CALL (eps) {...})", "our-cypher",
                       _staleness_sweep),
         CallableCheck("incremental touched_entities", "our-cypher", _touched_entities),
         CallableCheck("incremental load_persisted", "our-cypher", _load_persisted),
