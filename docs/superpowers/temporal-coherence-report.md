@@ -188,10 +188,13 @@ residue: [{'n': 0}]
 pilot episodes: [{'n': 247}]
 ```
 
-Matches the pre-test baseline exactly (247 `Episodic`, confirmed before this task
-began). The Postgres `semantic_jobs` table was independently restored to its
-original `593 pending` state (see §5) since the brief's cleanup script only
-covers Neo4j.
+`Episodic` count matches the pre-test baseline exactly (247, confirmed before this
+task began), but this did **not** match the pre-test baseline exactly: the cleanup
+query is group-scoped (`MATCH (n {group_id:'temporal-live'})`), and the injected
+`:Article {id:'temporal-live-article'}` node carried no `group_id`, so it was left
+behind as an orphan. It was removed in the final fix pass (see below); the
+Postgres `semantic_jobs` table was independently restored to its original
+`593 pending` state (see §5) since the brief's cleanup script only covers Neo4j.
 
 ## 7. Deferred to follow-up slices (unchanged by this work)
 

@@ -110,10 +110,6 @@ async def test_article_update_preserves_citations_and_expires_dropped_content():
         new_facts = await _facts_for(ep0_new)
         assert new_facts, "v2 chunk 0 produced no facts"
         async with driver.session() as s:
-            r = await s.run(
-                "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
-                "RETURN count(f) AS dead", g=_GROUP,
-                u=new_facts)
             # none of the new facts may be invalidated
             r2 = await s.run(
                 "MATCH ()-[f:RELATES_TO {group_id:$g}]->() "

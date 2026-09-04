@@ -10,7 +10,8 @@ class Provenance:
         async with self._driver.session() as s:
             r = await s.run(
                 "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->() "
-                "WHERE r.chunk_index=$i AND r.content_hash=$h RETURN r LIMIT 1",
+                "WHERE r.chunk_index=$i AND r.content_hash=$h "
+                "AND coalesce(r.superseded, false) = false RETURN r LIMIT 1",
                 a=article_id, i=chunk_index, h=content_hash)
             return await r.single() is not None
 
@@ -28,7 +29,7 @@ class Provenance:
                 "OPTIONAL MATCH (a)-[old:HAS_EPISODE {chunk_index:$i}]->(oldE:Episodic) "
                 "WHERE oldE.uuid <> $u "
                 "SET old.superseded = true, oldE.superseded = true "
-                "WITH a, e "
+                "WITH DISTINCT a, e "
                 "MERGE (a)-[r:HAS_EPISODE {chunk_index:$i}]->(e) "
                 "SET r.heading_path=$hp, r.token_count=$tc, r.content_hash=$h, "
                 "    r.superseded = false, e.superseded = false",

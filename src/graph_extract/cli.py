@@ -441,9 +441,10 @@ def maintenance() -> None:
 
 @app.command("sweep")
 def sweep() -> None:
-    """Expire RELATES_TO facts whose supporting episodes are all dead
-    (removed tombstones or detached HAS_EPISODE linkage) -- the deterministic
-    backstop for staleness Graphiti's own contradiction-detection can't see.
+    """Expire RELATES_TO facts whose supporting episodes are all dead (an
+    episode is dead when its HAS_EPISODE edge is flagged superseded, or the
+    episode or its article is removed) -- the deterministic backstop for
+    staleness Graphiti's own contradiction-detection can't see.
     """
 
     async def _run() -> None:

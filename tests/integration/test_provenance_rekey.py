@@ -94,3 +94,25 @@ async def test_link_supersede_does_not_delete_episode_node(extract_driver):
         node = await (await s.run(
             "MATCH (e:Episodic {uuid:'e_old4'}) RETURN e")).single()
     assert node is not None
+
+
+async def test_already_ingested_ignores_a_superseded_edge(extract_driver):
+    """Revert-to-identical-content must RE-INGEST, not skip. Before the superseded
+    filter, the retained flagged edge suppressed re-ingestion, leaving the stale
+    replacement live and the restored content expired -- liveness inverted."""
+    from graph_extract.provenance import Provenance
+    p = Provenance(extract_driver)
+    async with extract_driver.session() as s:
+        await s.run("CREATE (:Article {id:'ai1'})")
+        await s.run("CREATE (:Episodic {uuid:'ai_v1'})")
+        await s.run("CREATE (:Episodic {uuid:'ai_v2'})")
+    await p.link("ai1", "ai_v1", chunk_index=0, heading_path="", token_count=1,
+                 content_hash="hash-A")
+    assert await p.already_ingested("ai1", 0, "hash-A") is True
+    # edit: chunk re-keyed to a new episode, old edge retained + flagged
+    await p.link("ai1", "ai_v2", chunk_index=0, heading_path="", token_count=1,
+                 content_hash="hash-B")
+    # revert to the ORIGINAL content: the superseded edge must NOT suppress re-ingest
+    assert await p.already_ingested("ai1", 0, "hash-A") is False
+    # the currently-live content is still correctly recognised as ingested
+    assert await p.already_ingested("ai1", 0, "hash-B") is True
