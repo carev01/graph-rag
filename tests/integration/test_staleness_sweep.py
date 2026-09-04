@@ -115,3 +115,30 @@ async def test_sweep_keeps_fact_with_any_live_episode(extract_driver):
         inv = (await (await s.run(
             "MATCH ()-[f:RELATES_TO {uuid:'f5'}]->() RETURN f.invalid_at AS i")).single())["i"]
     assert inv is None
+
+
+async def test_sweep_expires_facts_from_a_superseded_edge(extract_driver):
+    """Defect B: a shrunk article's dropped chunk keeps its edge, so the old sweep
+    (which keyed liveness on linkage alone) saw it as alive and never expired it."""
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("""
+        CREATE (a:Article {id:'sup1'})
+        CREATE (live:Episodic {uuid:'ep_live', group_id:'g'})
+        CREATE (dead:Episodic {uuid:'ep_dead', group_id:'g'})
+        CREATE (a)-[:HAS_EPISODE {chunk_index:0}]->(live)
+        CREATE (a)-[:HAS_EPISODE {chunk_index:1, superseded:true}]->(dead)
+        CREATE (x:Entity {uuid:'x', group_id:'g'})
+        CREATE (y:Entity {uuid:'y', group_id:'g'})
+        CREATE (x)-[:RELATES_TO {uuid:'f_live', group_id:'g', episodes:['ep_live']}]->(y)
+        CREATE (x)-[:RELATES_TO {uuid:'f_dead', group_id:'g', episodes:['ep_dead']}]->(y)
+        """)
+    out = await sweep_stale_facts(extract_driver, "g")
+    assert out["expired"] == 1
+    assert out["expired_sample"] == ["f_dead"]
+    async with extract_driver.session() as s:
+        rows = [rec async for rec in await s.run(
+            "MATCH ()-[f:RELATES_TO {group_id:'g'}]->() "
+            "RETURN f.uuid AS uuid, f.invalid_at IS NOT NULL AS expired ORDER BY uuid")]
+    assert {r["uuid"]: r["expired"] for r in rows} == {"f_dead": True, "f_live": False}
