@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -58,6 +59,81 @@ def _inject_openrouter_provider(client: AsyncOpenAI) -> AsyncOpenAI:
     return client
 
 
+def _inject_penalties(client: AsyncOpenAI, *, frequency_penalty: float,
+                      presence_penalty: float) -> AsyncOpenAI:
+    """Attach repetition penalties to every chat completion.
+
+    Why this exists: graphiti's `episode_indices` field is an unbounded `list[int]`
+    (prompts/extract_edges.py) and we pin temperature=0.0. Greedy decoding plus an
+    unbounded array is a trap -- once a weaker model emits `[0, 1, 2` the most likely
+    continuation is another integer, and under a strict JSON schema the grammar masks
+    out every token that could break the pattern (prose, another key), leaving only
+    digits, ',' and ']'. The model counts until it exhausts max_tokens and the reply
+    truncates into invalid JSON. Observed on mistral-nemo and solar-pro4; gpt-5-mini
+    escapes it only by assigning low probability to continuing the run.
+
+    A frequency penalty scales with how often a token has already been emitted, so the
+    repeated digit/comma tokens decay in attractiveness until ']' wins. This is a
+    decoding-level fix, so it protects every unbounded field, not just this one.
+    """
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        kwargs.setdefault("frequency_penalty", frequency_penalty)
+        kwargs.setdefault("presence_penalty", presence_penalty)
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
+def _bound_index_arrays(client: AsyncOpenAI, max_items: int) -> AsyncOpenAI:
+    """Add `maxItems` to every unbounded array-of-integer in the request schema.
+
+    graphiti emits three such fields, all index lists, all unbounded:
+    `ExtractedEdges.Edge.episode_indices`, `EdgeDuplicate.duplicate_facts` and
+    `EdgeDuplicate.contradicted_facts`. Nothing stops a model from enumerating
+    forever in them -- an ascending integer run is the strongest sequence prior
+    there is, and under a JSON grammar the only legal continuations at that
+    position are digits, ',' and ']'. Observed twice: an `episode_indices` run
+    past 2,900 that exhausted max_tokens and truncated into invalid JSON, and
+    dedup indices referring to candidates that never existed.
+
+    Bounding the arrays makes the runaway *unrepresentable* rather than merely
+    discouraged, and unlike a repetition penalty it cannot suppress legitimate
+    output elsewhere -- arrays of OBJECTS (the `edges` list itself) are left
+    alone, so fact yield is untouched.
+
+    Caveat: graphiti deliberately omits `strict: true` from the response_format
+    (see openai_generic_client._build_response_format), so enforcement is
+    provider-dependent -- treat this as strong pressure, not a hard guarantee.
+    """
+    orig = client.chat.completions.create
+
+    def _bound(node: object) -> None:
+        if isinstance(node, dict):
+            items = node.get("items")
+            if (node.get("type") == "array" and isinstance(items, dict)
+                    and items.get("type") == "integer" and "maxItems" not in node):
+                node["maxItems"] = max_items
+            for value in node.values():
+                _bound(value)
+        elif isinstance(node, list):
+            for value in node:
+                _bound(value)
+
+    async def create(*args, **kwargs):
+        fmt = kwargs.get("response_format")
+        if isinstance(fmt, dict):
+            fmt = copy.deepcopy(fmt)          # never mutate graphiti's own dict
+            _bound(fmt)
+            kwargs["response_format"] = fmt
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
 def _is_azure(base_url: str) -> bool:
     return "azure.com" in base_url or "cognitiveservices" in base_url
 
@@ -78,6 +154,13 @@ def _llm_client(s: ExtractSettings):
                                  timeout=90.0, max_retries=4))
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
+    # Only wrap when configured: 0.0/0.0 leaves the proven gpt-5-mini path untouched
+    # (and avoids sending params some reasoning endpoints reject).
+    if s.llm_frequency_penalty or s.llm_presence_penalty:
+        raw = _inject_penalties(raw, frequency_penalty=s.llm_frequency_penalty,
+                                presence_penalty=s.llm_presence_penalty)
+    if s.llm_max_index_array:
+        raw = _bound_index_arrays(raw, s.llm_max_index_array)
     if s.llm_client_mode == "structured":
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
