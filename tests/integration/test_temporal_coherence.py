@@ -34,7 +34,7 @@ CREATE (gone)-[:HAS_EPISODE {chunk_index:0}]->(e5)
 CREATE (e6:Episodic {uuid:'e6', group_id:'g', removed:true})
 CREATE (art)-[:HAS_EPISODE {chunk_index:4}]->(e6)
 // 7. episode referenced by TWO articles, superseded by only one
-CREATE (e7:Episodic {uuid:'e7', group_id:'g'})
+CREATE (e7:Episodic {uuid:'e7', group_id:'g', superseded:true})
 CREATE (art)-[:HAS_EPISODE {chunk_index:5, superseded:true}]->(e7)
 CREATE (other:Article {id:'art3', source_url:'https://example.invalid/art3'})
 CREATE (other)-[:HAS_EPISODE {chunk_index:0}]->(e7)
