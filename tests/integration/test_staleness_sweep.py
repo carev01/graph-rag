@@ -26,8 +26,10 @@ async def test_sweep_expires_fact_with_no_live_episodes(extract_driver):
 
 
 async def test_sweep_keeps_fact_with_live_but_superseded_episode(extract_driver):
-    # THE #6 CASE: episode has a HAS_EPISODE edge (alive) but superseded=true
-    # -> fact must NOT be expired. superseded is never consulted.
+    # THE #6 CASE: episode has a HAS_EPISODE edge (alive) but the Episodic
+    # NODE's superseded=true -> fact must NOT be expired. Liveness is keyed on
+    # the edge's own `superseded` flag, never the node's, so the node-level
+    # flag here is never consulted.
     from graph_extract.staleness_sweep import sweep_stale_facts
     g = "swp2"
     async with extract_driver.session() as s:
@@ -39,7 +41,7 @@ async def test_sweep_keeps_fact_with_live_but_superseded_episode(extract_driver)
     async with extract_driver.session() as s:
         inv = (await (await s.run(
             "MATCH ()-[f:RELATES_TO {uuid:'f2'}]->() RETURN f.invalid_at AS i")).single())["i"]
-    assert inv is None  # kept alive by the HAS_EPISODE edge, superseded flag ignored
+    assert inv is None  # kept alive by the HAS_EPISODE edge; node-level superseded ignored
 
 
 async def test_sweep_expires_removed_episode_fact(extract_driver):
