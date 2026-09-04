@@ -108,10 +108,14 @@ class IngestDriver:
             return rec["c"] if rec else 0
 
     async def _supersede_trailing_episodes(self, article_id: str, new_count: int) -> None:
+        """A shrunk article drops trailing chunks. Flag the EDGE (not just the node)
+        so the staleness sweep sees them as dead -- flagging only the node is what
+        previously let facts from deleted content stay current forever."""
         async with self._driver.session() as s:
             await s.run(
                 "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->(e:Episodic) "
-                "WHERE r.chunk_index >= $n SET e.superseded=true", a=article_id, n=new_count)
+                "WHERE r.chunk_index >= $n "
+                "SET r.superseded=true, e.superseded=true", a=article_id, n=new_count)
 
     async def ingest_source(self, source_id: str, limit: int | None = None) -> IngestResult:
         ids = await self.list_article_ids(source_id)
