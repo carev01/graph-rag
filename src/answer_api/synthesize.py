@@ -13,6 +13,10 @@ from graph_extract.usage import instrument
 # doesn't swallow the legitimate [1] citation along with it.
 _URL_RE = re.compile(r"https?://[^\s\[\]]+", re.IGNORECASE)
 _MARKER_RE = re.compile(r"\[(\d+)\]")
+# A hyphen / en-dash / em-dash with optional surrounding spaces -- the forms a
+# model uses to write a marker RANGE like "[31]-[60]".
+_SEP = r"[ \t]*[-–—][ \t]*"
+_RANGE_RE = re.compile(r"\[(\d+)\]" + _SEP + r"\[(\d+)\]")
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
@@ -26,17 +30,51 @@ _PROMPT = (
 _REFUSAL = "I don't have enough information to answer that from the available sources."
 
 
+def _strip_markers(text: str, keep: set[int]) -> str:
+    """Remove every [N] marker whose N is not in `keep`, then repair the spacing.
+
+    Design decision #2 says a citation is graph-derived and the LLM only emits
+    markers. Filtering an unresolvable marker out of the `cited` list but leaving
+    it in the prose broke that: readers saw citations the envelope did not have.
+    A visible marker must always resolve.
+
+    Ranges get no expander on purpose. "[31]-[60]" is two markers and a
+    separator; a model writing a 30-marker span is guessing, not citing, so
+    expanding it would manufacture citations it never made. When both ends are
+    dropped the separator goes too, or the prose is left with an orphaned dash.
+    """
+    def _range(m: re.Match[str]) -> str:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a in keep and b in keep:
+            return m.group(0)          # a real span -- leave it intact
+        if a in keep:
+            return f"[{a}]"
+        if b in keep:
+            return f"[{b}]"
+        return ""                      # neither resolves: markers AND separator go
+
+    text = _RANGE_RE.sub(_range, text)
+    text = _MARKER_RE.sub(
+        lambda m: m.group(0) if int(m.group(1)) in keep else "", text)
+    # Repair spacing WITHOUT touching line breaks: this runs on every answer, and
+    # paragraph structure is part of a correct one.
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+([.,;:!?])", r"\1", text)
+    return text.strip()
+
+
 def _finalize_answer(raw: str, marker_map: dict[int, dict]) -> tuple[str, list[int]]:
     """Deterministic design-decision #2 enforcement: strip any URL the model
-    emitted (it must never write one), then keep the ordered-unique [N] markers
-    that map to a retrieved fact (drop invented ones)."""
+    emitted (it must never write one), keep the ordered-unique [N] markers that
+    map to a retrieved fact, and remove the ones that do not from the TEXT as
+    well -- a visible marker must always correspond to a real citation."""
     text = _URL_RE.sub("", raw).strip()
     cited: list[int] = []
     for m in _MARKER_RE.findall(text):
         n = int(m)
         if n in marker_map and n not in cited:
             cited.append(n)
-    return text, cited
+    return _strip_markers(text, set(marker_map)), cited
 
 
 def _build_citations(cited: list[int], marker_map: dict, resolved: dict) -> list[dict]:
