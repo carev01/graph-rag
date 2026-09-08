@@ -53,7 +53,34 @@ def _report_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
         raise ValueError(
             "No report model configured. Set report_llm_* or the judge_* (GLM-5.2) "
             "config in .env.")
-    return instrument(AsyncOpenAI(api_key=key, base_url=base)), model
+    # Timeout + throughput routing. Measured 2026-09-08 on z-ai/glm-5.3-flash with
+    # an identical prompt: Z.AI served it at 29 tok/s (7.7s), Parasail at 9.4 tok/s
+    # (24.2s), and one unpinned call took 380s. Reports are generated SEQUENTIALLY
+    # (see cli.py), so per-call routing luck multiplies across every community --
+    # unpinned, a 60-community build is anywhere from 30 minutes to 6 hours. A
+    # bounded timeout also stops a bad route from hanging the whole batch.
+    client = instrument(AsyncOpenAI(api_key=key, base_url=base,
+                                    timeout=180.0, max_retries=3))
+    if "openrouter" in base:
+        client = _prefer_fast_provider(client)
+    return client, model
+
+
+def _prefer_fast_provider(client: AsyncOpenAI) -> AsyncOpenAI:
+    """Ask OpenRouter to route by throughput rather than its default ordering."""
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        extra = dict(kwargs.get("extra_body") or {})
+        provider = dict(extra.get("provider") or {})
+        provider.setdefault("sort", "throughput")
+        provider.setdefault("allow_fallbacks", True)
+        extra["provider"] = provider
+        kwargs["extra_body"] = extra
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
 
 
 def _extract_json(raw: str) -> dict | None:

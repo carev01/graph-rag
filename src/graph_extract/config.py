@@ -79,6 +79,14 @@ class ExtractSettings(BaseSettings):
     judge_api_key: str = ""  # if empty, the judge reuses llm_api_key (fallback path)
     # --- theme-builder / community layer (design: theme-builder-community-layer) ---
     # Report tier defaults to the synthesis/judge tier (GLM-5.2) when left empty.
+    # The faithfulness judge for the router golden-set eval. Falls back to judge_*,
+    # but eval_router GUARDS against the fallback resolving to the synthesis tier --
+    # a judge grading its own output inflates faithfulness, and the failure is
+    # invisible in the score. Point this at a DIFFERENT model family from synthesis
+    # so the two do not share failure modes.
+    eval_judge_base_url: str = ""
+    eval_judge_model: str = ""
+    eval_judge_api_key: str = ""
     report_llm_base_url: str = ""
     report_llm_model: str = ""
     report_llm_api_key: str = ""

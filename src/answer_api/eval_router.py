@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
+from openai import AsyncOpenAI
 
 from answer_api import router as router_mod
 from answer_api.golden import precision_at_k
@@ -31,6 +32,34 @@ _JUDGE_PROMPT = (
     "(5 = every claim supported, 0 = unsupported/hallucinated). Reply with ONLY the "
     "integer.\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
+
+
+def _eval_judge_client_and_model(settings) -> tuple[AsyncOpenAI, str]:
+    """Resolve the faithfulness judge, INDEPENDENT of synthesis.
+
+    Uses `eval_judge_*` when set, else falls back to the judge/synthesis tier --
+    and then refuses that fallback, because a judge scoring answers it wrote
+    itself inflates faithfulness in a way the score cannot reveal. This mirrors
+    the guard `graph_extract.eval._judge_client_and_model` already applies
+    against judging with the extraction model.
+
+    Failing loudly here is the point: a silently self-graded eval is worse than
+    no eval, because it reads as evidence.
+    """
+    base = settings.eval_judge_base_url or settings.judge_base_url
+    model = settings.eval_judge_model or settings.judge_model
+    key = settings.eval_judge_api_key or settings.judge_api_key or "not-needed"
+    if not base or not model:
+        raise ValueError(
+            "No eval judge configured. Set EVAL_JUDGE_BASE_URL / EVAL_JUDGE_MODEL "
+            "(or JUDGE_BASE_URL / JUDGE_MODEL) in .env.")
+    if base == settings.judge_base_url and model == settings.judge_model:
+        raise ValueError(
+            f"Eval judge resolves to the synthesis model ({model!r}) -- it would "
+            "grade its own answers and inflate faithfulness. Set EVAL_JUDGE_MODEL "
+            "to a different model, ideally a different family so the two do not "
+            "share failure modes.")
+    return AsyncOpenAI(api_key=key, base_url=base), model
 
 
 async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int:
@@ -58,7 +87,7 @@ async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
 
 
 async def _score_one(clients, q, mode_override, settings):
-    graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel = clients
+    graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
     env = await router_mod.answer_router(
         graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel,
         q=q["question"], mode_override=mode_override, vendor=None, settings=settings)
@@ -66,7 +95,7 @@ async def _score_one(clients, q, mode_override, settings):
             if q["expected_article_ids"] else None)
     facts = await _cited_fact_texts(driver, settings.group_id,
                                     [c["fact_uuid"] for c in env["citations"]])
-    faith = await _faithfulness_judge(sc, sm, q["question"], env["answer"], facts)
+    faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
     return env, ghit, faith
 
 
@@ -121,9 +150,10 @@ async def main() -> None:
         settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
     embedder = build_embedder(settings)
     sc, sm = _synthesis_client_and_model(settings)
+    jc, jm = _eval_judge_client_and_model(settings)
     mc, mm = _map_client_and_model(settings)
     cc, cmodel = _cheap_classify_client(settings)
-    clients = (graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel)
+    clients = (graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm)
     try:
         summary = await run_eval(clients, questions, settings)
         report = format_report(summary)
@@ -135,6 +165,7 @@ async def main() -> None:
         await graphiti.close()
         await driver.close()
         await sc.close()
+        await jc.close()
         await mc.close()
         await embedder.client.close()   # standalone embedder owns a dedicated pool
         if cc is not None:
