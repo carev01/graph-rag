@@ -31,7 +31,9 @@ async def test_router_eval_smoke_live(live_extract_driver):
         assert summary["n"] == 2
         assert summary["routing_accuracy"] >= 0.5
         for r in summary["per_question"]:
-            assert 0 <= r["faithfulness"] <= 5
+            # faithfulness can genuinely be unmeasurable (judge truncation) --
+            # that must surface as None, never as a fabricated 0.
+            assert r["faithfulness"] is None or 0 <= r["faithfulness"] <= 5
         report = er.format_report(summary)
         assert "Routing accuracy" in report
     finally:

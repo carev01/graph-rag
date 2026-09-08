@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
@@ -62,18 +63,45 @@ def _eval_judge_client_and_model(settings) -> tuple[AsyncOpenAI, str]:
     return AsyncOpenAI(api_key=key, base_url=base), model
 
 
-async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int:
+async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | None:
+    """Score faithfulness 0-5, or return None if the judge could not be measured.
+
+    GLM-5.2 is a reasoning model: on heavy inputs it can burn the whole token
+    budget on reasoning tokens and return NO content at all
+    (finish_reason='length', content=None). Blindly parsing that with
+    `_parse_judge_score` yields 0 -- "I could not measure this answer" recorded
+    as "this answer is completely unfaithful", which corrupts the mean. So: give
+    the first attempt a large reasoning budget, retry once with an even larger
+    one if the reply is unusable, and if it is STILL unusable, return None
+    rather than a fabricated 0. Whether a digit was actually found is checked
+    directly against the raw content -- `_parse_judge_score` itself is not
+    trusted to distinguish "no digit" from "judge said 0".
+    """
     facts_block = "\n".join(f"- {f}" for f in cited_facts) or "(none)"
-    resp = await client.chat.completions.create(
-        # GLM-5.2 is a reasoning model: a tiny cap burns the whole budget on
-        # reasoning tokens and returns EMPTY content (finish_reason='stop',
-        # content='') -> _parse_judge_score -> 0 for every question. Give reasoning
-        # headroom; the final content is then just the bare integer. (Same lesson as
-        # theme-builder reports / the type_precision judge.)
-        model=model, temperature=0, max_tokens=2000,
-        messages=[{"role": "user", "content": _JUDGE_PROMPT.format(
-            q=q, answer=answer, facts=facts_block)}])
-    return _parse_judge_score(resp.choices[0].message.content or "")
+    prompt = _JUDGE_PROMPT.format(q=q, answer=answer, facts=facts_block)
+
+    async def _attempt(max_tokens: int):
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        choice = resp.choices[0]
+        content = choice.message.content
+        usable = (choice.finish_reason != "length" and bool(content)
+                  and re.search(r"-?\d+", content) is not None)
+        return choice, content, usable
+
+    choice, content, usable = await _attempt(8000)
+    if usable:
+        return _parse_judge_score(content)
+
+    choice, content, usable = await _attempt(16000)
+    if usable:
+        return _parse_judge_score(content)
+
+    logger.warning(
+        "faithfulness judge unmeasurable for question %r after retry "
+        "(finish_reason=%s); recording as unscored, not 0", q, choice.finish_reason)
+    return None
 
 
 async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
@@ -117,19 +145,22 @@ async def run_eval(clients, questions, settings) -> dict:
         except Exception:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
-                   "routing_hit": False, "grounding_hit": None, "faithfulness": 0}
+                   "routing_hit": False, "grounding_hit": None, "faithfulness": None}
         per_question.append(rec)
     return aggregate(per_question)
 
 
 def format_report(summary: dict) -> str:
+    faith_mean = summary["faithfulness_mean"]
+    faith_mean_str = f"{faith_mean:.2f}" if faith_mean is not None else "N/A"
     lines = ["# /answer Router Golden-Set Eval\n",
              f"Questions: {summary['n']}\n",
              f"**Routing accuracy: {summary['routing_accuracy']:.2f}**",
              f"by intent: {summary['routing_by_intent']}",
              f"Grounding precision: {summary['grounding_precision']}",
              f"by mode: {summary['grounding_by_mode']}",
-             f"Faithfulness mean: {summary['faithfulness_mean']:.2f}",
+             f"Faithfulness mean: {faith_mean_str} "
+             f"(unscored: {summary['faithfulness_unscored']}/{summary['n']})",
              f"by mode: {summary['faithfulness_by_mode']}\n",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
@@ -137,8 +168,9 @@ def format_report(summary: dict) -> str:
              "| intent | chosen | routing | grounding | faithfulness | question |",
              "|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
+        faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         lines.append(f"| {r['intent']} | {r['chosen']} | {r['routing_hit']} | "
-                     f"{r['grounding_hit']} | {r['faithfulness']} | {r['question']} |")
+                     f"{r['grounding_hit']} | {faith_cell} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 
