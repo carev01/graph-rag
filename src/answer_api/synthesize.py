@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from openai import AsyncOpenAI
@@ -7,6 +8,8 @@ from openai import AsyncOpenAI
 from answer_api import search as search_mod
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import instrument
+
+logger = logging.getLogger(__name__)
 
 # Case-insensitive: a URL must NEVER survive (design-decision #2). Stop the
 # match at brackets so a URL written flush against a marker ("https://x[1]")
@@ -94,6 +97,51 @@ def _build_citations(cited: list[int], marker_map: dict, resolved: dict) -> list
     return out
 
 
+def _usable_content(resp) -> str | None:
+    """The text of a chat completion, or None when the model returned nothing.
+
+    Two ways a HTTP 200 carries no answer: an empty `choices` list (seen in
+    production, see theme_builder/report.py), and `content=None` because a
+    reasoning model spent its whole max_tokens budget on reasoning tokens and
+    emitted no final message. Both must be distinguishable from a real answer.
+    """
+    if not resp.choices:
+        return None
+    content = resp.choices[0].message.content
+    if content is None or not content.strip():
+        return None
+    return content
+
+
+async def _complete_or_none(client: AsyncOpenAI, model: str, prompt: str, *,
+                            max_tokens: int) -> str | None:
+    """Call the model once; if it returns nothing usable, retry ONCE with a
+    3x larger token budget (a reasoning model can burn a small budget entirely
+    on reasoning tokens) before giving up and returning None."""
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}])
+    content = _usable_content(resp)
+    if content is not None:
+        return content
+    finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
+    logger.warning(
+        "synthesis model %s returned no usable content (finish_reason=%s); "
+        "retrying with max_tokens=%d", model, finish_reason, max_tokens * 3)
+
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens * 3,
+        messages=[{"role": "user", "content": prompt}])
+    content = _usable_content(resp)
+    if content is not None:
+        return content
+    finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
+    logger.warning(
+        "synthesis model %s still returned no usable content after retry "
+        "(finish_reason=%s); giving up", model, finish_reason)
+    return None
+
+
 def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
     """Synthesis LLM = GLM-5.2 via the judge_* config (shared endpoint for now;
     point at a dedicated synthesis model later without touching the judge)."""
@@ -121,13 +169,15 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
                 "retrieved": 0, "cited": 0}
     marker_map = {i: r for i, r in enumerate(results, 1)}
     facts_block = "\n".join(f"[{i}] {r['fact']}" for i, r in marker_map.items())
-    resp = await synth_client.chat.completions.create(
-        # GLM-5.2 is a reasoning model: a small cap truncates the answer to
-        # empty (finish_reason='length', content=''), so give the reasoning
-        # headroom -- same lesson as the GLM judge (type_precision).
-        model=synth_model, temperature=0, max_tokens=3000,
-        messages=[{"role": "user", "content": _PROMPT.format(facts=facts_block, q=q)}])
-    raw = resp.choices[0].message.content or ""
+    # GLM-5.2 is a reasoning model: a small cap truncates the answer to empty
+    # (finish_reason='length', content=None), so give the reasoning headroom --
+    # same lesson as the GLM judge -- and _complete_or_none retries once wider
+    # rather than serving that empty reply as a successful blank answer.
+    raw = await _complete_or_none(synth_client, synth_model,
+                                  _PROMPT.format(facts=facts_block, q=q), max_tokens=3000)
+    if raw is None:
+        return {"query": q, "answer": _REFUSAL, "citations": [],
+                "retrieved": len(results), "cited": 0}
     answer, cited = _finalize_answer(raw, marker_map)
     citations = [{"marker": m, "fact": marker_map[m]["fact"],
                   "fact_uuid": marker_map[m]["fact_uuid"],

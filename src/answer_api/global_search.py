@@ -15,7 +15,9 @@ from openai import AsyncOpenAI
 from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 from graph_extract.usage import instrument
-from answer_api.synthesize import _finalize_answer, _build_citations
+from answer_api.synthesize import (
+    _build_citations, _complete_or_none, _finalize_answer, _usable_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +130,7 @@ async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit,
         resp = await client.chat.completions.create(
             model=model, temperature=0, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}])
-        obj = _extract_json(resp.choices[0].message.content or "")
+        obj = _extract_json(_usable_content(resp) or "")
         if obj is not None:
             break
     if obj is None:
@@ -195,10 +197,12 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
         pts = "\n".join(f"- {p}" for p in m.key_points)
         blocks.append(f"COMMUNITY \"{m.title}\" (relevance {m.relevance}):\n{pts}\n"
                       f"Supporting facts: {markers}")
-    resp = await synth_client.chat.completions.create(
-        model=synth_model, temperature=0, max_tokens=3000,
-        messages=[{"role": "user", "content": _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks))}])
-    answer, cited = _finalize_answer(resp.choices[0].message.content or "", marker_map)
+    raw = await _complete_or_none(
+        synth_client, synth_model,
+        _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks)), max_tokens=3000)
+    if raw is None:
+        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+    answer, cited = _finalize_answer(raw, marker_map)
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = _build_citations(cited, marker_map, resolved)

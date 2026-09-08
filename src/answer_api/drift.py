@@ -9,7 +9,9 @@ import logging
 from dataclasses import dataclass
 
 from answer_api.search import search_local
-from answer_api.synthesize import _finalize_answer, _build_citations, answer_local
+from answer_api.synthesize import (
+    _build_citations, _complete_or_none, _finalize_answer, _usable_content, answer_local,
+)
 from answer_api.global_search import shortlist_communities, _extract_json
 from graph_extract.provenance import Provenance
 
@@ -70,7 +72,7 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
             model=synth_model, temperature=0, max_tokens=2000,
             messages=[{"role": "user",
                        "content": _PRIMER_PROMPT.format(q=q, blocks=blocks)}])
-        obj = _extract_json(resp.choices[0].message.content or "")
+        obj = _extract_json(_usable_content(resp) or "")
         if obj is not None:
             break
     hit_ids = {h.community_id for h in hits}
@@ -121,7 +123,7 @@ async def _refine_followups(synth_client, synth_model, *, q, facts, max_followup
             model=synth_model, temperature=0, max_tokens=1500,
             messages=[{"role": "user", "content": _REFINE_PROMPT.format(
                 n=max_followups, q=q, cids=sorted(hit_ids), facts=facts_block)}])
-        obj = _extract_json(resp.choices[0].message.content or "")
+        obj = _extract_json(_usable_content(resp) or "")
         if obj is not None:
             break
     if obj is None:
@@ -154,11 +156,14 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
     facts = _dedup_facts(facts)
     marker_map = {i: f for i, f in enumerate(facts, 1)}
     facts_block = "\n".join(f"[{i}] {f['fact']}" for i, f in marker_map.items())
-    resp = await synth_client.chat.completions.create(
-        model=synth_model, temperature=0, max_tokens=3000,
-        messages=[{"role": "user", "content": _SYNTH_PROMPT.format(
-            refusal=_REFUSAL, q=q, draft=preliminary_answer or "(none)", facts=facts_block)}])
-    answer, cited = _finalize_answer(resp.choices[0].message.content or "", marker_map)
+    raw = await _complete_or_none(
+        synth_client, synth_model,
+        _SYNTH_PROMPT.format(refusal=_REFUSAL, q=q, draft=preliminary_answer or "(none)",
+                             facts=facts_block),
+        max_tokens=3000)
+    if raw is None:
+        return _REFUSAL, []
+    answer, cited = _finalize_answer(raw, marker_map)
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = _build_citations(cited, marker_map, resolved)

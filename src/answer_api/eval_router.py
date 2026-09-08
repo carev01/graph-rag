@@ -77,6 +77,12 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
     directly against the raw content -- `_parse_judge_score` itself is not
     trusted to distinguish "no digit" from "judge said 0".
     """
+    if not answer or not answer.strip():
+        logger.warning(
+            "faithfulness judge skipped for question %r: blank answer would score "
+            "5 by vacuous truth; recording as unscored, not measured", q)
+        return None
+
     facts_block = "\n".join(f"- {f}" for f in cited_facts) or "(none)"
     prompt = _JUDGE_PROMPT.format(q=q, answer=answer, facts=facts_block)
 
