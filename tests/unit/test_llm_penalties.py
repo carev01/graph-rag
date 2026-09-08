@@ -155,3 +155,42 @@ async def test_existing_maxitems_is_respected():
     await client.chat.completions.create(model="m", messages=[], response_format=schema)
     got = holder.seen["response_format"]["json_schema"]["schema"]["properties"]["idx"]
     assert got["maxItems"] == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_report_retries_a_choices_less_response():
+    """A flaky provider can return HTTP 200 with an error payload and no choices.
+    Indexing choices[0] then raised TypeError and the caller dropped the community
+    outright -- 3 of 29 were lost that way on the first real theme-build."""
+    from theme_builder.report import generate_report
+
+    class _Resp:
+        def __init__(self, choices):
+            self.choices = choices
+
+    class _Msg:
+        content = '{"title":"t","summary":"s","rating":5,"rating_explanation":"e",' \
+                  '"full_report":[]}'
+
+    class _Choice:
+        message = _Msg()
+
+    class _Ctx:
+        text = "ctx"
+        fact_uuids: set = set()
+
+    calls = {"n": 0}
+
+    class _Client:
+        def __init__(self):
+            self.chat = type("C", (), {})()
+            self.chat.completions = self
+
+        async def create(self, **kw):
+            calls["n"] += 1
+            # first attempt: no choices at all; second: a valid reply
+            return _Resp(None) if calls["n"] == 1 else _Resp([_Choice()])
+
+    rep = await generate_report(_Client(), "m", _Ctx(), 16000)
+    assert calls["n"] == 2, "the choices-less reply must consume a retry, not raise"
+    assert rep is not None, "the retry's valid reply must produce a report"

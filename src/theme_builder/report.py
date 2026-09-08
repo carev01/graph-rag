@@ -128,6 +128,12 @@ async def generate_report(client: AsyncOpenAI, model: str,
             # lesson as answer_api/synthesize + the type_precision judge.
             model=model, temperature=0, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
+        # A flaky provider can return HTTP 200 with an error payload and NO
+        # choices; indexing [0] then raises TypeError and the caller drops the
+        # community entirely. Observed 3/29 on the first real theme-build. Treat
+        # it as an unparseable reply so it takes the retry instead.
+        if not resp.choices:
+            continue
         obj = _extract_json(resp.choices[0].message.content or "")
         if obj is not None:
             break
