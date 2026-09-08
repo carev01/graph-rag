@@ -39,12 +39,11 @@ async def test_shrink_supersedes_trailing(extract_driver):
         """)
     await driver._supersede_trailing_episodes("a2", 1)
     async with extract_driver.session() as s:
-        rec0 = await (await s.run(
-            "MATCH (e:Episodic {uuid:'e_s0'}) RETURN e.superseded AS s")).single()
-        rec1 = await (await s.run(
-            "MATCH (e:Episodic {uuid:'e_s1'}) RETURN e.superseded AS s")).single()
-        rec2 = await (await s.run(
-            "MATCH (e:Episodic {uuid:'e_s2'}) RETURN e.superseded AS s")).single()
-    assert rec0["s"] is not True
-    assert rec1["s"] is True
-    assert rec2["s"] is True
+        rows = [rec async for rec in await s.run(
+            "MATCH (:Article {id:'a2'})-[r:HAS_EPISODE]->(e:Episodic) "
+            "RETURN e.uuid AS uuid, coalesce(r.superseded, false) AS sup ORDER BY uuid")]
+    # the EDGE carries the flag -- that is what the sweep reads
+    assert {r["uuid"]: r["sup"] for r in rows} == {
+        "e_s0": False, "e_s1": True, "e_s2": True}
+    # every edge is retained, so the dropped chunks stay citable
+    assert len(rows) == 3

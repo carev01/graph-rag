@@ -10,7 +10,8 @@ class Provenance:
         async with self._driver.session() as s:
             r = await s.run(
                 "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->() "
-                "WHERE r.chunk_index=$i AND r.content_hash=$h RETURN r LIMIT 1",
+                "WHERE r.chunk_index=$i AND r.content_hash=$h "
+                "AND coalesce(r.superseded, false) = false RETURN r LIMIT 1",
                 a=article_id, i=chunk_index, h=content_hash)
             return await r.single() is not None
 
@@ -18,15 +19,20 @@ class Provenance:
                    heading_path: str, token_count: int, content_hash: str) -> None:
         async with self._driver.session() as s:
             await s.run(
+                # The old edge is FLAGGED, never deleted: its existence is what makes
+                # the superseded fact citable (design decision #2 for history), while
+                # the flag is what makes it dead for liveness (see episode_liveness).
+                # The leading MATCH on $u means a non-existent episode uuid yields zero
+                # rows and the whole statement is a no-op -- a pinned behaviour.
                 "MATCH (a:Article {id:$a}) "
                 "MATCH (e:Episodic {uuid:$u}) "
                 "OPTIONAL MATCH (a)-[old:HAS_EPISODE {chunk_index:$i}]->(oldE:Episodic) "
                 "WHERE oldE.uuid <> $u "
-                "SET oldE.superseded = true DELETE old "
-                "WITH a, e "
+                "SET old.superseded = true, oldE.superseded = true "
+                "WITH DISTINCT a, e "
                 "MERGE (a)-[r:HAS_EPISODE {chunk_index:$i}]->(e) "
                 "SET r.heading_path=$hp, r.token_count=$tc, r.content_hash=$h, "
-                "e.superseded = false",
+                "    r.superseded = false, e.superseded = false",
                 a=article_id, u=episode_uuid, i=chunk_index, hp=heading_path,
                 tc=token_count, h=content_hash)
 

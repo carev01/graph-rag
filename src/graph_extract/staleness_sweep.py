@@ -8,15 +8,17 @@ Graphiti to observe. This module is the deterministic, Cypher-only backstop
 for that case: a weekly sweep that expires facts with zero live supporting
 episodes.
 
-Correctness rule (see task brief "#6"): a supporting episode is DEAD iff
-`removed=true` OR it has NO `HAS_EPISODE` edge from a non-removed
-`:Article`. Liveness is keyed on HAS_EPISODE linkage, NEVER on the
-`superseded` flag -- a superseded episode had its HAS_EPISODE edge deleted
-by `Provenance.link`'s re-key (so it's dead by linkage anyway), but a
-shrink-then-restore episode can be wrongly left `superseded=true` while
-STILL holding its HAS_EPISODE edge, and that episode is ALIVE. Consulting
-`superseded` directly would wrongly expire facts still backed by real
-content -- so this sweep never reads it.
+Correctness rule (see graph_extract.episode_liveness, the single definition): a
+supporting episode is ALIVE iff its `HAS_EPISODE` edge is not `superseded`, the
+episode is not `removed`, and the article is not `removed`. Liveness is keyed on
+the EDGE's flag, never the Episodic node's -- one episode can be referenced by
+more than one article and dies only for the one that superseded it.
+
+This module is the ONLY evaluator of that rule; it materialises the outcome into
+`invalid_at`, which search and timeline consume. (Before 2026-09-04 the rule was
+keyed on edge *existence* because `Provenance.link` deleted the edge on re-key --
+which destroyed the citation for superseded facts, and meant a shrunk article's
+dropped chunks, whose edges were kept, never expired at all.)
 
 A fact is expired iff ALL its supporting episodes are dead (no alive
 episode survives). Only facts with `invalid_at IS NULL` and a non-empty
@@ -43,20 +45,19 @@ from __future__ import annotations
 
 from neo4j import AsyncDriver
 
-_SWEEP = """
-MATCH ()-[f:RELATES_TO {group_id:$g}]->()
+from graph_extract.episode_liveness import ALIVE_EPISODE, ALIVE_LINK
+
+_SWEEP = f"""
+MATCH ()-[f:RELATES_TO {{group_id:$g}}]->()
 WHERE f.invalid_at IS NULL AND f.episodes IS NOT NULL AND size(f.episodes) > 0
 WITH f, f.episodes AS eps
-CALL (eps) {
+CALL (eps) {{
   UNWIND eps AS epu
-  OPTIONAL MATCH (e:Episodic {uuid: epu})
-  OPTIONAL MATCH (a:Article)-[:HAS_EPISODE]->(e) WHERE coalesce(a.removed, false) = false
-  WITH e, count(a) AS live_links
-  RETURN sum(
-    CASE WHEN e IS NOT NULL AND coalesce(e.removed, false) = false AND live_links > 0
-    THEN 1 ELSE 0 END
-  ) AS alive
-}
+  OPTIONAL MATCH (e:Episodic {{uuid: epu}})
+  OPTIONAL MATCH (a:Article)-[he:HAS_EPISODE]->(e) WHERE {ALIVE_LINK}
+  WITH e, count(he) AS live_links
+  RETURN sum(CASE WHEN {ALIVE_EPISODE} THEN 1 ELSE 0 END) AS alive
+}}
 WITH f WHERE alive = 0
 SET f.invalid_at = datetime(), f.expired_by_sweep = true
 RETURN count(f) AS expired, collect(f.uuid)[..20] AS sample

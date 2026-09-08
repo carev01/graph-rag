@@ -68,12 +68,17 @@ document version that asserted it.
 
 ### 3.1 `src/graph_extract/episode_liveness.py` (new)
 
-The single home for the rule. Exports the Cypher predicate as a constant so callers
-compose it rather than restating it:
+The single home for the rule. Exports the Cypher predicates as constants so callers
+compose them rather than restating the rule:
 
-- `ALIVE_EPISODE_PREDICATE: str` — a Cypher boolean over bound `he` (the `HAS_EPISODE`
-  relationship), `e` (`:Episodic`) and `a` (`:Article`).
-- `LIVE_FACT_EXISTS: str` — the `EXISTS { … }` form used to filter facts.
+- `ALIVE_LINK: str` — is this Article→Episodic link live? A Cypher boolean over
+  bound `a` (`:Article`) and `he` (the `HAS_EPISODE` relationship).
+- `ALIVE_EPISODE: str` — is this episode alive overall? A Cypher boolean over
+  bound `e` (`:Episodic`, possibly `NULL`) and `live_links` (the count of that
+  episode's links passing `ALIVE_LINK`).
+
+There is no separate fact-level constant; the sweep composes these two into its own
+per-fact aggregation rather than the module exporting a third predicate.
 
 Both use `coalesce(x, false)` so a missing property means alive, which is what makes
 the existing 161 unflagged edges behave correctly without a backfill.
