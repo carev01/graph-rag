@@ -148,8 +148,17 @@ async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit,
 
 _REDUCE_PROMPT = (
     "Answer the QUESTION by synthesizing across these community findings, organized "
-    "by theme and vendor. Cite every claim with the [N] fact markers shown. Use ONLY "
-    "these findings. Do NOT write any URL. If nothing is relevant, reply exactly: "
+    "by theme and vendor.\n"
+    "Rules:\n"
+    "- Cite every claim with the [N] fact markers shown. A sentence with no marker "
+    "is not allowed.\n"
+    "- Use ONLY these findings. Do NOT use outside knowledge.\n"
+    "- Do NOT write any URL.\n"
+    "- Do NOT comment on what the findings do not contain, and do not explain what "
+    "you cannot compare. Absence of evidence is not a finding.\n"
+    "- Let the evidence set the length. Say what the findings support and then stop; "
+    "do not pad, hedge, or restate.\n"
+    "- If the findings do not support an answer, reply exactly: "
     "\"" + _REFUSAL + "\"\n\nQUESTION: {q}\n\nFINDINGS:\n{blocks}\n\nAnswer:"
 )
 
