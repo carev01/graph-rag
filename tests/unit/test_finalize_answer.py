@@ -109,3 +109,24 @@ def test_url_and_unresolvable_markers_together():
     assert "http" not in ans
     assert "[9]" not in ans and "[1]" in ans
     assert "  " not in ans and cited == [1]
+
+
+def test_chained_range_with_middle_marker_unresolvable_does_not_fabricate_a_span():
+    """'[1]-[2]-[3]' with only [2] unresolvable must drop the middle marker
+    without fusing the surviving outer markers into a fabricated '[1]-[3]'
+    span nobody asserted -- the old single-pass range regex did exactly that."""
+    mm = {1: {"fact_uuid": "f1"}, 3: {"fact_uuid": "f3"}}  # [2] absent on purpose
+    ans, cited = _finalize_answer("Claim [1]-[2]-[3].", mm)
+    assert cited == [1, 3]
+    assert "[1]-[3]" not in ans
+    assert "[1] [3]" in ans
+
+
+def test_trailing_space_before_newline_is_removed():
+    """A marker removed right before a line break used to leave a lone trailing
+    space abutting the '\\n' -- neither the double-space nor the
+    space-before-punctuation repair catches that, only a dedicated one does."""
+    ans, cited = _finalize_answer("Line one [9]\nLine two.", MM)
+    assert cited == []
+    assert " \n" not in ans
+    assert ans == "Line one\nLine two."

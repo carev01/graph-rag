@@ -13,10 +13,14 @@ from graph_extract.usage import instrument
 # doesn't swallow the legitimate [1] citation along with it.
 _URL_RE = re.compile(r"https?://[^\s\[\]]+", re.IGNORECASE)
 _MARKER_RE = re.compile(r"\[(\d+)\]")
-# A hyphen / en-dash / em-dash with optional surrounding spaces -- the forms a
-# model uses to write a marker RANGE like "[31]-[60]".
-_SEP = r"[ \t]*[-–—][ \t]*"
-_RANGE_RE = re.compile(r"\[(\d+)\]" + _SEP + r"\[(\d+)\]")
+# Placeholder for an unresolvable marker mid-pass. Never allowed to survive
+# into an answer -- _strip_markers strips any pre-existing one on entry.
+_SENTINEL = "\x00"
+# A separator directly adjacent to a removed marker is orphaned and goes with it.
+# Requiring the dash to sit immediately beside the sentinel (modulo spaces) is what
+# keeps hyphenated words like "made-up [9]" safe.
+_ORPHAN_RE = re.compile(
+    r"[ \t]*[-–—]?[ \t]*" + _SENTINEL + r"[ \t]*[-–—]?[ \t]*")
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
@@ -42,24 +46,23 @@ def _strip_markers(text: str, keep: set[int]) -> str:
     separator; a model writing a 30-marker span is guessing, not citing, so
     expanding it would manufacture citations it never made. When both ends are
     dropped the separator goes too, or the prose is left with an orphaned dash.
-    """
-    def _range(m: re.Match[str]) -> str:
-        a, b = int(m.group(1)), int(m.group(2))
-        if a in keep and b in keep:
-            return m.group(0)          # a real span -- leave it intact
-        if a in keep:
-            return f"[{a}]"
-        if b in keep:
-            return f"[{b}]"
-        return ""                      # neither resolves: markers AND separator go
 
-    text = _RANGE_RE.sub(_range, text)
+    Chained ranges ("[1]-[2]-[3]") rule out a single-pass regex substitution:
+    replacing "[1]-[2]" first would collapse it to "[1]" and leave "-[3]"
+    sitting right next to it, fabricating a "[1]-[3]" span nobody asserted.
+    Instead every unresolvable marker becomes a sentinel first, then a second
+    pass removes each sentinel together with any separator orphaned by its
+    removal -- a separator between two surviving markers is left untouched.
+    """
+    text = text.replace(_SENTINEL, "")  # defensive: must never reach an answer
     text = _MARKER_RE.sub(
-        lambda m: m.group(0) if int(m.group(1)) in keep else "", text)
+        lambda m: m.group(0) if int(m.group(1)) in keep else _SENTINEL, text)
+    text = _ORPHAN_RE.sub(" ", text)
     # Repair spacing WITHOUT touching line breaks: this runs on every answer, and
     # paragraph structure is part of a correct one.
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"[ \t]+([.,;:!?])", r"\1", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
     return text.strip()
 
 
