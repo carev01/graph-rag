@@ -28,11 +28,11 @@ class Provenance:
                 "MATCH (e:Episodic {uuid:$u}) "
                 "OPTIONAL MATCH (a)-[old:HAS_EPISODE {chunk_index:$i}]->(oldE:Episodic) "
                 "WHERE oldE.uuid <> $u "
-                "SET old.superseded = true, oldE.superseded = true "
+                "SET old.superseded = true "
                 "WITH DISTINCT a, e "
                 "MERGE (a)-[r:HAS_EPISODE {chunk_index:$i}]->(e) "
                 "SET r.heading_path=$hp, r.token_count=$tc, r.content_hash=$h, "
-                "    r.superseded = false, e.superseded = false",
+                "    r.superseded = false",
                 a=article_id, u=episode_uuid, i=chunk_index, hp=heading_path,
                 tc=token_count, h=content_hash)
 

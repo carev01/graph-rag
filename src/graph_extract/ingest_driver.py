@@ -115,7 +115,7 @@ class IngestDriver:
             await s.run(
                 "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->(e:Episodic) "
                 "WHERE r.chunk_index >= $n "
-                "SET r.superseded=true, e.superseded=true", a=article_id, n=new_count)
+                "SET r.superseded=true", a=article_id, n=new_count)
 
     async def ingest_source(self, source_id: str, limit: int | None = None) -> IngestResult:
         ids = await self.list_article_ids(source_id)

@@ -53,11 +53,14 @@ async def test_link_bad_uuid_is_noop(extract_driver):
         rec = await (await s.run(
             "MATCH (:Article {id:'a2'})-[r:HAS_EPISODE {chunk_index:0}]->(e:Episodic) "
             "RETURN count(r) AS c, collect(e.uuid) AS uuids")).single()
+        # Assert on the EDGE flag: the node-level property is no longer written, so
+        # `e.superseded is not True` would now pass trivially and prove nothing.
         old_sup = (await (await s.run(
-            "MATCH (e:Episodic {uuid:'e_old2'}) RETURN e.superseded AS s")).single())["s"]
+            "MATCH (:Article {id:'a2'})-[r:HAS_EPISODE {chunk_index:0}]->() "
+            "RETURN coalesce(r.superseded, false) AS s")).single())["s"]
     assert rec["c"] == 1
     assert rec["uuids"] == ["e_old2"]
-    assert old_sup is not True
+    assert old_sup is False
 
 
 async def test_link_re_activation_flips_which_edge_is_live(extract_driver):

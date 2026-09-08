@@ -197,6 +197,12 @@ def queue_status() -> None:
 def worker(
     batch: int = typer.Option(10, "--batch"),
     poll_seconds: float = typer.Option(5.0, "--poll-seconds"),
+    max_batches: int | None = typer.Option(
+        None, "--max-batches",
+        help="Stop after N batches instead of running until SIGINT/SIGTERM. "
+             "Use this for bounded/test runs: `timeout` does not forward "
+             "SIGTERM through `uv run`, so an unbounded worker can outlive "
+             "its intended window and claim jobs you did not mean to process."),
 ) -> None:
     """Standalone semantic-ingestion worker: claims `semantic_jobs` rows and
     drives them through the real `IngestDriver` (upsert -> ingest_article,
@@ -212,6 +218,7 @@ def worker(
                 loop.add_signal_handler(sig, stop_event.set)
             await run_worker(
                 store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event,
+                max_batches=max_batches,
                 budget=settings.semantic_daily_token_budget,
                 max_attempts=settings.semantic_max_attempts,
                 backoff_base=settings.semantic_backoff_base_seconds,
