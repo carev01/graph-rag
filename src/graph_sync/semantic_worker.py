@@ -48,12 +48,26 @@ async def run_worker_once(
 async def run_worker(
     store, ingest, *, batch: int, poll_seconds: float, stop_event: asyncio.Event,
     budget: int, max_attempts: int, backoff_base: float, backoff_cap: float,
-    lease: float,
+    lease: float, max_batches: int | None = None,
 ) -> None:
+    """Drain `semantic_jobs` until stopped.
+
+    `max_batches` bounds the run to N iterations and then returns normally. Without
+    it the only way out is a signal -- and `timeout ... uv run ...` does NOT forward
+    SIGTERM through to the wrapped interpreter, so a supposedly time-boxed worker
+    keeps running. That bit us for real: an unbounded run overshot its window,
+    looped again, and claimed a live bootstrap-lane job that was never intended to
+    be processed. Operators and tests need a stop condition that does not depend on
+    OS signal plumbing.
+    """
+    batches = 0
     while not stop_event.is_set():
         n = await run_worker_once(
             store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
             backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease)
+        batches += 1
+        if max_batches is not None and batches >= max_batches:
+            return
         if n == 0:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
