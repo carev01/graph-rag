@@ -94,7 +94,7 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 ctx = assemble_context(members, facts,
                                        top_entities=settings.report_top_entities,
                                        token_budget=settings.report_token_budget)
-                rep = await generate_report(client, model, ctx)
+                rep = await generate_report(client, model, ctx, settings.report_max_tokens)
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", c.community_id)
                 rep = None
@@ -168,7 +168,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                 facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
                 ctx = assemble_context(members, facts, top_entities=settings.report_top_entities,
                                        token_budget=settings.report_token_budget)
-                rep = await generate_report(client, model, ctx)
+                rep = await generate_report(client, model, ctx, settings.report_max_tokens)
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", stable_ids[i])
                 rep = None

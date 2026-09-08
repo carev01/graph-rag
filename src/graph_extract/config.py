@@ -92,6 +92,17 @@ class ExtractSettings(BaseSettings):
     report_llm_api_key: str = ""
     leiden_min_community_size: int = 3   # drop dust communities smaller than this
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
+    # Output cap for a community report. 8000 was measured against GLM-5.2 (3000
+    # skipped ~24% of communities, 8000 skipped ~0). GLM-5.3-flash reasons more and
+    # truncates at 8000 -- and a truncated report is DROPPED silently, because
+    # generate_report returns None and writeback only writes communities that have
+    # one. Reasoning counts against this budget, so cap the reasoning separately
+    # rather than only raising the ceiling.
+    report_max_tokens: int = 16000
+    # Reasoning effort for the report tier: "low" keeps reasoning (it helps report
+    # quality) while stopping it from consuming the whole output budget. Empty
+    # string sends no reasoning parameter at all.
+    report_reasoning_effort: str = "low"
     report_token_budget: int = 12000     # per-community context budget (~chars/4)
     report_top_entities: int = 30        # member entities included in a report's context
     # --- incremental community refresh (design: incremental-community-refresh) ---

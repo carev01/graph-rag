@@ -62,12 +62,17 @@ def _report_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
     client = instrument(AsyncOpenAI(api_key=key, base_url=base,
                                     timeout=180.0, max_retries=3))
     if "openrouter" in base:
-        client = _prefer_fast_provider(client)
+        client = _prefer_fast_provider(client, settings.report_reasoning_effort)
     return client, model
 
 
-def _prefer_fast_provider(client: AsyncOpenAI) -> AsyncOpenAI:
-    """Ask OpenRouter to route by throughput rather than its default ordering."""
+def _prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
+    """Route by throughput, and bound reasoning so it cannot eat the output budget.
+
+    Reasoning tokens count as completion tokens, so on a reasoning model an
+    unbounded effort level competes with the report text for the same cap --
+    and losing that race truncates the JSON, which drops the community.
+    """
     orig = client.chat.completions.create
 
     async def create(*args, **kwargs):
@@ -76,6 +81,8 @@ def _prefer_fast_provider(client: AsyncOpenAI) -> AsyncOpenAI:
         provider.setdefault("sort", "throughput")
         provider.setdefault("allow_fallbacks", True)
         extra["provider"] = provider
+        if reasoning_effort:
+            extra.setdefault("reasoning", {"effort": reasoning_effort})
         kwargs["extra_body"] = extra
         return await orig(*args, **kwargs)
 
@@ -105,7 +112,8 @@ def _strip(s: str) -> str:
 
 
 async def generate_report(client: AsyncOpenAI, model: str,
-                          context: ContextResult) -> CommunityReport | None:
+                          context: ContextResult,
+                          max_tokens: int = 16000) -> CommunityReport | None:
     """One LLM call (+ one retry on unparseable JSON). Validates fact_ids against
     the community's real fact UUIDs (drops hallucinations) and strips URLs.
     Returns None if the model never produced valid JSON."""
@@ -118,7 +126,7 @@ async def generate_report(client: AsyncOpenAI, model: str,
             # fail -> skipped report. 8000 gives the reasoning + report headroom
             # (measured: 3000 skipped ~24% of communities, 8000 skipped ~0). Same
             # lesson as answer_api/synthesize + the type_precision judge.
-            model=model, temperature=0, max_tokens=8000,
+            model=model, temperature=0, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
         obj = _extract_json(resp.choices[0].message.content or "")
         if obj is not None:
