@@ -264,8 +264,10 @@ meta-commentary about what the community reports did NOT contain. The prompt
 permitted all of it. These tests pin the constraints that forbid it -- they are
 prompt-shape tests, so the real verification is the eval re-run in Task 3.
 """
-from answer_api.global_search import _REDUCE_PROMPT
-from answer_api.synthesize import _REFUSAL
+# NOTE: `_REFUSAL` is module-local. global_search.py:22 defines its OWN
+# ("I don't have enough thematic coverage to answer that from the community
+# reports."), which is NOT synthesize.py's. Import it from global_search.
+from answer_api.global_search import _REDUCE_PROMPT, _REFUSAL
 
 
 def test_still_has_its_format_fields():
@@ -273,19 +275,25 @@ def test_still_has_its_format_fields():
 
 
 def test_forbids_commentary_about_absent_evidence():
+    """THE new constraint. The traced failure opened with exactly this."""
     low = _REDUCE_PROMPT.lower()
-    assert "do not" in low or "never" in low
-    assert "not contain" in low or "absent" in low or "missing" in low
+    assert "do not comment on what the findings do not contain" in low
+    assert "absence of evidence is not a finding" in low
 
 
 def test_requires_every_claim_to_carry_a_marker():
-    low = _REDUCE_PROMPT.lower()
-    assert "every claim" in low
-    assert "[n]" in low
+    """The old prompt already said 'cite every claim'; what is NEW is making an
+    uncited sentence explicitly disallowed."""
+    assert "a sentence with no marker is not allowed" in _REDUCE_PROMPT.lower()
 
 
-def test_offers_the_refusal_when_evidence_is_thin():
+def test_refusal_is_offered_for_thin_evidence_not_only_irrelevance():
+    """The broadened trigger: the old prompt refused only when NOTHING was
+    relevant, so on thin-but-relevant evidence the model padded instead. The
+    _REFUSAL string itself is unchanged -- only when it applies."""
     assert _REFUSAL in _REDUCE_PROMPT
+    assert "if the findings do not support an answer" in _REDUCE_PROMPT.lower()
+    assert "if nothing is relevant" not in _REDUCE_PROMPT.lower()
 
 
 def test_still_forbids_urls():
@@ -296,7 +304,15 @@ def test_still_forbids_urls():
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `uv run --extra dev pytest tests/unit/test_reduce_prompt.py -q`
-Expected: FAIL on `test_forbids_commentary_about_absent_evidence` — the current prompt says nothing about absent evidence.
+Expected: **3 failed, 2 passed.** The three new-constraint tests fail
+(`test_forbids_commentary_about_absent_evidence`,
+`test_requires_every_claim_to_carry_a_marker`,
+`test_refusal_is_offered_for_thin_evidence_not_only_irrelevance`); the two guard
+tests (`test_still_has_its_format_fields`, `test_still_forbids_urls`) pass now and
+must keep passing after — they exist to catch collateral damage, not to drive the change.
+
+If a test you expect to fail passes, stop: the assertion is vacuous against the
+current prompt and is testing nothing. Tighten it before implementing.
 
 - [ ] **Step 3: Rewrite the prompt**
 
