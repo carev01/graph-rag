@@ -64,7 +64,7 @@ def _patch(monkeypatch):
     async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
         return [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
 
-    async def _fake_generate(client, model, ctx):
+    async def _fake_generate(client, model, ctx, max_tokens):
         calls["n"] += 1
         return CommunityReport(title="NEW", summary="NEW", full_report="[]", rating=9.0,
                                rating_explanation="", tags=[], cited_fact_uuids=[])

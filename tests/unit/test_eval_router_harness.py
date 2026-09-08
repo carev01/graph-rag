@@ -36,7 +36,7 @@ async def test_run_eval_aggregates_and_comparative():
         {"question": "loc", "intent": "local", "expected_modes": ["local"], "expected_article_ids": ["A1"]},
         {"question": "broad", "intent": "drift", "expected_modes": ["drift", "global"], "expected_article_ids": []},
     ]
-    summary = await er.run_eval((None,) * 9, questions, _S)
+    summary = await er.run_eval((None,) * 11, questions, _S)
     assert summary["n"] == 2
     assert summary["routing_accuracy"] == 1.0              # loc->local, broad->drift both expected
     assert summary["grounding_precision"] == 1.0           # only 'loc' scored (broad is [])
