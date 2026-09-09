@@ -90,6 +90,13 @@ class ExtractSettings(BaseSettings):
     report_llm_base_url: str = ""
     report_llm_model: str = ""
     report_llm_api_key: str = ""
+    # The report verifier. Falls back to eval_judge_*. MUST NOT resolve to the
+    # report model -- theme_builder.report._verify_client_and_model raises if it
+    # does, because a model grading its own findings inflates the result in a way
+    # the result cannot reveal.
+    verify_llm_base_url: str = ""
+    verify_llm_model: str = ""
+    verify_llm_api_key: str = ""
     leiden_min_community_size: int = 3   # drop dust communities smaller than this
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
     # Output cap for a community report. 8000 was measured against GLM-5.2 (3000

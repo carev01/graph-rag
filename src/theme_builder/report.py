@@ -66,6 +66,34 @@ def _report_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
     return client, model
 
 
+def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
+    """Resolve the report VERIFIER, independent of the report writer.
+
+    Uses verify_llm_* when set, else eval_judge_*, and then refuses that result if
+    it is the report model. A model checking its own findings for outside-knowledge
+    leakage will not find any -- and the report gives no sign that the check was
+    vacuous. This mirrors answer_api.eval_router._eval_judge_client_and_model.
+    """
+    base = settings.verify_llm_base_url or settings.eval_judge_base_url
+    model = settings.verify_llm_model or settings.eval_judge_model
+    key = (settings.verify_llm_api_key or settings.eval_judge_api_key
+           or settings.judge_api_key or "not-needed")
+    if not base or not model:
+        raise ValueError(
+            "No report verifier configured. Set VERIFY_LLM_BASE_URL / VERIFY_LLM_MODEL "
+            "(or EVAL_JUDGE_*) in .env.")
+    report_base = settings.report_llm_base_url or settings.judge_base_url
+    report_model = settings.report_llm_model or settings.judge_model
+    if base == report_base and model == report_model:
+        raise ValueError(
+            f"Report verifier resolves to the report model ({model!r}) -- it would "
+            "check its own findings and confirm them. Set VERIFY_LLM_MODEL to a "
+            "different model, ideally a different family so the two do not share "
+            "failure modes.")
+    return instrument(AsyncOpenAI(api_key=key, base_url=base,
+                                  timeout=180.0, max_retries=3)), model
+
+
 def _prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
     """Route by throughput, and bound reasoning so it cannot eat the output budget.
 
