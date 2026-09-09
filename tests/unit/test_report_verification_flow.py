@@ -147,3 +147,24 @@ async def test_the_retry_names_the_offending_findings():
     retry_prompt = c.calls[1]["messages"][0]["content"]
     assert "F2" in retry_prompt
     assert "F1" not in retry_prompt.split("NOT supported")[-1]
+
+
+@pytest.mark.asyncio
+async def test_retry_generation_failure_degrades_to_first_verified():
+    """When retry generation returns unparseable reply (None), the code skips
+    re-verification and degrades to 'first-pass verified': it keeps findings
+    the original verdict didn't flag, drops those it did. This is correct because
+    report and findings were bound together from the same first generation, so
+    indices stay consistent and we don't discard the whole report just because
+    the retry failed to generate valid JSON."""
+    v = _verifier(VerifyResult(unsupported={2}, summary_supported=True))
+    # First generation succeeds, retry fails (needs two unparseable to exhaust _generate_once's retry)
+    c = _Client([GOOD, "not json 1", "not json 2"])
+    st = ReportStats()
+    rep = await generate_report(c, "m", _ctx(), verifier=v, stats=st)
+    assert rep is not None
+    kept = json.loads(rep.full_report)
+    assert [f["finding"] for f in kept] == ["F1"], "only F1 should be kept (F2 was flagged unsupported)"
+    assert len(v.calls) == 1, "verifier should be called exactly once (no re-verification)"
+    assert st.reverified is True
+    assert st.findings_dropped == 1
