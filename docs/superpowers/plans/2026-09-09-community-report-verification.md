@@ -620,7 +620,7 @@ near the top with the matching `import logging`.
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `uv run --extra dev pytest tests/unit/test_verify_report.py -q`
-Expected: PASS (10 passed).
+Expected: PASS (9 passed).
 
 - [ ] **Step 5: Lint, type-check, commit**
 
