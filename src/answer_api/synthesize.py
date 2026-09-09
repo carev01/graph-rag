@@ -16,14 +16,40 @@ logger = logging.getLogger(__name__)
 # doesn't swallow the legitimate [1] citation along with it.
 _URL_RE = re.compile(r"https?://[^\s\[\]]+", re.IGNORECASE)
 _MARKER_RE = re.compile(r"\[(\d+)\]")
+# Models emit a comma list ("[1, 2]") or inner-padded single marker ("[ 9 ]")
+# constantly -- `_MARKER_RE` only matches a single bare `[N]`, so left
+# unnormalised these forms are invisible to it: the marker stays visible in
+# the prose while `cited` sees nothing, breaking the guarantee that a visible
+# marker always has a citation entry. Normalising to one-marker-per-bracket
+# lets all the existing resolve/strip logic below handle it unchanged.
+# `[9a]` is intentionally NOT matched/normalised here -- it is not a marker
+# form the prompts ask models to emit, so it is out of scope for this pass
+# and is left as ordinary (if odd) prose.
+_MARKER_LIST_RE = re.compile(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]")
 # Placeholder for an unresolvable marker mid-pass. Never allowed to survive
 # into an answer -- _strip_markers strips any pre-existing one on entry.
 _SENTINEL = "\x00"
-# A separator directly adjacent to a removed marker is orphaned and goes with it.
-# Requiring the dash to sit immediately beside the sentinel (modulo spaces) is what
-# keeps hyphenated words like "made-up [9]" safe.
-_ORPHAN_RE = re.compile(
-    r"[ \t]*[-–—]?[ \t]*" + _SENTINEL + r"[ \t]*[-–—]?[ \t]*")
+# A separator is only orphaned -- and goes with a removed marker -- when the
+# token on the OTHER side of it is ALSO a marker (a surviving [N] or another
+# sentinel). Spec 3.3 licenses removal only "where a marker was removed from
+# each side"; a dash/em-dash with a marker on just one side is ordinary prose
+# punctuation ("enforced [9] — and ...", "Point-in-time [9]-recovery") and
+# must survive. `_PAIRED_SEP_RE` uses a lookahead (not a consuming match) for
+# the right-hand token so a chain like "[1]-[2]-[3]" resolves left-to-right in
+# one pass without fabricating a fused "[1]-[3]" span: each separator is
+# dropped only against its immediate neighbour, never both at once.
+_MARKER_TOKEN_RE = r"(?:\[\d+\]|" + _SENTINEL + r")"
+# Two alternatives, not one broad "marker SEP marker": a separator between two
+# SURVIVING markers ("[1]-[2]") had nothing removed from either side and must
+# never match here -- that is the legitimate-range case, left untouched. A
+# match requires a sentinel on at least one side.
+_PAIRED_SEP_RE = re.compile(
+    r"(" + _SENTINEL + r")[ \t]*[-–—][ \t]*(?=" + _MARKER_TOKEN_RE + r")"
+    r"|(\[\d+\])[ \t]*[-–—][ \t]*(?=" + _SENTINEL + r")")
+# Once every separator that had a marker on both sides is gone, whatever
+# sentinel remains is truly lone (no adjacent range partner) -- delete it and
+# collapse its surrounding spaces/tabs to one, touching nothing else.
+_LONE_SENTINEL_RE = re.compile(r"[ \t]*" + _SENTINEL + r"[ \t]*")
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
@@ -60,7 +86,8 @@ def _strip_markers(text: str, keep: set[int]) -> str:
     text = text.replace(_SENTINEL, "")  # defensive: must never reach an answer
     text = _MARKER_RE.sub(
         lambda m: m.group(0) if int(m.group(1)) in keep else _SENTINEL, text)
-    text = _ORPHAN_RE.sub(" ", text)
+    text = _PAIRED_SEP_RE.sub(lambda m: m.group(1) or m.group(2), text)
+    text = _LONE_SENTINEL_RE.sub(" ", text)
     # Repair spacing WITHOUT touching line breaks: this runs on every answer, and
     # paragraph structure is part of a correct one.
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -69,12 +96,24 @@ def _strip_markers(text: str, keep: set[int]) -> str:
     return text.strip()
 
 
+def _normalise_marker_lists(text: str) -> str:
+    """Rewrite a bracketed comma list into separate single markers so every
+    downstream step keeps working on one uniform `[N]` shape:
+    `[1, 2]` -> `[1] [2]`, `[ 9 ]` -> `[9]`, `[1]` -> `[1]` (unchanged)."""
+    return _MARKER_LIST_RE.sub(
+        lambda m: " ".join(f"[{n}]" for n in re.findall(r"\d+", m.group(0))), text)
+
+
 def _finalize_answer(raw: str, marker_map: dict[int, dict]) -> tuple[str, list[int]]:
     """Deterministic design-decision #2 enforcement: strip any URL the model
     emitted (it must never write one), keep the ordered-unique [N] markers that
     map to a retrieved fact, and remove the ones that do not from the TEXT as
     well -- a visible marker must always correspond to a real citation."""
     text = _URL_RE.sub("", raw).strip()
+    # Normalise comma-list/padded markers to single markers BEFORE `cited` is
+    # computed, so `cited` sees the same uniform shape the resolve/strip logic
+    # below already handles.
+    text = _normalise_marker_lists(text)
     cited: list[int] = []
     for m in _MARKER_RE.findall(text):
         n = int(m)

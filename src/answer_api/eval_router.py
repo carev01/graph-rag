@@ -16,11 +16,14 @@ from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 
 from answer_api import router as router_mod
+from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
+from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import _parse_judge_score, aggregate, routing_hit
-from answer_api.synthesize import _synthesis_client_and_model
+from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
+from answer_api.synthesize import _synthesis_client_and_model, _usable_content
 from graph_extract.config import get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 
@@ -82,6 +85,19 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
             "faithfulness judge skipped for question %r: blank answer would score "
             "5 by vacuous truth; recording as unscored, not measured", q)
         return None
+    stripped = answer.strip()
+    # A refusal is non-blank, so it survives the check above and reaches the
+    # judge with "CITED FACTS: (none)" -- which the judge scores 5 on "no
+    # claims, so every claim is supported". That is the same vacuous-truth
+    # inflation the blank-answer guard exists to prevent, just reached through
+    # a different string. The three refusal strings are module-local and
+    # worded differently per mode on purpose (design review) -- compare
+    # against all three rather than merging them into one shared constant.
+    if stripped in (_SYNTH_REFUSAL, _GLOBAL_REFUSAL, _DRIFT_REFUSAL):
+        logger.warning(
+            "faithfulness judge skipped for question %r: refusal answer would "
+            "score 5 by vacuous truth; recording as unscored, not measured", q)
+        return None
 
     facts_block = "\n".join(f"- {f}" for f in cited_facts) or "(none)"
     prompt = _JUDGE_PROMPT.format(q=q, answer=answer, facts=facts_block)
@@ -90,23 +106,27 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
         resp = await client.chat.completions.create(
             model=model, temperature=0, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
-        choice = resp.choices[0]
-        content = choice.message.content
-        usable = (choice.finish_reason != "length" and bool(content)
+        # `_usable_content` already handles the choices-less-HTTP-200 case (seen
+        # in production, theme_builder/report.py commit a0603ec) and the
+        # None/whitespace-only content case -- `resp.choices[0]` unguarded here
+        # was the very IndexError this eval was written to catch downstream.
+        content = _usable_content(resp)
+        finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
+        usable = (content is not None and finish_reason != "length"
                   and re.search(r"-?\d+", content) is not None)
-        return choice, content, usable
+        return finish_reason, content, usable
 
-    choice, content, usable = await _attempt(8000)
+    finish_reason, content, usable = await _attempt(8000)
     if usable:
         return _parse_judge_score(content)
 
-    choice, content, usable = await _attempt(16000)
+    finish_reason, content, usable = await _attempt(16000)
     if usable:
         return _parse_judge_score(content)
 
     logger.warning(
         "faithfulness judge unmeasurable for question %r after retry "
-        "(finish_reason=%s); recording as unscored, not 0", q, choice.finish_reason)
+        "(finish_reason=%s); recording as unscored, not 0", q, finish_reason)
     return None
 
 

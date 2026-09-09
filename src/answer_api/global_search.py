@@ -182,6 +182,11 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
             results.append(m)
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+    # Built once, right after `results` exists, and reused by every return
+    # below: this is "the communities that fed the reduce step", which stays
+    # true whether or not the reduce LLM call itself later succeeds.
+    communities_used = [{"community_id": m.community_id, "title": m.title,
+                         "relevance": m.relevance} for m in results]
     # number the ordered-unique union of fact ids -> marker_map
     marker_map: dict[int, dict] = {}
     fact_to_marker: dict[str, int] = {}
@@ -201,11 +206,15 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
         synth_client, synth_model,
         _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks)), max_tokens=3000)
     if raw is None:
-        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+        # Communities WERE shortlisted and mapped -- only the reduce LLM call
+        # failed. Report the same list the success path below reports; `[]`
+        # here would collapse "coverage existed, the LLM failed" into "no
+        # thematic coverage existed", which is a different, false statement.
+        return {"query": q, "answer": _REFUSAL, "citations": [],
+                "communities_used": communities_used}
     answer, cited = _finalize_answer(raw, marker_map)
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = _build_citations(cited, marker_map, resolved)
     return {"query": q, "answer": answer, "citations": citations,
-            "communities_used": [{"community_id": m.community_id, "title": m.title,
-                                  "relevance": m.relevance} for m in results]}
+            "communities_used": communities_used}

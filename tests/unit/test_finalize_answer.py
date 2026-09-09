@@ -122,6 +122,58 @@ def test_chained_range_with_middle_marker_unresolvable_does_not_fabricate_a_span
     assert "[1] [3]" in ans
 
 
+def test_comma_list_marker_is_split_and_both_resolve():
+    """'[1, 2]' is a form models emit constantly; without normalisation the
+    marker regex (single markers only) never matches it, so `cited` stays []
+    while the reader still sees a bracketed list -- a marker visible in the
+    answer with no corresponding citation entry."""
+    ans, cited = _finalize_answer("Both [1, 2] agree.", MM)
+    assert cited == [1, 2]
+    assert "[1]" in ans and "[2]" in ans
+    assert "[1, 2]" not in ans
+
+
+def test_comma_list_marker_with_inner_spaces_is_normalised():
+    ans, cited = _finalize_answer("Only [ 9 ] mentions it.", MM)
+    assert cited == []          # 9 not in marker_map
+    assert "[9]" not in ans and "[ 9 ]" not in ans
+
+
+def test_comma_list_with_one_unresolvable_marker_drops_only_that_one():
+    ans, cited = _finalize_answer("Immutable [1, 9] is claimed.", MM)
+    assert cited == [1]
+    assert "[1]" in ans and "[9]" not in ans and "[1, 9]" not in ans
+
+
+def test_single_marker_comma_list_form_is_unchanged():
+    """[1] has no comma -- the normalisation pass must be a no-op on it."""
+    ans, cited = _finalize_answer("Immutable [1].", MM)
+    assert cited == [1]
+    assert ans == "Immutable [1]."
+
+
+def test_em_dash_sentence_punctuation_survives_an_adjacent_removed_marker():
+    """Spec 3.3 only licenses dropping a separator 'where a marker was removed
+    from each side' -- here the em-dash is ordinary sentence punctuation, not
+    a range separator, because only ONE side is a marker."""
+    ans, cited = _finalize_answer(
+        "enforced [9] — and cannot be disabled [1].", MM)
+    assert cited == [1]
+    assert "[9]" not in ans
+    assert "—" in ans          # the em-dash must survive
+    assert "and cannot be disabled [1]." in ans
+
+
+def test_hyphen_in_compound_word_survives_an_adjacent_removed_marker():
+    """The hyphen belongs to 'recovery', not to a range with [9] -- only one
+    side of it is a marker, so it must not be eaten."""
+    ans, cited = _finalize_answer("Point-in-time [9]-recovery", MM)
+    assert cited == []
+    assert "[9]" not in ans
+    assert "-recovery" in ans        # the hyphen must survive
+    assert "Point-in-time" in ans
+
+
 def test_trailing_space_before_newline_is_removed():
     """A marker removed right before a line break used to leave a lone trailing
     space abutting the '\\n' -- neither the double-space nor the

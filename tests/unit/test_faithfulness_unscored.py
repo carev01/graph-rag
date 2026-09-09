@@ -37,9 +37,38 @@ class _FakeClient:
         self.chat = types.SimpleNamespace(completions=_FakeCompletions(responses))
 
 
+class _FakeCompletionsNoChoices:
+    """Every reply is an HTTP 200 with an empty `choices` list -- seen in
+    production (theme_builder/report.py, commit a0603ec). `_attempt` must not
+    do `resp.choices[0]` unguarded against this."""
+
+    def __init__(self, n):
+        self._n = n
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return types.SimpleNamespace(choices=[])
+
+
+class _FakeClientNoChoices:
+    def __init__(self, n=2):
+        self.chat = types.SimpleNamespace(completions=_FakeCompletionsNoChoices(n))
+
+
 # ---------------------------------------------------------------------------
 # _faithfulness_judge
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_empty_choices_list_yields_none_not_indexerror():
+    """A choices-less HTTP 200 must be treated like any other unusable reply
+    (return None) rather than raising IndexError from `resp.choices[0]`."""
+    client = _FakeClientNoChoices()
+    result = await er._faithfulness_judge(client, "m", "q", "answer", ["fact"])
+    assert result is None
+    assert len(client.chat.completions.calls) == 2
+
 
 @pytest.mark.asyncio
 async def test_unusable_both_attempts_yields_none_not_zero():

@@ -150,6 +150,10 @@ async def _fake_map_report(client, model, q, hit, *, relevance_min):
 
 
 async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
+    """The communities WERE shortlisted and mapped before the reduce LLM
+    failed -- `communities_used` must report that (the same list the success
+    path builds from `results`), not collapse "coverage existed, the LLM
+    failed" into the same `[]` the "no thematic coverage existed" path uses."""
     monkeypatch.setattr(global_search_mod, "shortlist_communities", _fake_shortlist)
     monkeypatch.setattr(global_search_mod, "map_report", _fake_map_report)
     synth_client = _FakeClient([_none_content(), _none_content()])
@@ -158,7 +162,8 @@ async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
         q="q", level=1, k=3, group_id="g", relevance_min=2)
     assert result["answer"] == global_search_mod._REFUSAL
     assert result["citations"] == []
-    assert result["communities_used"] == []
+    assert result["communities_used"] == [
+        {"community_id": "c1", "title": "T", "relevance": 8}]
 
 
 async def test_global_search_empty_choices_does_not_raise(monkeypatch):
@@ -228,4 +233,16 @@ async def test_faithfulness_judge_skips_blank_answer_without_calling_client():
     assert await er._faithfulness_judge(client, "model", "q", "", ["fact"]) is None
     assert await er._faithfulness_judge(client, "model", "q", "   ", ["fact"]) is None
     assert await er._faithfulness_judge(client, "model", "q", None, ["fact"]) is None
+    assert client.calls == 0
+
+
+async def test_faithfulness_judge_skips_refusal_without_calling_client():
+    """A refusal string is non-blank, so it used to reach the judge with
+    'CITED FACTS: (none)' and score 5 by vacuous truth ('no claims, so every
+    claim is supported') -- exactly the inflation this eval exists to catch.
+    Each mode's refusal string is module-local and worded differently; all
+    three must be recognised."""
+    client = _CountingClient()
+    for refusal in (synthesize._REFUSAL, global_search_mod._REFUSAL, drift_mod._REFUSAL):
+        assert await er._faithfulness_judge(client, "model", "q", refusal, ["fact"]) is None
     assert client.calls == 0
