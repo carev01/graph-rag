@@ -16,7 +16,15 @@ section is by my recommended priority.
 ## P0 — Blocks trusting the system's own numbers
 
 ### 1. Trace the map step: do community `key_points` drift from their facts?
-**Status: IN PROGRESS (blocked on Neo4j being unreachable, 2026-09-09).**
+**Status: DONE 2026-09-09. Answer: YES — the drift starts in the map step.**
+Full evidence in `map-step-trace-2026-09-09.md`. Every hallucinated specific in the
+traced reduce output was already present verbatim in the `key_points` the reduce step was
+given. The map step fabricates *when the community's facts do not answer the question* —
+rich facts produce faithful key points (that question scored 4), generic facts produce
+invented specifics (scored 0-1). Meta-commentary is also injected here, so the reduce
+prompt is fighting its own input. **This retargets item 3 — see items 3a/3b below.**
+
+<details><summary>Original framing (kept for context)</summary>
 
 The global reduce step never sees fact text — it sees `key_points`, LLM-written prose
 produced by `map_report` (`global_search.py`). Faithfulness is scored against the
@@ -32,6 +40,29 @@ Evidence: global grounding is 1.00 (citations point at the right articles) while
 faithfulness is ~1.1–1.6 (prose not supported by them). The traced worst case asserts
 "1-second PITR precision", "1–35 day retention", "RDS Multi-AZ", "Azure PostgreSQL" —
 none present in any of its 21 cited facts. See `router-eval-report.md`.
+</details>
+
+### 3a. Bind the map prompt to its facts — **the primary fix, do this first**
+Give `map_report` (`global_search.py`) the same evidence-binding the reduce prompt
+received in the citation-integrity slice: every key point must be supported by the facts
+it cites, no invented specifics, and no meta-commentary about what the report lacks.
+
+This is where the defect actually lives. Evidence in `map-step-trace-2026-09-09.md`:
+five of five key points from one community contained invented specifics (transaction-log
+replay mechanism, RDS Multi-AZ exclusion, 1–35 day range, 1-second precision, full-vs-
+incremental copy, same-AWS-Organization requirement) — none in any cited fact, all of
+them reproduced downstream with real markers attached.
+
+### 3b. Drop communities that contribute nothing
+`relevance_min = 2` admits communities whose own key points say "No information provided
+on AWS Backup restore workflows" or "provides no details". They inject meta-commentary
+and consume marker numbers. Either raise the threshold or detect a map result carrying no
+supported key point before it reaches reduce.
+
+### 3c. Re-test the map tier after 3a
+The map model is `upstage/solar-pro4` — the same cheap-tier model implicated in item 4.
+Fix our prompt first (on this project the fault has been in our own code or config every
+time), then compare cheap vs strong tier on the map step with the corrected prompt.
 
 ### 2. The faithfulness judge cannot check marker→fact correspondence
 `_cited_fact_texts` (`eval_router.py`) returns facts in arbitrary Neo4j order and the
@@ -44,16 +75,14 @@ facts by marker and have the judge score marker-to-fact support.
 **Do this before faithfulness gates any decision.** This slice is a case study in what
 happens when a metric is trusted further than it deserves.
 
-### 3. Structural constraint on the global reduce step
-Prompting did **not** fix global faithfulness (1.4 baseline → 1.6; 1.1 on the prior run
-— variance on 10 questions, not a trend). The remaining defect is *citations without
-support*: real markers attached to invented specifics.
+### 3. ~~Structural constraint on the global reduce step~~ — **DEPRIORITISED 2026-09-09**
+Superseded by 3a/3b/3c. The trace showed the reduce step is **faithful to its input** —
+it copied the invented specifics it was handed. Constraining it further would constrain a
+step that is already doing its job.
 
-Candidate approaches (choose after item 1): feed verified fact text to the reduce step
-rather than `key_points`; or post-verify each claim against its cited fact and drop
-unsupported sentences.
-
-**Blocked on item 1.**
+Revisit only if fixing the map step (3a) does not move faithfulness. If revisited, the
+candidate approaches remain: feed verified fact text to the reduce step rather than
+`key_points`, or post-verify each claim against its cited fact.
 
 ---
 
