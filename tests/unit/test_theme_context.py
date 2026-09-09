@@ -37,6 +37,9 @@ def test_single_oversized_fact_is_clipped_not_blown():
     assert "big" in res.fact_uuids                      # still included (>=1 guarantee)
     assert len(res.text) <= 40 + 60                     # clipped, not a 10k overshoot
     assert res.text.rstrip().endswith(("x", "]")) or "[big]" in res.text  # label preserved
+    # verify fact_texts stores the FULL original fact, not the display text
+    assert set(res.fact_texts) == res.fact_uuids       # lockstep on clipped path too
+    assert res.fact_texts["big"] == "x" * 10000        # stored full text, not clipped display
 
 
 def test_fact_texts_maps_uuid_to_text_for_included_facts():
