@@ -42,6 +42,17 @@ faithfulness is ~1.1–1.6 (prose not supported by them). The traced worst case 
 none present in any of its 21 cited facts. See `router-eval-report.md`.
 </details>
 
+### 2. The faithfulness judge cannot check marker→fact correspondence
+`_cited_fact_texts` (`eval_router.py`) returns facts in arbitrary Neo4j order and the
+judge prompt lists them unnumbered. The judge can therefore only ask "is this claim
+supported by the fact set *collectively*?" — a misattributed-but-plausible marker passes.
+
+We are optimising against a looser metric than the one we care about. Fix: number the
+facts by marker and have the judge score marker-to-fact support.
+
+**Do this before faithfulness gates any decision.** This slice is a case study in what
+happens when a metric is trusted further than it deserves.
+
 ### 3a. Bind the map prompt to its facts — **the primary fix, do this first**
 Give `map_report` (`global_search.py`) the same evidence-binding the reduce prompt
 received in the citation-integrity slice: every key point must be supported by the facts
@@ -63,17 +74,6 @@ supported key point before it reaches reduce.
 The map model is `upstage/solar-pro4` — the same cheap-tier model implicated in item 4.
 Fix our prompt first (on this project the fault has been in our own code or config every
 time), then compare cheap vs strong tier on the map step with the corrected prompt.
-
-### 2. The faithfulness judge cannot check marker→fact correspondence
-`_cited_fact_texts` (`eval_router.py`) returns facts in arbitrary Neo4j order and the
-judge prompt lists them unnumbered. The judge can therefore only ask "is this claim
-supported by the fact set *collectively*?" — a misattributed-but-plausible marker passes.
-
-We are optimising against a looser metric than the one we care about. Fix: number the
-facts by marker and have the judge score marker-to-fact support.
-
-**Do this before faithfulness gates any decision.** This slice is a case study in what
-happens when a metric is trusted further than it deserves.
 
 ### 3. ~~Structural constraint on the global reduce step~~ — **DEPRIORITISED 2026-09-09**
 Superseded by 3a/3b/3c. The trace showed the reduce step is **faithful to its input** —
