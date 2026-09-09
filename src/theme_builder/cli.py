@@ -16,7 +16,9 @@ from theme_builder.context import EntityRow, FactRow, assemble_context
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
     classify, load_persisted, match_communities, prev_corpus_cursor, touched_entities)
-from theme_builder.report import _report_client_and_model, generate_report
+from theme_builder.report import (ReportStats, _report_client_and_model,
+                                  _verify_client_and_model, generate_report,
+                                  verify_report)
 from theme_builder.writeback import write_communities, write_communities_incremental
 
 app = typer.Typer()
@@ -83,9 +85,15 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
         min_community_size=settings.leiden_min_community_size,
         max_levels=settings.leiden_max_levels)
     client, model = _report_client_and_model(settings)
+    vclient, vmodel = _verify_client_and_model(settings)
+
+    async def _verifier(findings, summary, fact_texts):
+        return await verify_report(vclient, vmodel, findings, summary, fact_texts)
+
     embedder = build_embedder(settings)
     reports: dict = {}
     skipped = 0
+    findings_dropped = reverified = unverified = 0
     try:
         for c in communities:
             try:
@@ -94,7 +102,13 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 ctx = assemble_context(members, facts,
                                        top_entities=settings.report_top_entities,
                                        token_budget=settings.report_token_budget)
-                rep = await generate_report(client, model, ctx, settings.report_max_tokens)
+                st = ReportStats()
+                rep = await generate_report(client, model, ctx,
+                                            settings.report_max_tokens,
+                                            verifier=_verifier, stats=st)
+                findings_dropped += st.findings_dropped
+                reverified += 1 if st.reverified else 0
+                unverified += 1 if st.unverified else 0
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", c.community_id)
                 rep = None
@@ -108,11 +122,15 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                                       communities, reports, corpus_cursor=corpus_cursor)
         res["communities_detected"] = len(communities)
         res["reports_skipped"] = skipped
+        res["findings_dropped"] = findings_dropped
+        res["reports_reverified"] = reverified
+        res["reports_unverified"] = unverified
         return res
     finally:
         # close both owned clients (report LLM + embedder) so a repeated caller
         # doesn't leak httpx pools; the injected driver is the caller's to close.
         await client.close()
+        await vclient.close()
         await embedder.client.close()
 
 
@@ -142,11 +160,17 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     id_map = {communities[i].community_id: stable_ids[i] for i in range(len(communities))}
 
     client, model = _report_client_and_model(settings)
+    vclient, vmodel = _verify_client_and_model(settings)
+
+    async def _verifier(findings, summary, fact_texts):
+        return await verify_report(vclient, vmodel, findings, summary, fact_texts)
+
     embedder = build_embedder(settings)
     entries: list[dict] = []
     regenerated = 0
     reused = 0
     skipped = 0
+    findings_dropped = reverified = unverified = 0
     now = datetime.now(timezone.utc)
     try:
         for i, c in enumerate(communities):
@@ -168,7 +192,13 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                 facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
                 ctx = assemble_context(members, facts, top_entities=settings.report_top_entities,
                                        token_budget=settings.report_token_budget)
-                rep = await generate_report(client, model, ctx, settings.report_max_tokens)
+                st = ReportStats()
+                rep = await generate_report(client, model, ctx,
+                                            settings.report_max_tokens,
+                                            verifier=_verifier, stats=st)
+                findings_dropped += st.findings_dropped
+                reverified += 1 if st.reverified else 0
+                unverified += 1 if st.unverified else 0
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", stable_ids[i])
                 rep = None
@@ -188,10 +218,14 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
         res.update({"communities_detected": len(communities),
                     "reports_regenerated": regenerated, "reports_reused": reused,
                     "reports_skipped": skipped,
-                    "communities_dissolved": len(persisted) - matched_persisted})
+                    "communities_dissolved": len(persisted) - matched_persisted,
+                    "findings_dropped": findings_dropped,
+                    "reports_reverified": reverified,
+                    "reports_unverified": unverified})
         return res
     finally:
         await client.close()
+        await vclient.close()
         await embedder.client.close()
 
 

@@ -64,7 +64,7 @@ def _patch(monkeypatch):
     async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
         return [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
 
-    async def _fake_generate(client, model, ctx, max_tokens):
+    async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
         calls["n"] += 1
         return CommunityReport(title="NEW", summary="NEW", full_report="[]", rating=9.0,
                                rating_explanation="", tags=[], cited_fact_uuids=[])
@@ -73,6 +73,7 @@ def _patch(monkeypatch):
     monkeypatch.setattr(cli, "generate_report", _fake_generate)
     monkeypatch.setattr(cli, "build_embedder", lambda s: _FakeEmbedder())
     monkeypatch.setattr(cli, "_report_client_and_model", lambda s: (_FakeClient(), "m"))
+    monkeypatch.setattr(cli, "_verify_client_and_model", lambda s: (_FakeClient(), "vm"))
     # context assembly is irrelevant (generate_report is faked); stub it so the
     # real _fetch_members/assemble_context path can't crash on unnamed seed entities.
     monkeypatch.setattr(cli, "assemble_context", lambda *a, **k: None)

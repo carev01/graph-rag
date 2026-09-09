@@ -20,14 +20,16 @@ async def test_run_theme_build_end_to_end(extract_driver, monkeypatch):
     monkeypatch.setattr(tc, "detect_communities", _fake_detect)
 
     captured = {}
-    async def _fake_report(client, model, context, max_tokens):
+    async def _fake_report(client, model, context, max_tokens, *, verifier=None, stats=None):
         captured["ctx"] = context
+        captured["verifier"] = verifier
         return CommunityReport("T", "S", "[]", 5.0, "", ["AWS"], list(context.fact_uuids))
     monkeypatch.setattr(tc, "generate_report", _fake_report)
 
     class _Closeable:               # _run_theme_build closes the report client
         async def close(self): pass
     monkeypatch.setattr(tc, "_report_client_and_model", lambda s: (_Closeable(), "m"))
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
 
     class _FakeEmb:                     # mirror OpenAIEmbedder: has .client to close
         class _C:
@@ -41,6 +43,10 @@ async def test_run_theme_build_end_to_end(extract_driver, monkeypatch):
     res = await tc._run_theme_build(s, driver=extract_driver)
     assert res["reports_written"] == 1
     assert "f1" in captured["ctx"].fact_uuids            # the real fact reached the context
+    assert captured["verifier"] is not None, "theme-build must verify its reports"
+    assert res["findings_dropped"] == 0
+    assert res["reports_reverified"] == 0
+    assert res["reports_unverified"] == 0
     async with extract_driver.session() as s2:
         c = (await (await s2.run(
             "MATCH (:Entity {uuid:'e1'})-[:IN_COMMUNITY]->(c:Community {community_id:'c1'}) "
@@ -63,7 +69,7 @@ async def test_one_community_error_does_not_abort_build(extract_driver, monkeypa
         return [Community("good", 0, ["g1"], None), Community("bad", 0, ["b1"], None)]
     monkeypatch.setattr(tc, "detect_communities", _fake_detect)
 
-    async def _fake_report(client, model, context, max_tokens):
+    async def _fake_report(client, model, context, max_tokens, *, verifier=None, stats=None):
         # the "bad" community's context has no entities named Good -> raise for it
         if "Good" not in context.text:
             raise RuntimeError("simulated LLM 500")
@@ -73,6 +79,7 @@ async def test_one_community_error_does_not_abort_build(extract_driver, monkeypa
     class _Closeable:
         async def close(self): pass
     monkeypatch.setattr(tc, "_report_client_and_model", lambda s: (_Closeable(), "m"))
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
 
     class _FakeEmb:
         class _C:
