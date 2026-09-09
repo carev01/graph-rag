@@ -1020,40 +1020,65 @@ EOF
 
 **Files:**
 - Modify: `src/theme_builder/cli.py` (both `generate_report` call sites, ~line 97 and ~line 171, and both result dicts, ~line 110 and ~line 189)
-- Test: `tests/unit/test_theme_cli_verification.py`
+- Test: `tests/integration/test_theme_cli.py`, `tests/integration/test_incremental_cli.py` (behavioural — assert the CLI passes a verifier and that the counters reach the summary; NO `inspect.getsource()` assertions)
 
 **Interfaces:**
 - Consumes: `_verify_client_and_model` (Task 3), `verify_report` (Task 4), `ReportStats` (Task 5).
 - Produces: `findings_dropped`, `reports_reverified`, `reports_unverified` in both `theme-build` result dicts.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Make the existing fakes behavioural**
 
-Create `tests/unit/test_theme_cli_verification.py`:
+**Do NOT write `inspect.getsource()` substring assertions.** This repo's own project
+review lists that pattern as a defect ("tests that assert less than they appear to",
+backlog item 16). Assert on behaviour through the existing integration harness instead.
+
+In `tests/integration/test_theme_cli.py`, the `_fake_report` fake currently is:
 
 ```python
-"""The CLI must actually pass a verifier -- otherwise verification is silently off
-in production while every unit test still passes."""
-import inspect
+    captured = {}
+    async def _fake_report(client, model, context, max_tokens):
+        captured["ctx"] = context
+        return CommunityReport("T", "S", "[]", 5.0, "", ["AWS"], list(context.fact_uuids))
+```
 
-from theme_builder import cli
+Change it to accept and record the new keyword arguments, and assert the CLI really
+passes a verifier — this is what stops verification being silently off in production
+while every other test still passes:
 
+```python
+    captured = {}
+    async def _fake_report(client, model, context, max_tokens, *, verifier=None, stats=None):
+        captured["ctx"] = context
+        captured["verifier"] = verifier
+        return CommunityReport("T", "S", "[]", 5.0, "", ["AWS"], list(context.fact_uuids))
+```
 
-def test_cli_passes_a_verifier_to_generate_report():
-    src = inspect.getsource(cli)
-    assert src.count("verifier=") >= 2, "both generate_report call sites must verify"
-    assert "_verify_client_and_model" in src
+and add to that test's assertions:
 
+```python
+    assert captured["verifier"] is not None, "theme-build must verify its reports"
+    assert res["findings_dropped"] == 0
+    assert res["reports_reverified"] == 0
+    assert res["reports_unverified"] == 0
+```
 
-def test_cli_reports_the_new_counters():
-    src = inspect.getsource(cli)
-    for key in ("findings_dropped", "reports_reverified", "reports_unverified"):
-        assert key in src, f"{key} must reach the run summary"
+Apply the same fake-signature change in the second test in that file and in
+`tests/integration/test_incremental_cli.py`'s `_fake_generate`. Change ONLY the
+signatures and add the new assertions — do not weaken any existing assertion. These fakes
+went stale once already and left the branch silently red.
+
+Also monkeypatch the verifier client in each affected test, mirroring the existing
+`_report_client_and_model` stub:
+
+```python
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run --extra dev pytest tests/unit/test_theme_cli_verification.py -q`
-Expected: FAIL — `assert 0 >= 2`.
+Run: `uv run --extra dev pytest tests/integration/test_theme_cli.py -q`
+Expected: FAIL — `AssertionError: theme-build must verify its reports` (the CLI does not
+pass a verifier yet), or a `KeyError` on the new result keys.
 
 - [ ] **Step 3: Wire the CLI**
 
@@ -1103,22 +1128,13 @@ Close `vclient` wherever the existing report `client` is closed, in the same `fi
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `uv run --extra dev pytest tests/unit/test_theme_cli_verification.py -q`
-Expected: PASS (2 passed).
-
-- [ ] **Step 5: Update the integration fakes honestly**
-
-`tests/integration/test_theme_cli.py` and `tests/integration/test_incremental_cli.py`
-fake `generate_report`. Their fakes must accept the new keyword arguments
-(`verifier=None, stats=None`) or the calls will raise `TypeError`. Update the fake
-signatures only — do NOT weaken any assertion. These same fakes went stale once already
-and left the branch silently red.
-
-Also monkeypatch `_verify_client_and_model` in those tests so they do not try to build a
-real client from test settings.
-
 Run: `uv run --extra dev pytest tests/integration/test_theme_cli.py tests/integration/test_incremental_cli.py -q`
-Expected: PASS (7 passed).
+Expected: PASS (7 passed). These use Docker testcontainers and are slow; let them finish.
+
+- [ ] **Step 5: Confirm nothing else regressed**
+
+Run: `uv run --extra dev pytest tests/unit -q`
+Expected: PASS. A failure here means the CLI wiring changed behaviour beyond verification.
 
 - [ ] **Step 6: Full suite, lint, type-check**
 
