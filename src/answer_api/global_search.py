@@ -15,7 +15,9 @@ from openai import AsyncOpenAI
 from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 from graph_extract.usage import instrument
-from answer_api.synthesize import _finalize_answer, _build_citations
+from answer_api.synthesize import (
+    _build_citations, _complete_or_none, _finalize_answer, _usable_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +130,7 @@ async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit,
         resp = await client.chat.completions.create(
             model=model, temperature=0, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}])
-        obj = _extract_json(resp.choices[0].message.content or "")
+        obj = _extract_json(_usable_content(resp) or "")
         if obj is not None:
             break
     if obj is None:
@@ -148,8 +150,17 @@ async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit,
 
 _REDUCE_PROMPT = (
     "Answer the QUESTION by synthesizing across these community findings, organized "
-    "by theme and vendor. Cite every claim with the [N] fact markers shown. Use ONLY "
-    "these findings. Do NOT write any URL. If nothing is relevant, reply exactly: "
+    "by theme and vendor.\n"
+    "Rules:\n"
+    "- Cite every claim with the [N] fact markers shown. A sentence with no marker "
+    "is not allowed.\n"
+    "- Use ONLY these findings. Do NOT use outside knowledge.\n"
+    "- Do NOT write any URL.\n"
+    "- Do NOT comment on what the findings do not contain, and do not explain what "
+    "you cannot compare. Absence of evidence is not a finding.\n"
+    "- Let the evidence set the length. Say what the findings support and then stop; "
+    "do not pad, hedge, or restate.\n"
+    "- If the findings do not support an answer, reply exactly: "
     "\"" + _REFUSAL + "\"\n\nQUESTION: {q}\n\nFINDINGS:\n{blocks}\n\nAnswer:"
 )
 
@@ -171,6 +182,11 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
             results.append(m)
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+    # Built once, right after `results` exists, and reused by every return
+    # below: this is "the communities that fed the reduce step", which stays
+    # true whether or not the reduce LLM call itself later succeeds.
+    communities_used = [{"community_id": m.community_id, "title": m.title,
+                         "relevance": m.relevance} for m in results]
     # number the ordered-unique union of fact ids -> marker_map
     marker_map: dict[int, dict] = {}
     fact_to_marker: dict[str, int] = {}
@@ -186,13 +202,19 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
         pts = "\n".join(f"- {p}" for p in m.key_points)
         blocks.append(f"COMMUNITY \"{m.title}\" (relevance {m.relevance}):\n{pts}\n"
                       f"Supporting facts: {markers}")
-    resp = await synth_client.chat.completions.create(
-        model=synth_model, temperature=0, max_tokens=3000,
-        messages=[{"role": "user", "content": _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks))}])
-    answer, cited = _finalize_answer(resp.choices[0].message.content or "", marker_map)
+    raw = await _complete_or_none(
+        synth_client, synth_model,
+        _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks)), max_tokens=3000)
+    if raw is None:
+        # Communities WERE shortlisted and mapped -- only the reduce LLM call
+        # failed. Report the same list the success path below reports; `[]`
+        # here would collapse "coverage existed, the LLM failed" into "no
+        # thematic coverage existed", which is a different, false statement.
+        return {"query": q, "answer": _REFUSAL, "citations": [],
+                "communities_used": communities_used}
+    answer, cited = _finalize_answer(raw, marker_map)
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = _build_citations(cited, marker_map, resolved)
     return {"query": q, "answer": answer, "citations": citations,
-            "communities_used": [{"community_id": m.community_id, "title": m.title,
-                                  "relevance": m.relevance} for m in results]}
+            "communities_used": communities_used}

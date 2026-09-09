@@ -31,9 +31,22 @@ def aggregate(per_question: list[dict]) -> dict:
     ground_by_mode: dict[str, list[bool]] = {}
     for r in grounded:
         ground_by_mode.setdefault(r["chosen"], []).append(bool(r["grounding_hit"]))
-    faith_by_mode: dict[str, list[int]] = {}
+
+    # Faithfulness can be None -- the judge could not be measured (e.g. the
+    # reasoning model burned its whole budget and returned no content). An
+    # unmeasured answer must never silently average in as a 0; it is excluded
+    # from every mean below and its count is surfaced via faithfulness_unscored.
+    faithed = [r for r in per_question if r["faithfulness"] is not None]
+    faithfulness_unscored = n - len(faithed)
+    faith_by_mode_scored: dict[str, list[int]] = {}
+    faith_by_mode_seen: list[str] = []
     for r in per_question:
-        faith_by_mode.setdefault(r["chosen"], []).append(r["faithfulness"])
+        if r["chosen"] not in faith_by_mode_seen:
+            faith_by_mode_seen.append(r["chosen"])
+        if r["faithfulness"] is not None:
+            faith_by_mode_scored.setdefault(r["chosen"], []).append(r["faithfulness"])
+    faith_by_mode = {m: (_mean(faith_by_mode_scored[m]) if m in faith_by_mode_scored else None)
+                      for m in faith_by_mode_seen}
 
     comp_rows = [r for r in per_question if "comparative" in r]
     comparative: dict | None = None
@@ -41,19 +54,23 @@ def aggregate(per_question: list[dict]) -> dict:
     if comp_rows:
         comparative = {}
         for m in ("local", "global", "drift"):
-            faiths = [r["comparative"][m]["faithfulness"] for r in comp_rows]
+            faiths = [r["comparative"][m]["faithfulness"] for r in comp_rows
+                      if r["comparative"][m]["faithfulness"] is not None]
             gh = [r["comparative"][m]["grounding_hit"] for r in comp_rows
                   if r["comparative"][m]["grounding_hit"] is not None]
             comparative[m] = {
-                "faithfulness": _mean(faiths),
+                "faithfulness": _mean(faiths) if faiths else None,
                 "grounding": (sum(1 for x in gh if x) / len(gh)) if gh else None,
             }
         d, lo, gl = comparative["drift"], comparative["local"], comparative["global"]
-        grounding_ok = (d["grounding"] is None
-                        or ((lo["grounding"] is None or d["grounding"] >= lo["grounding"])
-                            and (gl["grounding"] is None or d["grounding"] >= gl["grounding"])))
-        drift_wins = (d["faithfulness"] >= lo["faithfulness"]
-                      and d["faithfulness"] >= gl["faithfulness"] and grounding_ok)
+        if d["faithfulness"] is None or lo["faithfulness"] is None or gl["faithfulness"] is None:
+            drift_wins = None
+        else:
+            grounding_ok = (d["grounding"] is None
+                            or ((lo["grounding"] is None or d["grounding"] >= lo["grounding"])
+                                and (gl["grounding"] is None or d["grounding"] >= gl["grounding"])))
+            drift_wins = (d["faithfulness"] >= lo["faithfulness"]
+                          and d["faithfulness"] >= gl["faithfulness"] and grounding_ok)
 
     return {
         "n": n,
@@ -62,8 +79,9 @@ def aggregate(per_question: list[dict]) -> dict:
         "grounding_precision": (sum(1 for r in grounded if r["grounding_hit"]) / len(grounded)
                                 if grounded else None),
         "grounding_by_mode": {k: sum(v) / len(v) for k, v in ground_by_mode.items()},
-        "faithfulness_mean": _mean([r["faithfulness"] for r in per_question]),
-        "faithfulness_by_mode": {k: _mean(v) for k, v in faith_by_mode.items()},
+        "faithfulness_mean": _mean([r["faithfulness"] for r in faithed]) if faithed else None,
+        "faithfulness_by_mode": faith_by_mode,
+        "faithfulness_unscored": faithfulness_unscored,
         "comparative": comparative,
         "drift_wins": drift_wins,
         "per_question": per_question,

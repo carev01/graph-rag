@@ -53,7 +53,41 @@ def _report_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
         raise ValueError(
             "No report model configured. Set report_llm_* or the judge_* (GLM-5.2) "
             "config in .env.")
-    return instrument(AsyncOpenAI(api_key=key, base_url=base)), model
+    # Timeout + throughput routing. Measured 2026-09-08 on z-ai/glm-5.3-flash with
+    # an identical prompt: Z.AI served it at 29 tok/s (7.7s), Parasail at 9.4 tok/s
+    # (24.2s), and one unpinned call took 380s. Reports are generated SEQUENTIALLY
+    # (see cli.py), so per-call routing luck multiplies across every community --
+    # unpinned, a 60-community build is anywhere from 30 minutes to 6 hours. A
+    # bounded timeout also stops a bad route from hanging the whole batch.
+    client = instrument(AsyncOpenAI(api_key=key, base_url=base,
+                                    timeout=180.0, max_retries=3))
+    if "openrouter" in base:
+        client = _prefer_fast_provider(client, settings.report_reasoning_effort)
+    return client, model
+
+
+def _prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
+    """Route by throughput, and bound reasoning so it cannot eat the output budget.
+
+    Reasoning tokens count as completion tokens, so on a reasoning model an
+    unbounded effort level competes with the report text for the same cap --
+    and losing that race truncates the JSON, which drops the community.
+    """
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        extra = dict(kwargs.get("extra_body") or {})
+        provider = dict(extra.get("provider") or {})
+        provider.setdefault("sort", "throughput")
+        provider.setdefault("allow_fallbacks", True)
+        extra["provider"] = provider
+        if reasoning_effort:
+            extra.setdefault("reasoning", {"effort": reasoning_effort})
+        kwargs["extra_body"] = extra
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
 
 
 def _extract_json(raw: str) -> dict | None:
@@ -78,7 +112,8 @@ def _strip(s: str) -> str:
 
 
 async def generate_report(client: AsyncOpenAI, model: str,
-                          context: ContextResult) -> CommunityReport | None:
+                          context: ContextResult,
+                          max_tokens: int = 16000) -> CommunityReport | None:
     """One LLM call (+ one retry on unparseable JSON). Validates fact_ids against
     the community's real fact UUIDs (drops hallucinations) and strips URLs.
     Returns None if the model never produced valid JSON."""
@@ -91,8 +126,14 @@ async def generate_report(client: AsyncOpenAI, model: str,
             # fail -> skipped report. 8000 gives the reasoning + report headroom
             # (measured: 3000 skipped ~24% of communities, 8000 skipped ~0). Same
             # lesson as answer_api/synthesize + the type_precision judge.
-            model=model, temperature=0, max_tokens=8000,
+            model=model, temperature=0, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
+        # A flaky provider can return HTTP 200 with an error payload and NO
+        # choices; indexing [0] then raises TypeError and the caller drops the
+        # community entirely. Observed 3/29 on the first real theme-build. Treat
+        # it as an unparseable reply so it takes the retry instead.
+        if not resp.choices:
+            continue
         obj = _extract_json(resp.choices[0].message.content or "")
         if obj is not None:
             break

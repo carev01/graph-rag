@@ -20,7 +20,7 @@ async def test_run_theme_build_end_to_end(extract_driver, monkeypatch):
     monkeypatch.setattr(tc, "detect_communities", _fake_detect)
 
     captured = {}
-    async def _fake_report(client, model, context):
+    async def _fake_report(client, model, context, max_tokens):
         captured["ctx"] = context
         return CommunityReport("T", "S", "[]", 5.0, "", ["AWS"], list(context.fact_uuids))
     monkeypatch.setattr(tc, "generate_report", _fake_report)
@@ -63,7 +63,7 @@ async def test_one_community_error_does_not_abort_build(extract_driver, monkeypa
         return [Community("good", 0, ["g1"], None), Community("bad", 0, ["b1"], None)]
     monkeypatch.setattr(tc, "detect_communities", _fake_detect)
 
-    async def _fake_report(client, model, context):
+    async def _fake_report(client, model, context, max_tokens):
         # the "bad" community's context has no entities named Good -> raise for it
         if "Good" not in context.text:
             raise RuntimeError("simulated LLM 500")
