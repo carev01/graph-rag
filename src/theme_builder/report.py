@@ -5,14 +5,17 @@ decision #2 (the LLM never authors a citation URL)."""
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
-from graph_extract.usage import instrument
+from graph_extract.usage import instrument, usable_content
 from theme_builder.context import ContextResult
+
+logger = logging.getLogger(__name__)
 
 # A URL must never survive into a report (design decision #2). Case-insensitive,
 # stops at brackets so it can't swallow an adjacent token.
@@ -30,6 +33,25 @@ _PROMPT = (
     '"tags": [str, ...] (workloads/vendors covered)}}\n\n'
     "COMMUNITY CONTEXT:\n{context}"
 )
+
+_VERIFY_PROMPT = (
+    "You are checking a community report for claims its own evidence does not support.\n"
+    "For each FINDING below, decide whether EVERY claim it makes is stated by the FACTS "
+    "listed under it. A finding is UNSUPPORTED if it adds anything the facts do not "
+    "state -- a number, a limit, a duration, a product name, a mechanism, or a "
+    "requirement -- EVEN IF THAT CLAIM IS TRUE IN THE REAL WORLD. Judge only against "
+    "the facts shown; outside knowledge is exactly what we are detecting.\n"
+    "Also judge whether the SUMMARY is supported by the facts shown anywhere below.\n"
+    "Respond with ONLY JSON: {{\"unsupported\": [finding numbers], "
+    "\"summary_supported\": true or false}}\n\n"
+    "SUMMARY: {summary}\n\n{blocks}"
+)
+
+
+@dataclass
+class VerifyResult:
+    unsupported: set[int]      # 1-based finding indices
+    summary_supported: bool
 
 
 @dataclass
@@ -137,6 +159,38 @@ def _extract_json(raw: str) -> dict | None:
 
 def _strip(s: str) -> str:
     return _URL_RE.sub("", s or "").strip()
+
+
+async def verify_report(client: AsyncOpenAI, model: str, findings: list[dict],
+                        summary: str, fact_texts: dict[str, str], *,
+                        max_tokens: int = 4000) -> VerifyResult | None:
+    """Check each finding against the text of the facts it cites.
+
+    Returns None when verification could NOT be completed (unusable reply after a
+    retry). None is not "supported": writing an unverified report because the
+    verifier hiccuped is the defect this whole slice exists to prevent.
+    """
+    blocks = []
+    for i, f in enumerate(findings, 1):
+        texts = [fact_texts[u] for u in f.get("fact_ids", []) if u in fact_texts]
+        listed = "\n".join(f"   - {t}" for t in texts) or "   (no facts cited)"
+        blocks.append(f"FINDING {i}: {f.get('finding', '')}\nFACTS:\n{listed}")
+    prompt = _VERIFY_PROMPT.format(summary=summary, blocks="\n\n".join(blocks))
+    for budget in (max_tokens, max_tokens * 3):
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=budget,
+            messages=[{"role": "user", "content": prompt}])
+        obj = _extract_json(usable_content(resp) or "")
+        if obj is not None:
+            raw = obj.get("unsupported") or []
+            idx = {int(x) for x in raw
+                   if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit())}
+            return VerifyResult(unsupported=idx,
+                                summary_supported=bool(obj.get("summary_supported", False)))
+        logger.warning("report verifier returned no usable JSON (budget=%d); retrying",
+                       budget)
+    logger.warning("report verifier failed twice; report will be skipped")
+    return None
 
 
 async def generate_report(client: AsyncOpenAI, model: str,
