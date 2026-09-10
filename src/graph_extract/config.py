@@ -142,6 +142,16 @@ class ExtractSettings(BaseSettings):
     # Route an article to the STRONG tier when it is a dense table:
     dense_table_line_ratio: float = 0.25
     dense_pipe_count: int = 200
+    # Cross-encoder reranker (Voyage AI, Cohere-compatible /v1/rerank). Scores
+    # community relevance for the global path, replacing the LLM's improvised
+    # 0-10 rating. rerank_top_n / rerank_score_floor are set from measured score
+    # distributions -- see the 2026-09-10 spec, not guessed.
+    rerank_base_url: str = ""
+    rerank_model: str = ""
+    rerank_api_key: str = ""
+    rerank_candidates: int = 50    # cosine pre-cut before the API call
+    rerank_top_n: int = 4          # max communities reaching extraction
+    rerank_score_floor: float = 0.45
 
 
 @lru_cache
