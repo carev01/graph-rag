@@ -125,6 +125,17 @@ into one shared helper and use it for every tier. This is the third time in one 
 fix was applied at one call site instead of the layer that needed it — see
 [[llm-empty-reply-coerced-to-value]] for the same pattern.
 
+### 5d. The incremental path cannot report `lost_by_level` — **P1**
+`write_communities` now reports per-level losses, which is what would have caught level 1
+draining. `write_communities_incremental` **cannot**: it receives only the surviving
+`entries`, so a genuinely-skipped community's level never reaches it — and incremental is
+the DEFAULT path, so the blind spot persists exactly where routine runs happen.
+
+The fix is in the caller: `_run_theme_build_incremental` already loops
+`for i, c in enumerate(communities)` and knows `c.level` for every community it puts in
+`skipped` rather than `staged`. It needs to accumulate its own skipped-by-level dict and
+merge it into the result, the way it already adds `reports_skipped`.
+
 ### 5c. `rep is None` still drops a community on the non-staged paths — **P1**
 Staging (2026-09-10) covers only the verifier-blip path. The other `rep is None` routes —
 `except Exception` around report generation, and `_generate_once` returning `None` (measured
