@@ -60,9 +60,9 @@ _PRIMER_PROMPT = (
 
 
 async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
-                  max_followups, group_id):
+                  max_followups, group_id, settings):
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
-                                       group_id=group_id)
+                                       group_id=group_id, settings=settings)
     if not hits:
         return None
     blocks = "\n".join(f'- {h.community_id} "{h.title}": {h.summary}' for h in hits)
@@ -172,11 +172,11 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
 
 async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                        q, level, iterations, primer_k, max_followups, followup_k,
-                       group_id) -> dict:
+                       group_id, settings) -> dict:
     rounds = max(1, min(iterations, 2))
     primed = await _primer(embedder, synth_client, synth_model, driver, q=q,
                            level=level, k=primer_k, max_followups=max_followups,
-                           group_id=group_id)
+                           group_id=group_id, settings=settings)
     if primed is None:
         res = await answer_local(graphiti, driver, synth_client, synth_model,
                                  q=q, group_id=group_id)

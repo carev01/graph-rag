@@ -86,15 +86,16 @@ async def _fake_timeline_local(graphiti, driver, *, q, limit=30, vendor=None,
 
 
 async def _fake_global_search(driver, embedder, map_client, map_model, synth_client,
-                              synth_model, *, q, level, k, group_id, relevance_min):
+                              synth_model, *, q, level, k, group_id, settings):
     return {"query": q, "answer": "AWS and Azure both back up S3 [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"article_id": "art1", "source_url": "https://x/art1"}]}],
-            "communities_used": [{"community_id": "c1", "title": "S3", "relevance": 9}]}
+            "communities_used": [{"community_id": "c1", "title": "S3", "relevance": 0.9}]}
 
 
 async def _fake_drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
-                             q, level, iterations, primer_k, max_followups, followup_k, group_id):
+                             q, level, iterations, primer_k, max_followups, followup_k,
+                             group_id, settings):
     return {"query": q, "answer": "cross-vendor DRIFT answer [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],

@@ -120,7 +120,6 @@ class ExtractSettings(BaseSettings):
     map_llm_api_key: str = ""
     global_shortlist_k: int = 10
     global_default_level: int = 1
-    global_map_relevance_min: int = 2
     # --- DRIFT search (design: drift-search) ---
     drift_primer_level: int = 1      # community level the primer shortlists at
     drift_primer_k: int = 5          # reports shortlisted for the primer

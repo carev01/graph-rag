@@ -8,13 +8,14 @@ import asyncio
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 from graph_extract.usage import instrument
+from answer_api.rerank import rerank, rerank_configured
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content,
 )
@@ -34,6 +35,7 @@ class CommunityHit:
     cited_fact_uuids: list[str]
     full_report: str
     similarity: float
+    relevance: float = 0.0
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -61,8 +63,41 @@ def _rank_hits(query_vec: list[float], rows: list[dict], *, k: int,
     return [h for _, h in scored[:k]]
 
 
+@dataclass
+class RerankStats:
+    """Out-param so the two shortlist_communities call sites keep their shape."""
+    degraded: str | None = None
+
+
+def _apply_rerank(hits: list[CommunityHit],
+                  scored: list[tuple[int, float]] | None,
+                  *, top_n: int, floor: float,
+                  stats: RerankStats) -> list[CommunityHit]:
+    """Cut the candidate list using rerank scores.
+
+    `scored is None` means the reranker COULD NOT SCORE: fall back to cosine order,
+    capped at top_n, and mark the result degraded so the caller can tell the reader.
+    An empty list is different -- it means the reranker scored and nothing cleared
+    the floor, which is a real verdict and must reach the refusal path.
+    """
+    if scored is None:
+        stats.degraded = "rerank-unavailable"
+        return hits[:top_n]
+    out: list[CommunityHit] = []
+    for idx, score in scored[:top_n]:
+        if score < floor:
+            continue
+        # `replace`, not mutation: a caller may hold the same candidate list, and
+        # silently rewriting its objects is the kind of surprise that is very hard
+        # to trace later. Same reason report.py's _with_findings uses it.
+        out.append(replace(hits[idx], relevance=score))
+    return out
+
+
 async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
-                                group_id: str, rating_boost: float = 0.1) -> list[CommunityHit]:
+                                group_id: str, rating_boost: float = 0.1,
+                                settings: ExtractSettings | None = None,
+                                stats: RerankStats | None = None) -> list[CommunityHit]:
     query_vec = (await embedder.create_batch([q]))[0]
     async with driver.session() as s:
         r = await s.run(
@@ -74,24 +109,33 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
             "coalesce(c.full_report,'[]') AS full_report, c.embedding AS embedding",
             g=group_id, lvl=level)
         rows = [dict(rec) async for rec in r if rec["embedding"]]
-    return _rank_hits(query_vec, rows, k=k, rating_boost=rating_boost)
+    candidates = _rank_hits(query_vec, rows, k=(settings.rerank_candidates if settings
+                                                else k), rating_boost=rating_boost)
+    if settings is None or not rerank_configured(settings):
+        return candidates[:k]
+    st = stats if stats is not None else RerankStats()
+    docs = [f"{h.title}: {h.summary}" for h in candidates]
+    scored = await rerank(q, docs, top_k=settings.rerank_top_n, settings=settings)
+    return _apply_rerank(candidates, scored, top_n=settings.rerank_top_n,
+                         floor=settings.rerank_score_floor, stats=st)
 
 
 @dataclass
 class MapResult:
     community_id: str
     title: str
-    relevance: int
+    relevance: float
     key_points: list[str]
     fact_ids: list[str]
 
 
 _MAP_PROMPT = (
-    "You are assessing one COMMUNITY report for relevance to a QUESTION. Using ONLY "
-    "the report, respond with JSON: {{\"relevance\": 0-10 (how useful for the question), "
-    "\"key_points\": [short strings relevant to the question], \"fact_ids\": [the fact "
-    "uuids from the report that support those points]}}. fact_ids MUST be uuids that "
-    "appear in the report. Do NOT write URLs.\n\n"
+    "Extract from this COMMUNITY report only what answers the QUESTION. Using ONLY "
+    "the report, respond with JSON: {{\"key_points\": [short strings that answer the "
+    "question], \"fact_ids\": [the fact uuids from the report that support those "
+    "points]}}. Include ONLY points that bear on the question, and ONLY fact_ids that "
+    "support the points you listed. fact_ids MUST be uuids that appear in the report. "
+    "Do NOT write URLs.\n\n"
     "QUESTION: {q}\n\nCOMMUNITY \"{title}\": {summary}\nFINDINGS: {full_report}"
 )
 
@@ -121,8 +165,8 @@ def _extract_json(raw: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
-async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit, *,
-                     relevance_min: int) -> MapResult | None:
+async def map_report(client: AsyncOpenAI, model: str, q: str,
+                     hit: CommunityHit) -> MapResult | None:
     prompt = _MAP_PROMPT.format(q=q, title=hit.title, summary=hit.summary,
                                 full_report=hit.full_report)
     obj: dict | None = None
@@ -135,17 +179,11 @@ async def map_report(client: AsyncOpenAI, model: str, q: str, hit: CommunityHit,
             break
     if obj is None:
         return None
-    try:
-        relevance = int(obj.get("relevance", 0) or 0)
-    except (TypeError, ValueError):
-        relevance = 0
-    if relevance < relevance_min:
-        return None
     valid = {u for u in hit.cited_fact_uuids}
     fact_ids = [f for f in (obj.get("fact_ids") or []) if f in valid]
     key_points = [str(p) for p in (obj.get("key_points") or [])]
-    return MapResult(community_id=hit.community_id, title=hit.title, relevance=relevance,
-                     key_points=key_points, fact_ids=fact_ids)
+    return MapResult(community_id=hit.community_id, title=hit.title,
+                     relevance=hit.relevance, key_points=key_points, fact_ids=fact_ids)
 
 
 _REDUCE_PROMPT = (
@@ -167,12 +205,14 @@ _REDUCE_PROMPT = (
 
 async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: str,
                         synth_client: AsyncOpenAI, synth_model: str, *, q: str,
-                        level: int, k: int, group_id: str, relevance_min: int) -> dict:
-    hits = await shortlist_communities(driver, embedder, q, level=level, k=k, group_id=group_id)
+                        level: int, k: int, group_id: str,
+                        settings: ExtractSettings) -> dict:
+    hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
+                                       group_id=group_id, settings=settings)
     if not hits:
         return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
     maps = await asyncio.gather(
-        *[map_report(map_client, map_model, q, h, relevance_min=relevance_min) for h in hits],
+        *[map_report(map_client, map_model, q, h) for h in hits],
         return_exceptions=True)
     results: list[MapResult] = []
     for m in maps:
