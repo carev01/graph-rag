@@ -291,6 +291,11 @@ class ReportStats:
     findings_dropped: int = 0
     reverified: bool = False
     unverified: bool = False
+    # The generated report when verification could NOT be completed. Returned
+    # separately from generate_report's return value, which stays None so nothing
+    # unverified is ever mistaken for a usable report -- but the content is kept so
+    # a transient verifier outage does not cost a full regeneration (spec 4.7).
+    staged_report: "CommunityReport | None" = None
 
 
 _RETRY_NOTE = (
@@ -329,6 +334,7 @@ async def generate_report(client: AsyncOpenAI, model: str,
     if result is None:
         if stats is not None:
             stats.unverified = True
+            stats.staged_report = report
         return None
 
     if result.unsupported:
@@ -345,6 +351,7 @@ async def generate_report(client: AsyncOpenAI, model: str,
             if result is None:
                 if stats is not None:
                     stats.unverified = True
+                    stats.staged_report = report
                 return None
 
     if result.unsupported:

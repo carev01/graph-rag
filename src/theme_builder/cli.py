@@ -92,6 +92,7 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
 
     embedder = build_embedder(settings)
     reports: dict = {}
+    pending: dict = {}
     skipped = 0
     findings_dropped = reverified = unverified = 0
     try:
@@ -109,6 +110,8 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 findings_dropped += st.findings_dropped
                 reverified += 1 if st.reverified else 0
                 unverified += 1 if st.unverified else 0
+                if st.staged_report is not None:
+                    pending[c.community_id] = st.staged_report
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", c.community_id)
                 rep = None
@@ -119,12 +122,14 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
             reports[c.community_id] = rep
         corpus_cursor = await _corpus_cursor(driver, settings.group_id)
         res = await write_communities(driver, embedder, settings.group_id,
-                                      communities, reports, corpus_cursor=corpus_cursor)
+                                      communities, reports, corpus_cursor=corpus_cursor,
+                                      pending=pending)
         res["communities_detected"] = len(communities)
         res["reports_skipped"] = skipped
         res["findings_dropped"] = findings_dropped
         res["reports_reverified"] = reverified
         res["reports_unverified"] = unverified
+        res["reports_staged"] = len(pending)
         return res
     finally:
         # close both owned clients (report LLM + embedder) so a repeated caller

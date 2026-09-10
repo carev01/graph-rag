@@ -25,6 +25,7 @@ class PersistedCommunity:
     cited_fact_uuids: list[str]
     embedding: list[float]
     generated_at: object          # neo4j DateTime; passed back unchanged on reuse
+    verified: bool = True         # False (or no embedding) = staged: never clean
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -62,13 +63,25 @@ def match_communities(fresh: list[Community], persisted: list[PersistedCommunity
 def classify(fresh: list[Community], matches: dict[int, "PersistedCommunity | None"],
              touched: set[str] | None) -> tuple[list[int], list[int]]:
     """Split fresh community indexes into (dirty, clean). touched=None -> all dirty
-    (cold start). A matched community is clean iff none of its members were touched."""
+    (cold start). A matched community is clean iff none of its members were touched
+    AND its persisted report is a verified one.
+
+    Hazard: a report staged because verification could not complete (Task 9) is
+    written with no embedding and verified=false, but _load_persisted reads every
+    :Community row regardless -- so without this check a staged community with no
+    touched members would look "clean" and its empty/pending report would be reused
+    as if it were a real one on the next incremental run. Treat "no embedding" or
+    "not verified" as always dirty so a staged community is always retried.
+    """
     dirty: list[int] = []
     clean: list[int] = []
     for i, fc in enumerate(fresh):
-        if touched is None or matches[i] is None:
+        m = matches[i]
+        if touched is None or m is None:
             dirty.append(i)
         elif set(fc.member_uuids) & touched:
+            dirty.append(i)
+        elif not m.embedding or not m.verified:
             dirty.append(i)
         else:
             clean.append(i)
@@ -120,13 +133,14 @@ async def load_persisted(driver: AsyncDriver, group_id: str) -> list[PersistedCo
             "coalesce(c.full_report,'[]') AS full_report, coalesce(c.rating,0.0) AS rating, "
             "coalesce(c.rating_explanation,'') AS rating_explanation, "
             "coalesce(c.tags,[]) AS tags, coalesce(c.cited_fact_uuids,[]) AS cited_fact_uuids, "
-            "c.embedding AS embedding, c.generated_at AS generated_at", g=group_id)
+            "c.embedding AS embedding, c.generated_at AS generated_at, "
+            "coalesce(c.verified, true) AS verified", g=group_id)
         return [PersistedCommunity(
             community_id=x["community_id"], level=x["level"], members=set(x["members"]),
             title=x["title"], summary=x["summary"], full_report=x["full_report"],
             rating=x["rating"], rating_explanation=x["rating_explanation"], tags=x["tags"],
             cited_fact_uuids=x["cited_fact_uuids"], embedding=x["embedding"],
-            generated_at=x["generated_at"]) async for x in r]
+            generated_at=x["generated_at"], verified=x["verified"]) async for x in r]
 
 
 async def prev_corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:

@@ -95,3 +95,67 @@ async def test_one_community_error_does_not_abort_build(extract_driver, monkeypa
         ids = [r["id"] async for r in await s2.run(
             "MATCH (c:Community {group_id:$g}) RETURN c.community_id AS id", g=g)]
     assert ids == ["good"]   # the good community was written despite the other erroring
+
+
+async def test_unverifiable_report_is_staged_unreachable_by_answering(extract_driver, monkeypatch):
+    """A community whose verifier could not complete is kept in the graph (not
+    destroyed by the DETACH DELETE rebuild) but written with no embedding and
+    verified=false, so it is unreachable from shortlist_communities -- and from
+    DRIFT, which sources its ids from that same shortlist."""
+    import theme_builder.cli as tc
+    from theme_builder.detect import Community
+    from graph_extract.config import get_extract_settings
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n {group_id:$g}) DETACH DELETE n", g=g)   # clean slate
+        await s.run("CREATE (:Entity {uuid:'u1', group_id:$g, name:'Unverified', summary:'s'})", g=g)
+
+    async def _fake_detect(driver, group_id, **k):
+        return [Community("stagec", 0, ["u1"], None)]
+    monkeypatch.setattr(tc, "detect_communities", _fake_detect)
+
+    async def _fake_report(client, model, context, max_tokens, *, verifier=None, stats=None):
+        # simulate: report generation succeeded, then the verifier endpoint failed
+        assert stats is not None
+        stats.unverified = True
+        from theme_builder.report import CommunityReport
+        stats.staged_report = CommunityReport(
+            "Staged Title", "Staged Summary", "[]", 5.0, "", ["aws"], [])
+        return None
+    monkeypatch.setattr(tc, "generate_report", _fake_report)
+
+    class _Closeable:
+        async def close(self): pass
+    monkeypatch.setattr(tc, "_report_client_and_model", lambda s: (_Closeable(), "m"))
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
+
+    class _FakeEmb:
+        class _C:
+            async def close(self): pass
+        client = _C()
+        async def create_batch(self, texts): return [[0.0] for _ in texts]
+    monkeypatch.setattr(tc, "build_embedder", lambda s: _FakeEmb())
+
+    s = get_extract_settings.__wrapped__().model_copy(update=dict(group_id=g))
+    res = await tc._run_theme_build(s, driver=extract_driver)
+    assert res["reports_written"] == 0
+    assert res["reports_skipped"] == 1
+    assert res["reports_staged"] == 1
+
+    async with extract_driver.session() as s2:
+        rec = await (await s2.run(
+            "MATCH (c:Community {group_id:$g, community_id:'stagec'}) "
+            "RETURN c.pending_full_report AS pfr, c.verified AS verified, "
+            "c.embedding AS embedding", g=g)).single()
+    assert rec["pfr"] == "[]"
+    assert rec["verified"] is False
+    assert rec["embedding"] is None
+
+    from answer_api.global_search import shortlist_communities
+
+    class _QueryEmb:
+        async def create_batch(self, texts): return [[0.0] for _ in texts]
+
+    hits = await shortlist_communities(extract_driver, _QueryEmb(), "anything",
+                                       level=0, k=10, group_id=g)
+    assert all(h.community_id != "stagec" for h in hits)
