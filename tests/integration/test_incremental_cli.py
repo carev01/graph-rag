@@ -64,7 +64,7 @@ def _patch(monkeypatch):
     async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
         return [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
 
-    async def _fake_generate(client, model, ctx, max_tokens):
+    async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
         calls["n"] += 1
         return CommunityReport(title="NEW", summary="NEW", full_report="[]", rating=9.0,
                                rating_explanation="", tags=[], cited_fact_uuids=[])
@@ -73,6 +73,7 @@ def _patch(monkeypatch):
     monkeypatch.setattr(cli, "generate_report", _fake_generate)
     monkeypatch.setattr(cli, "build_embedder", lambda s: _FakeEmbedder())
     monkeypatch.setattr(cli, "_report_client_and_model", lambda s: (_FakeClient(), "m"))
+    monkeypatch.setattr(cli, "_verify_client_and_model", lambda s: (_FakeClient(), "vm"))
     # context assembly is irrelevant (generate_report is faked); stub it so the
     # real _fetch_members/assemble_context path can't crash on unnamed seed entities.
     monkeypatch.setattr(cli, "assemble_context", lambda *a, **k: None)
@@ -132,6 +133,77 @@ async def test_corpus_cursor_includes_sweep_invalid_at(extract_driver):
                     "(b:Entity {group_id:$g, uuid:'e2', created_at: datetime('2026-01-02')})", g=G)
     cur = await cli._corpus_cursor(extract_driver, G)
     assert cur.startswith("2026-05-01")     # sweep invalid_at dominates the created_ats
+
+
+async def test_incremental_stages_an_unverifiable_report_instead_of_destroying_it(
+        extract_driver, monkeypatch):
+    """CRITICAL 1: incremental is the DEFAULT path. A verifier blip on a dirty
+    community must STAGE the regenerated report, not drop the community out of
+    `entries` -- write_communities_incremental's DETACH DELETE would then take the
+    previously verified report with it. Measured blip rate: 5-8 of 41 per run."""
+    import theme_builder.cli as cli
+    from theme_builder.detect import Community
+    from theme_builder.report import CommunityReport
+
+    async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
+        return [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
+
+    async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
+        # generation succeeded; the verifier endpoint then blipped
+        assert stats is not None
+        stats.unverified = True
+        stats.staged_report = CommunityReport(
+            title="Staged Title", summary="Staged Summary",
+            full_report='[{"finding": "F1", "fact_ids": ["f1"]}]', rating=5.0,
+            rating_explanation="re", tags=["aws"], cited_fact_uuids=["f1"])
+        return None
+
+    monkeypatch.setattr(cli, "detect_communities", _fake_detect)
+    monkeypatch.setattr(cli, "generate_report", _fake_generate)
+    monkeypatch.setattr(cli, "build_embedder", lambda s: _FakeEmbedder())
+    monkeypatch.setattr(cli, "_report_client_and_model", lambda s: (_FakeClient(), "m"))
+    monkeypatch.setattr(cli, "_verify_client_and_model", lambda s: (_FakeClient(), "vm"))
+    monkeypatch.setattr(cli, "assemble_context", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "datetime", _FrozenDatetime)
+
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")  # A dirty
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert res["reports_unverified"] == 1
+    assert res["reports_staged"] == 1, "the staged report must be surfaced"
+    assert res["reports_regenerated"] == 0 and res["reports_reused"] == 1
+
+    async with extract_driver.session() as s:
+        rows = {r["cid"]: dict(r) async for r in await s.run(
+            "MATCH (c:Community {group_id:$g}) RETURN c.community_id AS cid, "
+            "c.title AS title, c.summary AS summary, c.full_report AS full_report, "
+            "c.pending_summary AS ps, c.pending_full_report AS pfr, "
+            "c.embedding AS embedding, c.verified AS verified, "
+            "c.cited_fact_uuids AS cited", g=G)}
+
+    assert set(rows) == {"sA", "sB"}, "the staged community must survive the rebuild"
+    a = rows["sA"]
+    assert a["ps"] == "Staged Summary"
+    assert a["pfr"] == '[{"finding": "F1", "fact_ids": ["f1"]}]'
+    assert a["title"] == "Staged Title"
+    assert a["verified"] is False
+    assert a["embedding"] is None, "a staged report must carry NO embedding"
+    assert a["summary"] is None and a["full_report"] is None
+    assert a["cited"] == ["f1"]
+
+    b = rows["sB"]
+    assert b["verified"] is True, "write_communities_incremental must write `verified`"
+    assert b["embedding"] == [0.0]
+
+    from answer_api.global_search import shortlist_communities
+
+    class _QueryEmb:
+        async def create_batch(self, texts):
+            return [[0.0] for _ in texts]
+
+    hits = await shortlist_communities(extract_driver, _QueryEmb(), "anything",
+                                       level=1, k=10, group_id=G)
+    assert all(h.community_id != "sA" for h in hits)
 
 
 async def test_swept_community_regenerates_once(extract_driver, monkeypatch):

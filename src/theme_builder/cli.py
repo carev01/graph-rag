@@ -16,7 +16,9 @@ from theme_builder.context import EntityRow, FactRow, assemble_context
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
     classify, load_persisted, match_communities, prev_corpus_cursor, touched_entities)
-from theme_builder.report import _report_client_and_model, generate_report
+from theme_builder.report import (ReportStats, _regenerate_summary,
+                                  _report_client_and_model, _verify_client_and_model,
+                                  generate_report, verify_report)
 from theme_builder.writeback import write_communities, write_communities_incremental
 
 app = typer.Typer()
@@ -83,9 +85,16 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
         min_community_size=settings.leiden_min_community_size,
         max_levels=settings.leiden_max_levels)
     client, model = _report_client_and_model(settings)
+    vclient, vmodel = _verify_client_and_model(settings)
+
+    async def _verifier(findings, summary, fact_texts):
+        return await verify_report(vclient, vmodel, findings, summary, fact_texts)
+
     embedder = build_embedder(settings)
     reports: dict = {}
+    pending: dict = {}
     skipped = 0
+    findings_dropped = reverified = unverified = 0
     try:
         for c in communities:
             try:
@@ -94,7 +103,15 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 ctx = assemble_context(members, facts,
                                        top_entities=settings.report_top_entities,
                                        token_budget=settings.report_token_budget)
-                rep = await generate_report(client, model, ctx, settings.report_max_tokens)
+                st = ReportStats()
+                rep = await generate_report(client, model, ctx,
+                                            settings.report_max_tokens,
+                                            verifier=_verifier, stats=st)
+                findings_dropped += st.findings_dropped
+                reverified += 1 if st.reverified else 0
+                unverified += 1 if st.unverified else 0
+                if st.staged_report is not None:
+                    pending[c.community_id] = st.staged_report
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", c.community_id)
                 rep = None
@@ -105,14 +122,20 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
             reports[c.community_id] = rep
         corpus_cursor = await _corpus_cursor(driver, settings.group_id)
         res = await write_communities(driver, embedder, settings.group_id,
-                                      communities, reports, corpus_cursor=corpus_cursor)
+                                      communities, reports, corpus_cursor=corpus_cursor,
+                                      pending=pending)
         res["communities_detected"] = len(communities)
         res["reports_skipped"] = skipped
+        res["findings_dropped"] = findings_dropped
+        res["reports_reverified"] = reverified
+        res["reports_unverified"] = unverified
+        res["reports_staged"] = len(pending)
         return res
     finally:
         # close both owned clients (report LLM + embedder) so a repeated caller
         # doesn't leak httpx pools; the injected driver is the caller's to close.
         await client.close()
+        await vclient.close()
         await embedder.client.close()
 
 
@@ -142,11 +165,18 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     id_map = {communities[i].community_id: stable_ids[i] for i in range(len(communities))}
 
     client, model = _report_client_and_model(settings)
+    vclient, vmodel = _verify_client_and_model(settings)
+
+    async def _verifier(findings, summary, fact_texts):
+        return await verify_report(vclient, vmodel, findings, summary, fact_texts)
+
     embedder = build_embedder(settings)
     entries: list[dict] = []
     regenerated = 0
     reused = 0
     skipped = 0
+    staged = 0
+    findings_dropped = reverified = unverified = 0
     now = datetime.now(timezone.utc)
     try:
         for i, c in enumerate(communities):
@@ -168,11 +198,36 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                 facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
                 ctx = assemble_context(members, facts, top_entities=settings.report_top_entities,
                                        token_budget=settings.report_token_budget)
-                rep = await generate_report(client, model, ctx, settings.report_max_tokens)
+                st = ReportStats()
+                rep = await generate_report(client, model, ctx,
+                                            settings.report_max_tokens,
+                                            verifier=_verifier, stats=st)
+                findings_dropped += st.findings_dropped
+                reverified += 1 if st.reverified else 0
+                unverified += 1 if st.unverified else 0
+                staged_report = st.staged_report
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", stable_ids[i])
                 rep = None
+                staged_report = None
             if rep is None:
+                if staged_report is not None:
+                    # Verification could not COMPLETE. The report is generated and
+                    # paid for; dropping this community from `entries` would let
+                    # write_communities_incremental's DETACH DELETE take the
+                    # community's PREVIOUSLY verified report with it. Stage it
+                    # instead -- no embedding, so it stays unreachable from every
+                    # answering path -- and recover it with --verify-pending.
+                    entries.append({**base, "title": staged_report.title,
+                                    "pending_summary": staged_report.summary,
+                                    "pending_full_report": staged_report.full_report,
+                                    "rating": staged_report.rating,
+                                    "rating_explanation": staged_report.rating_explanation,
+                                    "tags": staged_report.tags,
+                                    "cited_fact_uuids": staged_report.cited_fact_uuids,
+                                    "generated_at": now, "staged": True})
+                    staged += 1
+                    continue
                 skipped += 1
                 continue
             emb = (await embedder.create_batch([f"{rep.title}\n{rep.summary}"]))[0]
@@ -187,25 +242,124 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
         matched_persisted = sum(1 for i in matches if matches[i] is not None)
         res.update({"communities_detected": len(communities),
                     "reports_regenerated": regenerated, "reports_reused": reused,
-                    "reports_skipped": skipped,
-                    "communities_dissolved": len(persisted) - matched_persisted})
+                    "reports_skipped": skipped, "reports_staged": staged,
+                    "communities_dissolved": len(persisted) - matched_persisted,
+                    "findings_dropped": findings_dropped,
+                    "reports_reverified": reverified,
+                    "reports_unverified": unverified})
         return res
     finally:
         await client.close()
+        await vclient.close()
         await embedder.client.close()
 
 
+async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver) -> dict:
+    """Re-verify only the reports staged by an earlier run and promote the ones
+    that pass.
+
+    Recovering from a verifier outage costs one verify call per staged community
+    rather than regenerating the corpus (spec 4.7).
+
+    A staged report is lost ONLY when no finding survives verification. The summary
+    verdict is not a rejection reason (spec 4.4 / 4.5.5); the promoted summary is
+    regenerated from the findings that survived, so it inherits their support.
+    """
+    vclient, vmodel = _verify_client_and_model(settings)
+    # The promoted summary is REGENERATED from the findings that survived, so this
+    # needs the report tier too -- promoting the staged summary would publish (and
+    # embed) a paragraph written against findings that have just been dropped.
+    rclient, rmodel = _report_client_and_model(settings)
+    embedder = build_embedder(settings)
+    promoted = rejected = still_pending = findings_dropped = 0
+    try:
+        async with driver.session() as s:
+            r = await s.run(
+                "MATCH (c:Community {group_id:$g}) WHERE c.pending_full_report IS NOT NULL "
+                "RETURN c.community_id AS cid, c.title AS title, "
+                "c.pending_summary AS summary, c.pending_full_report AS full_report, "
+                "coalesce(c.cited_fact_uuids,[]) AS cited", g=settings.group_id)
+            staged = [dict(x) async for x in r]
+        for row in staged:
+            findings = json.loads(row["full_report"] or "[]")
+            async with driver.session() as s:
+                fr = await s.run(
+                    "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
+                    "RETURN f.uuid AS uuid, f.fact AS fact",
+                    g=settings.group_id, u=list(row["cited"]))
+                fact_texts = {x["uuid"]: x["fact"] async for x in fr}
+            result = await verify_report(vclient, vmodel, findings,
+                                         row["summary"] or "", fact_texts)
+            if result is None:
+                still_pending += 1
+                continue
+            kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
+            findings_dropped += len(findings) - len(kept)
+            # The SUMMARY verdict is deliberately NOT a rejection reason: judging an
+            # inherently synthetic paragraph by "states nothing the facts do not
+            # state" destroyed 15 of 41 communities. Only "no finding survived" --
+            # a genuine content failure -- loses the staged report.
+            if not kept:
+                rejected += 1
+                async with driver.session() as s:
+                    await s.run(
+                        "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                        "REMOVE c.pending_summary, c.pending_full_report",
+                        cid=row["cid"], g=settings.group_id)
+                continue
+            cited: list[str] = []
+            for f in kept:
+                for fid in f.get("fact_ids", []):
+                    if fid not in cited:
+                        cited.append(fid)
+            summary = await _regenerate_summary(rclient, rmodel, kept, row["title"] or "")
+            if not summary:
+                # A summariser hiccup must not cost a verified report; keep the
+                # staged summary, but say so -- the promoted paragraph may then
+                # still reference a dropped finding.
+                logger.warning(
+                    "verify-pending: summary regeneration returned nothing usable for "
+                    "community %s; keeping the staged summary", row["cid"])
+                summary = row["summary"] or ""
+            emb = (await embedder.create_batch([f"{row['title']}\n{summary}"]))[0]
+            async with driver.session() as s:
+                await s.run(
+                    "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                    "SET c.summary=$summary, c.full_report=$full_report, "
+                    "c.cited_fact_uuids=$cited, c.embedding=$emb, c.verified=true "
+                    "REMOVE c.pending_summary, c.pending_full_report",
+                    cid=row["cid"], g=settings.group_id, summary=summary,
+                    full_report=json.dumps(kept), cited=cited, emb=emb)
+            promoted += 1
+    finally:
+        await vclient.close()
+        await rclient.close()
+        await embedder.client.close()
+    return {"reports_promoted": promoted, "reports_rejected": rejected,
+            "reports_still_pending": still_pending,
+            "findings_dropped": findings_dropped}
+
+
 @app.command("theme-build")
-def theme_build(full: bool = typer.Option(
-        False, "--full", help="Full rebuild (regenerate every report) instead of incremental.")) -> None:
+def theme_build(
+        full: bool = typer.Option(
+            False, "--full", help="Full rebuild (regenerate every report) instead of incremental."),
+        verify_pending: bool = typer.Option(
+            False, "--verify-pending",
+            help="Re-verify only reports staged by an earlier run and promote the ones "
+                 "that pass. Recovers from a transient verifier outage without "
+                 "regenerating anything. Wins over --full if both are given.")) -> None:
     """Refresh the community-report layer (incremental by default; --full rebuilds all)."""
     async def _main() -> None:
         settings = get_extract_settings()
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
         try:
-            runner = _run_theme_build if full else _run_theme_build_incremental
-            res = await runner(settings, driver=driver)
+            if verify_pending:
+                res = await _run_verify_pending(settings, driver=driver)
+            else:
+                runner = _run_theme_build if full else _run_theme_build_incremental
+                res = await runner(settings, driver=driver)
             typer.echo(json.dumps(res, indent=2, default=str))
         finally:
             await driver.close()

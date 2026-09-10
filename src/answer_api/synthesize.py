@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 
 from answer_api import search as search_mod
 from graph_extract.config import ExtractSettings
-from graph_extract.usage import instrument
+from graph_extract.usage import instrument, usable_content as _usable_content
 
 logger = logging.getLogger(__name__)
 
@@ -134,22 +134,6 @@ def _build_citations(cited: list[int], marker_map: dict, resolved: dict) -> list
                     "valid_at": r.get("valid_at"), "invalid_at": r.get("invalid_at"),
                     "sources": r.get("sources", [])})
     return out
-
-
-def _usable_content(resp) -> str | None:
-    """The text of a chat completion, or None when the model returned nothing.
-
-    Two ways a HTTP 200 carries no answer: an empty `choices` list (seen in
-    production, see theme_builder/report.py), and `content=None` because a
-    reasoning model spent its whole max_tokens budget on reasoning tokens and
-    emitted no final message. Both must be distinguishable from a real answer.
-    """
-    if not resp.choices:
-        return None
-    content = resp.choices[0].message.content
-    if content is None or not content.strip():
-        return None
-    return content
 
 
 async def _complete_or_none(client: AsyncOpenAI, model: str, prompt: str, *,

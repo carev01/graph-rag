@@ -5,14 +5,17 @@ decision #2 (the LLM never authors a citation URL)."""
 from __future__ import annotations
 
 import json
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
-from graph_extract.usage import instrument
+from graph_extract.usage import instrument, usable_content
 from theme_builder.context import ContextResult
+
+logger = logging.getLogger(__name__)
 
 # A URL must never survive into a report (design decision #2). Case-insensitive,
 # stops at brackets so it can't swallow an adjacent token.
@@ -30,6 +33,33 @@ _PROMPT = (
     '"tags": [str, ...] (workloads/vendors covered)}}\n\n'
     "COMMUNITY CONTEXT:\n{context}"
 )
+
+_VERIFY_PROMPT = (
+    "You are checking a community report for claims its own evidence does not support.\n"
+    "For each FINDING below, decide whether EVERY claim it makes is stated by the FACTS "
+    "listed under it. A finding is UNSUPPORTED if it adds anything the facts do not "
+    "state -- a number, a limit, a duration, a product name, a mechanism, or a "
+    "requirement -- EVEN IF THAT CLAIM IS TRUE IN THE REAL WORLD. Judge only against "
+    "the facts shown; outside knowledge is exactly what we are detecting.\n"
+    "Also judge whether the SUMMARY is supported by the facts shown anywhere below.\n"
+    "Respond with ONLY JSON: {{\"unsupported\": [finding numbers], "
+    "\"summary_supported\": true or false}}\n\n"
+    "SUMMARY: {summary}\n\n{blocks}"
+)
+
+
+_SUMMARY_PROMPT = (
+    "Write ONE paragraph summarising the STATEMENTS below for a community titled "
+    "\"{title}\". Summarise only what these statements say -- do NOT add any detail, "
+    "number, product name or limit that is not in them, and do NOT write any URL. "
+    "Reply with the paragraph only.\n\nSTATEMENTS:\n{statements}"
+)
+
+
+@dataclass
+class VerifyResult:
+    unsupported: set[int]      # 1-based finding indices
+    summary_supported: bool
 
 
 @dataclass
@@ -64,6 +94,37 @@ def _report_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
     if "openrouter" in base:
         client = _prefer_fast_provider(client, settings.report_reasoning_effort)
     return client, model
+
+
+def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
+    """Resolve the report VERIFIER, independent of the report writer.
+
+    Uses verify_llm_* when set, else eval_judge_*, and then refuses that result if
+    it is the report model. A model checking its own findings for outside-knowledge
+    leakage will not find any -- and the report gives no sign that the check was
+    vacuous. This mirrors answer_api.eval_router._eval_judge_client_and_model.
+    """
+    base = settings.verify_llm_base_url or settings.eval_judge_base_url
+    model = settings.verify_llm_model or settings.eval_judge_model
+    key = (settings.verify_llm_api_key or settings.eval_judge_api_key
+           or settings.judge_api_key or "not-needed")
+    if not base or not model:
+        raise ValueError(
+            "No report verifier configured. Set VERIFY_LLM_BASE_URL / VERIFY_LLM_MODEL "
+            "(or EVAL_JUDGE_*) in .env.")
+    report_model = settings.report_llm_model or settings.judge_model
+    # Compare the MODEL ALONE. Also requiring the base URL to match let the exact
+    # same weights reached through a second gateway/provider slip past and grade
+    # their own findings -- and the shared failure modes we are guarding against
+    # travel with the model, not with the endpoint that serves it.
+    if model == report_model:
+        raise ValueError(
+            f"Report verifier resolves to the report model ({model!r}) -- it would "
+            "check its own findings and confirm them. Set VERIFY_LLM_MODEL to a "
+            "different model, ideally a different family so the two do not share "
+            "failure modes.")
+    return instrument(AsyncOpenAI(api_key=key, base_url=base,
+                                  timeout=180.0, max_retries=3)), model
 
 
 def _prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
@@ -111,14 +172,80 @@ def _strip(s: str) -> str:
     return _URL_RE.sub("", s or "").strip()
 
 
-async def generate_report(client: AsyncOpenAI, model: str,
-                          context: ContextResult,
-                          max_tokens: int = 16000) -> CommunityReport | None:
-    """One LLM call (+ one retry on unparseable JSON). Validates fact_ids against
-    the community's real fact UUIDs (drops hallucinations) and strips URLs.
-    Returns None if the model never produced valid JSON."""
-    prompt = _PROMPT.format(context=context.text)
-    obj: dict | None = None
+async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[dict],
+                              title: str, *, max_tokens: int = 4000) -> str | None:
+    """Rewrite the summary from the findings that survived verification.
+
+    The summary is inherently synthetic -- one paragraph generalising a whole
+    community -- so verifying it against raw facts rejected legitimate summarising
+    and cost 15 of 41 communities across two rebuilds. Regenerating it from verified
+    findings makes it inherit their support instead.
+
+    `max_tokens` matches the rest of this file's headroom (verify_report's 4000, the
+    report writer's 8000+) rather than a tight cap: the report/judge tier is a
+    REASONING model whose thinking tokens count against the same completion budget,
+    so a small cap returns finish_reason='length' with EMPTY content -- which lands
+    in the "keep the original summary" fallback and silently undoes the regeneration.
+    """
+    statements = "\n".join(f"- {f.get('finding', '')}" for f in findings)
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens,
+        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(
+            title=title, statements=statements)}])
+    text = usable_content(resp)
+    return _strip(text) if text else None
+
+
+async def verify_report(client: AsyncOpenAI, model: str, findings: list[dict],
+                        summary: str, fact_texts: dict[str, str], *,
+                        max_tokens: int = 4000) -> VerifyResult | None:
+    """Check each finding against the text of the facts it cites.
+
+    Returns None when verification could NOT be completed (unusable reply after a
+    retry). None is not "supported": writing an unverified report because the
+    verifier hiccuped is the defect this whole slice exists to prevent.
+    """
+    blocks = []
+    for i, f in enumerate(findings, 1):
+        texts = [fact_texts[u] for u in f.get("fact_ids", []) if u in fact_texts]
+        listed = "\n".join(f"   - {t}" for t in texts) or "   (no facts cited)"
+        blocks.append(f"FINDING {i}: {f.get('finding', '')}\nFACTS:\n{listed}")
+    prompt = _VERIFY_PROMPT.format(summary=summary, blocks="\n\n".join(blocks))
+    for budget in (max_tokens, max_tokens * 3):
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=budget,
+            messages=[{"role": "user", "content": prompt}])
+        obj = _extract_json(usable_content(resp) or "")
+        if obj is None:
+            logger.warning("report verifier returned no usable JSON (budget=%d); retrying",
+                           budget)
+            continue
+        raw = obj.get("unsupported")
+        if not isinstance(raw, list):
+            # A parseable reply whose schema drifted -- a renamed key
+            # ({"verdicts": [...]}), a nested one ({"result": {...}}), or a null --
+            # must NOT collapse to "nothing is unsupported". That is an unusable
+            # reply reading as "supported", the exact defect this verifier exists to
+            # prevent. No response_format json_schema is used here, and cheap tiers
+            # drift like this. Treat it as unusable and retry.
+            logger.warning(
+                "report verifier reply has no list-typed 'unsupported' key "
+                "(keys=%s, budget=%d); retrying", sorted(obj)[:8], budget)
+            continue
+        idx = {int(x) for x in raw
+               if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit())}
+        return VerifyResult(unsupported=idx,
+                            summary_supported=bool(obj.get("summary_supported", False)))
+    logger.warning(
+        "report verifier failed twice; the report will be STAGED unverified "
+        "(kept in the graph without an embedding, so it is unreachable from every "
+        "answering path) -- recover it with `theme-build --verify-pending`")
+    return None
+
+
+async def _generate_once(client: AsyncOpenAI, model: str, prompt: str,
+                         max_tokens: int) -> dict | None:
+    """One LLM call plus one retry on an unparseable/contentless reply."""
     for _ in range(2):
         resp = await client.chat.completions.create(
             # GLM-5.2 is a reasoning model: a small cap truncates the JSON to empty
@@ -129,16 +256,18 @@ async def generate_report(client: AsyncOpenAI, model: str,
             model=model, temperature=0, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
         # A flaky provider can return HTTP 200 with an error payload and NO
-        # choices; indexing [0] then raises TypeError and the caller drops the
-        # community entirely. Observed 3/29 on the first real theme-build. Treat
-        # it as an unparseable reply so it takes the retry instead.
-        if not resp.choices:
-            continue
-        obj = _extract_json(resp.choices[0].message.content or "")
+        # choices; indexing [0] then raises and the caller drops the community
+        # entirely. Observed 3/29 on the first real theme-build. usable_content
+        # folds that in with contentless replies so both take the retry.
+        obj = _extract_json(usable_content(resp) or "")
         if obj is not None:
-            break
-    if obj is None:
-        return None
+            return obj
+    return None
+
+
+def _build_report(obj: dict, context: ContextResult) -> tuple[CommunityReport, list[dict]]:
+    """Parse one report payload. Returns the report AND its findings list, so the
+    caller can verify the findings and rebuild the report with a subset."""
     raw_findings = obj.get("full_report")
     findings: list[dict] = []
     cited: list[str] = []
@@ -157,7 +286,7 @@ async def generate_report(client: AsyncOpenAI, model: str,
         rating = float(obj.get("rating", 0) or 0)
     except (TypeError, ValueError):
         rating = 0.0
-    return CommunityReport(
+    report = CommunityReport(
         title=_strip(str(obj.get("title", ""))),
         summary=_strip(str(obj.get("summary", ""))),
         full_report=json.dumps(findings),
@@ -165,3 +294,117 @@ async def generate_report(client: AsyncOpenAI, model: str,
         rating_explanation=_strip(str(obj.get("rating_explanation", ""))),
         tags=[_strip(str(t)) for t in (obj.get("tags") or [])],
         cited_fact_uuids=cited)
+    return report, findings
+
+
+def _with_findings(report: CommunityReport, findings: list[dict]) -> CommunityReport:
+    """Same report carrying only `findings`, with cited_fact_uuids recomputed so a
+    dropped finding's facts do not stay listed as cited."""
+    cited: list[str] = []
+    for f in findings:
+        for fid in f["fact_ids"]:
+            if fid not in cited:
+                cited.append(fid)
+    return replace(report, full_report=json.dumps(findings), cited_fact_uuids=cited)
+
+
+@dataclass
+class ReportStats:
+    """Out-parameter for counters the caller surfaces. generate_report's return type
+    is load-bearing for ten call sites, so the counts travel separately."""
+    findings_dropped: int = 0
+    reverified: bool = False
+    unverified: bool = False
+    # The generated report when verification could NOT be completed. Returned
+    # separately from generate_report's return value, which stays None so nothing
+    # unverified is ever mistaken for a usable report -- but the content is kept so
+    # a transient verifier outage does not cost a full regeneration (spec 4.7).
+    staged_report: "CommunityReport | None" = None
+
+
+_RETRY_NOTE = (
+    "\n\nYour previous answer was REJECTED. These findings state things the facts "
+    "you cited do not state, even if they are true in the real world:\n{offenders}\n"
+    "Rewrite the report using ONLY what the facts state. Do not restore the "
+    "rejected claims."
+)
+
+
+async def generate_report(client: AsyncOpenAI, model: str,
+                          context: ContextResult,
+                          max_tokens: int = 16000, *,
+                          verifier=None,
+                          stats: ReportStats | None = None) -> CommunityReport | None:
+    """Generate one community report, optionally verified against its own facts.
+
+    With `verifier` set: every finding is checked against the text of the facts it
+    cites. On violation the report is regenerated ONCE with the offenders named;
+    findings still unsupported are dropped. The summary verdict is never a reason
+    to skip the report -- see `_regenerate_summary`. Returns None -- report skipped
+    -- if every finding is dropped, or if verification could not be completed.
+    Without `verifier` the behaviour is exactly as before.
+    """
+    prompt = _PROMPT.format(context=context.text)
+    obj = await _generate_once(client, model, prompt, max_tokens)
+    if obj is None:
+        return None
+    report, findings = _build_report(obj, context)
+    if verifier is None or not findings:
+        # Nothing to verify: an empty report is already handled downstream by
+        # writeback, and calling the verifier with no findings wastes a request.
+        return report
+
+    result = await verifier(findings, report.summary, context.fact_texts)
+    if result is None:
+        if stats is not None:
+            stats.unverified = True
+            stats.staged_report = report
+        return None
+
+    if result.unsupported:
+        if stats is not None:
+            stats.reverified = True
+        offenders = "\n".join(
+            f"- {findings[i - 1]['finding']}" for i in sorted(result.unsupported)
+            if 1 <= i <= len(findings))
+        retry_obj = await _generate_once(
+            client, model, prompt + _RETRY_NOTE.format(offenders=offenders), max_tokens)
+        if retry_obj is not None:
+            report, findings = _build_report(retry_obj, context)
+            if not findings:
+                # The retry came back with no findings at all. Re-verifying an empty
+                # list returns unsupported=set(), which walks straight past the
+                # "every finding dropped" guard below and writes a citation-free
+                # report -- empty full_report, no cited facts, and a summary
+                # generated from an empty STATEMENTS block. Skip it here instead.
+                logger.warning("report retry returned no findings; skipping the report")
+                return None
+            result = await verifier(findings, report.summary, context.fact_texts)
+            if result is None:
+                if stats is not None:
+                    stats.unverified = True
+                    stats.staged_report = report
+                return None
+
+    if result.unsupported:
+        kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
+        if stats is not None:
+            stats.findings_dropped = len(findings) - len(kept)
+        if not kept:
+            return None
+        report = _with_findings(report, kept)
+        findings = kept
+
+    # The summary verdict (result.summary_supported) is deliberately IGNORED -- see
+    # the docstring on _regenerate_summary. Rewrite it from the surviving findings so
+    # it inherits their support; keep the original if the summariser returns nothing,
+    # since a summariser hiccup must not cost a verified report.
+    new_summary = await _regenerate_summary(client, model, findings, report.title)
+    if new_summary:
+        report = replace(report, summary=new_summary)
+    else:
+        # Visible, because the kept summary may still describe a dropped finding.
+        logger.warning(
+            "summary regeneration returned nothing usable for %r; keeping the "
+            "original summary (it was written before verification)", report.title)
+    return report

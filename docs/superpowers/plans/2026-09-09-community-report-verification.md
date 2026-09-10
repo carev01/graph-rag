@@ -1020,40 +1020,65 @@ EOF
 
 **Files:**
 - Modify: `src/theme_builder/cli.py` (both `generate_report` call sites, ~line 97 and ~line 171, and both result dicts, ~line 110 and ~line 189)
-- Test: `tests/unit/test_theme_cli_verification.py`
+- Test: `tests/integration/test_theme_cli.py`, `tests/integration/test_incremental_cli.py` (behavioural — assert the CLI passes a verifier and that the counters reach the summary; NO `inspect.getsource()` assertions)
 
 **Interfaces:**
 - Consumes: `_verify_client_and_model` (Task 3), `verify_report` (Task 4), `ReportStats` (Task 5).
 - Produces: `findings_dropped`, `reports_reverified`, `reports_unverified` in both `theme-build` result dicts.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Make the existing fakes behavioural**
 
-Create `tests/unit/test_theme_cli_verification.py`:
+**Do NOT write `inspect.getsource()` substring assertions.** This repo's own project
+review lists that pattern as a defect ("tests that assert less than they appear to",
+backlog item 16). Assert on behaviour through the existing integration harness instead.
+
+In `tests/integration/test_theme_cli.py`, the `_fake_report` fake currently is:
 
 ```python
-"""The CLI must actually pass a verifier -- otherwise verification is silently off
-in production while every unit test still passes."""
-import inspect
+    captured = {}
+    async def _fake_report(client, model, context, max_tokens):
+        captured["ctx"] = context
+        return CommunityReport("T", "S", "[]", 5.0, "", ["AWS"], list(context.fact_uuids))
+```
 
-from theme_builder import cli
+Change it to accept and record the new keyword arguments, and assert the CLI really
+passes a verifier — this is what stops verification being silently off in production
+while every other test still passes:
 
+```python
+    captured = {}
+    async def _fake_report(client, model, context, max_tokens, *, verifier=None, stats=None):
+        captured["ctx"] = context
+        captured["verifier"] = verifier
+        return CommunityReport("T", "S", "[]", 5.0, "", ["AWS"], list(context.fact_uuids))
+```
 
-def test_cli_passes_a_verifier_to_generate_report():
-    src = inspect.getsource(cli)
-    assert src.count("verifier=") >= 2, "both generate_report call sites must verify"
-    assert "_verify_client_and_model" in src
+and add to that test's assertions:
 
+```python
+    assert captured["verifier"] is not None, "theme-build must verify its reports"
+    assert res["findings_dropped"] == 0
+    assert res["reports_reverified"] == 0
+    assert res["reports_unverified"] == 0
+```
 
-def test_cli_reports_the_new_counters():
-    src = inspect.getsource(cli)
-    for key in ("findings_dropped", "reports_reverified", "reports_unverified"):
-        assert key in src, f"{key} must reach the run summary"
+Apply the same fake-signature change in the second test in that file and in
+`tests/integration/test_incremental_cli.py`'s `_fake_generate`. Change ONLY the
+signatures and add the new assertions — do not weaken any existing assertion. These fakes
+went stale once already and left the branch silently red.
+
+Also monkeypatch the verifier client in each affected test, mirroring the existing
+`_report_client_and_model` stub:
+
+```python
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run --extra dev pytest tests/unit/test_theme_cli_verification.py -q`
-Expected: FAIL — `assert 0 >= 2`.
+Run: `uv run --extra dev pytest tests/integration/test_theme_cli.py -q`
+Expected: FAIL — `AssertionError: theme-build must verify its reports` (the CLI does not
+pass a verifier yet), or a `KeyError` on the new result keys.
 
 - [ ] **Step 3: Wire the CLI**
 
@@ -1103,22 +1128,13 @@ Close `vclient` wherever the existing report `client` is closed, in the same `fi
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `uv run --extra dev pytest tests/unit/test_theme_cli_verification.py -q`
-Expected: PASS (2 passed).
-
-- [ ] **Step 5: Update the integration fakes honestly**
-
-`tests/integration/test_theme_cli.py` and `tests/integration/test_incremental_cli.py`
-fake `generate_report`. Their fakes must accept the new keyword arguments
-(`verifier=None, stats=None`) or the calls will raise `TypeError`. Update the fake
-signatures only — do NOT weaken any assertion. These same fakes went stale once already
-and left the branch silently red.
-
-Also monkeypatch `_verify_client_and_model` in those tests so they do not try to build a
-real client from test settings.
-
 Run: `uv run --extra dev pytest tests/integration/test_theme_cli.py tests/integration/test_incremental_cli.py -q`
-Expected: PASS (7 passed).
+Expected: PASS (7 passed). These use Docker testcontainers and are slow; let them finish.
+
+- [ ] **Step 5: Confirm nothing else regressed**
+
+Run: `uv run --extra dev pytest tests/unit -q`
+Expected: PASS. A failure here means the CLI wiring changed behaviour beyond verification.
 
 - [ ] **Step 6: Full suite, lint, type-check**
 
@@ -1262,3 +1278,686 @@ EOF
 5. `findings_dropped`, `reports_reverified`, `reports_unverified` visible in the summary (Task 6).
 6. The eval is re-run and global faithfulness reported against 1.6, whatever it shows (Task 7).
 7. Full non-live suite, ruff and mypy clean (Task 6 Step 6).
+
+---
+
+## Added 2026-09-09 after the first live rebuild
+
+The first `theme-build --full` lost **7 of 41** communities to `reports_unverified`.
+Probing the verifier straight afterwards showed it answering correctly in 204 completion
+tokens, so those were transient provider errors. But `write_communities` keeps only
+communities that have a new report and then atomically `DETACH DELETE`s the layer, so a
+momentary blip permanently removed a community until a **full rebuild** — discarding
+report generation we had already paid for, because the *check* failed.
+
+Task 8 revises the summary rule (spec §4.4). Tasks 9 and 10 implement spec §4.7.
+**Task 7 (live validation) runs LAST, after all three.**
+
+---
+
+### Task 8: Regenerate the summary from kept findings instead of verifying it
+
+**Files:**
+- Modify: `src/theme_builder/report.py`
+- Test: `tests/unit/test_summary_regeneration.py`
+
+**Interfaces:**
+- Consumes: `verify_report`, `VerifyResult`, `ReportStats`, `generate_report` (Tasks 4–6).
+- Produces: `_SUMMARY_PROMPT: str`; `async def _regenerate_summary(client, model, findings: list[dict], title: str, *, max_tokens: int = 1000) -> str | None`.
+- **Removes** `ReportStats.summary_unsupported` — it can no longer occur.
+
+**Why.** Measured across two full rebuilds, the old rule (verify the summary against the
+union of cited facts, skip the whole report if it fails) destroyed **15 of 41**
+communities on its own. `findings_dropped` came back **0** both times, and because the
+"every finding dropped" path increments that counter before returning, a zero proves no
+report was lost for bad findings — every non-transient loss was the summary.
+
+A community summary is inherently synthetic: one paragraph generalising across a whole
+community. Judging it by "states nothing the facts do not state" rejects legitimate
+summarising. Regenerating it from the surviving findings makes it inherit their support by
+construction.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/unit/test_summary_regeneration.py`:
+
+```python
+"""The summary is regenerated from kept findings, never a reason to lose a report."""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from theme_builder.context import ContextResult
+from theme_builder.report import ReportStats, VerifyResult, generate_report
+
+GOOD = {"title": "T", "summary": "ORIGINAL", "rating": 5, "rating_explanation": "r",
+        "tags": ["aws"],
+        "full_report": [{"finding": "F1", "fact_ids": ["u1"]},
+                        {"finding": "F2", "fact_ids": ["u2"]}]}
+
+
+def _ctx():
+    return ContextResult(text="ctx", fact_uuids={"u1", "u2"},
+                         fact_texts={"u1": "fact one", "u2": "fact two"})
+
+
+class _Client:
+    def __init__(self, payloads):
+        self._payloads = [json.dumps(p) if isinstance(p, dict) else p for p in payloads]
+        self.calls = []
+
+        async def _create(**kw):
+            self.calls.append(kw)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=self._payloads.pop(0)))])
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_create))
+
+
+def _verifier(*results):
+    seq = list(results)
+
+    async def _v(findings, summary, fact_texts):
+        return seq.pop(0)
+
+    return _v
+
+
+@pytest.mark.asyncio
+async def test_unsupported_summary_no_longer_loses_the_report():
+    """The old rule skipped the whole report here. It destroyed 15 of 41 communities."""
+    st = ReportStats()
+    rep = await generate_report(
+        _Client([GOOD, "A regenerated summary."]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported=set(), summary_supported=False)),
+        stats=st)
+    assert rep is not None, "a failing summary must never lose a report"
+    assert len(json.loads(rep.full_report)) == 2
+
+
+@pytest.mark.asyncio
+async def test_summary_is_replaced_by_the_regenerated_one():
+    rep = await generate_report(
+        _Client([GOOD, "A regenerated summary."]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(set(), True)), stats=ReportStats())
+    assert rep is not None and rep.summary == "A regenerated summary."
+
+
+@pytest.mark.asyncio
+async def test_regeneration_sees_only_the_kept_findings():
+    """F2 was dropped, so the summariser must not be shown it."""
+    c = _Client([GOOD, GOOD, "Summary of F1 only."])
+    rep = await generate_report(
+        c, "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported={2}, summary_supported=True),
+                           VerifyResult(unsupported={2}, summary_supported=True)),
+        stats=ReportStats())
+    assert rep is not None
+    prompt = c.calls[-1]["messages"][0]["content"]
+    assert "F1" in prompt and "F2" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_all_findings_dropped_still_skips_without_summarising():
+    """Nothing to summarise -- and no wasted call."""
+    c = _Client([GOOD, GOOD])
+    st = ReportStats()
+    rep = await generate_report(
+        c, "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported={1, 2}, summary_supported=True),
+                           VerifyResult(unsupported={1, 2}, summary_supported=True)),
+        stats=st)
+    assert rep is None and st.findings_dropped == 2
+    assert len(c.calls) == 2, "must not call the summariser with no findings"
+
+
+@pytest.mark.asyncio
+async def test_unusable_summary_reply_keeps_the_original_summary():
+    """A summariser hiccup must not lose the report either."""
+    rep = await generate_report(
+        _Client([GOOD, ""]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(set(), True)), stats=ReportStats())
+    assert rep is not None and rep.summary == "ORIGINAL"
+
+
+@pytest.mark.asyncio
+async def test_no_verifier_skips_regeneration_entirely():
+    rep = await generate_report(_Client([GOOD]), "m", _ctx())
+    assert rep is not None and rep.summary == "ORIGINAL"
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run --extra dev pytest tests/unit/test_summary_regeneration.py -q`
+Expected: FAIL — the first test currently returns `None` (old rule skips the report).
+
+- [ ] **Step 3: Add the summariser**
+
+In `src/theme_builder/report.py`:
+
+```python
+_SUMMARY_PROMPT = (
+    "Write ONE paragraph summarising the STATEMENTS below for a community titled "
+    "\"{title}\". Summarise only what these statements say -- do NOT add any detail, "
+    "number, product name or limit that is not in them, and do NOT write any URL. "
+    "Reply with the paragraph only.\n\nSTATEMENTS:\n{statements}"
+)
+
+
+async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[dict],
+                              title: str, *, max_tokens: int = 1000) -> str | None:
+    """Rewrite the summary from the findings that survived verification.
+
+    The summary is inherently synthetic -- one paragraph generalising a whole
+    community -- so verifying it against raw facts rejected legitimate summarising
+    and cost 15 of 41 communities across two rebuilds. Regenerating it from verified
+    findings makes it inherit their support instead.
+    """
+    statements = "\n".join(f"- {f.get('finding', '')}" for f in findings)
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens,
+        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(
+            title=title, statements=statements)}])
+    text = usable_content(resp)
+    return _strip(text) if text else None
+```
+
+- [ ] **Step 4: Rewire `generate_report`**
+
+Replace the post-verification block. The summary verdict is no longer consulted; drop the
+`summary_unsupported` handling entirely and remove that field from `ReportStats`:
+
+```python
+    if result.unsupported:
+        kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
+        if stats is not None:
+            stats.findings_dropped = len(findings) - len(kept)
+        if not kept:
+            return None
+        report = _with_findings(report, kept)
+        findings = kept
+
+    # The summary verdict (result.summary_supported) is deliberately IGNORED -- see
+    # the docstring on _regenerate_summary. Rewrite it from the surviving findings so
+    # it inherits their support; keep the original if the summariser returns nothing,
+    # since a summariser hiccup must not cost a verified report.
+    new_summary = await _regenerate_summary(client, model, findings, report.title)
+    if new_summary:
+        report = replace(report, summary=new_summary)
+    return report
+```
+
+Also drive the retry on `result.unsupported` only — remove `or not result.summary_supported`
+from that condition, and remove the `"- The SUMMARY is not supported by the facts."`
+line from the offenders text.
+
+- [ ] **Step 5: Run the new tests**
+
+Run: `uv run --extra dev pytest tests/unit/test_summary_regeneration.py -q`
+Expected: PASS (6 passed).
+
+- [ ] **Step 6: Update the test that pinned the old rule**
+
+`tests/unit/test_report_verification_flow.py::test_unsupported_summary_skips_the_whole_report`
+asserts the behaviour this task deliberately removes. Rewrite it to assert the NEW
+contract — an unsupported summary verdict does not skip the report — or delete it as
+superseded by `test_unsupported_summary_no_longer_loses_the_report`. Say which you chose
+and why in your report. Do NOT weaken any other assertion in that file.
+
+Run: `uv run --extra dev pytest tests/unit -q`
+Expected: PASS.
+
+- [ ] **Step 7: Full suite, lint, type-check, commit**
+
+Run: `uv run ruff check src tests && uv run mypy src && uv run --extra dev pytest -m "not live" -q`
+Expected: all pass. FOREGROUND, ~11 minutes.
+
+```bash
+git add src tests
+git commit -F - <<'EOF'
+feat(theme): regenerate the summary from kept findings instead of verifying it
+
+Measured across two full rebuilds, the old rule -- verify the summary against the
+union of cited facts, skip the whole report on failure -- destroyed 15 of 41
+communities on its own. findings_dropped came back 0 both times, and since the
+all-dropped path increments that counter before returning, a zero proves nothing
+was lost for bad findings. Every non-transient loss was the summary.
+
+The rule was wrong in principle: a community summary is inherently synthetic, so
+"states nothing the facts do not state" rejects legitimate summarising. It is now
+regenerated from the findings that survived verification, inheriting their
+support by construction.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0174DUVF7CPn91yApHMLiVcv
+EOF
+```
+
+---
+
+### Task 9: Stage a report whose verification could not complete
+
+**Files:**
+- Modify: `src/theme_builder/report.py` (`ReportStats`, the two `stats.unverified = True` branches)
+- Modify: `src/theme_builder/writeback.py` (`write_communities`)
+- Modify: `src/theme_builder/cli.py` (collect staged reports, pass them to writeback)
+- Modify: `src/theme_builder/incremental.py` (treat a staged community as dirty)
+- Test: `tests/unit/test_report_staging.py`
+
+**Interfaces:**
+- Consumes: `ReportStats`, `generate_report`, `verify_report` (Tasks 4–6).
+- Produces:
+  - `ReportStats.staged_report: CommunityReport | None = None`
+  - `write_communities(driver, embedder, group_id, communities, reports, corpus_cursor, *, pending: dict[str, CommunityReport] | None = None)`
+
+**The key move:** `generate_report` still returns `None` when verification cannot complete
+— so nothing unverified is ever treated as a usable report — but it now hands the report
+back on `stats.staged_report` so the caller can persist it out of reach instead of
+throwing it away.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/unit/test_report_staging.py`:
+
+```python
+"""A report whose verification could not complete is STAGED, not destroyed.
+
+The first live rebuild lost 7 of 41 communities to transient verifier errors. The
+report generation had already been paid for; only the check failed."""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from theme_builder.context import ContextResult
+from theme_builder.report import CommunityReport, ReportStats, VerifyResult, generate_report
+
+GOOD = {"title": "T", "summary": "S", "rating": 5, "rating_explanation": "r",
+        "tags": ["aws"],
+        "full_report": [{"finding": "F1", "fact_ids": ["u1"]}]}
+
+
+def _ctx():
+    return ContextResult(text="ctx", fact_uuids={"u1"}, fact_texts={"u1": "fact one"})
+
+
+class _Client:
+    def __init__(self, payloads):
+        self._payloads = [json.dumps(p) if isinstance(p, dict) else p for p in payloads]
+
+        async def _create(**kw):
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=self._payloads.pop(0)))])
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_create))
+
+
+def _verifier(*results):
+    seq = list(results)
+
+    async def _v(findings, summary, fact_texts):
+        return seq.pop(0)
+
+    return _v
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_report_is_staged_not_destroyed():
+    st = ReportStats()
+    rep = await generate_report(_Client([GOOD]), "m", _ctx(),
+                                verifier=_verifier(None), stats=st)
+    assert rep is None, "must not be returned as a usable report"
+    assert st.unverified is True
+    assert isinstance(st.staged_report, CommunityReport)
+    assert st.staged_report.summary == "S"
+    assert json.loads(st.staged_report.full_report)[0]["finding"] == "F1"
+
+
+@pytest.mark.asyncio
+async def test_staged_report_carries_the_retry_generation_when_there_was_one():
+    """If the retry regenerated the report and THEN the verifier died, the newer
+    report is the one worth keeping."""
+    st = ReportStats()
+    newer = {**GOOD, "summary": "S2"}
+    rep = await generate_report(
+        _Client([GOOD, newer]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported={1}, summary_supported=True), None),
+        stats=st)
+    assert rep is None and st.unverified is True
+    assert st.staged_report is not None and st.staged_report.summary == "S2"
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_unsupported_report_is_not_staged():
+    """Staging is for 'could not check', never for 'checked and it failed'.
+
+    NOTE: an unsupported SUMMARY no longer fails a report (Task 8) -- the summary is
+    regenerated from kept findings. The genuine-failure case is now "every finding
+    dropped", which is what this exercises. GOOD carries one finding, so dropping it
+    drops them all."""
+    st = ReportStats()
+    rep = await generate_report(
+        _Client([GOOD, GOOD]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported={1}, summary_supported=True),
+                           VerifyResult(unsupported={1}, summary_supported=True)),
+        stats=st)
+    assert rep is None and st.findings_dropped == 1
+    assert st.staged_report is None
+
+
+@pytest.mark.asyncio
+async def test_a_verified_report_stages_nothing():
+    """The second payload is the summary regeneration added in Task 8."""
+    st = ReportStats()
+    rep = await generate_report(_Client([GOOD, "A regenerated summary."]), "m", _ctx(),
+                                verifier=_verifier(VerifyResult(set(), True)), stats=st)
+    assert rep is not None and st.staged_report is None
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run --extra dev pytest tests/unit/test_report_staging.py -q`
+Expected: FAIL — `AttributeError: 'ReportStats' object has no attribute 'staged_report'`.
+
+- [ ] **Step 3: Carry the report on `ReportStats`**
+
+In `src/theme_builder/report.py`, add the field:
+
+```python
+@dataclass
+class ReportStats:
+    findings_dropped: int = 0
+    reverified: bool = False
+    unverified: bool = False
+    summary_unsupported: bool = False
+    # The generated report when verification could NOT be completed. Returned
+    # separately from generate_report's return value, which stays None so nothing
+    # unverified is ever mistaken for a usable report -- but the content is kept so
+    # a transient verifier outage does not cost a full regeneration (spec 4.7).
+    staged_report: "CommunityReport | None" = None
+```
+
+Then in BOTH branches of `generate_report` that set `stats.unverified = True`, also set
+`stats.staged_report = report` — using the `report` variable as it stands at that point,
+so the retry's newer report is staged when there was one:
+
+```python
+    if result is None:
+        if stats is not None:
+            stats.unverified = True
+            stats.staged_report = report
+        return None
+```
+
+and identically in the post-retry branch.
+
+- [ ] **Step 4: Run the report tests**
+
+Run: `uv run --extra dev pytest tests/unit/test_report_staging.py tests/unit/test_report_verification_flow.py -q`
+Expected: PASS (4 new + 11 existing = 15 passed).
+
+- [ ] **Step 5: Persist staged reports out of reach of retrieval**
+
+In `src/theme_builder/writeback.py`, give `write_communities` a keyword-only
+`pending: dict[str, CommunityReport] | None = None`. Inside `_rebuild`, after the loop that
+writes verified communities, write the staged ones — **with no `embedding`**:
+
+```python
+        for c in (communities if pending else []):
+            r = (pending or {}).get(c.community_id)
+            if r is None:
+                continue
+            # Staged: kept so a transient verifier outage does not cost a full
+            # regeneration, but written WITHOUT an embedding. shortlist_communities
+            # drops rows with no embedding, and DRIFT sources its ids from that same
+            # shortlist, so this is unreachable from every answering path by
+            # construction -- not by a flag someone could forget to check.
+            await tx.run(
+                "MERGE (c:Community {community_id:$cid, group_id:$g}) "
+                "SET c += {level:$level, title:$title, pending_summary:$summary, "
+                "pending_full_report:$full_report, rating:$rating, "
+                "rating_explanation:$re, tags:$tags, cited_fact_uuids:$cited, "
+                "verified:false, member_count:$mc, generated_at:datetime(), "
+                "corpus_cursor:$cur}",
+                cid=c.community_id, g=group_id, level=c.level, title=r.title,
+                summary=r.summary, full_report=r.full_report, rating=r.rating,
+                re=r.rating_explanation, tags=r.tags, cited=r.cited_fact_uuids,
+                mc=len(c.member_uuids), cur=corpus_cursor)
+            await tx.run(
+                "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                "UNWIND $members AS mu MATCH (e:Entity {uuid:mu, group_id:$g}) "
+                "MERGE (e)-[:IN_COMMUNITY]->(c)",
+                cid=c.community_id, g=group_id, members=c.member_uuids)
+```
+
+Set `verified: true` on the verified-community write in the same function, so the two
+kinds are distinguishable. Add `"reports_staged": len(pending or {})` to the returned dict.
+
+- [ ] **Step 6: Collect staged reports in the CLI**
+
+In `src/theme_builder/cli.py`, in `_run_theme_build` (the `--full` path), build a
+`pending: dict[str, CommunityReport] = {}` beside `reports`, and after each
+`generate_report` call:
+
+```python
+                if st.staged_report is not None:
+                    pending[c.community_id] = st.staged_report
+```
+
+Pass it through: `await write_communities(..., pending=pending)`, and add
+`"reports_staged": len(pending)` to that function's result dict.
+
+Leave `_run_theme_build_incremental` alone for staging — it uses
+`write_communities_incremental` and is covered by Step 7.
+
+- [ ] **Step 7: Treat a staged community as dirty**
+
+In `src/theme_builder/incremental.py`, `_load_persisted` (~line 115) reads every community
+regardless of embedding. A staged community has no embedding and an empty `summary`, so an
+incremental run could reuse it as if it carried a valid report. Make the dirty check treat
+it as dirty. Find where a persisted community is judged clean/reusable and add the
+condition that a community with no `embedding` (or `verified = false`) is always dirty.
+Add a comment naming the hazard.
+
+- [ ] **Step 8: Test the staging write and the dirty rule**
+
+Add to `tests/integration/test_theme_cli.py` a test that a community whose verification
+fails is still present in the graph, carries `pending_full_report`, has `verified = false`,
+and has **no** embedding — and therefore is not returned by `shortlist_communities`.
+Follow the existing integration-test style in that file (testcontainers fixture,
+monkeypatched report/verify clients).
+
+Run: `uv run --extra dev pytest tests/integration/test_theme_cli.py tests/integration/test_incremental_cli.py -q`
+Expected: PASS.
+
+- [ ] **Step 9: Full suite, lint, type-check, commit**
+
+Run: `uv run ruff check src tests && uv run mypy src && uv run --extra dev pytest -m "not live" -q`
+Expected: all pass. FOREGROUND, ~11 minutes.
+
+```bash
+git add src tests
+git commit -F - <<'EOF'
+feat(theme): stage a report whose verification could not complete
+
+A transient verifier error cost 7 of 41 communities on the first live rebuild,
+because write_communities keeps only communities with a new report and then
+DETACH DELETEs the layer. The generation was already paid for; only the check
+failed.
+
+generate_report still returns None so nothing unverified is mistaken for a
+usable report, but hands the content back on stats.staged_report. Staged reports
+are written with no embedding, which makes them unreachable from every answering
+path by construction -- shortlist_communities already drops rows without one.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0174DUVF7CPn91yApHMLiVcv
+EOF
+```
+
+---
+
+### Task 10: `theme-build --verify-pending` — recover staged reports
+
+**Files:**
+- Modify: `src/theme_builder/cli.py` (new `_run_verify_pending`, new CLI flag)
+- Test: `tests/integration/test_verify_pending.py`
+
+**Interfaces:**
+- Consumes: `verify_report`, `_verify_client_and_model` (Tasks 3–4); the staging schema (Task 8).
+- Produces: `theme-build --verify-pending`, returning
+  `{"reports_promoted": int, "reports_rejected": int, "reports_still_pending": int, "findings_dropped": int}`.
+
+**Why:** recovering from an outage must cost one verify call per staged community, not a
+full regeneration of the corpus.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/integration/test_verify_pending.py`. Follow the existing style in
+`tests/integration/test_theme_cli.py` (testcontainers `extract_driver` fixture,
+monkeypatched clients). Cover:
+
+- a staged community whose findings all verify is **promoted**: `summary` and
+  `full_report` are populated from `pending_*`, `verified` is true, an `embedding` is
+  written, and `pending_summary`/`pending_full_report` are cleared;
+- after promotion it IS returned by `shortlist_communities`;
+- a staged community with an unsupported finding has that finding dropped and the rest
+  promoted, counted in `findings_dropped`;
+- a staged community whose verifier is STILL unavailable stays staged, counted in
+  `reports_still_pending`, and is not promoted;
+- a staged community whose summary is unsupported is **rejected**: staging cleared, no
+  `summary`/`embedding` written, counted in `reports_rejected`;
+- a community that is already verified is left untouched and not re-verified.
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run --extra dev pytest tests/integration/test_verify_pending.py -q`
+Expected: FAIL — the `--verify-pending` path does not exist.
+
+- [ ] **Step 3: Implement `_run_verify_pending`**
+
+In `src/theme_builder/cli.py`:
+
+```python
+async def _run_verify_pending(settings, *, driver) -> dict:
+    """Re-verify only the reports staged by an earlier run and promote the ones
+    that pass.
+
+    Recovering from a verifier outage costs one verify call per staged community
+    rather than regenerating the corpus (spec 4.7).
+    """
+    vclient, vmodel = _verify_client_and_model(settings)
+    embedder = build_embedder(settings)
+    promoted = rejected = still_pending = findings_dropped = 0
+    try:
+        async with driver.session() as s:
+            r = await s.run(
+                "MATCH (c:Community {group_id:$g}) WHERE c.pending_full_report IS NOT NULL "
+                "RETURN c.community_id AS cid, c.title AS title, "
+                "c.pending_summary AS summary, c.pending_full_report AS full_report, "
+                "coalesce(c.cited_fact_uuids,[]) AS cited", g=settings.group_id)
+            staged = [dict(x) async for x in r]
+        for row in staged:
+            findings = json.loads(row["full_report"] or "[]")
+            async with driver.session() as s:
+                fr = await s.run(
+                    "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
+                    "RETURN f.uuid AS uuid, f.fact AS fact",
+                    g=settings.group_id, u=list(row["cited"]))
+                fact_texts = {x["uuid"]: x["fact"] async for x in fr}
+            result = await verify_report(vclient, vmodel, findings,
+                                         row["summary"] or "", fact_texts)
+            if result is None:
+                still_pending += 1
+                continue
+            kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
+            findings_dropped += len(findings) - len(kept)
+            if not result.summary_supported or not kept:
+                rejected += 1
+                async with driver.session() as s:
+                    await s.run(
+                        "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                        "REMOVE c.pending_summary, c.pending_full_report",
+                        cid=row["cid"], g=settings.group_id)
+                continue
+            cited: list[str] = []
+            for f in kept:
+                for fid in f["fact_ids"]:
+                    if fid not in cited:
+                        cited.append(fid)
+            emb = (await embedder.create_batch([f"{row['title']}\n{row['summary']}"]))[0]
+            async with driver.session() as s:
+                await s.run(
+                    "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                    "SET c.summary=$summary, c.full_report=$full_report, "
+                    "c.cited_fact_uuids=$cited, c.embedding=$emb, c.verified=true "
+                    "REMOVE c.pending_summary, c.pending_full_report",
+                    cid=row["cid"], g=settings.group_id, summary=row["summary"],
+                    full_report=json.dumps(kept), cited=cited, emb=emb)
+            promoted += 1
+    finally:
+        await vclient.close()
+        await embedder.client.close()
+    return {"reports_promoted": promoted, "reports_rejected": rejected,
+            "reports_still_pending": still_pending,
+            "findings_dropped": findings_dropped}
+```
+
+- [ ] **Step 4: Add the CLI flag**
+
+```python
+@app.command("theme-build")
+def theme_build(
+        full: bool = typer.Option(
+            False, "--full", help="Full rebuild (regenerate every report) instead of incremental."),
+        verify_pending: bool = typer.Option(
+            False, "--verify-pending",
+            help="Re-verify only reports staged by an earlier run and promote the ones "
+                 "that pass. Recovers from a transient verifier outage without "
+                 "regenerating anything."),
+) -> None:
+    """Refresh the community-report layer (incremental by default; --full rebuilds all)."""
+    async def _main() -> None:
+        settings = get_extract_settings()
+        driver = AsyncGraphDatabase.driver(
+            settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
+        try:
+            if verify_pending:
+                res = await _run_verify_pending(settings, driver=driver)
+            else:
+                runner = _run_theme_build if full else _run_theme_build_incremental
+                res = await runner(settings, driver=driver)
+            typer.echo(json.dumps(res, indent=2, default=str))
+        finally:
+            await driver.close()
+
+    asyncio.run(_main())
+```
+
+If `--full` and `--verify-pending` are both given, `--verify-pending` wins; say so in its
+help text if that is not already obvious from the wording.
+
+- [ ] **Step 5: Run the tests**
+
+Run: `uv run --extra dev pytest tests/integration/test_verify_pending.py -q`
+Expected: PASS.
+
+- [ ] **Step 6: Full suite, lint, type-check, commit**
+
+Run: `uv run ruff check src tests && uv run mypy src && uv run --extra dev pytest -m "not live" -q`
+Expected: all pass. FOREGROUND, ~11 minutes.
+
+```bash
+git add src tests
+git commit -F - <<'EOF'
+feat(theme): theme-build --verify-pending recovers staged reports
+
+Re-verifies only the reports staged by an earlier run and promotes the ones that
+pass, so a verifier outage costs one verify call per staged community instead of
+a full regeneration.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0174DUVF7CPn91yApHMLiVcv
+EOF
+```

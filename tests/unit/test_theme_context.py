@@ -37,3 +37,35 @@ def test_single_oversized_fact_is_clipped_not_blown():
     assert "big" in res.fact_uuids                      # still included (>=1 guarantee)
     assert len(res.text) <= 40 + 60                     # clipped, not a 10k overshoot
     assert res.text.rstrip().endswith(("x", "]")) or "[big]" in res.text  # label preserved
+    # verify fact_texts stores the FULL original fact, not the display text
+    assert set(res.fact_texts) == res.fact_uuids       # lockstep on clipped path too
+    assert res.fact_texts["big"] == "x" * 10000        # stored full text, not clipped display
+
+
+def test_fact_texts_maps_uuid_to_text_for_included_facts():
+    """The verifier needs each fact's TEXT, not just its uuid."""
+    from theme_builder.context import EntityRow, FactRow, assemble_context
+    facts = [
+        FactRow(uuid="u1", fact="AWS Backup provides continuous backups for Aurora.",
+                valid_at=None, invalid_at=None, name="PROVIDES"),
+        FactRow(uuid="u2", fact="AWS Backup integrates with AWS KMS.",
+                valid_at=None, invalid_at=None, name="INTEGRATES_WITH"),
+    ]
+    members = [EntityRow(uuid="e1", name="AWS Backup", type="Product", summary="s", degree=2)]
+    ctx = assemble_context(members, facts, top_entities=5, token_budget=1000)
+    assert ctx.fact_texts == {
+        "u1": "AWS Backup provides continuous backups for Aurora.",
+        "u2": "AWS Backup integrates with AWS KMS.",
+    }
+    assert set(ctx.fact_texts) == ctx.fact_uuids
+
+
+def test_fact_texts_excludes_facts_dropped_by_the_budget():
+    """A fact cut for budget is not citable, so it must not appear in fact_texts."""
+    from theme_builder.context import EntityRow, FactRow, assemble_context
+    facts = [FactRow(uuid=f"u{i}", fact="x" * 200, valid_at=None, invalid_at=None,
+                     name="N") for i in range(10)]
+    members = [EntityRow(uuid="e1", name="E", type="Product", summary="s", degree=1)]
+    ctx = assemble_context(members, facts, top_entities=1, token_budget=100)
+    assert set(ctx.fact_texts) == ctx.fact_uuids
+    assert len(ctx.fact_texts) < 10

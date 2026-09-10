@@ -70,3 +70,17 @@ def instrument(async_openai):
             return wrapped
         setattr(responses, name, _wrap(fn))
     return async_openai
+
+
+def usable_content(resp) -> str | None:
+    """The text of a chat completion, or None when the model returned nothing.
+
+    Two ways a HTTP 200 carries no answer: an empty `choices` list, and
+    `content=None` because a reasoning model spent its whole max_tokens budget on
+    reasoning tokens and emitted no final message. Both must stay distinguishable
+    from a real reply — coercing them to "" has caused four separate defects here.
+    """
+    if not resp.choices:
+        return None
+    content = resp.choices[0].message.content
+    return content if content and content.strip() else None

@@ -3,7 +3,7 @@ member/fact rows from Neo4j; this ranks, orders, budgets, and labels them so the
 report LLM can cite fact UUIDs. Kept pure so it is unit-testable without a DB."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -28,6 +28,11 @@ class FactRow:
 class ContextResult:
     text: str
     fact_uuids: set[str]
+    # uuid -> fact text, for exactly the facts included above. The report verifier
+    # judges each finding against the text of the facts it cites; `text` renders
+    # them into one blob, which is not machine-addressable. Defaulted so existing
+    # constructions (several test fakes) keep working.
+    fact_texts: dict[str, str] = field(default_factory=dict)
 
 
 def assemble_context(members: list[EntityRow], facts: list[FactRow], *,
@@ -43,6 +48,7 @@ def assemble_context(members: list[EntityRow], facts: list[FactRow], *,
     char_budget = token_budget * 4
     used = len("\n".join(lines))
     included: set[str] = set()
+    texts: dict[str, str] = {}
     # current facts (invalid_at is None) first, then superseded; each group by
     # valid_at descending (recency). reverse=True puts empty/None valid_at last.
     current = [f for f in facts if f.invalid_at is None]
@@ -61,8 +67,10 @@ def assemble_context(members: list[EntityRow], facts: list[FactRow], *,
             room = max(len(f"[{f.uuid}] "), char_budget - used - 1)
             lines.append(line[:room])
             included.add(f.uuid)
+            texts[f.uuid] = f.fact
             break
         lines.append(line)
         included.add(f.uuid)
+        texts[f.uuid] = f.fact
         used += len(line) + 1
-    return ContextResult(text="\n".join(lines), fact_uuids=included)
+    return ContextResult(text="\n".join(lines), fact_uuids=included, fact_texts=texts)

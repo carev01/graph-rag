@@ -64,6 +64,25 @@ replay mechanism, RDS Multi-AZ exclusion, 1–35 day range, 1-second precision, 
 incremental copy, same-AWS-Organization requirement) — none in any cited fact, all of
 them reproduced downstream with real markers attached.
 
+### 3a-bis. `_MAP_PROMPT` has no relevance rubric — scores invert
+User-observed 2026-09-10, same question ("What should I consider for backup encryption
+across cloud providers?"):
+
+- "KMS Key Policy Management for AWS Backup" — literally about encryption keys — scored **3**.
+- "Resiliency in Azure: Unified BCDR Posture Management Platform" — 25 cited facts, none
+  about encryption — scored **6**, and returned all 25 fact_ids.
+
+The prompt asks only for `"relevance": 0-10 (how useful for the question)` with **no
+anchors and no definition of relevance**. A model given "how useful, 0-10" rewards a large,
+information-dense report over a narrow on-topic one — which is exactly the inversion seen.
+The junk community then reaches the reduce step ranked ABOVE the on-topic one, and its
+fact_ids consume marker numbers (see 3b).
+
+Fix with 3a: add explicit scale anchors and define relevance as topical match to the
+question, not general usefulness. Then re-run these two examples as a before/after. Only
+if the inversion survives a proper rubric is this evidence about the model (3c) rather
+than about our prompt.
+
 ### 3b. Drop communities that contribute nothing
 `relevance_min = 2` admits communities whose own key points say "No information provided
 on AWS Backup restore workflows" or "provides no details". They inject meta-commentary
@@ -71,9 +90,41 @@ and consume marker numbers. Either raise the threshold or detect a map result ca
 supported key point before it reaches reduce.
 
 ### 3c. Re-test the map tier after 3a
-The map model is `upstage/solar-pro4` — the same cheap-tier model implicated in item 4.
+The map model is `upstage/solar-pro4`, which currently does THREE jobs: cheap extraction,
+the global map step, and the router classifier (which falls back to the cheap tier and so
+decides which retrieval mode every question takes). It is the same model implicated in
+item 4.
 Fix our prompt first (on this project the fault has been in our own code or config every
 time), then compare cheap vs strong tier on the map step with the corrected prompt.
+
+### 3d. Cross-encoder reranking for the global path — evaluate AFTER 3a/3a-bis
+**We already use a reranker, but only on the path that works.** `graphiti_client.py:212`
+passes `OpenAIRerankerClient` as graphiti's cross-encoder for local search (local scores
+5.0 faithfulness). `global_search.py` has none: `_rank_hits` does cosine in pure Python
+plus a rating boost, takes top-`k`, and hands them straight to the LLM. That is the path
+where relevance inverts (3a-bis). graphiti ships `bge_reranker_client`,
+`gemini_reranker_client` and `openai_reranker_client`, so the dependency already exists.
+
+`map_report` currently does TWO jobs in one call: score relevance 0-10, and extract
+key_points + fact_ids. A cross-encoder is purpose-built for the first and is calibrated
+for it, where an LLM rating 0-10 is improvising a scale.
+
+Three wins if adopted:
+1. **Cheaper, not dearer** — rerank cheaply, then run the expensive map call on the top 3-4
+   instead of all 10, which offsets moving the map step to gpt-5-mini.
+2. **Better recall** — today's top-10 is cosine over a community SUMMARY embedding, and
+   that summary is now a regenerated synthetic paragraph (a weak signal). Rerank top-50
+   down to top-5 instead.
+3. **Right granularity** — cross-encoders cap near 512 tokens and reports run ~5k chars, so
+   rerank FINDINGS rather than whole reports. Finding-level relevance is what reduce eats.
+
+**What it does NOT do:** it changes what gets selected, not whether content is invented.
+That was the report-verification slice. Do not let it be sold as a faithfulness fix.
+
+**Sequencing:** do 3a/3a-bis (rubric + model) first and measure on the two 3a-bis examples.
+If a proper rubric fixes calibration, this becomes an optimisation (cost, recall) rather
+than a correctness fix, which changes its priority. Adding infrastructure to paper over a
+prompt bug is the mistake tracing already saved this project from twice.
 
 ### 3. ~~Structural constraint on the global reduce step~~ — **DEPRIORITISED 2026-09-09**
 Superseded by 3a/3b/3c. The trace showed the reduce step is **faithful to its input** —
@@ -117,6 +168,44 @@ Same bug class as the four already fixed — see the `llm-empty-reply-coerced-to
 note. Use `synthesize._usable_content`. Observable today as `routing.via = "default"`,
 but nothing aggregates it, so a regression would be invisible. Routing accuracy 0.97 was
 measured with the current classifier, so it is not biting *now*.
+
+### 5b. Answer-path LLM clients have NO timeout and no provider routing — **P1**
+`report.py` was fixed on 2026-09-08 after a measured 380-second outlier: OpenRouter routes
+the same model to different providers (29 tok/s vs 9.4 tok/s on the same prompt), so it
+got `timeout=180.0, max_retries=3` plus `_prefer_fast_provider` (throughput sort). Its own
+comment warns "unpinned, a 60-community build is anywhere from 30 minutes to 6 hours."
+
+**That fix was never generalised.** Every answer-path client is still bare:
+
+- `synthesize.py:176` — `AsyncOpenAI(api_key=..., base_url=...)`, no timeout, no routing
+- `global_search.py:105` — same
+- `eval_router.py:66` — same
+- `router.py:54` — same
+
+Two consequences. **In production**, an `/answer` request has no timeout, so a single bad
+provider route can hang a user's query indefinitely with nothing to cut it off.
+**In the eval**, observed 2026-09-10: a run that previously took ~20 minutes took over 100,
+with only 2 retry warnings in the log — so the slowness is route latency, not retries.
+
+Fix: extract the report-tier client construction (bounded timeout + throughput preference)
+into one shared helper and use it for every tier. This is the third time in one session a
+fix was applied at one call site instead of the layer that needed it — see
+[[llm-empty-reply-coerced-to-value]] for the same pattern.
+
+### 5c. `rep is None` still drops a community on the non-staged paths — **P1**
+Staging (2026-09-10) covers only the verifier-blip path. The other `rep is None` routes —
+`except Exception` around report generation, and `_generate_once` returning `None` (measured
+3/29 empty-`choices` replies on a real theme-build) — still omit the community from
+`entries`, so `write_communities_incremental`'s `DETACH DELETE` removes it along with its
+**previously verified** report.
+
+Related, weaker: even on the staged path, a blip costs the community its retrievability
+until `theme-build --verify-pending` runs, and a later genuine rejection loses the older
+verified text permanently.
+
+**One rule fixes both:** when `rep is None` for any reason, fall back to `matches[i]`'s
+persisted verified entry rather than omitting it. Nothing verified should leave retrieval
+because a *new* attempt failed.
 
 ### 6. graphiti's false invalidations (the "43 phantom invalidations")
 Review §2.3, and reproduced live during the temporal-coherence slice: graphiti
