@@ -192,6 +192,21 @@ into one shared helper and use it for every tier. This is the third time in one 
 fix was applied at one call site instead of the layer that needed it — see
 [[llm-empty-reply-coerced-to-value]] for the same pattern.
 
+### 5c. `rep is None` still drops a community on the non-staged paths — **P1**
+Staging (2026-09-10) covers only the verifier-blip path. The other `rep is None` routes —
+`except Exception` around report generation, and `_generate_once` returning `None` (measured
+3/29 empty-`choices` replies on a real theme-build) — still omit the community from
+`entries`, so `write_communities_incremental`'s `DETACH DELETE` removes it along with its
+**previously verified** report.
+
+Related, weaker: even on the staged path, a blip costs the community its retrievability
+until `theme-build --verify-pending` runs, and a later genuine rejection loses the older
+verified text permanently.
+
+**One rule fixes both:** when `rep is None` for any reason, fall back to `matches[i]`'s
+persisted verified entry rather than omitting it. Nothing verified should leave retrieval
+because a *new* attempt failed.
+
 ### 6. graphiti's false invalidations (the "43 phantom invalidations")
 Review §2.3, and reproduced live during the temporal-coherence slice: graphiti
 invalidated a fact **at ingest time** (`invalid_at == the new fact's valid_at`,
