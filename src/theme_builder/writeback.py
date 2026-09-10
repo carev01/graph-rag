@@ -29,6 +29,19 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
     for c in written:
         by_level[c.level] = by_level.get(c.level, 0) + 1
 
+    # A community that is neither written (no report) nor staged (pending) is
+    # genuinely dropped by the DETACH DELETE rebuild below -- gone from the graph,
+    # not just unwritten this run. by_level only ever counted the survivors, which
+    # is how level 1 lost a 219-entity community for two slices without anyone
+    # noticing: reports_skipped moved, but nothing said WHICH level absorbed it,
+    # and global search reads level 1 only. Keyed by level so an operator can see
+    # a retrieval-critical level draining without cross-referencing report logs.
+    pending_ids = set(pending or {})
+    lost_by_level: dict[int, int] = {}
+    for c in communities:
+        if c.community_id not in reports and c.community_id not in pending_ids:
+            lost_by_level[c.level] = lost_by_level.get(c.level, 0) + 1
+
     async def _rebuild(tx):
         # atomic full rebuild: old :Community subgraph deleted and the new one
         # written in a single transaction, so a mid-run failure rolls back to the
@@ -87,6 +100,7 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
     async with driver.session() as s:
         await s.execute_write(_rebuild)
     return {"reports_written": len(written), "by_level": by_level,
+            "lost_by_level": lost_by_level,
             "facts_cited": sum(len(reports[c.community_id].cited_fact_uuids) for c in written),
             "reports_staged": len(pending or {})}
 
@@ -105,7 +119,18 @@ async def write_communities_incremental(driver: AsyncDriver, group_id: str,
     graph (so the rebuild's DETACH DELETE does not destroy it) but unreachable from
     shortlist_communities, and therefore from DRIFT, by construction. Staging it
     here is what keeps the DEFAULT incremental path from losing a community to a
-    transient verifier blip."""
+    transient verifier blip.
+
+    No lost_by_level here (unlike write_communities): `entries` only holds the
+    survivors -- clean/reused, regenerated, and staged rows -- so a community the
+    CLI genuinely skipped (no report, not staged) never shows up in `entries` at
+    all, not even its level. Computing lost_by_level would require the full
+    detected `communities` list alongside the per-community outcome, which only
+    the caller (theme_builder.cli._run_theme_build_incremental) has: it already
+    loops `for i, c in enumerate(communities)` and knows `c.level` for every
+    community it drops into `skipped` (as opposed to `staged`). That loop would
+    need to accumulate its own skipped-by-level dict and merge it into `res`
+    after this call returns, the same way it already adds `reports_skipped`."""
     by_level: dict[int, int] = {}
     for e in entries:
         by_level[e["level"]] = by_level.get(e["level"], 0) + 1
