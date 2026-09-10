@@ -118,6 +118,29 @@ note. Use `synthesize._usable_content`. Observable today as `routing.via = "defa
 but nothing aggregates it, so a regression would be invisible. Routing accuracy 0.97 was
 measured with the current classifier, so it is not biting *now*.
 
+### 5b. Answer-path LLM clients have NO timeout and no provider routing — **P1**
+`report.py` was fixed on 2026-09-08 after a measured 380-second outlier: OpenRouter routes
+the same model to different providers (29 tok/s vs 9.4 tok/s on the same prompt), so it
+got `timeout=180.0, max_retries=3` plus `_prefer_fast_provider` (throughput sort). Its own
+comment warns "unpinned, a 60-community build is anywhere from 30 minutes to 6 hours."
+
+**That fix was never generalised.** Every answer-path client is still bare:
+
+- `synthesize.py:176` — `AsyncOpenAI(api_key=..., base_url=...)`, no timeout, no routing
+- `global_search.py:105` — same
+- `eval_router.py:66` — same
+- `router.py:54` — same
+
+Two consequences. **In production**, an `/answer` request has no timeout, so a single bad
+provider route can hang a user's query indefinitely with nothing to cut it off.
+**In the eval**, observed 2026-09-10: a run that previously took ~20 minutes took over 100,
+with only 2 retry warnings in the log — so the slowness is route latency, not retries.
+
+Fix: extract the report-tier client construction (bounded timeout + throughput preference)
+into one shared helper and use it for every tier. This is the third time in one session a
+fix was applied at one call site instead of the layer that needed it — see
+[[llm-empty-reply-coerced-to-value]] for the same pattern.
+
 ### 6. graphiti's false invalidations (the "43 phantom invalidations")
 Review §2.3, and reproduced live during the temporal-coherence slice: graphiti
 invalidated a fact **at ingest time** (`invalid_at == the new fact's valid_at`,
