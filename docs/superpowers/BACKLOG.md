@@ -97,6 +97,35 @@ item 4.
 Fix our prompt first (on this project the fault has been in our own code or config every
 time), then compare cheap vs strong tier on the map step with the corrected prompt.
 
+### 3d. Cross-encoder reranking for the global path — evaluate AFTER 3a/3a-bis
+**We already use a reranker, but only on the path that works.** `graphiti_client.py:212`
+passes `OpenAIRerankerClient` as graphiti's cross-encoder for local search (local scores
+5.0 faithfulness). `global_search.py` has none: `_rank_hits` does cosine in pure Python
+plus a rating boost, takes top-`k`, and hands them straight to the LLM. That is the path
+where relevance inverts (3a-bis). graphiti ships `bge_reranker_client`,
+`gemini_reranker_client` and `openai_reranker_client`, so the dependency already exists.
+
+`map_report` currently does TWO jobs in one call: score relevance 0-10, and extract
+key_points + fact_ids. A cross-encoder is purpose-built for the first and is calibrated
+for it, where an LLM rating 0-10 is improvising a scale.
+
+Three wins if adopted:
+1. **Cheaper, not dearer** — rerank cheaply, then run the expensive map call on the top 3-4
+   instead of all 10, which offsets moving the map step to gpt-5-mini.
+2. **Better recall** — today's top-10 is cosine over a community SUMMARY embedding, and
+   that summary is now a regenerated synthetic paragraph (a weak signal). Rerank top-50
+   down to top-5 instead.
+3. **Right granularity** — cross-encoders cap near 512 tokens and reports run ~5k chars, so
+   rerank FINDINGS rather than whole reports. Finding-level relevance is what reduce eats.
+
+**What it does NOT do:** it changes what gets selected, not whether content is invented.
+That was the report-verification slice. Do not let it be sold as a faithfulness fix.
+
+**Sequencing:** do 3a/3a-bis (rubric + model) first and measure on the two 3a-bis examples.
+If a proper rubric fixes calibration, this becomes an optimisation (cost, recall) rather
+than a correctness fix, which changes its priority. Adding infrastructure to paper over a
+prompt bug is the mistake tracing already saved this project from twice.
+
 ### 3. ~~Structural constraint on the global reduce step~~ — **DEPRIORITISED 2026-09-09**
 Superseded by 3a/3b/3c. The trace showed the reduce step is **faithful to its input** —
 it copied the invented specifics it was handed. Constraining it further would constrain a
