@@ -15,6 +15,43 @@ section is by my recommended priority.
 
 ## P0 — Blocks trusting the system's own numbers
 
+### 0. Restore level 1, then re-baseline — **DO THIS FIRST**
+**Added 2026-09-10 from `faithfulness-investigation-2026-09-10.md`.** Global mode reads
+`global_default_level = 1`, and level 1 has **lost its Azure Backup community** (219
+entities, 705 intra-community facts, 701 of them Microsoft). It was rejected by
+`--verify-pending` under the summary rule that has since been removed, and nothing
+regenerated it. Detected vs retrievable by level: 19/17, **12/11**, 10/9. Every Azure golden
+article is unreachable at level 1.
+
+Measured across all ten golden global/DRIFT questions, the Azure Backup community appears
+**0/10 at level 1** and **10/10 at levels 0 and 2**. The golden set is dominated by
+AWS-vs-Azure comparisons, so **every comparison question at the production level is
+half-unanswerable by construction.** This invalidates the eval as a measure of comparison
+quality — including the 1.6 → 2.33 gain previously attributed to report verification.
+
+Note this is self-inflicted: a bug that was fixed without repairing the damage it did.
+
+**Do:** regenerate the two rejected communities and `--verify-pending` the two staged ones;
+add a lost-by-level counter to `theme-build` so this cannot recur silently; and until level 1
+is whole, set `global_default_level = 0` (the only complete level — it also puts the correct
+Azure community first on 8/10 questions) and re-baseline. Cheapest available step, and
+nothing else is measurable until it is done.
+
+### 0b. Bind claims to their supporting facts in the reduce step — **the real fix**
+`_MAP_PROMPT` returns `key_points[]` and `fact_ids[]` as **two unrelated lists**, and the
+reduce block renders `Supporting facts: [1] [2] … [19]` as a marker bag. The reducer cannot
+know which fact backs which point, so it numbers sentences **by position** — one traced
+answer cites `[1]…[5]` in order.
+
+Per-claim audit of a low-scoring answer: **6 of 6 claims fully supported by the facts the
+reducer was given, 0 correctly cited.** Judge scores 0-2 against the *cited* facts versus
+5/5/5 against the facts *given*. **That ~3-point gap is the global-vs-local gap.** The
+control that scored 5 cited 13/13 markers, so cited = given and binding could not bite.
+
+**Do:** feed the reducer `[N] fact` lines selected by the map step, instead of key points
+plus a marker bag. Predicted to close the gap. Do NOT add prompt constraints, swap tiers, or
+tune rerank thresholds — three slices have now shown those do not touch this.
+
 ### 1. Trace the map step: do community `key_points` drift from their facts?
 **Status: DONE 2026-09-09. Answer: YES — the drift starts in the map step.**
 Full evidence in `map-step-trace-2026-09-09.md`. Every hallucinated specific in the
@@ -42,16 +79,20 @@ faithfulness is ~1.1–1.6 (prose not supported by them). The traced worst case 
 none present in any of its 21 cited facts. See `router-eval-report.md`.
 </details>
 
-### 2. The faithfulness judge cannot check marker→fact correspondence
-`_cited_fact_texts` (`eval_router.py`) returns facts in arbitrary Neo4j order and the
-judge prompt lists them unnumbered. The judge can therefore only ask "is this claim
-supported by the fact set *collectively*?" — a misattributed-but-plausible marker passes.
+### 2. ~~The judge cannot check marker→fact correspondence~~ — **DIRECTION WAS BACKWARDS**
+**Corrected 2026-09-10.** This item argued the judge was too *loose* — that a
+misattributed-but-plausible marker would pass, so we were optimising against a looser metric
+than we believed. The investigation found the opposite: misattributed markers **fail**,
+because the reducer cites only 5-7 of 25-29 markers and the true supporting fact is usually
+not in the judge's set at all. Numbering the cited facts barely moves scores.
 
-We are optimising against a looser metric than the one we care about. Fix: number the
-facts by marker and have the judge score marker-to-fact support.
+The judge is **stricter** than assumed, on an axis nobody was working on. That is precisely
+why report verification moved the number (invented claims fail under any reading) while
+reduce-binding and reranking could not.
 
-**Do this before faithfulness gates any decision.** This slice is a case study in what
-happens when a metric is trusted further than it deserves.
+Still worth doing, but reframed and lower priority: **split the judge into
+evidence-faithfulness and citation-precision**, so the two failure modes stop being averaged
+into one uninterpretable score. Sequence it after 0 and 0b.
 
 ### 3a. Bind the map prompt to its facts — **the primary fix, do this first**
 Give `map_report` (`global_search.py`) the same evidence-binding the reduce prompt
