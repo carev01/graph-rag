@@ -317,25 +317,26 @@ exercised only by the manual compat run.
 This project has now shipped test-quality defects three times: two tests that did not
 verify their own docstring claim, and five stale doubles that left a branch silently red.
 
-### 16b. "Hermetic" tests are not hermetic — `graphiti_core` loads the real `.env` at import
-`graphiti_core/helpers.py:33` calls `load_dotenv()` at **import time**, so importing anything
-from graphiti puts the developer's real credentials into `os.environ`. Crucially,
-`ExtractSettings(_env_file=None, ...)` does **not** protect against this: `_env_file=None`
-only disables reading the `.env` FILE, while pydantic-settings still reads `os.environ`.
+### 16b. Integration tests are not hermetic against the developer's `.env`
+**Corrected 2026-09-10 — my first write-up of this overstated it.** `tests/unit/conftest.py`
+ALREADY has an autouse fixture stripping every `ExtractSettings` field from `os.environ`,
+and its docstring documents this exact hazard plus a real past incident (changing
+`CHEAP_LLM_MODEL` in `.env` broke three unrelated unit tests, order-dependently). **Unit
+tests are protected.**
 
-Observed 2026-09-10: six integration tests failed because their settings picked up the real
-`RERANK_*` credentials and the tests began exercising the live Voyage endpoint — a **paid**
-API — instead of their fakes. Patched locally by disabling rerank in those specific test
-settings, which does not address the class.
+The real gap is `tests/integration/`, which has a `conftest.py` with no such fixture.
 
-**Why it matters beyond flakiness:** a test suite that silently acquires live credentials
-can spend money, mutate real state, and pass or fail depending on whose machine runs it.
-Every future `*_BASE_URL` / `*_API_KEY` setting inherits the hazard.
+The hazard itself is real: `graphiti_core/helpers.py:33` calls `load_dotenv()` at **import
+time**, so importing graphiti copies `.env` into `os.environ`, and
+`ExtractSettings(_env_file=None, ...)` does **not** protect against it — pydantic-settings
+reads `os.environ` regardless. Observed 2026-09-10: six integration tests picked up the real
+`RERANK_*` credentials and began exercising the live Voyage endpoint — a **paid** API —
+instead of their fakes. Patched by pinning `rerank_base_url=""` in those specific tests,
+which fixes those tests and not the class.
 
-**Candidate fixes:** a session-scoped autouse fixture that strips the project's env vars
-from `os.environ` for unit tests; or a settings factory used by tests that pins every
-credential field to a fake value explicitly. Prefer the fixture — it fails safe for
-settings that do not exist yet.
+**Fix:** extend the same autouse fixture to `tests/integration/conftest.py`. Note it must
+not strip the variables the testcontainers fixtures legitimately set — check before
+applying. Every future `*_BASE_URL` / `*_API_KEY` setting inherits the hazard until it is.
 
 ### 17. Label collision
 The ontology's `Vendor`/`Product` entity types (`ontology.py:6,9`) collide with the
