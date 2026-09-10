@@ -317,6 +317,26 @@ exercised only by the manual compat run.
 This project has now shipped test-quality defects three times: two tests that did not
 verify their own docstring claim, and five stale doubles that left a branch silently red.
 
+### 16b. "Hermetic" tests are not hermetic — `graphiti_core` loads the real `.env` at import
+`graphiti_core/helpers.py:33` calls `load_dotenv()` at **import time**, so importing anything
+from graphiti puts the developer's real credentials into `os.environ`. Crucially,
+`ExtractSettings(_env_file=None, ...)` does **not** protect against this: `_env_file=None`
+only disables reading the `.env` FILE, while pydantic-settings still reads `os.environ`.
+
+Observed 2026-09-10: six integration tests failed because their settings picked up the real
+`RERANK_*` credentials and the tests began exercising the live Voyage endpoint — a **paid**
+API — instead of their fakes. Patched locally by disabling rerank in those specific test
+settings, which does not address the class.
+
+**Why it matters beyond flakiness:** a test suite that silently acquires live credentials
+can spend money, mutate real state, and pass or fail depending on whose machine runs it.
+Every future `*_BASE_URL` / `*_API_KEY` setting inherits the hazard.
+
+**Candidate fixes:** a session-scoped autouse fixture that strips the project's env vars
+from `os.environ` for unit tests; or a settings factory used by tests that pins every
+credential field to a fake value explicitly. Prefer the fixture — it fails safe for
+settings that do not exist yet.
+
 ### 17. Label collision
 The ontology's `Vendor`/`Product` entity types (`ontology.py:6,9`) collide with the
 structural layer's labels, so `MATCH (v:Vendor)` returns 22 nodes mixing both layers.
