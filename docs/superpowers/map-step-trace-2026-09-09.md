@@ -107,3 +107,77 @@ These consume marker numbers and inject noise. A community whose map output is e
   a key point), but the gap-filling hypothesis would be firmer across more questions.
 - Extraction is not deterministic (backlog item 7), so exact key points vary between runs;
   the pattern held across both traces.
+
+---
+
+## Post-fix validation (2026-09-10)
+
+Graph unchanged from the trace above: 385 episodes, 2,173 facts, 41 communities detected.
+
+### Rebuild results across three runs
+
+The first two runs were made under the ORIGINAL spec and exposed two design flaws in it.
+Run 3 is the fixed system.
+
+| | run 1 (original) | run 2 (original) | **run 3 (fixed)** |
+|---|---|---|---|
+| reports_written | 25 | 18 | **36** |
+| reports_staged (recoverable) | — | — | **5** |
+| **permanently lost** | **16** | **23** | **0** |
+| findings_dropped | 6 | 0 | **13** |
+| reports_reverified | 34 | 33 | 36 |
+| reports_unverified | 7 | 8 | 5 |
+
+`theme-build --verify-pending` then recovered the staged reports at a cost of five verify
+calls rather than a full rebuild: **1 promoted, 2 rejected** (genuine content failures),
+**2 still pending** (verifier still flaky, recoverable whenever it clears).
+
+Final state: **41 communities present, 37 retrievable**, 2 staged-and-recoverable,
+2 rejected.
+
+### The two design flaws the live runs exposed
+
+1. **The summary rule was destroying reports for the wrong reason.** Runs 1 and 2 skipped
+   15-16 non-transient reports while reporting `findings_dropped` of 6 and **0**. Because
+   the "every finding dropped" path increments that counter before returning, a zero
+   proves nothing was lost for bad findings — every non-transient loss was the summary.
+   The rule was wrong in principle: a community summary is inherently synthetic, so
+   judging it by "states nothing the facts do not state" rejects legitimate summarising.
+   The summary is now regenerated from the findings that survive verification.
+2. **A transient verifier error destroyed the report entirely.** `write_communities` keeps
+   only communities with a new report and then `DETACH DELETE`s the layer, so a provider
+   blip removed a community until a full rebuild — discarding generation already paid for
+   because the *check* failed. Reports are now staged with no embedding (unreachable from
+   every answering path by construction) and recovered by `--verify-pending`.
+
+### Verification of the original defect
+
+All six traced inventions are **gone** from every retrievable report:
+
+| probe | reports carrying it |
+|---|---|
+| `1-second` | 0 |
+| `35 day` | 0 |
+| `1 to 35` | 0 |
+| `Multi-AZ` | 0 |
+| `same organization` | 0 |
+| `from incremental backups` | 0 |
+
+### The headline number
+
+**36 of 41 reports failed first-pass verification** (`reports_reverified`). The report
+writer was inventing on ~88% of communities, not merely the four cases originally traced.
+`findings_dropped = 13` is what survived into a second attempt and still could not be
+supported.
+
+### Eval: NOT YET RUN
+
+The router golden-set eval could not be run: `openrouter.ai` resolves only to IPv6 and
+this host has no default IPv6 route, so every LLM call fails with `APIConnectionError`.
+It worked minutes earlier during the rebuild, so this is a transient local network
+condition. **Global faithfulness against the 1.6 baseline therefore remains unmeasured**,
+and no claim is made about it here.
+
+Note the eval harness swallowed 14 connection errors into per-question failures rather
+than aborting, which would have produced a plausible-looking but meaningless report. That
+is the same swallow-and-continue pattern this project has been bitten by repeatedly.
