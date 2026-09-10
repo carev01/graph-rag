@@ -488,7 +488,7 @@ EOF
 - Produces:
   - `@dataclass class RerankStats: degraded: str | None = None`
   - `shortlist_communities(driver, embedder, q, *, level, k, group_id, rating_boost=0.1, settings=None, stats=None) -> list[CommunityHit]`
-  - `CommunityHit.similarity` unchanged; `MapResult.relevance` becomes a **float** carrying the rerank score.
+  - `CommunityHit.similarity` unchanged; `MapResult.relevance` becomes a **float | None** carrying the rerank score (None when the shortlist was never reranked).
 
 **Why reranking lives in `shortlist_communities`:** DRIFT calls it (`drift.py:64`) and must
 inherit reranking. The degraded signal travels on an optional `stats` out-param, matching
@@ -667,8 +667,9 @@ _MAP_PROMPT = (
 
 In `map_report`, delete the relevance parse and the `relevance < relevance_min` gate, drop
 the `relevance_min` parameter, and populate `MapResult.relevance` from `hit.relevance` (the
-rerank score). Change `MapResult.relevance` to `float`. Remove `global_map_relevance_min`
-from `config.py` and from the `global_search(...)` call chain.
+rerank score). Change `MapResult.relevance` to `float | None` (None when the shortlist was
+never reranked). Remove `global_map_relevance_min` from `config.py` and from the
+`global_search(...)` call chain.
 
 - [ ] **Step 6: Run the tests**
 

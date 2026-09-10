@@ -16,10 +16,19 @@
 >
 > ## Reranking did NOT improve faithfulness
 >
-> Global faithfulness went 2.33 → 2.30. That is flat. Per-question global scores were
-> 5, 1, 1, 5, 2 against a previous 5, 1, 4, –, 2: individual questions moved in both
-> directions and cancelled out. Comparative global rose 2.4 → 2.625 and comparative DRIFT
-> fell 4.3 → 4.2 — both within noise on ten questions.
+> Global faithfulness went 2.33 → 2.30. That is flat on the headline, but the headline is
+> not the whole story: the previous 2.33 averaged **9** scored questions (1 was unscored),
+> and this run's 2.30 averages **10** (the previously-unscored question now scores 5). On
+> the **9 questions common to both runs, the mean fell 2.33 → 2.00** — a decline, held flat
+> in the headline only by the newly-scored question pulling the 10-question average back
+> up. Per-question global scores were 5, 1, 1, 5, 2 against a previous 5, 1, 4, –, 2:
+> individual questions moved in both directions and cancelled out. Comparative global rose
+> 2.4 → 2.625 and comparative DRIFT fell 4.3 → 4.2 — both within noise on ten questions.
+>
+> This does not make the conclusion below a regression claim — ten questions (nine, for the
+> like-for-like comparison) is too small a base to call 2.33 → 2.00 anything more than
+> "did not improve, and arguably drifted down within noise." It does mean "flat" undersells
+> what the like-for-like arithmetic actually shows.
 >
 > **This was pre-committed as the honest outcome and is reported as such.** The slice's own
 > spec (§2.8) states that reranking changes what is *selected*, not whether content is

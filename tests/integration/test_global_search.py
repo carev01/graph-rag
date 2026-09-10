@@ -77,6 +77,61 @@ async def test_global_search_end_to_end(extract_driver):
     assert res["communities_used"][0]["community_id"] == "c1"
 
 
+async def test_global_search_end_to_end_disclaims_when_rerank_unavailable(
+        extract_driver, monkeypatch):
+    """Mutation-verified wiring test (Important 1): a rerank outage must both set
+    `degraded` on the envelope AND put a reader-visible disclaimer in the answer
+    text. See the report for the delete-the-wiring-line proof."""
+    from answer_api import global_search as global_search_mod
+    from answer_api.global_search import global_search
+    import json
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (a:Article {id:'art1', source_url:'https://x/art1', title:'T'})"
+                    "-[:HAS_EPISODE]->(:Episodic {uuid:'ep1', group_id:$g})", g=g)
+        await s.run("CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f1', episodes:['ep1'], "
+                    "fact:'AWS Backup supports S3'}]->(y:Entity)", g=g)
+        await s.run("CREATE (:Community {group_id:$g, level:1, community_id:'c1', title:'S3 backup', "
+                    "summary:'s', rating:8.0, cited_fact_uuids:['f1'], full_report:'[]', embedding:[1.0,0.0]})", g=g)
+
+    class _Emb:
+        async def create_batch(self, texts): return [[1.0, 0.0] for _ in texts]
+
+    class _MapClient:   # returns a valid map result citing f1
+        def __init__(self):
+            self.chat = self
+            self.completions = self
+        async def create(self, **kw):
+            c = json.dumps({"key_points": ["S3 supported"], "fact_ids": ["f1"]})
+            return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": c})()})()]})
+
+    class _ReduceClient:
+        def __init__(self):
+            self.chat = self
+            self.completions = self
+        async def create(self, **kw):
+            c = "AWS Backup supports S3 [1]."
+            return type("R", (), {"choices": [type("m", (), {"message": type("mm", (), {"content": c})()})()]})
+
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
+        return None   # simulates a Voyage outage: COULD NOT SCORE, not "nothing relevant"
+
+    monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
+    s_rerank = ExtractSettings(
+        _env_file=None, docext_base_url="http://x", docext_read_key="k",
+        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+        rerank_base_url="https://rr.example/v1", rerank_model="rerank-3",
+        rerank_api_key="k", rerank_candidates=10, rerank_top_n=2, rerank_score_floor=0.5)
+
+    res = await global_search(extract_driver, _Emb(), _MapClient(), "mm", _ReduceClient(), "rm",
+                              q="how is S3 backed up", level=1, k=5, group_id=g,
+                              settings=s_rerank)
+    assert res["degraded"] == "rerank-unavailable"
+    assert "relevance ranking was unavailable" in res["answer"].lower()
+    assert res["citations"][0]["fact_uuid"] == "f1"          # still a real, cited answer
+
+
 async def test_global_search_empty_shortlist_refuses(extract_driver):
     from answer_api.global_search import global_search, _REFUSAL
     g = "backup-docs-empty"

@@ -206,6 +206,40 @@ async def test_drift_search_end_to_end(extract_driver):
     assert res["communities_used"][0]["community_id"] == "c1"
 
 
+async def test_drift_search_end_to_end_disclaims_when_rerank_unavailable(
+        extract_driver, monkeypatch):
+    """Mutation-verified wiring test (Important 1 / Critical 1): a rerank outage
+    during DRIFT's primer must both set `degraded` on the envelope AND put a
+    reader-visible disclaimer in the final answer text -- not just on
+    global_search. Also proves the disclaimer never lands on DRIFT's OWN
+    refusal string (distinct from global_search's)."""
+    from answer_api import global_search as global_search_mod
+    from answer_api.drift import drift_search
+    await _seed_fact_provenance(extract_driver)
+    primer = json.dumps({"preliminary_answer": "S3 is supported",
+                         "follow_ups": [{"query": "how", "community_id": "c1", "relevance": 9}]})
+    synth = "AWS Backup supports S3 [1]."
+    llm = _FakeLLM([primer, synth])
+
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
+        return None   # simulates a Voyage outage: COULD NOT SCORE, not "nothing relevant"
+
+    monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
+    s_rerank = ExtractSettings(
+        _env_file=None, docext_base_url="http://x", docext_read_key="k",
+        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+        rerank_base_url="https://rr.example/v1", rerank_model="rerank-3",
+        rerank_api_key="k", rerank_candidates=10, rerank_top_n=2, rerank_score_floor=0.5)
+
+    res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             llm, "m", q="s3 retention", level=1, iterations=1,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID,
+                             settings=s_rerank)
+    assert res["degraded"] == "rerank-unavailable"
+    assert "relevance ranking was unavailable" in res["answer"].lower()
+    assert res["citations"][0]["fact_uuid"] == "f1"          # still a real, cited answer
+
+
 async def test_drift_search_empty_shortlist_degrades_to_local(extract_driver):
     from answer_api.drift import drift_search
     async with extract_driver.session() as s:

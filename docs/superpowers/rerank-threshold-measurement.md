@@ -88,6 +88,16 @@ than by the floor.
 
 ## Honest caveats
 
+- **Production never sees the survivor counts this table shows.** `rerank()` is called
+  with `top_k=rerank_top_n` (4), so the API itself only ever returns 4 scored rows per
+  question — the "survivors per floor" table above (5-8 survivors at 0.35, 3-6 at 0.40)
+  describes a distribution measured with `top_k` wide open for this exercise, which
+  production never encounters. That weakens the floor-selection argument as written: the
+  real question the floor answers in production is "does it ever cut into the already-tiny
+  top-4", not "how many of 11 candidates clear it." The chosen values are unaffected —
+  0.40 still measurably fixes the acceptance-case ordering and the compression argument
+  above still holds — but the survivor-count table should not be read as evidence about
+  what production sees.
 - **The floor sits just below a dense band.** At 0.40 the nearest excluded scores are
   0.383 and 0.369, and several questions have multiple communities within 0.02 of the
   cut. Small score shifts — a reranker version change, an edited community summary — could

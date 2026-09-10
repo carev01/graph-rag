@@ -118,10 +118,14 @@ class ExtractSettings(BaseSettings):
     map_llm_base_url: str = ""   # map tier; defaults to the judge/synthesis tier when empty
     map_llm_model: str = ""
     map_llm_api_key: str = ""
+    # Pre-rerank shortlist size. Inert once a reranker is configured: rerank_top_n
+    # bounds what reaches the map step instead (see rerank_top_n below).
     global_shortlist_k: int = 10
     global_default_level: int = 1
     # --- DRIFT search (design: drift-search) ---
     drift_primer_level: int = 1      # community level the primer shortlists at
+    # Pre-rerank primer shortlist size. Same caveat as global_shortlist_k: once a
+    # reranker is configured, rerank_top_n bounds the primer set, not this.
     drift_primer_k: int = 5          # reports shortlisted for the primer
     drift_max_followups: int = 4     # follow-ups kept per round (relevance-budgeted)
     drift_followup_k: int = 8        # local-search k per follow-up
@@ -149,6 +153,8 @@ class ExtractSettings(BaseSettings):
     rerank_model: str = ""
     rerank_api_key: str = ""
     rerank_candidates: int = 50    # cosine pre-cut before the API call
+    # Max communities reaching extraction. Once configured, this -- not
+    # global_shortlist_k / drift_primer_k -- is what bounds the shortlist.
     rerank_top_n: int = 4          # max communities reaching extraction
     # 0.40, not the provisional 0.45: measured across all 10 golden global/DRIFT
     # questions (docs/superpowers/rerank-threshold-measurement.md). Scores are

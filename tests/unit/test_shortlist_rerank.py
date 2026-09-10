@@ -135,7 +135,7 @@ class _FakeEmbedder:
 async def test_shortlist_calls_rerank_with_candidate_docs_and_top_n(monkeypatch):
     seen = {}
 
-    async def fake_rerank(query, documents, *, top_k, settings):
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
         seen["query"] = query
         seen["documents"] = documents
         seen["top_k"] = top_k
@@ -158,7 +158,7 @@ async def test_shortlist_calls_rerank_with_candidate_docs_and_top_n(monkeypatch)
 
 
 async def test_shortlist_rerank_score_floor_drops_low_scorers(monkeypatch):
-    async def fake_rerank(query, documents, *, top_k, settings):
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
         return [(0, 0.9), (1, 0.2), (2, 0.1)]
 
     monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
@@ -171,7 +171,7 @@ async def test_shortlist_rerank_score_floor_drops_low_scorers(monkeypatch):
 
 
 async def test_shortlist_rerank_none_falls_back_to_cosine_and_marks_degraded(monkeypatch):
-    async def fake_rerank(query, documents, *, top_k, settings):
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
         return None
 
     monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
@@ -189,7 +189,7 @@ async def test_shortlist_rerank_none_falls_back_to_cosine_and_marks_degraded(mon
 async def test_shortlist_rerank_not_configured_never_calls_rerank(monkeypatch):
     called = []
 
-    async def fake_rerank(query, documents, *, top_k, settings):
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
         called.append(1)
         return None
 

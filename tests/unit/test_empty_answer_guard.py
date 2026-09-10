@@ -211,7 +211,7 @@ async def test_drift_search_end_to_end_refuses_on_unusable_synthesis(monkeypatch
     hit = _hit()
 
     async def _fake_primer(embedder, synth_client, synth_model, driver, *, q, level, k,
-                           max_followups, group_id, settings):
+                           max_followups, group_id, settings, stats=None):
         return "prelim", [drift_mod.FollowUp(query="q2", community_id="c1", iteration=1)], [hit]
 
     async def _fake_run_followup(graphiti, driver, fu, *, k, group_id):

@@ -12,7 +12,9 @@ from answer_api.search import search_local
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content, answer_local,
 )
-from answer_api.global_search import shortlist_communities, _extract_json
+from answer_api.global_search import (
+    RerankStats, _extract_json, _with_disclaimer, shortlist_communities,
+)
 from graph_extract.provenance import Provenance
 
 logger = logging.getLogger(__name__)
@@ -60,9 +62,9 @@ _PRIMER_PROMPT = (
 
 
 async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
-                  max_followups, group_id, settings):
+                  max_followups, group_id, settings, stats: RerankStats | None = None):
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
-                                       group_id=group_id, settings=settings)
+                                       group_id=group_id, settings=settings, stats=stats)
     if not hits:
         return None
     blocks = "\n".join(f'- {h.community_id} "{h.title}": {h.summary}' for h in hits)
@@ -174,9 +176,10 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                        q, level, iterations, primer_k, max_followups, followup_k,
                        group_id, settings) -> dict:
     rounds = max(1, min(iterations, 2))
+    stats = RerankStats()
     primed = await _primer(embedder, synth_client, synth_model, driver, q=q,
                            level=level, k=primer_k, max_followups=max_followups,
-                           group_id=group_id, settings=settings)
+                           group_id=group_id, settings=settings, stats=stats)
     if primed is None:
         res = await answer_local(graphiti, driver, synth_client, synth_model,
                                  q=q, group_id=group_id)
@@ -211,8 +214,16 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
     deduped = _dedup_facts(facts)
     if not deduped:
         return {"query": q, "answer": _REFUSAL, "citations": [],
-                "follow_ups": follow_ups_meta, "communities_used": communities_used}
+                "follow_ups": follow_ups_meta, "communities_used": communities_used,
+                "degraded": stats.degraded}
     answer, citations = await _synthesize(synth_client, synth_model, driver, q=q,
                                           preliminary_answer=preliminary, facts=deduped)
+    # Guard against _with_disclaimer's own refusal check, which compares against
+    # global_search's _REFUSAL string -- textually distinct from ours. Checking
+    # against OUR _REFUSAL here (not global_search's) is what keeps a DRIFT
+    # refusal from silently picking up a disclaimer.
+    if answer != _REFUSAL:
+        answer = _with_disclaimer(answer, stats.degraded)
     return {"query": q, "answer": answer, "citations": citations,
-            "follow_ups": follow_ups_meta, "communities_used": communities_used}
+            "follow_ups": follow_ups_meta, "communities_used": communities_used,
+            "degraded": stats.degraded}
