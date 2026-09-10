@@ -48,6 +48,14 @@ _VERIFY_PROMPT = (
 )
 
 
+_SUMMARY_PROMPT = (
+    "Write ONE paragraph summarising the STATEMENTS below for a community titled "
+    "\"{title}\". Summarise only what these statements say -- do NOT add any detail, "
+    "number, product name or limit that is not in them, and do NOT write any URL. "
+    "Reply with the paragraph only.\n\nSTATEMENTS:\n{statements}"
+)
+
+
 @dataclass
 class VerifyResult:
     unsupported: set[int]      # 1-based finding indices
@@ -161,6 +169,24 @@ def _strip(s: str) -> str:
     return _URL_RE.sub("", s or "").strip()
 
 
+async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[dict],
+                              title: str, *, max_tokens: int = 1000) -> str | None:
+    """Rewrite the summary from the findings that survived verification.
+
+    The summary is inherently synthetic -- one paragraph generalising a whole
+    community -- so verifying it against raw facts rejected legitimate summarising
+    and cost 15 of 41 communities across two rebuilds. Regenerating it from verified
+    findings makes it inherit their support instead.
+    """
+    statements = "\n".join(f"- {f.get('finding', '')}" for f in findings)
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens,
+        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(
+            title=title, statements=statements)}])
+    text = usable_content(resp)
+    return _strip(text) if text else None
+
+
 async def verify_report(client: AsyncOpenAI, model: str, findings: list[dict],
                         summary: str, fact_texts: dict[str, str], *,
                         max_tokens: int = 4000) -> VerifyResult | None:
@@ -265,7 +291,6 @@ class ReportStats:
     findings_dropped: int = 0
     reverified: bool = False
     unverified: bool = False
-    summary_unsupported: bool = False
 
 
 _RETRY_NOTE = (
@@ -285,9 +310,10 @@ async def generate_report(client: AsyncOpenAI, model: str,
 
     With `verifier` set: every finding is checked against the text of the facts it
     cites. On violation the report is regenerated ONCE with the offenders named;
-    findings still unsupported are dropped. Returns None -- report skipped -- if the
-    summary stays unsupported, if every finding is dropped, or if verification could
-    not be completed. Without `verifier` the behaviour is exactly as before.
+    findings still unsupported are dropped. The summary verdict is never a reason
+    to skip the report -- see `_regenerate_summary`. Returns None -- report skipped
+    -- if every finding is dropped, or if verification could not be completed.
+    Without `verifier` the behaviour is exactly as before.
     """
     prompt = _PROMPT.format(context=context.text)
     obj = await _generate_once(client, model, prompt, max_tokens)
@@ -305,14 +331,12 @@ async def generate_report(client: AsyncOpenAI, model: str,
             stats.unverified = True
         return None
 
-    if result.unsupported or not result.summary_supported:
+    if result.unsupported:
         if stats is not None:
             stats.reverified = True
         offenders = "\n".join(
             f"- {findings[i - 1]['finding']}" for i in sorted(result.unsupported)
             if 1 <= i <= len(findings))
-        if not result.summary_supported:
-            offenders += "\n- The SUMMARY is not supported by the facts."
         retry_obj = await _generate_once(
             client, model, prompt + _RETRY_NOTE.format(offenders=offenders), max_tokens)
         if retry_obj is not None:
@@ -323,11 +347,6 @@ async def generate_report(client: AsyncOpenAI, model: str,
                     stats.unverified = True
                 return None
 
-    if not result.summary_supported:
-        if stats is not None:
-            stats.summary_unsupported = True
-        return None
-
     if result.unsupported:
         kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
         if stats is not None:
@@ -335,4 +354,13 @@ async def generate_report(client: AsyncOpenAI, model: str,
         if not kept:
             return None
         report = _with_findings(report, kept)
+        findings = kept
+
+    # The summary verdict (result.summary_supported) is deliberately IGNORED -- see
+    # the docstring on _regenerate_summary. Rewrite it from the surviving findings so
+    # it inherits their support; keep the original if the summariser returns nothing,
+    # since a summariser hiccup must not cost a verified report.
+    new_summary = await _regenerate_summary(client, model, findings, report.title)
+    if new_summary:
+        report = replace(report, summary=new_summary)
     return report

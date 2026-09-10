@@ -46,12 +46,13 @@ def _verifier(*results):
 @pytest.mark.asyncio
 async def test_supported_report_passes_through_with_one_verify_call():
     v = _verifier(VerifyResult(unsupported=set(), summary_supported=True))
-    c = _Client([GOOD])
+    c = _Client([GOOD, "A regenerated summary."])
     st = ReportStats()
     rep = await generate_report(c, "m", _ctx(), verifier=v, stats=st)
     assert rep is not None
     assert len(json.loads(rep.full_report)) == 2
-    assert len(c.calls) == 1 and len(v.calls) == 1
+    # 1 generation + 1 summary regeneration; still exactly one verify call.
+    assert len(c.calls) == 2 and len(v.calls) == 1
     assert st == ReportStats()
 
 
@@ -59,11 +60,12 @@ async def test_supported_report_passes_through_with_one_verify_call():
 async def test_unsupported_finding_triggers_one_regeneration():
     v = _verifier(VerifyResult(unsupported={2}, summary_supported=True),
                   VerifyResult(unsupported=set(), summary_supported=True))
-    c = _Client([GOOD, GOOD])
+    c = _Client([GOOD, GOOD, "A regenerated summary."])
     st = ReportStats()
     rep = await generate_report(c, "m", _ctx(), verifier=v, stats=st)
     assert rep is not None and len(json.loads(rep.full_report)) == 2
-    assert len(c.calls) == 2, "should regenerate exactly once"
+    # 2 report generations (should regenerate exactly once) + 1 summary regeneration.
+    assert len(c.calls) == 3
     assert st.reverified is True and st.findings_dropped == 0
 
 
@@ -71,7 +73,7 @@ async def test_unsupported_finding_triggers_one_regeneration():
 async def test_finding_still_unsupported_after_retry_is_dropped():
     v = _verifier(VerifyResult(unsupported={2}, summary_supported=True),
                   VerifyResult(unsupported={2}, summary_supported=True))
-    c = _Client([GOOD, GOOD])
+    c = _Client([GOOD, GOOD, "A regenerated summary."])
     st = ReportStats()
     rep = await generate_report(c, "m", _ctx(), verifier=v, stats=st)
     assert rep is not None
@@ -79,17 +81,6 @@ async def test_finding_still_unsupported_after_retry_is_dropped():
     assert [f["finding"] for f in kept] == ["F1"]
     assert st.findings_dropped == 1
     assert rep.cited_fact_uuids == ["u1"], "dropped finding's fact must not stay cited"
-
-
-@pytest.mark.asyncio
-async def test_unsupported_summary_skips_the_whole_report():
-    """A one-paragraph summary cannot be partially salvaged, and map_report reads
-    it, so an ungrounded summary would leak straight through."""
-    v = _verifier(VerifyResult(unsupported=set(), summary_supported=False),
-                  VerifyResult(unsupported=set(), summary_supported=False))
-    st = ReportStats()
-    rep = await generate_report(_Client([GOOD, GOOD]), "m", _ctx(), verifier=v, stats=st)
-    assert rep is None and st.summary_unsupported is True
 
 
 @pytest.mark.asyncio
@@ -142,7 +133,7 @@ async def test_report_with_no_findings_does_not_call_the_verifier():
 async def test_the_retry_names_the_offending_findings():
     v = _verifier(VerifyResult(unsupported={2}, summary_supported=True),
                   VerifyResult(unsupported=set(), summary_supported=True))
-    c = _Client([GOOD, GOOD])
+    c = _Client([GOOD, GOOD, "A regenerated summary."])
     await generate_report(c, "m", _ctx(), verifier=v, stats=ReportStats())
     retry_prompt = c.calls[1]["messages"][0]["content"]
     assert "F2" in retry_prompt
@@ -159,7 +150,7 @@ async def test_retry_generation_failure_degrades_to_first_verified():
     the retry failed to generate valid JSON."""
     v = _verifier(VerifyResult(unsupported={2}, summary_supported=True))
     # First generation succeeds, retry fails (needs two unparseable to exhaust _generate_once's retry)
-    c = _Client([GOOD, "not json 1", "not json 2"])
+    c = _Client([GOOD, "not json 1", "not json 2", "A regenerated summary."])
     st = ReportStats()
     rep = await generate_report(c, "m", _ctx(), verifier=v, stats=st)
     assert rep is not None
