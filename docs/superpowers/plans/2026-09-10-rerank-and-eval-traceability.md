@@ -633,8 +633,21 @@ After the existing cosine ranking, take `settings.rerank_candidates` candidates 
                          floor=settings.rerank_score_floor, stats=st)
 ```
 
-Both call sites must pass `settings=`; `drift.py:64` passes it too so DRIFT inherits
-reranking. `drift.py` needs no other change.
+**Thread `settings` to both call sites — neither has it today.** This is not optional
+plumbing: skipping the DRIFT half is exactly how the previous slice shipped two Criticals,
+by leaving the non-obvious path out. Verified signatures:
+
+- `global_search(driver, embedder, map_client, map_model, synth_client, synth_model, *, q, level, k, group_id, relevance_min)` (`global_search.py:168`) — **add `settings`**, drop `relevance_min`.
+- `drift_search(graphiti, driver, embedder, synth_client, synth_model, *, q, level, iterations, primer_k, max_followups, followup_k, group_id)` (`drift.py:173`) — **add `settings`** and pass it to `_primer`.
+- `_primer(embedder, synth_client, synth_model, driver, *, q, level, k, max_followups, group_id)` (`drift.py:62`) — **add `settings`**, pass to `shortlist_communities`.
+
+The four outer callers already HAVE settings, so this is threading only:
+
+- `router.py:130` (`global_search`) and `router.py:135` (`drift_search`) — inside `answer_router`, which takes `settings` (`router.py:146`). Pass `settings=settings`; delete the `relevance_min=settings.global_map_relevance_min` argument.
+- `app.py:147` (`global_search`) and `app.py:162` (`drift_search`) — use `st.settings`. Pass `settings=st.settings`; delete the `relevance_min=` argument.
+
+`drift.py` needs no change beyond threading `settings` through those two functions —
+its ranking, primer prompt and follow-up logic are untouched.
 
 - [ ] **Step 5: Strip relevance from the map step**
 
