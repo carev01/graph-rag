@@ -234,17 +234,90 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
         await embedder.client.close()
 
 
+async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver) -> dict:
+    """Re-verify only the reports staged by an earlier run and promote the ones
+    that pass.
+
+    Recovering from a verifier outage costs one verify call per staged community
+    rather than regenerating the corpus (spec 4.7).
+    """
+    vclient, vmodel = _verify_client_and_model(settings)
+    embedder = build_embedder(settings)
+    promoted = rejected = still_pending = findings_dropped = 0
+    try:
+        async with driver.session() as s:
+            r = await s.run(
+                "MATCH (c:Community {group_id:$g}) WHERE c.pending_full_report IS NOT NULL "
+                "RETURN c.community_id AS cid, c.title AS title, "
+                "c.pending_summary AS summary, c.pending_full_report AS full_report, "
+                "coalesce(c.cited_fact_uuids,[]) AS cited", g=settings.group_id)
+            staged = [dict(x) async for x in r]
+        for row in staged:
+            findings = json.loads(row["full_report"] or "[]")
+            async with driver.session() as s:
+                fr = await s.run(
+                    "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
+                    "RETURN f.uuid AS uuid, f.fact AS fact",
+                    g=settings.group_id, u=list(row["cited"]))
+                fact_texts = {x["uuid"]: x["fact"] async for x in fr}
+            result = await verify_report(vclient, vmodel, findings,
+                                         row["summary"] or "", fact_texts)
+            if result is None:
+                still_pending += 1
+                continue
+            kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
+            findings_dropped += len(findings) - len(kept)
+            if not result.summary_supported or not kept:
+                rejected += 1
+                async with driver.session() as s:
+                    await s.run(
+                        "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                        "REMOVE c.pending_summary, c.pending_full_report",
+                        cid=row["cid"], g=settings.group_id)
+                continue
+            cited: list[str] = []
+            for f in kept:
+                for fid in f["fact_ids"]:
+                    if fid not in cited:
+                        cited.append(fid)
+            emb = (await embedder.create_batch([f"{row['title']}\n{row['summary']}"]))[0]
+            async with driver.session() as s:
+                await s.run(
+                    "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                    "SET c.summary=$summary, c.full_report=$full_report, "
+                    "c.cited_fact_uuids=$cited, c.embedding=$emb, c.verified=true "
+                    "REMOVE c.pending_summary, c.pending_full_report",
+                    cid=row["cid"], g=settings.group_id, summary=row["summary"],
+                    full_report=json.dumps(kept), cited=cited, emb=emb)
+            promoted += 1
+    finally:
+        await vclient.close()
+        await embedder.client.close()
+    return {"reports_promoted": promoted, "reports_rejected": rejected,
+            "reports_still_pending": still_pending,
+            "findings_dropped": findings_dropped}
+
+
 @app.command("theme-build")
-def theme_build(full: bool = typer.Option(
-        False, "--full", help="Full rebuild (regenerate every report) instead of incremental.")) -> None:
+def theme_build(
+        full: bool = typer.Option(
+            False, "--full", help="Full rebuild (regenerate every report) instead of incremental."),
+        verify_pending: bool = typer.Option(
+            False, "--verify-pending",
+            help="Re-verify only reports staged by an earlier run and promote the ones "
+                 "that pass. Recovers from a transient verifier outage without "
+                 "regenerating anything. Wins over --full if both are given.")) -> None:
     """Refresh the community-report layer (incremental by default; --full rebuilds all)."""
     async def _main() -> None:
         settings = get_extract_settings()
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
         try:
-            runner = _run_theme_build if full else _run_theme_build_incremental
-            res = await runner(settings, driver=driver)
+            if verify_pending:
+                res = await _run_verify_pending(settings, driver=driver)
+            else:
+                runner = _run_theme_build if full else _run_theme_build_incremental
+                res = await runner(settings, driver=driver)
             typer.echo(json.dumps(res, indent=2, default=str))
         finally:
             await driver.close()
