@@ -24,6 +24,31 @@ logger = logging.getLogger(__name__)
 
 _REFUSAL = "I don't have enough thematic coverage to answer that from the community reports."
 
+# Reader-visible degradation notices. The `degraded` envelope field is
+# machine-readable only -- nothing shows it to the person reading the answer.
+# Keyed by reason so other degraded modes can adopt it; only rerank-unavailable
+# is wired up. drift.py's "no-primer-communities" is deliberately NOT here: the
+# reader gets a valid local answer, not a less accurate one.
+_DEGRADED_DISCLAIMERS = {
+    "rerank-unavailable": (
+        "Note: relevance ranking was unavailable for this answer, so the sources it "
+        "draws on may be less relevant than usual. Please verify against the cited "
+        "sources."),
+}
+
+
+def _with_disclaimer(answer: str, reason: str | None) -> str:
+    """Prepend a reader-visible notice to a degraded answer.
+
+    Called AFTER _finalize_answer: marker stripping and whitespace repair must not
+    treat this text as answer prose. The notice carries no [N] markers and no URL,
+    so it cannot be mistaken for cited content.
+    """
+    note = _DEGRADED_DISCLAIMERS.get(reason or "")
+    if not note or not answer.strip() or answer.strip() == _REFUSAL:
+        return answer
+    return f"{note}\n\n{answer}"
+
 
 @dataclass
 class CommunityHit:
@@ -211,10 +236,12 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
                         synth_client: AsyncOpenAI, synth_model: str, *, q: str,
                         level: int, k: int, group_id: str,
                         settings: ExtractSettings) -> dict:
+    stats = RerankStats()
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
-                                       group_id=group_id, settings=settings)
+                                       group_id=group_id, settings=settings, stats=stats)
     if not hits:
-        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": [],
+                "degraded": stats.degraded}
     maps = await asyncio.gather(
         *[map_report(map_client, map_model, q, h) for h in hits],
         return_exceptions=True)
@@ -225,7 +252,8 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
         elif m is not None:
             results.append(m)
     if not results:
-        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": []}
+        return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": [],
+                "degraded": stats.degraded}
     # Built once, right after `results` exists, and reused by every return
     # below: this is "the communities that fed the reduce step", which stays
     # true whether or not the reduce LLM call itself later succeeds.
@@ -260,10 +288,11 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
         # here would collapse "coverage existed, the LLM failed" into "no
         # thematic coverage existed", which is a different, false statement.
         return {"query": q, "answer": _REFUSAL, "citations": [],
-                "communities_used": communities_used}
+                "communities_used": communities_used, "degraded": stats.degraded}
     answer, cited = _finalize_answer(raw, marker_map)
     resolved = await Provenance(driver).resolve_citations(
         [marker_map[m]["fact_uuid"] for m in cited])
     citations = _build_citations(cited, marker_map, resolved)
+    answer = _with_disclaimer(answer, stats.degraded)
     return {"query": q, "answer": answer, "citations": citations,
-            "communities_used": communities_used}
+            "degraded": stats.degraded, "communities_used": communities_used}
