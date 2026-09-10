@@ -24,8 +24,13 @@ def _mean(xs: Sequence[int | float]) -> float:
 
 def aggregate(per_question: list[dict]) -> dict:
     n = len(per_question)
+    # A failed question (e.g. an APIConnectionError) is not a routing miss --
+    # it never got a chance to route. `ran` mirrors the `grounded`/`faithed`
+    # filters below: exclude what could not be measured rather than scoring it
+    # as a failure.
+    ran = [r for r in per_question if not r.get("failed")]
     by_intent: dict[str, list[bool]] = {}
-    for r in per_question:
+    for r in ran:
         by_intent.setdefault(r["intent"], []).append(bool(r["routing_hit"]))
     grounded = [r for r in per_question if r["grounding_hit"] is not None]
     ground_by_mode: dict[str, list[bool]] = {}
@@ -74,7 +79,8 @@ def aggregate(per_question: list[dict]) -> dict:
 
     return {
         "n": n,
-        "routing_accuracy": (sum(1 for r in per_question if r["routing_hit"]) / n) if n else 0.0,
+        "questions_failed": n - len(ran),
+        "routing_accuracy": (sum(1 for r in ran if r["routing_hit"]) / len(ran)) if ran else 0.0,
         "routing_by_intent": {k: sum(v) / len(v) for k, v in by_intent.items()},
         "grounding_precision": (sum(1 for r in grounded if r["grounding_hit"]) / len(grounded)
                                 if grounded else None),

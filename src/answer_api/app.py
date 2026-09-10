@@ -139,7 +139,13 @@ def create_app() -> FastAPI:
             st.map_client, st.map_model, st.cheap_client, st.cheap_model,
             q=q, mode_override=mode, vendor=vendor, settings=st.settings)
 
-    @app.get("/search/global")
+    @app.get(
+        "/search/global",
+        description="Community map-reduce search. Note: `k` only bounds the "
+        "pre-rerank shortlist -- once a reranker is configured (rerank_base_url "
+        "+ rerank_model), rerank_top_n decides how many communities actually "
+        "reach the map step, not `k`.",
+    )
     async def search_global(
         q: str, level: int | None = Query(None, ge=0), k: int | None = Query(None, ge=1)
     ) -> dict[str, Any]:
@@ -150,9 +156,15 @@ def create_app() -> FastAPI:
             q=q, level=st.settings.global_default_level if level is None else level,
             k=st.settings.global_shortlist_k if k is None else k,
             group_id=st.settings.group_id,
-            relevance_min=st.settings.global_map_relevance_min)
+            settings=st.settings)
 
-    @app.get("/search/drift")
+    @app.get(
+        "/search/drift",
+        description="DRIFT primer->follow-up->synthesis search. Note: the "
+        "settings-configured drift_primer_k only bounds the pre-rerank primer "
+        "shortlist -- once a reranker is configured, rerank_top_n decides how "
+        "many communities feed the primer, not drift_primer_k.",
+    )
     async def search_drift(
         q: str, level: int | None = Query(None, ge=0),
         iterations: int | None = Query(None, ge=1, le=2)
@@ -165,7 +177,7 @@ def create_app() -> FastAPI:
             level=s.drift_primer_level if level is None else level,
             iterations=s.drift_iterations if iterations is None else iterations,
             primer_k=s.drift_primer_k, max_followups=s.drift_max_followups,
-            followup_k=s.drift_followup_k, group_id=s.group_id)
+            followup_k=s.drift_followup_k, group_id=s.group_id, settings=s)
 
     @app.get("/timeline")
     async def timeline(

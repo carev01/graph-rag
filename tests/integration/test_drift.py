@@ -1,9 +1,20 @@
 import json
 import pytest
 
+from graph_extract.config import ExtractSettings
+
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 GROUP_ID = "backup-docs"
+
+
+# `_env_file=None` alone is not enough: importing graphiti_core calls
+# load_dotenv(), which copies the developer's .env into os.environ, and
+# pydantic-settings reads os.environ regardless of `_env_file`. Force
+# rerank off explicitly so these tests never make a live reranker call.
+_S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                     rerank_base_url="", rerank_model="")
 
 
 class _FakeEmbedder:
@@ -38,7 +49,8 @@ async def test_primer_shortlists_and_budgets(extract_driver):
                           "follow_ups": [{"query": "how retained", "community_id": "c1", "relevance": 9},
                                          {"query": "extra", "community_id": None, "relevance": 1}]})
     out = await _primer(_FakeEmbedder([1.0, 0.0]), _FakeLLM([payload]), "m", extract_driver,
-                        q="retention", level=1, k=5, max_followups=1, group_id=GROUP_ID)
+                        q="retention", level=1, k=5, max_followups=1, group_id=GROUP_ID,
+                        settings=_S)
     assert out is not None
     preliminary, fus, hits = out
     assert preliminary == "draft"
@@ -52,7 +64,8 @@ async def test_primer_empty_shortlist_signals_degrade(extract_driver):
     async with extract_driver.session() as s:
         await s.run("MATCH (n) DETACH DELETE n")   # no communities
     out = await _primer(_FakeEmbedder([1.0, 0.0]), _FakeLLM([]), "m", extract_driver,
-                        q="q", level=1, k=5, max_followups=4, group_id=GROUP_ID)
+                        q="q", level=1, k=5, max_followups=4, group_id=GROUP_ID,
+                        settings=_S)
     assert out is None
 
 
@@ -61,7 +74,7 @@ async def test_primer_bad_json_falls_back_to_single_query(extract_driver):
     await _seed_community(extract_driver)
     out = await _primer(_FakeEmbedder([1.0, 0.0]), _FakeLLM(["nope", "still nope"]), "m",
                         extract_driver, q="original q", level=1, k=5, max_followups=4,
-                        group_id=GROUP_ID)
+                        group_id=GROUP_ID, settings=_S)
     assert out is not None
     preliminary, fus, hits = out
     assert preliminary == ""                              # unparseable -> empty draft
@@ -77,7 +90,8 @@ async def test_primer_zero_valid_followups_falls_back_keeping_preliminary(extrac
     payload = json.dumps({"preliminary_answer": "kept draft",
                           "follow_ups": [{"query": "", "community_id": "c1", "relevance": 9}]})
     out = await _primer(_FakeEmbedder([1.0, 0.0]), _FakeLLM([payload]), "m", extract_driver,
-                        q="original q", level=1, k=5, max_followups=4, group_id=GROUP_ID)
+                        q="original q", level=1, k=5, max_followups=4, group_id=GROUP_ID,
+                        settings=_S)
     assert out is not None
     preliminary, fus, hits = out
     assert preliminary == "kept draft"                    # parsed draft kept, not blanked
@@ -183,13 +197,47 @@ async def test_drift_search_end_to_end(extract_driver):
     llm = _FakeLLM([primer, synth])
     res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
                              llm, "m", q="s3 retention", level=1, iterations=1,
-                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID, settings=_S)
     assert res["citations"][0]["fact_uuid"] == "f1"
     assert res["citations"][0]["sources"][0]["url"] == "https://x/art1"
     assert "http" not in res["answer"]                         # URL stripped
     assert [c["marker"] for c in res["citations"]] == [1]      # invalid [9] dropped
     assert res["follow_ups"][0]["community_id"] == "c1"
     assert res["communities_used"][0]["community_id"] == "c1"
+
+
+async def test_drift_search_end_to_end_disclaims_when_rerank_unavailable(
+        extract_driver, monkeypatch):
+    """Mutation-verified wiring test (Important 1 / Critical 1): a rerank outage
+    during DRIFT's primer must both set `degraded` on the envelope AND put a
+    reader-visible disclaimer in the final answer text -- not just on
+    global_search. Also proves the disclaimer never lands on DRIFT's OWN
+    refusal string (distinct from global_search's)."""
+    from answer_api import global_search as global_search_mod
+    from answer_api.drift import drift_search
+    await _seed_fact_provenance(extract_driver)
+    primer = json.dumps({"preliminary_answer": "S3 is supported",
+                         "follow_ups": [{"query": "how", "community_id": "c1", "relevance": 9}]})
+    synth = "AWS Backup supports S3 [1]."
+    llm = _FakeLLM([primer, synth])
+
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
+        return None   # simulates a Voyage outage: COULD NOT SCORE, not "nothing relevant"
+
+    monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
+    s_rerank = ExtractSettings(
+        _env_file=None, docext_base_url="http://x", docext_read_key="k",
+        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+        rerank_base_url="https://rr.example/v1", rerank_model="rerank-3",
+        rerank_api_key="k", rerank_candidates=10, rerank_top_n=2, rerank_score_floor=0.5)
+
+    res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
+                             llm, "m", q="s3 retention", level=1, iterations=1,
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID,
+                             settings=s_rerank)
+    assert res["degraded"] == "rerank-unavailable"
+    assert "relevance ranking was unavailable" in res["answer"].lower()
+    assert res["citations"][0]["fact_uuid"] == "f1"          # still a real, cited answer
 
 
 async def test_drift_search_empty_shortlist_degrades_to_local(extract_driver):
@@ -203,7 +251,7 @@ async def test_drift_search_empty_shortlist_degrades_to_local(extract_driver):
     llm = _FakeLLM(["n/a"])
     res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
                              llm, "m", q="q", level=1, iterations=1,
-                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID, settings=_S)
     assert res["degraded"] == "no-primer-communities"
 
 
@@ -230,7 +278,7 @@ async def test_drift_search_zero_facts_refuses(extract_driver):
 
     res = await drift_search(_NoFacts(), extract_driver, _FakeEmbedder([1.0, 0.0]),
                              _Boom([primer]), "m", q="q", level=1, iterations=1,
-                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID, settings=_S)
     assert res["answer"] == _REFUSAL and res["citations"] == []
 
 
@@ -245,7 +293,7 @@ async def test_drift_search_iterations_two_runs_refinement(extract_driver):
     llm = _FakeLLM([primer, refine, synth])
     res = await drift_search(_FactGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
                              llm, "m", q="q", level=1, iterations=2,
-                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID, settings=_S)
     iters = {f["iteration"] for f in res["follow_ups"]}
     assert iters == {1, 2}                                   # both rounds executed
     assert res["citations"][0]["fact_uuid"] == "f1"
@@ -270,5 +318,5 @@ async def test_drift_search_one_followup_raises_does_not_abort(extract_driver):
     synth = "Answer [1]."
     res = await drift_search(_FlakyGraphiti(), extract_driver, _FakeEmbedder([1.0, 0.0]),
                              _FakeLLM([primer, synth]), "m", q="q", level=1, iterations=1,
-                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID)
+                             primer_k=5, max_followups=4, followup_k=8, group_id=GROUP_ID, settings=_S)
     assert res["citations"][0]["fact_uuid"] == "f1"          # survived the raising follow-up

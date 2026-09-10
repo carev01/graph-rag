@@ -13,6 +13,10 @@ from answer_api import drift as drift_mod
 from answer_api import eval_router as er
 from answer_api import global_search as global_search_mod
 from answer_api import synthesize
+from graph_extract.config import ExtractSettings
+
+_S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
 
 
 class _FakeChoice:
@@ -137,15 +141,16 @@ async def test_answer_local_empty_choices_does_not_raise(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _hit():
-    return global_search_mod.CommunityHit("c1", "T", "sum", 1, 7.0, ["f1"], "[]", 0.9)
+    return global_search_mod.CommunityHit("c1", "T", "sum", 1, 7.0, ["f1"], "[]", 0.9, 0.8)
 
 
-async def _fake_shortlist(driver, embedder, q, *, level, k, group_id, rating_boost=0.1):
+async def _fake_shortlist(driver, embedder, q, *, level, k, group_id, rating_boost=0.1,
+                          settings=None, stats=None):
     return [_hit()]
 
 
-async def _fake_map_report(client, model, q, hit, *, relevance_min):
-    return global_search_mod.MapResult(community_id="c1", title="T", relevance=8,
+async def _fake_map_report(client, model, q, hit):
+    return global_search_mod.MapResult(community_id="c1", title="T", relevance=hit.relevance,
                                        key_points=["kp"], fact_ids=["f1"])
 
 
@@ -159,11 +164,11 @@ async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
     synth_client = _FakeClient([_none_content(), _none_content()])
     result = await global_search_mod.global_search(
         None, None, object(), "map-model", synth_client, "synth-model",
-        q="q", level=1, k=3, group_id="g", relevance_min=2)
+        q="q", level=1, k=3, group_id="g", settings=_S)
     assert result["answer"] == global_search_mod._REFUSAL
     assert result["citations"] == []
     assert result["communities_used"] == [
-        {"community_id": "c1", "title": "T", "relevance": 8}]
+        {"community_id": "c1", "title": "T", "relevance": 0.8}]
 
 
 async def test_global_search_empty_choices_does_not_raise(monkeypatch):
@@ -172,7 +177,7 @@ async def test_global_search_empty_choices_does_not_raise(monkeypatch):
     synth_client = _FakeClient([_no_choices(), _no_choices()])
     result = await global_search_mod.global_search(
         None, None, object(), "map-model", synth_client, "synth-model",
-        q="q", level=1, k=3, group_id="g", relevance_min=2)
+        q="q", level=1, k=3, group_id="g", settings=_S)
     assert result["answer"] == global_search_mod._REFUSAL
     assert result["citations"] == []
 
@@ -206,7 +211,7 @@ async def test_drift_search_end_to_end_refuses_on_unusable_synthesis(monkeypatch
     hit = _hit()
 
     async def _fake_primer(embedder, synth_client, synth_model, driver, *, q, level, k,
-                           max_followups, group_id):
+                           max_followups, group_id, settings, stats=None):
         return "prelim", [drift_mod.FollowUp(query="q2", community_id="c1", iteration=1)], [hit]
 
     async def _fake_run_followup(graphiti, driver, fu, *, k, group_id):
@@ -217,7 +222,7 @@ async def test_drift_search_end_to_end_refuses_on_unusable_synthesis(monkeypatch
     synth_client = _FakeClient([_none_content(), _none_content()])
     result = await drift_mod.drift_search(
         None, None, None, synth_client, "model", q="q", level=1, iterations=1,
-        primer_k=3, max_followups=3, followup_k=5, group_id="g")
+        primer_k=3, max_followups=3, followup_k=5, group_id="g", settings=_S)
     assert result["answer"] == drift_mod._REFUSAL
     assert result["citations"] == []
     assert result["follow_ups"] == [{"query": "q2", "community_id": "c1", "iteration": 1}]

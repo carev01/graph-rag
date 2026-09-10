@@ -19,7 +19,7 @@ async def test_drift_search_live(live_extract_driver):
             q="What should I consider when planning long-term backup retention across cloud vendors?",
             level=s.drift_primer_level, iterations=s.drift_iterations,
             primer_k=s.drift_primer_k, max_followups=s.drift_max_followups,
-            followup_k=s.drift_followup_k, group_id=s.group_id)
+            followup_k=s.drift_followup_k, group_id=s.group_id, settings=s)
         assert res["answer"]
         assert "http" not in res["answer"]                    # no LLM-authored URL
         for c in res.get("citations", []):

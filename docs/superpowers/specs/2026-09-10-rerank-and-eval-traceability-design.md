@@ -143,9 +143,9 @@ project just had to undo.
 `_MAP_PROMPT` drops the `relevance` field and asks only for `key_points` and `fact_ids`.
 The rubric problem disappears rather than needing a rubric written for it.
 
-`MapResult.relevance` is retained but now carries the **rerank score as a float**, so
-`communities_used[].relevance` in the envelope becomes a calibrated number instead of an
-improvised integer. `global_map_relevance_min` retires with the scoring it gated.
+`MapResult.relevance` is retained but now carries the **rerank score as a `float | None`**
+(`None` when the shortlist was never reranked), so `communities_used[].relevance` in the
+envelope becomes a calibrated number instead of an improvised integer. `global_map_relevance_min` retires with the scoring it gated.
 
 ### 2.3.4 Degradation is visible to the machine AND the reader
 

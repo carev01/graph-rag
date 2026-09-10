@@ -45,7 +45,6 @@ def test_global_search_defaults():
     assert ExtractSettings.model_fields["map_llm_base_url"].default == ""
     assert s.global_shortlist_k == 10
     assert s.global_default_level == 1
-    assert s.global_map_relevance_min == 2
 
 
 def test_drift_defaults():

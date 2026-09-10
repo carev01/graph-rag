@@ -130,13 +130,13 @@ async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
         return await global_mod.global_search(
             driver, embedder, map_client, map_model, synth_client, synth_model,
             q=q, level=settings.global_default_level, k=settings.global_shortlist_k,
-            group_id=g, relevance_min=settings.global_map_relevance_min)
+            group_id=g, settings=settings)
     if mode == "drift":
         return await drift_mod.drift_search(
             graphiti, driver, embedder, synth_client, synth_model, q=q,
             level=settings.drift_primer_level, iterations=settings.drift_iterations,
             primer_k=settings.drift_primer_k, max_followups=settings.drift_max_followups,
-            followup_k=settings.drift_followup_k, group_id=g)
+            followup_k=settings.drift_followup_k, group_id=g, settings=settings)
     return await timeline_mod.timeline_local(
         graphiti, driver, q=q, vendor=vendor, group_id=g)
 

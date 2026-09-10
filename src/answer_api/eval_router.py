@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
@@ -155,13 +156,15 @@ async def _score_one(clients, q, mode_override, settings):
 
 async def run_eval(clients, questions, settings) -> dict:
     per_question: list[dict] = []
-    for q in questions:
+    total = len(questions)
+    for i, q in enumerate(questions, 1):
+        started = time.monotonic()
         try:
             env, ghit, faith = await _score_one(clients, q, None, settings)
             chosen = env["routing"]["chosen"]
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
-                         "grounding_hit": ghit, "faithfulness": faith}
+                         "grounding_hit": ghit, "faithfulness": faith, "failed": False}
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
@@ -171,7 +174,16 @@ async def run_eval(clients, questions, settings) -> dict:
         except Exception:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
-                   "routing_hit": False, "grounding_hit": None, "faithfulness": None}
+                   "routing_hit": False, "grounding_hit": None, "faithfulness": None,
+                   "failed": True}
+        elapsed = time.monotonic() - started
+        # A 2h09m run printed nothing until it finished, so a hung run and a working
+        # one looked identical. One line per question makes progress visible.
+        print(f"[{i}/{total}] {rec['intent']:8} -> {rec['chosen']:8} "
+              f"routing={'-' if rec.get('failed') else rec['routing_hit']} "
+              f"grounding={rec['grounding_hit']} "
+              f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
+              f"{elapsed:.0f}s", flush=True)
         per_question.append(rec)
     return aggregate(per_question)
 
@@ -180,7 +192,7 @@ def format_report(summary: dict) -> str:
     faith_mean = summary["faithfulness_mean"]
     faith_mean_str = f"{faith_mean:.2f}" if faith_mean is not None else "N/A"
     lines = ["# /answer Router Golden-Set Eval\n",
-             f"Questions: {summary['n']}\n",
+             f"Questions: {summary['n']} (failed: {summary['questions_failed']})\n",
              f"**Routing accuracy: {summary['routing_accuracy']:.2f}**",
              f"by intent: {summary['routing_by_intent']}",
              f"Grounding precision: {summary['grounding_precision']}",
@@ -195,7 +207,8 @@ def format_report(summary: dict) -> str:
              "|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
-        lines.append(f"| {r['intent']} | {r['chosen']} | {r['routing_hit']} | "
+        routing_cell = "-" if r.get("failed") else r["routing_hit"]
+        lines.append(f"| {r['intent']} | {r['chosen']} | {routing_cell} | "
                      f"{r['grounding_hit']} | {faith_cell} | {r['question']} |")
     return "\n".join(lines) + "\n"
 

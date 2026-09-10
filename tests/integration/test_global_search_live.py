@@ -18,7 +18,7 @@ async def test_global_search_live(live_extract_driver):
             live_extract_driver, emb, mc, mm, sc, sm,
             q="How do AWS Backup and Azure Backup handle backup retention?",
             level=s.global_default_level, k=s.global_shortlist_k,
-            group_id=s.group_id, relevance_min=s.global_map_relevance_min)
+            group_id=s.group_id, settings=s)
         assert res["answer"] and res["communities_used"]
         assert "http" not in res["answer"]                       # no LLM-authored URL
         for c in res["citations"]:
