@@ -91,12 +91,33 @@ Configured model: **`~deepseek/deepseek-v4-flash-latest`** (already set as
 `eval_judge_model`). The report tier resolves to `z-ai/glm-5.3-flash` via `judge_model`,
 so the two differ in both instance and family.
 
-### 4.4 The summary is verified too
+### 4.4 The summary is regenerated from the kept findings, not verified as prose
 
-`summary` carries no `fact_ids`, so it is checked against the **union** of the facts cited
-across the report's findings. This is not optional: `map_report` reads `hit.summary` as
-well as `hit.full_report`, and the summary also feeds community shortlisting, so leaving
-it ungated would relocate the leak rather than close it.
+**Revised 2026-09-09 after the second live rebuild.** The original rule verified the
+summary against the union of the report's cited facts and skipped the whole report if it
+failed. Measured across two full rebuilds, that rule alone destroyed **15 of 41**
+communities: `findings_dropped` came back **0**, and since the "every finding dropped"
+path increments that counter before returning, a zero proves no report was lost for bad
+findings. Every non-transient loss was the summary.
+
+The rule was wrong in principle, not just in calibration. A community summary is
+*inherently* synthetic — one paragraph generalising across a whole community. Judging it
+by "states nothing the facts do not state" rejects legitimate summarising, and §4.5 then
+discarded the entire report over it.
+
+**New rule:** after findings are verified and unsupported ones dropped, **regenerate the
+summary from the surviving findings only**, instructing the model to summarise those
+statements and add nothing else. The summary then inherits their support by construction:
+generalising over verified findings is not inventing.
+
+`verify_report` still returns `summary_supported`, but `generate_report` no longer acts on
+it — the summary it would have judged is discarded and rewritten anyway.
+
+**Accepted residual risk:** the regenerated summary is not itself re-verified. Its input is
+already-verified findings and its instruction is narrow, so the exposure is far smaller
+than the rule it replaces — but it is not zero. Re-verifying it against the *facts* would
+reintroduce exactly the defect this section removes; re-verifying it against the *kept
+findings* is the obvious future move if a trace ever shows summary leakage.
 
 ### 4.5 On violation — retry once, then drop
 
@@ -106,9 +127,10 @@ it ungated would relocate the leak rather than close it.
    to use only what the facts state.
 3. Re-verify the regenerated report.
 4. Findings still unsupported are **dropped**; the rest of the report is kept.
-5. If the **summary** is still unsupported, the whole report is **skipped** — a
-   one-paragraph summary cannot be partially salvaged, and an ungrounded summary poisons
-   shortlisting.
+5. The summary verdict is **ignored** — see §4.4. The summary is regenerated from the
+   findings that survived, so it cannot be the reason a report is lost.
+6. If **every** finding is dropped there is nothing to summarise, and the report is
+   skipped.
 
 ### 4.6 An unusable verifier reply must never read as "supported"
 
@@ -206,7 +228,7 @@ deliverable, not a nicety.
 | All findings supported | Report returned unchanged; no retry, no extra cost beyond the one verify call. |
 | Some findings unsupported | Regenerate once with the violations named; re-verify; drop those still failing. |
 | Every finding dropped | Report is skipped rather than written empty; counted in `reports_skipped`. |
-| Summary unsupported after retry | Whole report skipped. |
+| Summary unsupported | Verdict ignored; the summary is regenerated from the kept findings (§4.4). It is never a reason to lose a report. |
 | Verifier returns nothing usable | Report **staged**, not discarded: written to `pending_*` with `verified=false` and no embedding, counted in `reports_unverified`, and recoverable via `theme-build --verify-pending` (§4.7). |
 | Verifier resolves to the report model | Raise at startup, do not run. |
 | Report has no findings at all | Existing behaviour unchanged; nothing to verify. |

@@ -1290,11 +1290,253 @@ communities that have a new report and then atomically `DETACH DELETE`s the laye
 momentary blip permanently removed a community until a **full rebuild** — discarding
 report generation we had already paid for, because the *check* failed.
 
-Tasks 8 and 9 implement spec §4.7. **Task 7 (live validation) runs LAST, after both.**
+Task 8 revises the summary rule (spec §4.4). Tasks 9 and 10 implement spec §4.7.
+**Task 7 (live validation) runs LAST, after all three.**
 
 ---
 
-### Task 8: Stage a report whose verification could not complete
+### Task 8: Regenerate the summary from kept findings instead of verifying it
+
+**Files:**
+- Modify: `src/theme_builder/report.py`
+- Test: `tests/unit/test_summary_regeneration.py`
+
+**Interfaces:**
+- Consumes: `verify_report`, `VerifyResult`, `ReportStats`, `generate_report` (Tasks 4–6).
+- Produces: `_SUMMARY_PROMPT: str`; `async def _regenerate_summary(client, model, findings: list[dict], title: str, *, max_tokens: int = 1000) -> str | None`.
+- **Removes** `ReportStats.summary_unsupported` — it can no longer occur.
+
+**Why.** Measured across two full rebuilds, the old rule (verify the summary against the
+union of cited facts, skip the whole report if it fails) destroyed **15 of 41**
+communities on its own. `findings_dropped` came back **0** both times, and because the
+"every finding dropped" path increments that counter before returning, a zero proves no
+report was lost for bad findings — every non-transient loss was the summary.
+
+A community summary is inherently synthetic: one paragraph generalising across a whole
+community. Judging it by "states nothing the facts do not state" rejects legitimate
+summarising. Regenerating it from the surviving findings makes it inherit their support by
+construction.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/unit/test_summary_regeneration.py`:
+
+```python
+"""The summary is regenerated from kept findings, never a reason to lose a report."""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from theme_builder.context import ContextResult
+from theme_builder.report import ReportStats, VerifyResult, generate_report
+
+GOOD = {"title": "T", "summary": "ORIGINAL", "rating": 5, "rating_explanation": "r",
+        "tags": ["aws"],
+        "full_report": [{"finding": "F1", "fact_ids": ["u1"]},
+                        {"finding": "F2", "fact_ids": ["u2"]}]}
+
+
+def _ctx():
+    return ContextResult(text="ctx", fact_uuids={"u1", "u2"},
+                         fact_texts={"u1": "fact one", "u2": "fact two"})
+
+
+class _Client:
+    def __init__(self, payloads):
+        self._payloads = [json.dumps(p) if isinstance(p, dict) else p for p in payloads]
+        self.calls = []
+
+        async def _create(**kw):
+            self.calls.append(kw)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=self._payloads.pop(0)))])
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_create))
+
+
+def _verifier(*results):
+    seq = list(results)
+
+    async def _v(findings, summary, fact_texts):
+        return seq.pop(0)
+
+    return _v
+
+
+@pytest.mark.asyncio
+async def test_unsupported_summary_no_longer_loses_the_report():
+    """The old rule skipped the whole report here. It destroyed 15 of 41 communities."""
+    st = ReportStats()
+    rep = await generate_report(
+        _Client([GOOD, "A regenerated summary."]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported=set(), summary_supported=False)),
+        stats=st)
+    assert rep is not None, "a failing summary must never lose a report"
+    assert len(json.loads(rep.full_report)) == 2
+
+
+@pytest.mark.asyncio
+async def test_summary_is_replaced_by_the_regenerated_one():
+    rep = await generate_report(
+        _Client([GOOD, "A regenerated summary."]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(set(), True)), stats=ReportStats())
+    assert rep is not None and rep.summary == "A regenerated summary."
+
+
+@pytest.mark.asyncio
+async def test_regeneration_sees_only_the_kept_findings():
+    """F2 was dropped, so the summariser must not be shown it."""
+    c = _Client([GOOD, GOOD, "Summary of F1 only."])
+    rep = await generate_report(
+        c, "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported={2}, summary_supported=True),
+                           VerifyResult(unsupported={2}, summary_supported=True)),
+        stats=ReportStats())
+    assert rep is not None
+    prompt = c.calls[-1]["messages"][0]["content"]
+    assert "F1" in prompt and "F2" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_all_findings_dropped_still_skips_without_summarising():
+    """Nothing to summarise -- and no wasted call."""
+    c = _Client([GOOD, GOOD])
+    st = ReportStats()
+    rep = await generate_report(
+        c, "m", _ctx(),
+        verifier=_verifier(VerifyResult(unsupported={1, 2}, summary_supported=True),
+                           VerifyResult(unsupported={1, 2}, summary_supported=True)),
+        stats=st)
+    assert rep is None and st.findings_dropped == 2
+    assert len(c.calls) == 2, "must not call the summariser with no findings"
+
+
+@pytest.mark.asyncio
+async def test_unusable_summary_reply_keeps_the_original_summary():
+    """A summariser hiccup must not lose the report either."""
+    rep = await generate_report(
+        _Client([GOOD, ""]), "m", _ctx(),
+        verifier=_verifier(VerifyResult(set(), True)), stats=ReportStats())
+    assert rep is not None and rep.summary == "ORIGINAL"
+
+
+@pytest.mark.asyncio
+async def test_no_verifier_skips_regeneration_entirely():
+    rep = await generate_report(_Client([GOOD]), "m", _ctx())
+    assert rep is not None and rep.summary == "ORIGINAL"
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run --extra dev pytest tests/unit/test_summary_regeneration.py -q`
+Expected: FAIL — the first test currently returns `None` (old rule skips the report).
+
+- [ ] **Step 3: Add the summariser**
+
+In `src/theme_builder/report.py`:
+
+```python
+_SUMMARY_PROMPT = (
+    "Write ONE paragraph summarising the STATEMENTS below for a community titled "
+    "\"{title}\". Summarise only what these statements say -- do NOT add any detail, "
+    "number, product name or limit that is not in them, and do NOT write any URL. "
+    "Reply with the paragraph only.\n\nSTATEMENTS:\n{statements}"
+)
+
+
+async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[dict],
+                              title: str, *, max_tokens: int = 1000) -> str | None:
+    """Rewrite the summary from the findings that survived verification.
+
+    The summary is inherently synthetic -- one paragraph generalising a whole
+    community -- so verifying it against raw facts rejected legitimate summarising
+    and cost 15 of 41 communities across two rebuilds. Regenerating it from verified
+    findings makes it inherit their support instead.
+    """
+    statements = "\n".join(f"- {f.get('finding', '')}" for f in findings)
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens,
+        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(
+            title=title, statements=statements)}])
+    text = usable_content(resp)
+    return _strip(text) if text else None
+```
+
+- [ ] **Step 4: Rewire `generate_report`**
+
+Replace the post-verification block. The summary verdict is no longer consulted; drop the
+`summary_unsupported` handling entirely and remove that field from `ReportStats`:
+
+```python
+    if result.unsupported:
+        kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
+        if stats is not None:
+            stats.findings_dropped = len(findings) - len(kept)
+        if not kept:
+            return None
+        report = _with_findings(report, kept)
+        findings = kept
+
+    # The summary verdict (result.summary_supported) is deliberately IGNORED -- see
+    # the docstring on _regenerate_summary. Rewrite it from the surviving findings so
+    # it inherits their support; keep the original if the summariser returns nothing,
+    # since a summariser hiccup must not cost a verified report.
+    new_summary = await _regenerate_summary(client, model, findings, report.title)
+    if new_summary:
+        report = replace(report, summary=new_summary)
+    return report
+```
+
+Also drive the retry on `result.unsupported` only — remove `or not result.summary_supported`
+from that condition, and remove the `"- The SUMMARY is not supported by the facts."`
+line from the offenders text.
+
+- [ ] **Step 5: Run the new tests**
+
+Run: `uv run --extra dev pytest tests/unit/test_summary_regeneration.py -q`
+Expected: PASS (6 passed).
+
+- [ ] **Step 6: Update the test that pinned the old rule**
+
+`tests/unit/test_report_verification_flow.py::test_unsupported_summary_skips_the_whole_report`
+asserts the behaviour this task deliberately removes. Rewrite it to assert the NEW
+contract — an unsupported summary verdict does not skip the report — or delete it as
+superseded by `test_unsupported_summary_no_longer_loses_the_report`. Say which you chose
+and why in your report. Do NOT weaken any other assertion in that file.
+
+Run: `uv run --extra dev pytest tests/unit -q`
+Expected: PASS.
+
+- [ ] **Step 7: Full suite, lint, type-check, commit**
+
+Run: `uv run ruff check src tests && uv run mypy src && uv run --extra dev pytest -m "not live" -q`
+Expected: all pass. FOREGROUND, ~11 minutes.
+
+```bash
+git add src tests
+git commit -F - <<'EOF'
+feat(theme): regenerate the summary from kept findings instead of verifying it
+
+Measured across two full rebuilds, the old rule -- verify the summary against the
+union of cited facts, skip the whole report on failure -- destroyed 15 of 41
+communities on its own. findings_dropped came back 0 both times, and since the
+all-dropped path increments that counter before returning, a zero proves nothing
+was lost for bad findings. Every non-transient loss was the summary.
+
+The rule was wrong in principle: a community summary is inherently synthetic, so
+"states nothing the facts do not state" rejects legitimate summarising. It is now
+regenerated from the findings that survived verification, inheriting their
+support by construction.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0174DUVF7CPn91yApHMLiVcv
+EOF
+```
+
+---
+
+### Task 9: Stage a report whose verification could not complete
 
 **Files:**
 - Modify: `src/theme_builder/report.py` (`ReportStats`, the two `stats.unverified = True` branches)
@@ -1550,7 +1792,7 @@ EOF
 
 ---
 
-### Task 9: `theme-build --verify-pending` — recover staged reports
+### Task 10: `theme-build --verify-pending` — recover staged reports
 
 **Files:**
 - Modify: `src/theme_builder/cli.py` (new `_run_verify_pending`, new CLI flag)
