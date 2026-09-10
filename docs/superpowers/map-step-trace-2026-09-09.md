@@ -129,8 +129,16 @@ Run 3 is the fixed system.
 | reports_unverified | 7 | 8 | 5 |
 
 `theme-build --verify-pending` then recovered the staged reports at a cost of five verify
-calls rather than a full rebuild: **1 promoted, 2 rejected** (genuine content failures),
-**2 still pending** (verifier still flaky, recoverable whenever it clears).
+calls rather than a full rebuild: **1 promoted, 2 rejected**, **2 still pending**
+(verifier still flaky, recoverable whenever it clears).
+
+No cause can be attributed to those 2 rejections. `reports_rejected` was a single
+counter merging two very different outcomes — "the summary was judged unsupported" and
+"every finding was dropped" — and at the time of this run the summary verdict was still a
+rejection reason inside `--verify-pending` (the defect fixed as Critical 2 of the final
+branch review). The earlier claim that these were "genuine content failures" was
+unsupported by the data and has been removed; on the measured rates the likelier cause is
+the summary rule.
 
 Final state: **41 communities present, 37 retrievable**, 2 staged-and-recoverable,
 2 rejected.
@@ -170,13 +178,23 @@ writer was inventing on ~88% of communities, not merely the four cases originall
 `findings_dropped = 13` is what survived into a second attempt and still could not be
 supported.
 
-### Eval: NOT YET RUN
+### Eval: RUN, and the gain is measured
 
-The router golden-set eval could not be run: `openrouter.ai` resolves only to IPv6 and
-this host has no default IPv6 route, so every LLM call fails with `APIConnectionError`.
-It worked minutes earlier during the rebuild, so this is a transient local network
-condition. **Global faithfulness against the 1.6 baseline therefore remains unmeasured**,
-and no claim is made about it here.
+At the time this trace was written the router golden-set eval could not be run:
+`openrouter.ai` resolved only to IPv6 and this host had no default IPv6 route, so every
+LLM call failed with `APIConnectionError` — a transient local network condition.
+
+**It has since run.** Against the 1.6 pre-verification baseline (see
+`router-eval-report.md`):
+
+| metric | before | after |
+|---|---|---|
+| global faithfulness | 1.6 | **2.33** |
+| global grounding | 1.00 | **0.86** |
+
+Global faithfulness rose **1.6 → 2.33**, a real measured gain from stopping the report
+writer's inventions. Global grounding dipped **1.00 → 0.86** on a 7-question base — one
+question flipped. Global remains the weakest mode (2.33 against local's 4.79).
 
 Note the eval harness swallowed 14 connection errors into per-question failures rather
 than aborting, which would have produced a plausible-looking but meaningless report. That

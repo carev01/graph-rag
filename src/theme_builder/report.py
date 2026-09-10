@@ -112,9 +112,12 @@ def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
         raise ValueError(
             "No report verifier configured. Set VERIFY_LLM_BASE_URL / VERIFY_LLM_MODEL "
             "(or EVAL_JUDGE_*) in .env.")
-    report_base = settings.report_llm_base_url or settings.judge_base_url
     report_model = settings.report_llm_model or settings.judge_model
-    if base == report_base and model == report_model:
+    # Compare the MODEL ALONE. Also requiring the base URL to match let the exact
+    # same weights reached through a second gateway/provider slip past and grade
+    # their own findings -- and the shared failure modes we are guarding against
+    # travel with the model, not with the endpoint that serves it.
+    if model == report_model:
         raise ValueError(
             f"Report verifier resolves to the report model ({model!r}) -- it would "
             "check its own findings and confirm them. Set VERIFY_LLM_MODEL to a "
@@ -170,13 +173,19 @@ def _strip(s: str) -> str:
 
 
 async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[dict],
-                              title: str, *, max_tokens: int = 1000) -> str | None:
+                              title: str, *, max_tokens: int = 4000) -> str | None:
     """Rewrite the summary from the findings that survived verification.
 
     The summary is inherently synthetic -- one paragraph generalising a whole
     community -- so verifying it against raw facts rejected legitimate summarising
     and cost 15 of 41 communities across two rebuilds. Regenerating it from verified
     findings makes it inherit their support instead.
+
+    `max_tokens` matches the rest of this file's headroom (verify_report's 4000, the
+    report writer's 8000+) rather than a tight cap: the report/judge tier is a
+    REASONING model whose thinking tokens count against the same completion budget,
+    so a small cap returns finish_reason='length' with EMPTY content -- which lands
+    in the "keep the original summary" fallback and silently undoes the regeneration.
     """
     statements = "\n".join(f"- {f.get('finding', '')}" for f in findings)
     resp = await client.chat.completions.create(
@@ -207,15 +216,30 @@ async def verify_report(client: AsyncOpenAI, model: str, findings: list[dict],
             model=model, temperature=0, max_tokens=budget,
             messages=[{"role": "user", "content": prompt}])
         obj = _extract_json(usable_content(resp) or "")
-        if obj is not None:
-            raw = obj.get("unsupported") or []
-            idx = {int(x) for x in raw
-                   if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit())}
-            return VerifyResult(unsupported=idx,
-                                summary_supported=bool(obj.get("summary_supported", False)))
-        logger.warning("report verifier returned no usable JSON (budget=%d); retrying",
-                       budget)
-    logger.warning("report verifier failed twice; report will be skipped")
+        if obj is None:
+            logger.warning("report verifier returned no usable JSON (budget=%d); retrying",
+                           budget)
+            continue
+        raw = obj.get("unsupported")
+        if not isinstance(raw, list):
+            # A parseable reply whose schema drifted -- a renamed key
+            # ({"verdicts": [...]}), a nested one ({"result": {...}}), or a null --
+            # must NOT collapse to "nothing is unsupported". That is an unusable
+            # reply reading as "supported", the exact defect this verifier exists to
+            # prevent. No response_format json_schema is used here, and cheap tiers
+            # drift like this. Treat it as unusable and retry.
+            logger.warning(
+                "report verifier reply has no list-typed 'unsupported' key "
+                "(keys=%s, budget=%d); retrying", sorted(obj)[:8], budget)
+            continue
+        idx = {int(x) for x in raw
+               if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit())}
+        return VerifyResult(unsupported=idx,
+                            summary_supported=bool(obj.get("summary_supported", False)))
+    logger.warning(
+        "report verifier failed twice; the report will be STAGED unverified "
+        "(kept in the graph without an embedding, so it is unreachable from every "
+        "answering path) -- recover it with `theme-build --verify-pending`")
     return None
 
 
@@ -347,6 +371,14 @@ async def generate_report(client: AsyncOpenAI, model: str,
             client, model, prompt + _RETRY_NOTE.format(offenders=offenders), max_tokens)
         if retry_obj is not None:
             report, findings = _build_report(retry_obj, context)
+            if not findings:
+                # The retry came back with no findings at all. Re-verifying an empty
+                # list returns unsupported=set(), which walks straight past the
+                # "every finding dropped" guard below and writes a citation-free
+                # report -- empty full_report, no cited facts, and a summary
+                # generated from an empty STATEMENTS block. Skip it here instead.
+                logger.warning("report retry returned no findings; skipping the report")
+                return None
             result = await verifier(findings, report.summary, context.fact_texts)
             if result is None:
                 if stats is not None:
@@ -370,4 +402,9 @@ async def generate_report(client: AsyncOpenAI, model: str,
     new_summary = await _regenerate_summary(client, model, findings, report.title)
     if new_summary:
         report = replace(report, summary=new_summary)
+    else:
+        # Visible, because the kept summary may still describe a dropped finding.
+        logger.warning(
+            "summary regeneration returned nothing usable for %r; keeping the "
+            "original summary (it was written before verification)", report.title)
     return report

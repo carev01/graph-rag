@@ -102,6 +102,43 @@ async def test_finding_citing_no_facts_is_shown_as_having_none():
 
 
 @pytest.mark.asyncio
+async def test_a_reply_missing_the_unsupported_key_is_unusable_not_supported():
+    """IMPORTANT 4: a parseable reply with a renamed key -- {"verdicts": [...]} --
+    used to read as unsupported=set(), i.e. 'everything is supported'. No
+    response_format json_schema is used, and cheap tiers drift like this."""
+    renamed = json.dumps({"verdicts": [2], "summary_supported": True})
+    c = _FakeClient([renamed, renamed])
+    got = await verify_report(c, "m", FINDINGS, "sum", FACTS)
+    assert got is None, "an unusable reply must never read as 'supported'"
+    assert len(c.calls) == 2, "it must take the retry before giving up"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_nesting_unsupported_under_another_key_is_unusable():
+    nested = json.dumps({"result": {"unsupported": [1, 2]}})
+    got = await verify_report(_FakeClient([nested, nested]), "m", FINDINGS, "sum", FACTS)
+    assert got is None
+
+
+@pytest.mark.asyncio
+async def test_a_non_list_unsupported_value_is_unusable():
+    """`"unsupported": null` previously became [] via `or []` -- 'all supported'."""
+    got = await verify_report(_FakeClient([json.dumps({"unsupported": None}),
+                                           json.dumps({"unsupported": "none"})]),
+                              "m", FINDINGS, "sum", FACTS)
+    assert got is None
+
+
+@pytest.mark.asyncio
+async def test_a_divergent_first_reply_recovers_on_the_retry():
+    """Unusable is a reason to retry, not a reason to lose the report outright."""
+    good = json.dumps({"unsupported": [1], "summary_supported": True})
+    got = await verify_report(_FakeClient([json.dumps({"verdicts": []}), good]),
+                              "m", FINDINGS, "sum", FACTS)
+    assert got == VerifyResult(unsupported={1}, summary_supported=True)
+
+
+@pytest.mark.asyncio
 async def test_garbage_indices_are_ignored_not_crashed_on():
     payload = json.dumps({"unsupported": ["2", "nope", None], "summary_supported": True})
     got = await verify_report(_FakeClient([payload]), "m", FINDINGS, "s", FACTS)

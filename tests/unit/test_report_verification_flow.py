@@ -112,6 +112,26 @@ async def test_all_findings_dropped_skips_the_report():
 
 
 @pytest.mark.asyncio
+async def test_retry_returning_zero_findings_is_skipped_not_written():
+    """IMPORTANT 3: the retry can come back with `full_report: []`. Re-verifying an
+    empty findings list yields `unsupported=set()`, so the `if not kept: return None`
+    guard is never reached and a citation-free report -- empty full_report, empty
+    cited_fact_uuids, a summary generated from an empty STATEMENTS block -- would be
+    embedded and made retrievable."""
+    empty = dict(GOOD, full_report=[])
+    v = _verifier(VerifyResult(unsupported={1}, summary_supported=True),
+                  VerifyResult(unsupported=set(), summary_supported=True))
+    c = _Client([GOOD, empty, "Free prose about a title."])
+    st = ReportStats()
+    rep = await generate_report(c, "m", _ctx(), verifier=v, stats=st)
+    assert rep is None, "a report with no findings must never be written"
+    assert st.staged_report is None, "this is not a verification outage"
+    # no wasted re-verify and no wasted summary call on an empty findings list
+    assert len(v.calls) == 1
+    assert len(c.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_no_verifier_keeps_todays_behaviour_exactly():
     """Ten existing call sites pass no verifier; they must be unaffected."""
     rep = await generate_report(_Client([GOOD]), "m", _ctx())
@@ -136,8 +156,14 @@ async def test_the_retry_names_the_offending_findings():
     c = _Client([GOOD, GOOD, "A regenerated summary."])
     await generate_report(c, "m", _ctx(), verifier=v, stats=ReportStats())
     retry_prompt = c.calls[1]["messages"][0]["content"]
-    assert "F2" in retry_prompt
-    assert "F1" not in retry_prompt.split("NOT supported")[-1]
+    # Split on text that ACTUALLY appears in _RETRY_NOTE. "NOT supported" does not,
+    # so splitting on it returned the whole prompt and the assertion held by
+    # accident (F1 is in the original context, which the retry prompt repeats).
+    marker = "Your previous answer was REJECTED."
+    assert marker in retry_prompt
+    offender_block = retry_prompt.split(marker)[-1]
+    assert "F2" in offender_block
+    assert "F1" not in offender_block.split("Rewrite the report")[0]
 
 
 @pytest.mark.asyncio

@@ -16,9 +16,9 @@ from theme_builder.context import EntityRow, FactRow, assemble_context
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
     classify, load_persisted, match_communities, prev_corpus_cursor, touched_entities)
-from theme_builder.report import (ReportStats, _report_client_and_model,
-                                  _verify_client_and_model, generate_report,
-                                  verify_report)
+from theme_builder.report import (ReportStats, _regenerate_summary,
+                                  _report_client_and_model, _verify_client_and_model,
+                                  generate_report, verify_report)
 from theme_builder.writeback import write_communities, write_communities_incremental
 
 app = typer.Typer()
@@ -175,6 +175,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     regenerated = 0
     reused = 0
     skipped = 0
+    staged = 0
     findings_dropped = reverified = unverified = 0
     now = datetime.now(timezone.utc)
     try:
@@ -204,10 +205,29 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                 findings_dropped += st.findings_dropped
                 reverified += 1 if st.reverified else 0
                 unverified += 1 if st.unverified else 0
+                staged_report = st.staged_report
             except Exception:
                 logger.exception("theme-build: community %s errored; skipping", stable_ids[i])
                 rep = None
+                staged_report = None
             if rep is None:
+                if staged_report is not None:
+                    # Verification could not COMPLETE. The report is generated and
+                    # paid for; dropping this community from `entries` would let
+                    # write_communities_incremental's DETACH DELETE take the
+                    # community's PREVIOUSLY verified report with it. Stage it
+                    # instead -- no embedding, so it stays unreachable from every
+                    # answering path -- and recover it with --verify-pending.
+                    entries.append({**base, "title": staged_report.title,
+                                    "pending_summary": staged_report.summary,
+                                    "pending_full_report": staged_report.full_report,
+                                    "rating": staged_report.rating,
+                                    "rating_explanation": staged_report.rating_explanation,
+                                    "tags": staged_report.tags,
+                                    "cited_fact_uuids": staged_report.cited_fact_uuids,
+                                    "generated_at": now, "staged": True})
+                    staged += 1
+                    continue
                 skipped += 1
                 continue
             emb = (await embedder.create_batch([f"{rep.title}\n{rep.summary}"]))[0]
@@ -222,7 +242,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
         matched_persisted = sum(1 for i in matches if matches[i] is not None)
         res.update({"communities_detected": len(communities),
                     "reports_regenerated": regenerated, "reports_reused": reused,
-                    "reports_skipped": skipped,
+                    "reports_skipped": skipped, "reports_staged": staged,
                     "communities_dissolved": len(persisted) - matched_persisted,
                     "findings_dropped": findings_dropped,
                     "reports_reverified": reverified,
@@ -240,8 +260,16 @@ async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver)
 
     Recovering from a verifier outage costs one verify call per staged community
     rather than regenerating the corpus (spec 4.7).
+
+    A staged report is lost ONLY when no finding survives verification. The summary
+    verdict is not a rejection reason (spec 4.4 / 4.5.5); the promoted summary is
+    regenerated from the findings that survived, so it inherits their support.
     """
     vclient, vmodel = _verify_client_and_model(settings)
+    # The promoted summary is REGENERATED from the findings that survived, so this
+    # needs the report tier too -- promoting the staged summary would publish (and
+    # embed) a paragraph written against findings that have just been dropped.
+    rclient, rmodel = _report_client_and_model(settings)
     embedder = build_embedder(settings)
     promoted = rejected = still_pending = findings_dropped = 0
     try:
@@ -267,7 +295,11 @@ async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver)
                 continue
             kept = [f for i, f in enumerate(findings, 1) if i not in result.unsupported]
             findings_dropped += len(findings) - len(kept)
-            if not result.summary_supported or not kept:
+            # The SUMMARY verdict is deliberately NOT a rejection reason: judging an
+            # inherently synthetic paragraph by "states nothing the facts do not
+            # state" destroyed 15 of 41 communities. Only "no finding survived" --
+            # a genuine content failure -- loses the staged report.
+            if not kept:
                 rejected += 1
                 async with driver.session() as s:
                     await s.run(
@@ -277,21 +309,31 @@ async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver)
                 continue
             cited: list[str] = []
             for f in kept:
-                for fid in f["fact_ids"]:
+                for fid in f.get("fact_ids", []):
                     if fid not in cited:
                         cited.append(fid)
-            emb = (await embedder.create_batch([f"{row['title']}\n{row['summary']}"]))[0]
+            summary = await _regenerate_summary(rclient, rmodel, kept, row["title"] or "")
+            if not summary:
+                # A summariser hiccup must not cost a verified report; keep the
+                # staged summary, but say so -- the promoted paragraph may then
+                # still reference a dropped finding.
+                logger.warning(
+                    "verify-pending: summary regeneration returned nothing usable for "
+                    "community %s; keeping the staged summary", row["cid"])
+                summary = row["summary"] or ""
+            emb = (await embedder.create_batch([f"{row['title']}\n{summary}"]))[0]
             async with driver.session() as s:
                 await s.run(
                     "MATCH (c:Community {community_id:$cid, group_id:$g}) "
                     "SET c.summary=$summary, c.full_report=$full_report, "
                     "c.cited_fact_uuids=$cited, c.embedding=$emb, c.verified=true "
                     "REMOVE c.pending_summary, c.pending_full_report",
-                    cid=row["cid"], g=settings.group_id, summary=row["summary"],
+                    cid=row["cid"], g=settings.group_id, summary=summary,
                     full_report=json.dumps(kept), cited=cited, emb=emb)
             promoted += 1
     finally:
         await vclient.close()
+        await rclient.close()
         await embedder.client.close()
     return {"reports_promoted": promoted, "reports_rejected": rejected,
             "reports_still_pending": still_pending,

@@ -42,6 +42,16 @@ def test_raises_when_it_resolves_to_the_report_model():
         _verify_client_and_model(s)
 
 
+def test_the_same_model_behind_a_different_base_url_still_raises():
+    """The guard is about the MODEL, not the endpoint. Comparing base URL AND model
+    let the identical model reached through a second provider/gateway self-grade --
+    the failure modes it must not share travel with the weights, not the host."""
+    s = _settings(verify_llm_base_url="https://some-other-gateway.example/v1",
+                  verify_llm_model="z-ai/glm-5.3-flash")
+    with pytest.raises(ValueError, match="report model"):
+        _verify_client_and_model(s)
+
+
 def test_raises_when_nothing_is_configured():
     with pytest.raises(ValueError, match="verif"):
         _verify_client_and_model(_settings())
