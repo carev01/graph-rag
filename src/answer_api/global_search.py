@@ -35,7 +35,7 @@ class CommunityHit:
     cited_fact_uuids: list[str]
     full_report: str
     similarity: float
-    relevance: float = 0.0
+    relevance: float | None = None       # rerank score; None when never reranked
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -109,10 +109,14 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
             "coalesce(c.full_report,'[]') AS full_report, c.embedding AS embedding",
             g=group_id, lvl=level)
         rows = [dict(rec) async for rec in r if rec["embedding"]]
-    candidates = _rank_hits(query_vec, rows, k=(settings.rerank_candidates if settings
-                                                else k), rating_boost=rating_boost)
+    # The unreranked path must still return exactly k, whatever rerank_candidates
+    # is set to, or it silently under-returns (finding: rerank_candidates < k) --
+    # so only widen the pre-cut pool once we know it will actually be reranked.
     if settings is None or not rerank_configured(settings):
+        candidates = _rank_hits(query_vec, rows, k=k, rating_boost=rating_boost)
         return candidates[:k]
+    candidates = _rank_hits(query_vec, rows, k=settings.rerank_candidates,
+                            rating_boost=rating_boost)
     st = stats if stats is not None else RerankStats()
     docs = [f"{h.title}: {h.summary}" for h in candidates]
     scored = await rerank(q, docs, top_k=settings.rerank_top_n, settings=settings)
@@ -124,7 +128,7 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
 class MapResult:
     community_id: str
     title: str
-    relevance: float
+    relevance: float | None
     key_points: list[str]
     fact_ids: list[str]
 
@@ -240,7 +244,12 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
     for m in results:
         markers = " ".join(f"[{fact_to_marker[f]}]" for f in m.fact_ids)
         pts = "\n".join(f"- {p}" for p in m.key_points)
-        blocks.append(f"COMMUNITY \"{m.title}\" (relevance {m.relevance}):\n{pts}\n"
+        # m.relevance is the rerank score; None when the shortlist was never
+        # reranked (the default deployment). Printing "(relevance 0.0)" then
+        # would be false information handed to the reducer, not a placeholder
+        # -- omit the parenthetical entirely rather than invent a number.
+        suffix = f" (relevance {m.relevance})" if m.relevance is not None else ""
+        blocks.append(f"COMMUNITY \"{m.title}\"{suffix}:\n{pts}\n"
                       f"Supporting facts: {markers}")
     raw = await _complete_or_none(
         synth_client, synth_model,
