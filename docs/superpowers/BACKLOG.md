@@ -52,133 +52,25 @@ control that scored 5 cited 13/13 markers, so cited = given and binding could no
 plus a marker bag. Predicted to close the gap. Do NOT add prompt constraints, swap tiers, or
 tune rerank thresholds — three slices have now shown those do not touch this.
 
-### 1. Trace the map step: do community `key_points` drift from their facts?
-**Status: DONE 2026-09-09. Answer: YES — the drift starts in the map step.**
-Full evidence in `map-step-trace-2026-09-09.md`. Every hallucinated specific in the
-traced reduce output was already present verbatim in the `key_points` the reduce step was
-given. The map step fabricates *when the community's facts do not answer the question* —
-rich facts produce faithful key points (that question scored 4), generic facts produce
-invented specifics (scored 0-1). Meta-commentary is also injected here, so the reduce
-prompt is fighting its own input. **This retargets item 3 — see items 3a/3b below.**
-
-<details><summary>Original framing (kept for context)</summary>
-
-The global reduce step never sees fact text — it sees `key_points`, LLM-written prose
-produced by `map_report` (`global_search.py`). Faithfulness is scored against the
-*facts*. So if the map step already drifts, the reduce step is faithfully summarising an
-unfaithful intermediate and **no reduce-side fix can work**.
-
-Decisive experiment: for one global question, dump each community's `key_points` beside
-the fact texts they claim to rest on. Cheap, read-only.
-
-**This gates item 3.** Do not design a structural reduce fix until this answers.
-
-Evidence: global grounding is 1.00 (citations point at the right articles) while global
-faithfulness is ~1.1–1.6 (prose not supported by them). The traced worst case asserts
-"1-second PITR precision", "1–35 day retention", "RDS Multi-AZ", "Azure PostgreSQL" —
-none present in any of its 21 cited facts. See `router-eval-report.md`.
-</details>
-
-### 2. ~~The judge cannot check marker→fact correspondence~~ — **DIRECTION WAS BACKWARDS**
-**Corrected 2026-09-10.** This item argued the judge was too *loose* — that a
-misattributed-but-plausible marker would pass, so we were optimising against a looser metric
-than we believed. The investigation found the opposite: misattributed markers **fail**,
-because the reducer cites only 5-7 of 25-29 markers and the true supporting fact is usually
-not in the judge's set at all. Numbering the cited facts barely moves scores.
-
-The judge is **stricter** than assumed, on an axis nobody was working on. That is precisely
-why report verification moved the number (invented claims fail under any reading) while
-reduce-binding and reranking could not.
-
-Still worth doing, but reframed and lower priority: **split the judge into
-evidence-faithfulness and citation-precision**, so the two failure modes stop being averaged
-into one uninterpretable score. Sequence it after 0 and 0b.
-
-### 3a. Bind the map prompt to its facts — **the primary fix, do this first**
-Give `map_report` (`global_search.py`) the same evidence-binding the reduce prompt
-received in the citation-integrity slice: every key point must be supported by the facts
-it cites, no invented specifics, and no meta-commentary about what the report lacks.
-
-This is where the defect actually lives. Evidence in `map-step-trace-2026-09-09.md`:
-five of five key points from one community contained invented specifics (transaction-log
-replay mechanism, RDS Multi-AZ exclusion, 1–35 day range, 1-second precision, full-vs-
-incremental copy, same-AWS-Organization requirement) — none in any cited fact, all of
-them reproduced downstream with real markers attached.
-
-### 3a-bis. `_MAP_PROMPT` has no relevance rubric — scores invert
-User-observed 2026-09-10, same question ("What should I consider for backup encryption
-across cloud providers?"):
-
-- "KMS Key Policy Management for AWS Backup" — literally about encryption keys — scored **3**.
-- "Resiliency in Azure: Unified BCDR Posture Management Platform" — 25 cited facts, none
-  about encryption — scored **6**, and returned all 25 fact_ids.
-
-The prompt asks only for `"relevance": 0-10 (how useful for the question)` with **no
-anchors and no definition of relevance**. A model given "how useful, 0-10" rewards a large,
-information-dense report over a narrow on-topic one — which is exactly the inversion seen.
-The junk community then reaches the reduce step ranked ABOVE the on-topic one, and its
-fact_ids consume marker numbers (see 3b).
-
-Fix with 3a: add explicit scale anchors and define relevance as topical match to the
-question, not general usefulness. Then re-run these two examples as a before/after. Only
-if the inversion survives a proper rubric is this evidence about the model (3c) rather
-than about our prompt.
-
-### 3b. Drop communities that contribute nothing
-`relevance_min = 2` admits communities whose own key points say "No information provided
-on AWS Backup restore workflows" or "provides no details". They inject meta-commentary
-and consume marker numbers. Either raise the threshold or detect a map result carrying no
-supported key point before it reaches reduce.
-
-### 3c. Re-test the map tier after 3a
-The map model is `upstage/solar-pro4`, which currently does THREE jobs: cheap extraction,
-the global map step, and the router classifier (which falls back to the cheap tier and so
-decides which retrieval mode every question takes). It is the same model implicated in
-item 4.
-Fix our prompt first (on this project the fault has been in our own code or config every
-time), then compare cheap vs strong tier on the map step with the corrected prompt.
-
-### 3d. Cross-encoder reranking for the global path — evaluate AFTER 3a/3a-bis
-**We already use a reranker, but only on the path that works.** `graphiti_client.py:212`
-passes `OpenAIRerankerClient` as graphiti's cross-encoder for local search (local scores
-5.0 faithfulness). `global_search.py` has none: `_rank_hits` does cosine in pure Python
-plus a rating boost, takes top-`k`, and hands them straight to the LLM. That is the path
-where relevance inverts (3a-bis). graphiti ships `bge_reranker_client`,
-`gemini_reranker_client` and `openai_reranker_client`, so the dependency already exists.
-
-`map_report` currently does TWO jobs in one call: score relevance 0-10, and extract
-key_points + fact_ids. A cross-encoder is purpose-built for the first and is calibrated
-for it, where an LLM rating 0-10 is improvising a scale.
-
-Three wins if adopted:
-1. **Cheaper, not dearer** — rerank cheaply, then run the expensive map call on the top 3-4
-   instead of all 10, which offsets moving the map step to gpt-5-mini.
-2. **Better recall** — today's top-10 is cosine over a community SUMMARY embedding, and
-   that summary is now a regenerated synthetic paragraph (a weak signal). Rerank top-50
-   down to top-5 instead.
-3. **Right granularity** — cross-encoders cap near 512 tokens and reports run ~5k chars, so
-   rerank FINDINGS rather than whole reports. Finding-level relevance is what reduce eats.
-
-**What it does NOT do:** it changes what gets selected, not whether content is invented.
-That was the report-verification slice. Do not let it be sold as a faithfulness fix.
-
-**Sequencing:** do 3a/3a-bis (rubric + model) first and measure on the two 3a-bis examples.
-If a proper rubric fixes calibration, this becomes an optimisation (cost, recall) rather
-than a correctness fix, which changes its priority. Adding infrastructure to paper over a
-prompt bug is the mistake tracing already saved this project from twice.
-
-### 3. ~~Structural constraint on the global reduce step~~ — **DEPRIORITISED 2026-09-09**
-Superseded by 3a/3b/3c. The trace showed the reduce step is **faithful to its input** —
-it copied the invented specifics it was handed. Constraining it further would constrain a
-step that is already doing its job.
-
-Revisit only if fixing the map step (3a) does not move faithfulness. If revisited, the
-candidate approaches remain: feed verified fact text to the reduce step rather than
-`key_points`, or post-verify each claim against its cited fact.
-
----
-
 ## P1 — Known-wrong behaviour in shipped code
+
+### 2. Split the judge into evidence-faithfulness and citation-precision — **reframed**
+**The original framing had the direction backwards, corrected 2026-09-10.** This item used
+to argue the judge was too *loose* — that a misattributed-but-plausible marker would pass,
+so we were optimising against a weaker metric than we believed. The investigation found the
+opposite: misattributed markers **fail**, because the reducer cites only 5-7 of 25-29
+markers and the true supporting fact is usually not in the judge's set at all. Numbering the
+cited facts barely moves scores.
+
+The judge is **stricter** than assumed, on an axis nobody was working on. That is exactly
+why report verification moved the number (invented claims fail under any reading) while
+reduce-prompt binding and reranking could not.
+
+**What to do instead:** score two things separately — *is this claim supported by the
+evidence given?* and *does its marker point at the right fact?* Today those are averaged
+into one number that cannot distinguish "made it up" from "cited the wrong line", which is
+why three slices chased the wrong causes. Sequence after items 0 and 0b, since 0b is
+expected to move citation-precision sharply and the split is what will prove it.
 
 ### 4. Slice B: out-of-range dedup indices during extraction
 Deferred deliberately from the citation-integrity slice — see
@@ -304,6 +196,13 @@ token extraction with no further confirmation.
 
 `--max-batches` was added (`b95d116`) which bounds a run, but **the question of what those
 593 rows are for is still open** — decide, or clear them.
+
+### 11b. Is the cheap tier good enough for map EXTRACTION? (was 3c)
+`upstage/solar-pro4` no longer scores relevance — the reranker does — so the old question
+("is it miscalibrated?") is moot. What remains is narrower: it still performs the map step's
+**extraction** (key_points + fact_ids), and it is the same model implicated in the
+out-of-range dedup indices (item 4). Worth measuring extraction quality specifically, but
+only after items 0 and 0b, since the reduce step's input format is about to change.
 
 ### 12. The `judge` tier still does three jobs
 The eval judge was separated this slice (`eval_judge_*`, with a guard that *refuses* to
@@ -454,7 +353,39 @@ operating system remains untested in anger.
 
 ---
 
-## Resolved this session (do not re-open)
+## Next steps, in order
+
+1. **Item 0** — restore level 1 and re-baseline. Nothing else is measurable until this is
+   done, and it is the cheapest step available.
+2. **Item 0b** — bind claims to their supporting facts in the reduce step. The structural
+   fix the investigation identified.
+3. **Item 2 (reframed)** — split the judge into evidence-faithfulness and citation-precision,
+   so the two failure modes stop averaging into one uninterpretable number.
+4. **Item 5b** — answer-path clients still have no timeout. Observed live: single eval
+   questions taking 478s and 528s.
+5. Then P1 by priority: item 4 (Slice B, dedup indices), 5c, 6.
+
+Explicitly NOT next: more prompt constraints, LLM tier swaps, or rerank threshold tuning.
+Three slices have now shown those do not move faithfulness.
+
+## Resolved (do not re-open)
+
+**2026-09-10 — reranked selection + observable eval:**
+- **1. Trace the map step** — done; the drift was traced through three hops and found in the
+  report writer, not the map or reduce steps (`map-step-trace-2026-09-09.md`).
+- **3a. Bind the map prompt to its facts** — superseded. `_MAP_PROMPT` no longer scores
+  relevance at all, and the map step was shown faithful to its input. The real binding
+  defect is item 0b, one hop downstream.
+- **3a-bis. No relevance rubric** — resolved by removing the relevance field entirely rather
+  than writing a rubric for it.
+- **3b. Drop communities that contribute nothing** — resolved by `rerank_top_n` plus
+  `rerank_score_floor`.
+- **3d. Cross-encoder reranking** — implemented and merged. It corrected the observed
+  inversion and cut map-step LLM calls ~60%, but did **not** improve faithfulness.
+- **3. Structural constraint on the reduce step** — superseded by item 0b, which identifies
+  the actual defect (marker binding) rather than constraining the prompt further.
+
+**2026-09-09 — community report verification:**
 
 - Global and DRIFT were silently dead (`Community` count 0) — `theme-build` has run,
   41 communities exist.
