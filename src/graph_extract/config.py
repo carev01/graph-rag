@@ -150,7 +150,13 @@ class ExtractSettings(BaseSettings):
     rerank_api_key: str = ""
     rerank_candidates: int = 50    # cosine pre-cut before the API call
     rerank_top_n: int = 4          # max communities reaching extraction
-    rerank_score_floor: float = 0.45
+    # 0.40, not the provisional 0.45: measured across all 10 golden global/DRIFT
+    # questions (docs/superpowers/rerank-threshold-measurement.md). Scores are
+    # compressed -- the two communities the inversion complaint was about sit
+    # 0.023 apart -- so the floor only removes the clear tail and rerank_top_n
+    # does the selecting. 0.45 would have cut the very community that complaint
+    # wanted ranked higher; 0.55+ refuses 3 of 10 answerable questions.
+    rerank_score_floor: float = 0.40
 
 
 @lru_cache
