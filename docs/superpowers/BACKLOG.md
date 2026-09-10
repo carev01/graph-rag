@@ -64,6 +64,25 @@ replay mechanism, RDS Multi-AZ exclusion, 1–35 day range, 1-second precision, 
 incremental copy, same-AWS-Organization requirement) — none in any cited fact, all of
 them reproduced downstream with real markers attached.
 
+### 3a-bis. `_MAP_PROMPT` has no relevance rubric — scores invert
+User-observed 2026-09-10, same question ("What should I consider for backup encryption
+across cloud providers?"):
+
+- "KMS Key Policy Management for AWS Backup" — literally about encryption keys — scored **3**.
+- "Resiliency in Azure: Unified BCDR Posture Management Platform" — 25 cited facts, none
+  about encryption — scored **6**, and returned all 25 fact_ids.
+
+The prompt asks only for `"relevance": 0-10 (how useful for the question)` with **no
+anchors and no definition of relevance**. A model given "how useful, 0-10" rewards a large,
+information-dense report over a narrow on-topic one — which is exactly the inversion seen.
+The junk community then reaches the reduce step ranked ABOVE the on-topic one, and its
+fact_ids consume marker numbers (see 3b).
+
+Fix with 3a: add explicit scale anchors and define relevance as topical match to the
+question, not general usefulness. Then re-run these two examples as a before/after. Only
+if the inversion survives a proper rubric is this evidence about the model (3c) rather
+than about our prompt.
+
 ### 3b. Drop communities that contribute nothing
 `relevance_min = 2` admits communities whose own key points say "No information provided
 on AWS Backup restore workflows" or "provides no details". They inject meta-commentary
@@ -71,7 +90,10 @@ and consume marker numbers. Either raise the threshold or detect a map result ca
 supported key point before it reaches reduce.
 
 ### 3c. Re-test the map tier after 3a
-The map model is `upstage/solar-pro4` — the same cheap-tier model implicated in item 4.
+The map model is `upstage/solar-pro4`, which currently does THREE jobs: cheap extraction,
+the global map step, and the router classifier (which falls back to the cheap tier and so
+decides which retrieval mode every question takes). It is the same model implicated in
+item 4.
 Fix our prompt first (on this project the fault has been in our own code or config every
 time), then compare cheap vs strong tier on the map step with the corrected prompt.
 
