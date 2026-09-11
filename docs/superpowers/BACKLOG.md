@@ -541,18 +541,29 @@ operating system remains untested in anger.
 
 ## Next steps, in order
 
-1. **Item 0** — restore level 1 and re-baseline. Nothing else is measurable until this is
-   done, and it is the cheapest step available.
-2. **Item 0b** — bind claims to their supporting facts in the reduce step. The structural
-   fix the investigation identified.
-3. **Item 2 (reframed)** — split the judge into evidence-faithfulness and citation-precision,
-   so the two failure modes stop averaging into one uninterpretable number.
-4. **Item 5b** — answer-path clients still have no timeout. Observed live: single eval
-   questions taking 478s and 528s.
-5. Then P1 by priority: item 4 (Slice B, dedup indices), 5c, 6.
+**All four P0s are done** (0, 0b, 0c, 0d). Global faithfulness is 4.7 against local's 5.0;
+the faithfulness gap that drove five slices is largely closed, and what remains is
+synthesis over-reach rather than mis-citation.
+
+1. **Item 5b** — the only remaining *production* defect. Answer-path clients have no timeout,
+   so a bad provider route can hang a user's `/answer` request indefinitely; and since 0b a
+   fifth of reduce calls pay a 4x retry on empty content. The fix is written and proven
+   twice in this repo (`_prefer_fast_provider`), just never applied to the synthesis tier.
+2. **Threshold the bag-pasting** (from 0b). Five of ten global-mode answers carry a sentence
+   with ≥8 markers, which is indistinguishable from good citation to the judge. `mps` exposes
+   it; nothing acts on it. Add a "share of citations in ≥8-marker sentences" measure.
+3. **Item 4 — Slice B, out-of-range dedup indices.** The largest untouched correctness item,
+   and the last one on the ingest side. Needs a re-ingest cycle to validate.
+4. **Item 5c / 5d** — the remaining `rep is None` paths that still drop a community, and the
+   incremental path's missing `lost_by_level`.
+5. **Item 2 (judge split) — DE-PRIORITISED by evidence.** It existed because two
+   interventions failed to move the number, implying the metric was suspect. When the real
+   defect was fixed, judge score and per-claim audit moved *together* — the judge tracks
+   reality. Still worth separating evidence-faithfulness from citation-precision eventually,
+   but it is no longer diagnostic-critical.
 
 Explicitly NOT next: more prompt constraints, LLM tier swaps, or rerank threshold tuning.
-Three slices have now shown those do not move faithfulness.
+Four slices have shown those do not move faithfulness; the one that did was structural.
 
 ## Resolved (do not re-open)
 
