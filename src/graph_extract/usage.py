@@ -1,6 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 
+from openai import AsyncOpenAI
+
 @dataclass
 class UsageTally:
     prompt_tokens: int = 0
@@ -70,6 +72,63 @@ def instrument(async_openai):
             return wrapped
         setattr(responses, name, _wrap(fn))
     return async_openai
+
+
+def prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
+    """Route by throughput, and bound reasoning so it cannot eat the output budget.
+
+    OpenRouter serves one model through several providers at very different
+    speeds (measured 29 tok/s vs 9.4 tok/s on an identical prompt, one unpinned
+    call at 380s); `provider.sort=throughput` prefers the fast one.
+
+    Reasoning tokens count as completion tokens, so on a reasoning model an
+    unbounded effort level competes with the answer for the same max_tokens --
+    and losing that race returns NO content (finish_reason='length',
+    content=None). `reasoning_effort` bounds it. Use "low", never `enabled:
+    false`: measured on the report verifier, `low` produced a real verdict in
+    3028 tokens while `enabled: false` produced a 13-token rubber stamp that
+    approved everything. An empty string sends no reasoning parameter at all --
+    which is REQUIRED for a model that does not reason by default (measured
+    2026-09-11 on upstage/solar-pro4: `effort: low` switched thinking ON and
+    every max_tokens=8 classifier call came back empty).
+    """
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        extra = dict(kwargs.get("extra_body") or {})
+        provider = dict(extra.get("provider") or {})
+        provider.setdefault("sort", "throughput")
+        provider.setdefault("allow_fallbacks", True)
+        extra["provider"] = provider
+        if reasoning_effort:
+            extra.setdefault("reasoning", {"effort": reasoning_effort})
+        kwargs["extra_body"] = extra
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
+def bounded_llm_client(base_url: str, api_key: str, *, reasoning_effort: str,
+                       timeout: float = 180.0, max_retries: int = 3) -> AsyncOpenAI:
+    """The one way to build a chat-completions client for a synthesis-side tier.
+
+    Every tier gets: usage tallying, a finite per-request timeout with a
+    bounded retry count (a hung route aborts and retries on a new route
+    instead of hanging the caller -- measured 478s/528s eval questions and a
+    2h09m eval against ~20 min before this), and on OpenRouter, throughput
+    routing plus the tier's reasoning bound (see prefer_fast_provider).
+    `provider`/`reasoning` are OpenRouter extensions, so another gateway gets
+    a plain request.
+
+    This is the fourth place the same fix was needed; it lives here, in the
+    layer both answer_api and theme_builder import, so it is not copied again.
+    """
+    client = instrument(AsyncOpenAI(api_key=api_key or "not-needed", base_url=base_url,
+                                    timeout=timeout, max_retries=max_retries))
+    if "openrouter" in base_url:
+        client = prefer_fast_provider(client, reasoning_effort)
+    return client
 
 
 def usable_content(resp) -> str | None:

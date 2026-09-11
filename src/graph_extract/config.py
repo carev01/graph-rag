@@ -130,6 +130,23 @@ class ExtractSettings(BaseSettings):
     map_llm_base_url: str = ""   # map tier; defaults to the judge/synthesis tier when empty
     map_llm_model: str = ""
     map_llm_api_key: str = ""
+    # --- answer-path reasoning bounds (design: answer-path-hardening) ---
+    # One setting PER TIER, not one shared knob, because the right value is a
+    # property of the MODEL a tier points at, and tiers are configured per tier.
+    # Measured 2026-09-11: GLM-5.3-flash (synthesis) and deepseek-v4-flash (eval
+    # judge) reason by default, so an unbounded effort competes with the answer
+    # for max_tokens and returns empty content (8 empty-content retries in ~40
+    # reduce calls); "low" bounds it and keeps the answer. upstage/solar-pro4
+    # (map + classifier) does NOT reason by default (reasoning_tokens=0), and
+    # `effort: low` SWITCHES THINKING ON: at max_tokens=8 every classifier reply
+    # was empty; at max_tokens=2000 one of two map calls exhausted the whole
+    # budget on reasoning and returned nothing. A shared "low" would have broken
+    # both. Empty string = send no reasoning parameter (the model's own default).
+    # NEVER "disable" reasoning on a reasoning model instead of bounding it:
+    # see verify_reasoning_effort for the 13-token rubber stamp that produced.
+    synthesis_reasoning_effort: str = "low"   # judge_* tier: local/drift/reduce synthesis
+    map_reasoning_effort: str = ""            # set "low" if map_llm_* is a reasoning model
+    eval_judge_reasoning_effort: str = "low"  # the faithfulness judge (eval only)
     # Pre-rerank shortlist size. Inert once a reranker is configured: rerank_top_n
     # bounds what reaches the map step instead (see rerank_top_n below).
     global_shortlist_k: int = 10

@@ -13,7 +13,7 @@ from typing import Literal, cast
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
-from graph_extract.usage import instrument
+from graph_extract.usage import bounded_llm_client, usable_content
 
 from answer_api import synthesize as synth_mod
 from answer_api import global_search as global_mod
@@ -51,8 +51,23 @@ def _cheap_classify_client(settings: ExtractSettings) -> tuple[AsyncOpenAI | Non
     -> the router runs heuristics-only and defaults uncaught queries to drift."""
     if not settings.cheap_llm_api_key:
         return None, ""
-    client = instrument(AsyncOpenAI(
-        api_key=settings.cheap_llm_api_key, base_url=settings.cheap_llm_base_url))
+    # No reasoning parameter, deliberately and by measurement (2026-09-11,
+    # upstage/solar-pro4): the classifier's max_tokens=8 fits a 2-token label
+    # because the model does not reason by default; `reasoning: {effort: low}`
+    # switched thinking ON and every reply came back content=None. A reasoning
+    # cheap model would need BOTH a bound and a far larger max_tokens here.
+    # 20s cuts a slow route (measured 36s for a 2-token reply) rather than
+    # waiting on it; a timeout retries on a new route twice, then classify()
+    # falls back to the default mode.
+    # max_retries=1, not 2: on timeout the classifier falls back to via="default",
+    # which routes to DRIFT -- the most expensive mode. A 36s route was measured on
+    # this very model, so 20s x 3 attempts (60s worst case) makes a spurious default
+    # plausible under provider slowdown. One retry halves that exposure.
+    # reasoning_effort="" deliberately: solar-pro4 does not reason by default, and
+    # sending `reasoning` would ENABLE it -- at max_tokens=8 every reply then comes
+    # back content=None. See config.py and the 2026-09-11 hardening report.
+    client = bounded_llm_client(settings.cheap_llm_base_url, settings.cheap_llm_api_key,
+                                reasoning_effort="", timeout=20.0, max_retries=1)
     return client, settings.cheap_llm_model
 
 
@@ -71,10 +86,21 @@ async def classify(q: str, *, cheap_client, cheap_model,
             resp = await cheap_client.chat.completions.create(
                 model=cheap_model, temperature=0, max_tokens=8,
                 messages=[{"role": "user", "content": _CLASSIFY_PROMPT.format(q=q)}])
-            label = (resp.choices[0].message.content or "").strip().lower()
-            match = next((m for m in _MODE_ORDER if m in label), None)
-            if match is not None:
-                chosen, via = match, "llm"
+            # BACKLOG 5: an empty reply (no choices, or content=None) is the
+            # same empty-reply class fixed at four other sites. The default is
+            # still the right outcome, but it must be logged, not coerced to
+            # "" and silently fallen through.
+            content = usable_content(resp)
+            if content is None:
+                finish = (getattr(resp.choices[0], "finish_reason", None)
+                          if resp.choices else "no-choices")
+                logger.warning("cheap classifier %s returned no usable content "
+                               "(finish_reason=%s); defaulting", cheap_model, finish)
+            else:
+                label = content.strip().lower()
+                match = next((m for m in _MODE_ORDER if m in label), None)
+                if match is not None:
+                    chosen, via = match, "llm"
         except Exception:
             logger.warning("cheap classifier failed; defaulting", exc_info=True)
     return cast(Mode, chosen), via

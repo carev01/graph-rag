@@ -31,6 +31,7 @@ from answer_api.synthesize import (
 )
 from graph_extract.config import get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
+from graph_extract.usage import bounded_llm_client
 
 logger = logging.getLogger(__name__)
 _QUESTIONS = Path(__file__).with_name("router_golden.json")
@@ -68,7 +69,8 @@ def _eval_judge_client_and_model(settings) -> tuple[AsyncOpenAI, str]:
             "grade its own answers and inflate faithfulness. Set EVAL_JUDGE_MODEL "
             "to a different model, ideally a different family so the two do not "
             "share failure modes.")
-    return AsyncOpenAI(api_key=key, base_url=base), model
+    return bounded_llm_client(base, key,
+                              reasoning_effort=settings.eval_judge_reasoning_effort), model
 
 
 async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | None:

@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 
 from answer_api import search as search_mod
 from graph_extract.config import ExtractSettings
-from graph_extract.usage import instrument, usable_content as _usable_content
+from graph_extract.usage import bounded_llm_client, usable_content as _usable_content
 
 logger = logging.getLogger(__name__)
 
@@ -205,8 +205,8 @@ def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI,
             "No synthesis model configured. Set JUDGE_BASE_URL / JUDGE_MODEL / "
             "JUDGE_API_KEY in .env (synthesis currently uses the GLM-5.2 judge endpoint)."
         )
-    client = instrument(AsyncOpenAI(
-        api_key=settings.judge_api_key or "not-needed", base_url=settings.judge_base_url))
+    client = bounded_llm_client(settings.judge_base_url, settings.judge_api_key,
+                                reasoning_effort=settings.synthesis_reasoning_effort)
     return client, settings.judge_model
 
 

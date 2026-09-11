@@ -13,6 +13,11 @@ from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import instrument, usable_content
+# The throughput-routing + reasoning-bound wrapper was written here first and
+# then needed by every answer_api tier too; it now lives in graph_extract.usage
+# (answer_api must not import theme_builder). Re-exported under its old name so
+# the report and verifier tiers are untouched.
+from graph_extract.usage import prefer_fast_provider as _prefer_fast_provider
 from theme_builder.context import ContextResult
 
 logger = logging.getLogger(__name__)
@@ -128,30 +133,6 @@ def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
     if "openrouter" in base:
         client = _prefer_fast_provider(client, settings.verify_reasoning_effort)
     return client, model
-
-
-def _prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
-    """Route by throughput, and bound reasoning so it cannot eat the output budget.
-
-    Reasoning tokens count as completion tokens, so on a reasoning model an
-    unbounded effort level competes with the report text for the same cap --
-    and losing that race truncates the JSON, which drops the community.
-    """
-    orig = client.chat.completions.create
-
-    async def create(*args, **kwargs):
-        extra = dict(kwargs.get("extra_body") or {})
-        provider = dict(extra.get("provider") or {})
-        provider.setdefault("sort", "throughput")
-        provider.setdefault("allow_fallbacks", True)
-        extra["provider"] = provider
-        if reasoning_effort:
-            extra.setdefault("reasoning", {"effort": reasoning_effort})
-        kwargs["extra_body"] = extra
-        return await orig(*args, **kwargs)
-
-    client.chat.completions.create = create  # type: ignore[method-assign]
-    return client
 
 
 def _extract_json(raw: str) -> dict | None:
