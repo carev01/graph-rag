@@ -200,6 +200,31 @@ control that scored 5 cited 13/13 markers, so cited = given and binding could no
 plus a marker bag. Predicted to close the gap. Do NOT add prompt constraints, swap tiers, or
 tune rerank thresholds — three slices have now shown those do not touch this.
 
+### 0e. Bag-pasting is now measured — and the harness stops discarding its evidence — **MEASURE LANDED 2026-09-11, unthresholded**
+Branch `eval-bag-share`. `bag_share` = share of an answer's citation MASS sitting in
+sentences of **≥8 markers** (`BAG_MARKERS`), reported per question as a `bag` column and
+aggregated `bag_share_by_mode`. It answers what `mps` cannot: `mps_max` is identical for an
+answer with one 19-marker bag beside thirty clean claims and an answer that is *only* that
+bag. Returns **None, never 0.0**, when an answer cites nothing — 0.0 is the *best* score on
+this scale, so a refusal earning it would read as perfect citation hygiene (the same
+coerce-a-failure-into-a-legitimate-value class as [[llm-empty-reply-coerced-to-value]]).
+
+The threshold is 8 because the 0b distribution is bimodal — bags of 16, 9, 9, 10, 19 and
+nothing cited between 7 and 9. That is five observations at one corpus size; re-check it
+before treating 8 as anything but a working cut.
+
+**Nothing thresholds it yet, and that is not deferral for its own sake** — no policy should
+be set before the number is seen on a real run. What the number is for: if `bag_share` is
+high, 0b's 80% correct-citation figure is inflated by bags that are trivially "correct"
+because they cite everything.
+
+**The structural half matters more than the metric.** Every scored column this harness has
+gained — `cited`, `ranges` (0d), `mps` (0b), `bag` (now) — cost a **full paid eval run** to
+observe, because `run_eval` scored each answer and then threw it away. The run now writes
+`docs/superpowers/router-eval-raw.json` (git-ignored): answer text, cited fact texts and
+citations per question, including the comparative passes. The next question asked of a run
+is a re-read, not a re-purchase.
+
 ## P1 — Known-wrong behaviour in shipped code
 
 ### 2. Split the judge into evidence-faithfulness and citation-precision — **reframed**
@@ -581,17 +606,24 @@ operating system remains untested in anger.
 the faithfulness gap that drove five slices is largely closed, and what remains is
 synthesis over-reach rather than mis-citation.
 
-1. **Item 5b** — the only remaining *production* defect. Answer-path clients have no timeout,
-   so a bad provider route can hang a user's `/answer` request indefinitely; and since 0b a
-   fifth of reduce calls pay a 4x retry on empty content. The fix is written and proven
-   twice in this repo (`_prefer_fast_provider`), just never applied to the synthesis tier.
-2. **Threshold the bag-pasting** (from 0b). Five of ten global-mode answers carry a sentence
-   with ≥8 markers, which is indistinguishable from good citation to the judge. `mps` exposes
-   it; nothing acts on it. Add a "share of citations in ≥8-marker sentences" measure.
+**Item 5b is DONE** (answer-path clients bounded; eval 1h44m → 26 min) and **0e** landed the
+bag-pasting measure. Revised order:
+
+1. **Items 5c / 5d — a verified report is still destroyed by a failed *new* attempt.** The
+   highest-value remaining item and the only one that loses data the system cannot rebuild
+   cheaply. Staging covered the verifier-blip path only; `except Exception` around report
+   generation and `_generate_once` returning `None` (measured 3/29 empty-`choices` replies on
+   a real run) still omit the community, and `write_communities_incremental`'s `DETACH
+   DELETE` then removes it *with its previously verified report*. Incremental is the DEFAULT
+   path. 5d is the same blind spot in reporting: that path cannot emit `lost_by_level`, so
+   the loss is also invisible. Code-only — no re-ingest, no paid run.
+2. **Item 10 — request-level deadline (P1).** The 5b hardening bounds a *call* at 180s, not a
+   *request*: with client retries plus `_complete_or_none`'s own, a hung reduce can still
+   consume ~24 minutes of a user's `/answer`. "Cannot hang indefinitely" is true; "safe for a
+   user request" is not.
 3. **Item 4 — Slice B, out-of-range dedup indices.** The largest untouched correctness item,
    and the last one on the ingest side. Needs a re-ingest cycle to validate.
-4. **Item 5c / 5d** — the remaining `rep is None` paths that still drop a community, and the
-   incremental path's missing `lost_by_level`.
+4. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
 5. **Item 2 (judge split) — DE-PRIORITISED by evidence.** It existed because two
    interventions failed to move the number, implying the metric was suspect. When the real
    defect was fixed, judge score and per-claim audit moved *together* — the judge tracks

@@ -8,3 +8,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Eval run output: the answers a router-eval run scored (large, regenerated per run).
+docs/superpowers/router-eval-raw.json
