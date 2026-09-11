@@ -164,6 +164,11 @@ _MAP_PROMPT = (
     "question], \"fact_ids\": [the fact uuids from the report that support those "
     "points]}}. Include ONLY points that bear on the question, and ONLY fact_ids that "
     "support the points you listed. fact_ids MUST be uuids that appear in the report. "
+    "Every key point must state something the report SAYS. Do NOT write a point about "
+    "what the report does not contain, does not mention, or cannot compare, and do not "
+    "describe the report's scope. Absence of evidence is not a finding. If nothing in "
+    "the report bears on the question, return an empty key_points list: "
+    "{{\"key_points\": [], \"fact_ids\": []}}. "
     "Do NOT write URLs.\n\n"
     "QUESTION: {q}\n\nCOMMUNITY \"{title}\": {summary}\nFINDINGS: {full_report}"
 )
