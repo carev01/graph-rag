@@ -24,7 +24,9 @@ from answer_api.global_search import _map_client_and_model
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import _parse_judge_score, aggregate, routing_hit
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
-from answer_api.synthesize import _synthesis_client_and_model, _usable_content
+from answer_api.synthesize import (
+    _range_markers, _synthesis_client_and_model, _usable_content,
+)
 from graph_extract.config import get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 
@@ -162,9 +164,16 @@ async def run_eval(clients, questions, settings) -> dict:
         try:
             env, ghit, faith = await _score_one(clients, q, None, settings)
             chosen = env["routing"]["chosen"]
+            # `cited` and `ranges` are what the faithfulness score is silently
+            # conditioned on (BACKLOG 0d): the judge sees only the cited facts,
+            # and a surviving range "[1]-[26]" means it saw 2 of 26. The harness
+            # does not persist answer text, so without these two numbers a
+            # range-shorthand answer and a well-cited one are indistinguishable.
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
-                         "grounding_hit": ghit, "faithfulness": faith, "failed": False}
+                         "grounding_hit": ghit, "faithfulness": faith,
+                         "cited": len(env["citations"]),
+                         "ranges": len(_range_markers(env["answer"])), "failed": False}
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
@@ -175,7 +184,7 @@ async def run_eval(clients, questions, settings) -> dict:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
-                   "failed": True}
+                   "cited": None, "ranges": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -183,6 +192,7 @@ async def run_eval(clients, questions, settings) -> dict:
               f"routing={'-' if rec.get('failed') else rec['routing_hit']} "
               f"grounding={rec['grounding_hit']} "
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
+              f"cited={rec['cited']} ranges={rec['ranges']} "
               f"{elapsed:.0f}s", flush=True)
         per_question.append(rec)
     return aggregate(per_question)
@@ -203,13 +213,18 @@ def format_report(summary: dict) -> str:
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
-             "| intent | chosen | routing | grounding | faithfulness | question |",
-             "|---|---|---|---|---|---|"]
+             "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
+             "| question |",
+             "|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
+        # .get(): summaries written before the cited/ranges columns existed.
+        cited_cell = r.get("cited") if r.get("cited") is not None else "-"
+        ranges_cell = r.get("ranges") if r.get("ranges") is not None else "-"
         lines.append(f"| {r['intent']} | {r['chosen']} | {routing_cell} | "
-                     f"{r['grounding_hit']} | {faith_cell} | {r['question']} |")
+                     f"{r['grounding_hit']} | {faith_cell} | {cited_cell} | "
+                     f"{ranges_cell} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 
