@@ -83,6 +83,42 @@ refusal on thin evidence is correct behaviour and worth keeping.
 **Until this is fixed the re-baseline is not comparable**: 3 unscored refusals make the
 global figure an average over 8 of 10 questions.
 
+### 0d. Range shorthand silently discards citations — **NEW P0, measure before 0b**
+**Found 2026-09-10 during the 0c fix; mechanism verified independently.** The reducer writes
+citation ranges like `[1]-[26]`. `_finalize_answer` keeps only literal markers, so that
+yields exactly **two** citations for prose resting on 26 facts:
+
+```
+_finalize_answer("AWS and Azure both encrypt at rest [1]-[26].", MM)
+  -> cited == [1, 26]
+```
+
+Measured live: 3 of 9 runs kept **4, 2 and 6** citations out of **25, 59 and 53** available
+facts. The faithfulness judge scores against *cited* facts only, so an answer well-supported
+by 25 facts is judged against 2 and reads as unsupported. This is likely a material,
+deterministic contributor to the low global scores that three slices failed to move.
+
+**This revisits a decision I made and defended.** The citation-integrity spec (§3 rule 2)
+rejected a range expander on the grounds that "a model emitting a 30-marker span is guessing,
+not citing, so expanding it would legitimise the pattern and manufacture citations the model
+never really made." That reasoning still holds on integrity grounds — and it has a
+measurement cost nobody knew about.
+
+**The fix is neither expanding nor keeping the status quo:** instruct the reducer to cite
+markers individually and never as a range. That preserves the integrity guarantee (no
+manufactured citations) and stops discarding genuine ones. Expanding remains rejected.
+
+**The 0c fix increased exposure to this.** A reviewer traced the chain: the new map prompt
+yields far more fact_ids per community (measured 15 → 45), longer marker lists make range
+shorthand more attractive to the reducer, `_finalize_answer` collapses `[a]-[b]` to its two
+endpoints, and the judge scores only those. That is the most plausible explanation for the
+encryption control dropping 5 → 2 in the 0c eval, and it means global scores cannot be
+compared meaningfully until 0d is fixed.
+
+**Measure this before starting 0b.** 0b (binding claims to their facts) will make ranges
+*more* attractive to the reducer, so leaving this unfixed would confound 0b's result — and
+0b's whole purpose is to make citation correctness measurable.
+
 ### 0b. Bind claims to their supporting facts in the reduce step — **the real fix**
 `_MAP_PROMPT` returns `key_points[]` and `fact_ids[]` as **two unrelated lists**, and the
 reduce block renders `Supporting facts: [1] [2] … [19]` as a marker bag. The reducer cannot
@@ -196,6 +232,21 @@ verified text permanently.
 **One rule fixes both:** when `rep is None` for any reason, fall back to `matches[i]`'s
 persisted verified entry rather than omitting it. Nothing verified should leave retrieval
 because a *new* attempt failed.
+
+### 5e. DRIFT-intent question misroutes to global and now refuses — **P1**
+Surfaced 2026-09-10 while closing 0c, and recorded here so it stops living only inside
+another item's closure note. The drift-intent question *"What should I think about when
+restoring databases from cloud backups?"* routes to **global** and now returns a refusal
+where it previously scored 1.
+
+Not a regression in any strict sense — routing accuracy is unchanged at 0.97, the misroute
+predates this work, and a worthless answer becoming an honest refusal is arguably an
+improvement. But it is untraced, and the drift→global misroute pattern affects all five
+drift-intent questions in the golden set, which is why global-mode figures average ten
+questions rather than five.
+
+Trace it alongside 0d, since range-shorthand citation loss is a candidate cause for the
+underlying low scores.
 
 ### 6. graphiti's false invalidations (the "43 phantom invalidations")
 Review §2.3, and reproduced live during the temporal-coherence slice: graphiti
