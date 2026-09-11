@@ -245,3 +245,23 @@ untouched (global `mps` max 18, two answers ≥11).
 - `uv run --extra dev pytest -m "not live" -q` — **727 passed**, 15 deselected, 10:52.
 - Eight mutation checks (table above), `git diff --stat src/` empty after restore.
 - Live eval as above; 12 probe calls on the map/classifier model, 16 on the judge.
+
+
+## Review correction (2026-09-11)
+
+**The judge probe is weaker than this report first read it.** Three of its four fixtures sit
+at the scale floor or ceiling (5/5, 0/0, 0/0), where leniency cannot register. The only
+discriminating cell moved `3,4` → `4,4` — so the one signal the probe produced points
+*toward* leniency, and n=2 cannot call that rep-to-rep spread. The decisive test was
+available and skipped: re-judge, under both judge configurations, the three answers that
+actually moved 4→5. The conclusion stands (4.90 → 5.00 is recorded as variance and not
+claimed as improvement), but the probe does not establish it.
+
+**180s bounds a CALL, not a REQUEST.** With `max_retries=3` on the client and
+`_complete_or_none`'s own 3x retry, a single hung reduce can still consume roughly 24
+minutes of a user's `/answer`. "Cannot hang indefinitely" is true; "safe for a user request"
+is not. A request-level deadline (BACKLOG 10) is the real fix, not a nice-to-have.
+
+**Classifier retries reduced 2 → 1** after review: on timeout the classifier falls back to
+`via="default"`, which routes to DRIFT, the most expensive mode. 20s x 3 was a 60s worst
+case against a measured 36s route on this model.

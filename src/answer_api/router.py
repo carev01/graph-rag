@@ -59,8 +59,15 @@ def _cheap_classify_client(settings: ExtractSettings) -> tuple[AsyncOpenAI | Non
     # 20s cuts a slow route (measured 36s for a 2-token reply) rather than
     # waiting on it; a timeout retries on a new route twice, then classify()
     # falls back to the default mode.
+    # max_retries=1, not 2: on timeout the classifier falls back to via="default",
+    # which routes to DRIFT -- the most expensive mode. A 36s route was measured on
+    # this very model, so 20s x 3 attempts (60s worst case) makes a spurious default
+    # plausible under provider slowdown. One retry halves that exposure.
+    # reasoning_effort="" deliberately: solar-pro4 does not reason by default, and
+    # sending `reasoning` would ENABLE it -- at max_tokens=8 every reply then comes
+    # back content=None. See config.py and the 2026-09-11 hardening report.
     client = bounded_llm_client(settings.cheap_llm_base_url, settings.cheap_llm_api_key,
-                                reasoning_effort="", timeout=20.0, max_retries=2)
+                                reasoning_effort="", timeout=20.0, max_retries=1)
     return client, settings.cheap_llm_model
 
 

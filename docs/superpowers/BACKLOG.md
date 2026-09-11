@@ -289,6 +289,7 @@ the synthesis client with `effort: low` exactly as the verifier fix did — and 
 `enabled: false`, which was measured returning a 13-token rubber stamp.
 
 Timeouts (original entry) belong to the same client construction; do both together.
+</details>
 `report.py` was fixed on 2026-09-08 after a measured 380-second outlier: OpenRouter routes
 the same model to different providers (29 tok/s vs 9.4 tok/s on the same prompt), so it
 got `timeout=180.0, max_retries=3` plus `_prefer_fast_provider` (throughput sort). Its own
@@ -390,7 +391,16 @@ unblock the rest.
 
 Fine at pilot scale, wrong at corpus scale.
 
-### 10. 90-second timeouts
+### 10. No REQUEST-level deadline — **P1, raised 2026-09-11**
+The 5b hardening bounds each *call* at 180s, which stops an unbounded hang. It does **not**
+bound a request: with `max_retries=3` on the client and `_complete_or_none`'s own 3x retry,
+a single hung reduce can still consume roughly **24 minutes** of a user's `/answer`.
+"Cannot hang indefinitely" is true; "safe for a user request" is not.
+
+A deadline that spans the whole request — shared across shortlist, map, reduce and their
+retries — is the real fix. Until it exists, the worst case is bounded but not acceptable.
+
+### 10b. 90-second timeouts
 Confirmed at `graphiti_client.py:150,154,204,256`. Add chonkie `timeout=120`
 (`ingest_driver.py:80`) and docext `timeout=300` (`docext/client.py:12`) to the same fix.
 
