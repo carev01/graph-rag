@@ -29,6 +29,25 @@ def test_range_markers_ignores_ordinary_markers_and_prose_dashes():
     assert _range_markers(text) == []
 
 
+# --- BACKLOG 0d follow-ups riding with 0b: three detection gaps (detection only) --
+
+def test_range_markers_reports_both_ranges_of_a_chain():
+    """`[1]-[2]-[3]` is two ranges; a non-overlapping findall consumed `[2]` with
+    the first match and reported one."""
+    assert _range_markers("Claim [1]-[2]-[3].") == ["[1]-[2]", "[2]-[3]"]
+
+
+@pytest.mark.parametrize("text", ["claim [1] To [3].", "claim [1] THROUGH [3]."])
+def test_range_markers_word_separators_are_case_insensitive(text):
+    assert len(_range_markers(text)) == 1
+
+
+@pytest.mark.parametrize("text", ["claim [1] -\n[3].", "claim [1]\nto\n[3].", "claim [1]\n– [3]."])
+def test_range_markers_spans_a_line_break(text):
+    """A model that wraps a line inside the range wrote a range all the same."""
+    assert len(_range_markers(text)) == 1
+
+
 def test_surviving_range_is_logged_with_cited_versus_available(caplog):
     """A range that survives into the finalized answer costs citations with no
     signal anywhere today. The warning must carry what is needed to act on it:

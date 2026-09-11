@@ -55,8 +55,12 @@ _LONE_SENTINEL_RE = re.compile(r"[ \t]*" + _SENTINEL + r"[ \t]*")
 # range that survives finalization costs citations: "[1]-[26]" is 2 markers
 # cited for 26 facts drawn on, and the eval judge then scores the answer
 # against those 2. Until BACKLOG 0d that loss had no signal anywhere.
+# The whole range sits inside a lookahead group so consecutive ranges that
+# share a marker ("[1]-[2]-[3]") are both reported -- a plain findall consumed
+# the shared [2] with the first match and reported one. IGNORECASE catches
+# "[1] To [3]"; `\s*` (not `[ \t]*`) catches a range wrapped across a line.
 _RANGE_RE = re.compile(
-    r"\[\d+\][ \t]*(?:[-–—]|…|\.{3}|to|through)[ \t]*\[\d+\]")
+    r"(?=(\[\d+\]\s*(?:[-–—]|…|\.{3}|to|through)\s*\[\d+\]))", re.IGNORECASE)
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
@@ -145,8 +149,9 @@ def _finalize_answer(raw: str, marker_map: dict[int, dict]) -> tuple[str, list[i
 def _range_markers(text: str) -> list[str]:
     """Every range-shaped marker sequence in `text` (`[14]-[25]`, `[1]…[13]`,
     `[3] to [9]`), as written. Ordinary prose dashes beside a single marker
-    ("[1]-recovery", "[2] — and") do not match: both sides must be markers."""
-    return _RANGE_RE.findall(text)
+    ("[1]-recovery", "[2] — and") do not match: both sides must be markers.
+    Overlapping: a chain `[1]-[2]-[3]` is two ranges."""
+    return [m.group(1) for m in _RANGE_RE.finditer(text)]
 
 
 def _build_citations(cited: list[int], marker_map: dict, resolved: dict) -> list[dict]:

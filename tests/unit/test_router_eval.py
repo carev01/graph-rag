@@ -1,4 +1,50 @@
-from answer_api.router_eval import routing_hit, _parse_judge_score, aggregate
+from answer_api.router_eval import (
+    aggregate, markers_per_sentence, _parse_judge_score, routing_hit,
+)
+
+
+# --- BACKLOG 0b: markers per sentence ----------------------------------------
+# Pasting 19 markers onto one sentence was indistinguishable from good citation
+# in every measure the eval had (cited, ranges, grounding, the judge). This is
+# the distribution that separates "one marker per claim" from bag-pasting.
+
+def test_markers_per_sentence_counts_each_cited_sentence():
+    text = "AWS encrypts with KMS [1] [2]. Azure uses AES [3].\nVault Lock is WORM [4] [5] [6]."
+    assert markers_per_sentence(text) == [2, 1, 3]
+
+
+def test_markers_per_sentence_skips_uncited_sentences_and_headings():
+    text = "## AWS Backup\nAWS encrypts with KMS [1]. It is enabled by default.\n\nAzure [2]."
+    assert markers_per_sentence(text) == [1, 1]
+
+
+def test_markers_per_sentence_folds_a_trailing_marker_only_segment_into_its_sentence():
+    """Models sometimes write `Claim. [1] [2]` -- the markers after the full
+    stop belong to the sentence before them, not to a new empty one."""
+    assert markers_per_sentence("Claim one. [1] [2] Claim two [3].") == [2, 1]
+
+
+def test_markers_per_sentence_bag_pasting_is_visible():
+    bag = " ".join(f"[{i}]" for i in range(1, 20))
+    assert markers_per_sentence(f"Both vendors encrypt at rest {bag}.") == [19]
+
+
+def test_markers_per_sentence_empty_or_refusal_is_empty():
+    assert markers_per_sentence("") == []
+    assert markers_per_sentence("I don't have enough thematic coverage.") == []
+
+
+def test_aggregate_reports_markers_per_sentence_by_mode():
+    pq = [
+        {"question": "a", "intent": "global", "chosen": "global", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": 2, "mps_mean": 1.0, "mps_max": 1},
+        {"question": "b", "intent": "global", "chosen": "global", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": 5, "mps_mean": 3.0, "mps_max": 19},
+        {"question": "c", "intent": "local", "chosen": "local", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": 5},              # older record: no mps keys
+    ]
+    s = aggregate(pq)
+    assert s["mps_by_mode"] == {"global": {"mean": 2.0, "max": 19}}
 
 
 def test_routing_hit():

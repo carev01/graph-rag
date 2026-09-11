@@ -154,6 +154,12 @@ async def _fake_map_report(client, model, q, hit):
                                        key_points=["kp"], fact_ids=["f1"])
 
 
+async def _fake_fact_texts(driver, group_id, fact_uuids):
+    # The reduce step reads fact text before calling the model (BACKLOG 0b);
+    # these tests pass no driver, so serve the text directly.
+    return {u: f"fact {u}" for u in fact_uuids}
+
+
 async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
     """The communities WERE shortlisted and mapped before the reduce LLM
     failed -- `communities_used` must report that (the same list the success
@@ -161,6 +167,7 @@ async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
     failed" into the same `[]` the "no thematic coverage existed" path uses."""
     monkeypatch.setattr(global_search_mod, "shortlist_communities", _fake_shortlist)
     monkeypatch.setattr(global_search_mod, "map_report", _fake_map_report)
+    monkeypatch.setattr(global_search_mod, "_fact_texts", _fake_fact_texts)
     synth_client = _FakeClient([_none_content(), _none_content()])
     result = await global_search_mod.global_search(
         None, None, object(), "map-model", synth_client, "synth-model",
@@ -174,6 +181,7 @@ async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
 async def test_global_search_empty_choices_does_not_raise(monkeypatch):
     monkeypatch.setattr(global_search_mod, "shortlist_communities", _fake_shortlist)
     monkeypatch.setattr(global_search_mod, "map_report", _fake_map_report)
+    monkeypatch.setattr(global_search_mod, "_fact_texts", _fake_fact_texts)
     synth_client = _FakeClient([_no_choices(), _no_choices()])
     result = await global_search_mod.global_search(
         None, None, object(), "map-model", synth_client, "synth-model",

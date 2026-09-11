@@ -223,11 +223,56 @@ async def map_report(client: AsyncOpenAI, model: str, q: str,
                      relevance=hit.relevance, key_points=key_points, fact_ids=fact_ids)
 
 
+async def _fact_texts(driver, group_id: str, fact_uuids: list[str]) -> dict[str, str]:
+    """Fact text for the union of the map step's fact_ids, in ONE round trip.
+
+    BACKLOG 0b: the reducer used to be handed key points plus a bag of markers
+    and never saw a fact, so it numbered sentences by position. It now sees
+    `[N] <fact>` lines, which needs the text. A fact with no text (edge gone,
+    property null) is simply absent from the result -- the caller drops it
+    loudly rather than rendering an empty line under a legitimate marker.
+    """
+    if not fact_uuids:
+        return {}
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
+            "RETURN f.uuid AS uuid, f.fact AS fact", g=group_id, u=list(fact_uuids))
+        return {rec["uuid"]: rec["fact"] async for rec in r
+                if rec["fact"] and str(rec["fact"]).strip()}
+
+
+def _render_blocks(results: list[MapResult], fact_to_marker: dict[str, int],
+                   texts: dict[str, str]) -> list[str]:
+    """One reduce block per community: `COMMUNITY "title":` then a `[N] <fact>`
+    line per selected fact, in the map step's order, numbered by the SAME
+    fact_to_marker every citation downstream resolves through. A fact whose
+    text is missing is skipped (see _fact_texts); a community left with no
+    line contributes no block at all."""
+    blocks = []
+    for m in results:
+        lines = [f"[{fact_to_marker[f]}] {texts[f]}" for f in m.fact_ids if f in texts]
+        if not lines:
+            continue
+        # m.relevance is the rerank score; None when the shortlist was never
+        # reranked (the default deployment). Printing "(relevance 0.0)" then
+        # would be false information handed to the reducer, not a placeholder
+        # -- omit the parenthetical entirely rather than invent a number.
+        suffix = f" (relevance {m.relevance})" if m.relevance is not None else ""
+        blocks.append(f"COMMUNITY \"{m.title}\"{suffix}:\n" + "\n".join(lines))
+    return blocks
+
+
 _REDUCE_PROMPT = (
     "Answer the QUESTION by synthesizing across these community findings, organized "
-    "by theme and vendor.\n"
+    "by theme and vendor. Each finding is shown as a marker [N] followed by the fact "
+    "it refers to.\n"
     "Rules:\n"
-    "- Cite every claim with the [N] fact markers shown. A sentence with no marker "
+    # BACKLOG 0b: the findings are now the facts themselves, marker-bound, so
+    # the citation rule can say which marker a claim takes: the one printed
+    # beside the fact the claim was drawn from.
+    "- Cite every claim with the [N] marker of the fact it rests on: a claim drawn "
+    "from the fact shown after [N] must cite that [N]. A sentence with no marker "
     "is not allowed.\n"
     # BACKLOG 0d: a range like [1]-[26] finalizes to TWO citations (no expander,
     # by design -- a 26-marker span is a guess, not a citation), so the model
@@ -281,17 +326,25 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
                 idx = len(fact_to_marker) + 1
                 fact_to_marker[fid] = idx
                 marker_map[idx] = {"fact_uuid": fid}
-    blocks = []
-    for m in results:
-        markers = " ".join(f"[{fact_to_marker[f]}]" for f in m.fact_ids)
-        pts = "\n".join(f"- {p}" for p in m.key_points)
-        # m.relevance is the rerank score; None when the shortlist was never
-        # reranked (the default deployment). Printing "(relevance 0.0)" then
-        # would be false information handed to the reducer, not a placeholder
-        # -- omit the parenthetical entirely rather than invent a number.
-        suffix = f" (relevance {m.relevance})" if m.relevance is not None else ""
-        blocks.append(f"COMMUNITY \"{m.title}\"{suffix}:\n{pts}\n"
-                      f"Supporting facts: {markers}")
+    # BACKLOG 0b: the reducer gets `[N] <fact>` lines, not key points plus a
+    # marker bag, so a claim can cite the fact it actually rests on. The
+    # numbering above is untouched; only what is printed beside it changed.
+    texts = await _fact_texts(driver, group_id, list(fact_to_marker))
+    missing = [fid for fid in fact_to_marker if fid not in texts]
+    if missing:
+        # Not silent: a marker with no fact behind it would either render as
+        # an empty line or be cited blind. Drop it from the block AND from the
+        # marker map, and say how many and which.
+        logger.warning(
+            "global reduce: %d of %d selected facts have no readable text and were "
+            "dropped from the findings: %s", len(missing), len(fact_to_marker), missing)
+        marker_map = {n: v for n, v in marker_map.items() if v["fact_uuid"] in texts}
+    if not marker_map:
+        logger.warning("global reduce: no fact text for any selected fact; refusing "
+                       "without calling the reducer")
+        return {"query": q, "answer": _REFUSAL, "citations": [],
+                "communities_used": communities_used, "degraded": stats.degraded}
+    blocks = _render_blocks(results, fact_to_marker, texts)
     raw = await _complete_or_none(
         synth_client, synth_model,
         _REDUCE_PROMPT.format(q=q, blocks="\n\n".join(blocks)), max_tokens=3000)
