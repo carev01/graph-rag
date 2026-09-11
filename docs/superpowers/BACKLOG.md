@@ -38,6 +38,38 @@ attributed to report verification — was measured on a corpus missing its main 
 community. Those numbers describe a damaged graph. Re-run before drawing conclusions, and
 note `global_default_level = 0` is no longer needed as a workaround.
 
+### 0c. The reduce step over-refuses, and map meta-commentary is feeding it — **NEW P0**
+**Traced live 2026-09-10 on the repaired corpus.** Two of five global golden questions now
+**refuse** where they previously answered, which is what dragged the re-baseline to global
+1.5 with 3/29 unscored.
+
+It is not selection and not missing evidence. On *"Compare AWS Backup and Azure Backup
+database restore workflows"*:
+- the shortlist returns 4 survivors, with the restored Azure community ranked #1 (0.5781);
+- the map step returns 4 results with **29 fact_ids** across substantive AWS *and* Azure
+  database-restore content;
+- and the reduce step refuses anyway.
+
+**The likely trigger is map-step meta-commentary.** Among the key points handed to reduce:
+*"The provided report contains no information about Azure Backup."* and *"The provided
+report does not contain information about AWS Backup."* The reduce prompt was taught to
+refuse when the findings do not support an answer (citation-integrity slice), so a finding
+that literally says "no information" invites exactly that — while 29 cited facts sit
+alongside it.
+
+**I retired item 3a prematurely**, marking it superseded because the map step was shown
+faithful. Faithful it is — it does not invent. But it still emits meta-commentary, which is
+a different property, and the ban written into `_REDUCE_PROMPT` was never applied to
+`_MAP_PROMPT`.
+
+**Do, in order:** ban meta-commentary in `_MAP_PROMPT` (a key point must state something the
+report says, never what it lacks); then re-check whether the refusals persist; only then
+consider softening the reduce refusal trigger. Do not soften the trigger first — an honest
+refusal on thin evidence is correct behaviour and worth keeping.
+
+**Until this is fixed the re-baseline is not comparable**: 3 unscored refusals make the
+global figure an average over 8 of 10 questions.
+
 ### 0b. Bind claims to their supporting facts in the reduce step — **the real fix**
 `_MAP_PROMPT` returns `key_points[]` and `fact_ids[]` as **two unrelated lists**, and the
 reduce block renders `Supporting facts: [1] [2] … [19]` as a marker bag. The reducer cannot
