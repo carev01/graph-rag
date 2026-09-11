@@ -60,17 +60,33 @@ graph say something false, and `--verify-pending` reads it.
 ## Verification
 
 - `uv run ruff check src tests`, `uv run mypy src` clean.
-- Four new tests (3 integration against a real Neo4j, 1 unit).
+- Eleven new tests: 3 integration on the incremental path, 2 integration on `--full`,
+  6 unit (`classify` + `write_communities`' `preserved`).
 - **Discrimination proven**, per the standing rule that a test must fail without its fix:
-  the carry-over branch was neutralised and the three integration tests failed; restored,
-  all pass, and `git diff` of `src/` is clean of the experiment.
+  each carry-over branch was neutralised in turn and the covering tests failed — three on
+  the incremental path, one on `--full`. Restored, all pass, `git diff` of `src/` clean of
+  the experiment.
+
+## The `--full` path holds the same rule
+
+`write_communities` rebuilds the whole layer with `DETACH DELETE` and writes back only what
+it is handed, and `_run_theme_build` never loaded the persisted layer — so it could not have
+carried anything over even in principle. One failed generation deleted the community
+outright, report included. On a 41-community corpus at the measured blip rate that is
+several communities gone per run. `--full` means "regenerate everything"; it does not mean
+"destroy what we have if the regeneration fails".
+
+It now loads the persisted layer, matches it against the fresh detection with the same
+`match_communities` the incremental path uses, and passes survivors through a new
+`preserved` argument. The shape rules are identical: verified keeps its embedding,
+`generated_at` and `stale:true`; staged stays staged.
+
+**Found while fixing it:** `PARENT_OF` edges were written only between communities present
+in `reports`. A staged community already lost its place in the hierarchy, and a preserved
+one would have too — on the very run that saved it from deletion. The gate is now the full
+set of communities the run wrote.
 
 ## What this does NOT fix
-
-**The `--full` path.** `_run_theme_build` does not load persisted communities at all, so
-`rep is None` there still loses the report. It is *visible* — `write_communities` reports
-`lost_by_level` — and `--full` is an explicit rebuild the operator asked for, but the rule
-above does not hold on that path. Recorded in BACKLOG 5c/5d.
 
 **A husk from a genuine rejection is preserved too.** `--verify-pending` rejecting a report
 leaves a node with no summary, no full report and no embedding. Carry-over keeps it rather

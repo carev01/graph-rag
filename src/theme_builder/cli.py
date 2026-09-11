@@ -94,10 +94,19 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
     embedder = build_embedder(settings)
     reports: dict = {}
     pending: dict = {}
+    # What is already in the graph, so a community whose regeneration fails can be
+    # carried over instead of being deleted by write_communities' DETACH DELETE
+    # rebuild (BACKLOG 5c). `--full` regenerates everything, but "regenerate it"
+    # and "destroy what we have if the regeneration fails" are different promises,
+    # and only the first is the one being asked for.
+    persisted = await load_persisted(driver, settings.group_id)
+    matches = match_communities(communities, persisted,
+                                tau=settings.theme_refresh_jaccard_tau)
+    preserved: dict = {}
     skipped = 0
     findings_dropped = reverified = unverified = 0
     try:
-        for c in communities:
+        for i, c in enumerate(communities):
             try:
                 members = await _fetch_members(driver, settings.group_id, c.member_uuids)
                 facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
@@ -117,14 +126,34 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 logger.exception("theme-build: community %s errored; skipping", c.community_id)
                 rep = None
             if rep is None:
-                logger.info("theme-build: community %s produced no report; skipping", c.community_id)
                 skipped += 1
+                if c.community_id in pending:
+                    # Verification could not complete; the regenerated report is
+                    # staged and recoverable with --verify-pending.
+                    logger.info("theme-build: community %s staged, not verified",
+                                c.community_id)
+                    continue
+                # Generation itself failed. If this community already has a
+                # persisted report, a failed NEW attempt must not take it -- carry
+                # it over rather than let the rebuild delete it. Only a community
+                # with nothing persisted is a genuine loss.
+                p = matches[i]
+                if p is not None:
+                    preserved[c.community_id] = p
+                    logger.warning(
+                        "theme-build: community %s produced no report; carrying over "
+                        "its persisted %s report, flagged stale for the next run",
+                        c.community_id, "staged" if p.is_staged else "verified")
+                    continue
+                logger.warning(
+                    "theme-build: community %s (level %s) produced no report and has "
+                    "nothing persisted; LOST", c.community_id, c.level)
                 continue
             reports[c.community_id] = rep
         corpus_cursor = await _corpus_cursor(driver, settings.group_id)
         res = await write_communities(driver, embedder, settings.group_id,
                                       communities, reports, corpus_cursor=corpus_cursor,
-                                      pending=pending)
+                                      pending=pending, preserved=preserved)
         res["communities_detected"] = len(communities)
         res["reports_skipped"] = skipped
         res["findings_dropped"] = findings_dropped
@@ -140,13 +169,6 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
         await embedder.client.close()
 
 
-def _is_staged(p: PersistedCommunity) -> bool:
-    """A persisted community whose report was never verified. Its text lives in
-    pending_*; `summary`/`full_report` read back empty, so it must never be
-    carried over in the normal shape."""
-    return not p.verified or not p.embedding
-
-
 def _carry_over(base: dict, p: PersistedCommunity, *, stale: bool = False) -> dict:
     """Build an entry that hands a persisted community back to the writer
     unchanged, in whichever shape it already has.
@@ -158,7 +180,7 @@ def _carry_over(base: dict, p: PersistedCommunity, *, stale: bool = False) -> di
     run stamps a fresh corpus_cursor, so `classify` needs the flag to know to
     retry it. A staged community is already always-dirty, so the flag is not
     applied to it."""
-    if _is_staged(p):
+    if p.is_staged:
         return {**base, "title": p.title,
                 "pending_summary": p.pending_summary,
                 "pending_full_report": p.pending_full_report,
@@ -272,8 +294,8 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                     logger.warning(
                         "theme-build: community %s produced no report; carrying over "
                         "its persisted %s report, flagged stale for the next run",
-                        stable_ids[i], "staged" if _is_staged(p) else "verified")
-                    if _is_staged(p):
+                        stable_ids[i], "staged" if p.is_staged else "verified")
+                    if p.is_staged:
                         staged += 1
                     else:
                         preserved += 1

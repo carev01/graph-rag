@@ -159,3 +159,115 @@ async def test_unverifiable_report_is_staged_unreachable_by_answering(extract_dr
     hits = await shortlist_communities(extract_driver, _QueryEmb(), "anything",
                                        level=0, k=10, group_id=g)
     assert all(h.community_id != "stagec" for h in hits)
+
+
+async def test_full_rebuild_preserves_a_report_whose_regeneration_fails(
+        extract_driver, monkeypatch):
+    """BACKLOG 5c, `--full` half. write_communities DETACH DELETEs the whole
+    :Community layer and writes back only what it is handed, and _run_theme_build
+    never loaded the persisted layer -- so one failed generation deleted a report
+    that had been generated, verified and paid for. `--full` means "regenerate
+    everything", not "destroy what we have if the regeneration fails"."""
+    import theme_builder.cli as tc
+    from theme_builder.detect import Community
+    from graph_extract.config import get_extract_settings
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        for uuid in ("e1", "e2"):
+            await s.run("CREATE (:Entity {uuid:$u, group_id:$g, name:$u, summary:'x', "
+                        "created_at: datetime('2026-01-01')})", u=uuid, g=g)
+        await s.run("CREATE (:Episodic {group_id:$g, uuid:'ep1', created_at: datetime('2026-01-01')})", g=g)
+        # a previously verified, retrievable report for the community we will fail
+        await s.run("CREATE (c:Community {group_id:$g, community_id:'c1', level:0, "
+                    "title:'OLD T', summary:'OLD S', full_report:'[{\"finding\":\"old\"}]', "
+                    "rating:7.0, rating_explanation:'re', tags:['aws'], "
+                    "cited_fact_uuids:['f1'], embedding:[0.9], verified:true, "
+                    "generated_at: datetime('2026-03-01'), member_count:2})", g=g)
+        for uuid in ("e1", "e2"):
+            await s.run("MATCH (c:Community {community_id:'c1', group_id:$g}), "
+                        "(e:Entity {uuid:$u, group_id:$g}) MERGE (e)-[:IN_COMMUNITY]->(c)",
+                        u=uuid, g=g)
+
+    async def _fake_detect(driver, group_id, **k):
+        return [Community("c1", 0, ["e1", "e2"], None)]
+
+    async def _failing_report(client, model, context, max_tokens, *, verifier=None, stats=None):
+        return None                      # generation failed; nothing staged
+
+    class _Closeable:
+        async def close(self): pass
+
+    class _FakeEmb:
+        class _C:
+            async def close(self): pass
+        client = _C()
+        async def create_batch(self, texts): return [[0.0] for _ in texts]
+
+    monkeypatch.setattr(tc, "detect_communities", _fake_detect)
+    monkeypatch.setattr(tc, "generate_report", _failing_report)
+    monkeypatch.setattr(tc, "_report_client_and_model", lambda s: (_Closeable(), "m"))
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
+    monkeypatch.setattr(tc, "build_embedder", lambda s: _FakeEmb())
+
+    st = get_extract_settings.__wrapped__().model_copy(update=dict(group_id=g))
+    res = await tc._run_theme_build(st, driver=extract_driver)
+
+    assert res["reports_preserved"] == 1
+    assert res["lost_by_level"] == {}, "nothing was lost, so nothing may be counted lost"
+
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH (c:Community {group_id:$g, community_id:'c1'}) "
+                        "RETURN c.summary AS summary, c.embedding AS embedding, "
+                        "c.verified AS verified, c.stale AS stale, "
+                        "toString(c.generated_at) AS ga, "
+                        "size([(e)-[:IN_COMMUNITY]->(c) | e]) AS members", g=g)
+        row = await r.single()
+    assert row is not None, "the community must survive the DETACH DELETE rebuild"
+    assert row["summary"] == "OLD S", "its verified report text is intact"
+    assert row["embedding"] == [0.9], "it stays RETRIEVABLE, with its own embedding"
+    assert row["verified"] is True
+    assert row["stale"] is True, "but flagged so the next incremental run retries it"
+    assert row["ga"].startswith("2026-03"), "the original report's age, not this run's"
+    assert row["members"] == 2, "its IN_COMMUNITY edges were rewritten"
+
+
+async def test_full_rebuild_reports_a_community_with_nothing_persisted_as_lost(
+        extract_driver, monkeypatch):
+    """The other side: a brand-new community whose first report fails has nothing
+    to preserve. That IS a loss and must be counted, not quietly preserved."""
+    import theme_builder.cli as tc
+    from theme_builder.detect import Community
+    from graph_extract.config import get_extract_settings
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (:Entity {uuid:'e9', group_id:$g, name:'n', summary:'x'})", g=g)
+        await s.run("CREATE (:Episodic {group_id:$g, uuid:'ep1', created_at: datetime('2026-01-01')})", g=g)
+
+    async def _fake_detect(driver, group_id, **k):
+        return [Community("cNEW", 1, ["e9"], None)]
+
+    async def _failing_report(client, model, context, max_tokens, *, verifier=None, stats=None):
+        return None
+
+    class _Closeable:
+        async def close(self): pass
+
+    class _FakeEmb:
+        class _C:
+            async def close(self): pass
+        client = _C()
+        async def create_batch(self, texts): return [[0.0] for _ in texts]
+
+    monkeypatch.setattr(tc, "detect_communities", _fake_detect)
+    monkeypatch.setattr(tc, "generate_report", _failing_report)
+    monkeypatch.setattr(tc, "_report_client_and_model", lambda s: (_Closeable(), "m"))
+    monkeypatch.setattr(tc, "_verify_client_and_model", lambda s: (_Closeable(), "vm"))
+    monkeypatch.setattr(tc, "build_embedder", lambda s: _FakeEmb())
+
+    st = get_extract_settings.__wrapped__().model_copy(update=dict(group_id=g))
+    res = await tc._run_theme_build(st, driver=extract_driver)
+
+    assert res["reports_preserved"] == 0
+    assert res["lost_by_level"] == {1: 1}
