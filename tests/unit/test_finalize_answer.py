@@ -1,6 +1,62 @@
-from answer_api.synthesize import _finalize_answer
+import logging
+
+import pytest
+
+from answer_api.synthesize import _finalize_answer, _range_markers
 
 MM = {1: {"fact_uuid": "f1"}, 2: {"fact_uuid": "f2"}}
+MM26 = {i: {"fact_uuid": f"f{i}"} for i in range(1, 27)}
+
+
+# --- BACKLOG 0d: range shorthand must be VISIBLE, never silently costly -------
+
+def test_range_shorthand_still_keeps_only_the_endpoints():
+    """The mechanism 0d documents, pinned so nobody 'fixes' it by expanding: a
+    range is exactly two citations. Expansion was rejected by the
+    citation-integrity spec and stays rejected."""
+    ans, cited = _finalize_answer("AWS and Azure both encrypt at rest [1]-[26].", MM26)
+    assert cited == [1, 26]
+    assert "[1]-[26]" in ans
+
+
+@pytest.mark.parametrize("sep", ["-", "–", "—", "…", "...", " - ", " to ", " through "])
+def test_range_markers_detects_every_span_form(sep):
+    assert _range_markers(f"claim [14]{sep}[25].") == [f"[14]{sep}[25]"]
+
+
+def test_range_markers_ignores_ordinary_markers_and_prose_dashes():
+    text = "Immutable [1], and cross-region [2] — and more. Point-in-time [1]-recovery [2]."
+    assert _range_markers(text) == []
+
+
+def test_surviving_range_is_logged_with_cited_versus_available(caplog):
+    """A range that survives into the finalized answer costs citations with no
+    signal anywhere today. The warning must carry what is needed to act on it:
+    how many markers were named against how many facts were available."""
+    with caplog.at_level(logging.WARNING, logger="answer_api.synthesize"):
+        _, cited = _finalize_answer("Both encrypt at rest [1]-[26]. Keys rotate [2].", MM26)
+    assert cited == [1, 26, 2]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "range" in msg.lower()
+    assert "[1]-[26]" in msg
+    assert "3" in msg and "26" in msg          # 3 markers cited, 26 facts available
+
+
+def test_range_whose_endpoint_was_removed_is_not_reported_as_a_surviving_range(caplog):
+    """`[1]-[99]` with 99 unresolvable finalizes to `[1]` -- there is no span
+    left in the answer, so nothing to warn about on the range channel."""
+    with caplog.at_level(logging.WARNING, logger="answer_api.synthesize"):
+        ans, cited = _finalize_answer("Claim [1]-[99].", MM)
+    assert cited == [1] and "[99]" not in ans
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_no_range_means_no_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="answer_api.synthesize"):
+        _finalize_answer("Claim [1] [2].", MM)
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
 def test_strips_url():

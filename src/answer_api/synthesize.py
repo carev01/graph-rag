@@ -50,6 +50,13 @@ _PAIRED_SEP_RE = re.compile(
 # sentinel remains is truly lone (no adjacent range partner) -- delete it and
 # collapse its surrounding spaces/tabs to one, touching nothing else.
 _LONE_SENTINEL_RE = re.compile(r"[ \t]*" + _SENTINEL + r"[ \t]*")
+# Range shorthand: two markers joined by a dash / ellipsis / "to" / "through".
+# Detection only -- there is deliberately no expander (see _strip_markers). A
+# range that survives finalization costs citations: "[1]-[26]" is 2 markers
+# cited for 26 facts drawn on, and the eval judge then scores the answer
+# against those 2. Until BACKLOG 0d that loss had no signal anywhere.
+_RANGE_RE = re.compile(
+    r"\[\d+\][ \t]*(?:[-–—]|…|\.{3}|to|through)[ \t]*\[\d+\]")
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
@@ -119,7 +126,27 @@ def _finalize_answer(raw: str, marker_map: dict[int, dict]) -> tuple[str, list[i
         n = int(m)
         if n in marker_map and n not in cited:
             cited.append(n)
-    return _strip_markers(text, set(marker_map)), cited
+    answer = _strip_markers(text, set(marker_map))
+    # Checked on the FINAL text, on every answer path (local, global, DRIFT):
+    # a range whose endpoint was removed above is no longer a span the reader
+    # sees, so it is not reported here. Silent degradation is this project's
+    # most expensive recurring failure -- make the non-compliance loud, with
+    # the two numbers needed to judge its cost.
+    ranges = _range_markers(answer)
+    if ranges:
+        logger.warning(
+            "citation range shorthand survived into the answer: %d range(s) %s; "
+            "%d marker(s) cited of %d facts available -- the markers inside each "
+            "span are NOT cited (no expander, by design)",
+            len(ranges), ranges, len(cited), len(marker_map))
+    return answer, cited
+
+
+def _range_markers(text: str) -> list[str]:
+    """Every range-shaped marker sequence in `text` (`[14]-[25]`, `[1]…[13]`,
+    `[3] to [9]`), as written. Ordinary prose dashes beside a single marker
+    ("[1]-recovery", "[2] — and") do not match: both sides must be markers."""
+    return _RANGE_RE.findall(text)
 
 
 def _build_citations(cited: list[int], marker_map: dict, resolved: dict) -> list[dict]:

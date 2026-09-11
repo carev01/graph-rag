@@ -229,6 +229,11 @@ _REDUCE_PROMPT = (
     "Rules:\n"
     "- Cite every claim with the [N] fact markers shown. A sentence with no marker "
     "is not allowed.\n"
+    # BACKLOG 0d: a range like [1]-[26] finalizes to TWO citations (no expander,
+    # by design -- a 26-marker span is a guess, not a citation), so the model
+    # must name every marker it means. Tell it why: only what it writes counts.
+    "- Write each marker individually: [1] [2] [3]. Never write a range or span "
+    "such as [1]-[3]; only the markers you write out are cited.\n"
     "- Use ONLY these findings. Do NOT use outside knowledge.\n"
     "- Do NOT write any URL.\n"
     "- Do NOT comment on what the findings do not contain, and do not explain what "

@@ -43,3 +43,23 @@ async def test_run_eval_aggregates_and_comparative():
     assert summary["comparative"] is not None              # the broad question ran the comparative pass
     report = er.format_report(summary)
     assert "Routing accuracy" in report and "drift_wins" in report.lower()
+
+
+async def test_per_question_records_cited_count_and_surviving_ranges(monkeypatch):
+    """BACKLOG 0d follow-through: the harness never persisted answer text, so a
+    range-shorthand answer (judged against its two endpoints) was
+    indistinguishable from a well-cited one in the report. Record both counts."""
+    async def _range_router(*a, q, mode_override, vendor, settings):
+        env = _env("global", "A1")
+        env["answer"] = "Both encrypt at rest [1]-[26]."
+        env["citations"] = [dict(env["citations"][0], marker=m) for m in (1, 26)]
+        return env
+    monkeypatch.setattr(er.router_mod, "answer_router", _range_router)
+    questions = [{"question": "enc", "intent": "global", "expected_modes": ["global"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S)
+    rec = summary["per_question"][0]
+    assert rec["cited"] == 2
+    assert rec["ranges"] == 1
+    row = [ln for ln in er.format_report(summary).splitlines() if "| enc |" in ln][0]
+    assert "| 2 | 1 |" in row                      # cited | ranges columns
