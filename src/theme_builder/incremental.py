@@ -26,6 +26,15 @@ class PersistedCommunity:
     embedding: list[float]
     generated_at: object          # neo4j DateTime; passed back unchanged on reuse
     verified: bool = True         # False (or no embedding) = staged: never clean
+    # A staged row's report text lives in pending_*; `summary`/`full_report` are
+    # empty for it. Carried here so a staged community whose retry fails can be
+    # re-staged verbatim instead of being written out as an empty real report.
+    pending_summary: str = ""
+    pending_full_report: str = "[]"
+    # True = this verified report was carried over from a run whose regeneration
+    # failed. It stays retrievable, but it describes an older member set, so it
+    # must be treated as dirty until it is actually regenerated (BACKLOG 5c).
+    stale: bool = False
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -72,6 +81,12 @@ def classify(fresh: list[Community], matches: dict[int, "PersistedCommunity | No
     touched members would look "clean" and its empty/pending report would be reused
     as if it were a real one on the next incremental run. Treat "no embedding" or
     "not verified" as always dirty so a staged community is always retried.
+
+    Same reasoning for `stale` (BACKLOG 5c): a verified report carried over from a
+    failed regeneration keeps its embedding and stays retrievable, so neither of
+    the checks above catches it -- and the carrying run stamps a fresh
+    corpus_cursor, so the edits that made it dirty fall behind the next run's
+    watermark. Without this it would look clean forever.
     """
     dirty: list[int] = []
     clean: list[int] = []
@@ -81,7 +96,7 @@ def classify(fresh: list[Community], matches: dict[int, "PersistedCommunity | No
             dirty.append(i)
         elif set(fc.member_uuids) & touched:
             dirty.append(i)
-        elif not m.embedding or not m.verified:
+        elif not m.embedding or not m.verified or m.stale:
             dirty.append(i)
         else:
             clean.append(i)
@@ -134,13 +149,19 @@ async def load_persisted(driver: AsyncDriver, group_id: str) -> list[PersistedCo
             "coalesce(c.rating_explanation,'') AS rating_explanation, "
             "coalesce(c.tags,[]) AS tags, coalesce(c.cited_fact_uuids,[]) AS cited_fact_uuids, "
             "c.embedding AS embedding, c.generated_at AS generated_at, "
-            "coalesce(c.verified, true) AS verified", g=group_id)
+            "coalesce(c.verified, true) AS verified, "
+            "coalesce(c.pending_summary,'') AS pending_summary, "
+            "coalesce(c.pending_full_report,'[]') AS pending_full_report, "
+            "coalesce(c.stale, false) AS stale", g=group_id)
         return [PersistedCommunity(
             community_id=x["community_id"], level=x["level"], members=set(x["members"]),
             title=x["title"], summary=x["summary"], full_report=x["full_report"],
             rating=x["rating"], rating_explanation=x["rating_explanation"], tags=x["tags"],
             cited_fact_uuids=x["cited_fact_uuids"], embedding=x["embedding"],
-            generated_at=x["generated_at"], verified=x["verified"]) async for x in r]
+            generated_at=x["generated_at"], verified=x["verified"],
+            pending_summary=x["pending_summary"],
+            pending_full_report=x["pending_full_report"],
+            stale=x["stale"]) async for x in r]
 
 
 async def prev_corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:

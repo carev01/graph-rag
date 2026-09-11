@@ -6,12 +6,12 @@ def _fresh(cid, level, members):
     return Community(community_id=cid, level=level, member_uuids=list(members), parent_id=None)
 
 
-def _pers(cid, level, members, *, embedding=(0.0,), verified=True):
+def _pers(cid, level, members, *, embedding=(0.0,), verified=True, stale=False):
     return PersistedCommunity(community_id=cid, level=level, members=set(members),
                               title="t", summary="s", full_report="[]", rating=1.0,
                               rating_explanation="", tags=[], cited_fact_uuids=[],
                               embedding=list(embedding) if embedding else embedding,
-                              generated_at="old", verified=verified)
+                              generated_at="old", verified=verified, stale=stale)
 
 
 def test_exact_and_wobble_match():
@@ -51,6 +51,20 @@ def test_classify_dirty_and_clean():
     dirty, clean = classify(fresh, matches, touched={"a"})   # community 0 has touched 'a'
     assert dirty == [0, 2]     # matched+touched, and the new one
     assert clean == [1]        # matched, untouched
+
+
+def test_classify_treats_a_stale_carried_over_community_as_dirty():
+    """BACKLOG 5c: when regeneration fails outright, the community's previously
+    verified report is carried over rather than deleted -- but it describes the
+    OLD member set, and the run stamps a fresh corpus_cursor, so next run's
+    `touched` would no longer include the edits that made it dirty. Without the
+    `stale` flag the carried-over report would look clean forever and never be
+    regenerated. It keeps its embedding (it stays retrievable); only its
+    dirtiness is forced."""
+    fresh = [_fresh("h1", 1, ["a", "b"])]
+    matches = {0: _pers("s1", 1, ["a", "b"], stale=True)}
+    dirty, clean = classify(fresh, matches, touched=set())   # nothing touched
+    assert dirty == [0] and clean == []
 
 
 def test_classify_treats_a_staged_community_as_dirty():

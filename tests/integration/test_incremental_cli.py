@@ -223,3 +223,140 @@ async def test_swept_community_regenerates_once(extract_driver, monkeypatch):
     r2 = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
     assert calls["n"] == 1                       # unchanged: no further regeneration
     assert r2["reports_regenerated"] == 0 and r2["reports_reused"] == 2
+
+
+def _patch_failing_generation(monkeypatch, communities):
+    """Report generation fails outright: no report AND nothing staged. This is the
+    `except Exception` route and the `_generate_once` -> None route (measured 3/29
+    empty-`choices` replies on a real theme-build), neither of which staging
+    covers."""
+    import theme_builder.cli as cli
+
+    async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
+        return communities
+
+    async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
+        return None
+
+    monkeypatch.setattr(cli, "detect_communities", _fake_detect)
+    monkeypatch.setattr(cli, "generate_report", _fake_generate)
+    monkeypatch.setattr(cli, "build_embedder", lambda s: _FakeEmbedder())
+    monkeypatch.setattr(cli, "_report_client_and_model", lambda s: (_FakeClient(), "m"))
+    monkeypatch.setattr(cli, "_verify_client_and_model", lambda s: (_FakeClient(), "vm"))
+    monkeypatch.setattr(cli, "assemble_context", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "datetime", _FrozenDatetime)
+
+
+async def test_a_failed_regeneration_preserves_the_previously_verified_report(
+        extract_driver, monkeypatch):
+    """BACKLOG 5c. Community A is dirty, its regeneration returns None, and
+    nothing is staged. Before this fix A was omitted from `entries` and
+    write_communities_incremental's DETACH DELETE removed the node -- taking a
+    report that had been generated, verified and paid for. Nothing verified
+    should leave retrieval because a NEW attempt failed."""
+    import theme_builder.cli as cli
+    from theme_builder.detect import Community
+    _patch_failing_generation(monkeypatch, [Community("hA", 1, ["e1", "e2"], None),
+                                            Community("hB", 1, ["e3", "e4"], None)])
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")  # A dirty
+
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert res["reports_preserved"] == 1
+    assert res["reports_skipped"] == 0, "nothing was lost, so nothing may be counted lost"
+    assert res["lost_by_level"] == {}
+
+    async with extract_driver.session() as s:
+        r = await s.run(
+            "MATCH (c:Community {group_id:$g, community_id:'sA'}) RETURN c.summary AS summary, "
+            "c.embedding AS embedding, c.verified AS verified, c.stale AS stale, "
+            "toString(c.generated_at) AS ga", g=G)
+        a = await r.single()
+    assert a is not None, "the community must survive the rebuild"
+    assert a["summary"] == "old", "its verified report text is intact"
+    assert a["embedding"] == [0.0], "it stays RETRIEVABLE -- a live report, not a staged one"
+    assert a["verified"] is True, "it was verified; the new attempt failing does not unverify it"
+    assert a["stale"] is True, "but it is known-stale, so the next run must retry it"
+    assert a["ga"].startswith("2026-03"), "generated_at is the old report's, not this run's"
+
+
+async def test_a_preserved_report_is_regenerated_on_the_next_run(extract_driver, monkeypatch):
+    """The other half of 5c: carrying the report over must not make it look fresh.
+    The run stamps a new corpus_cursor, so next run's `touched` no longer contains
+    the edits that made it dirty -- only the `stale` flag forces the retry."""
+    import theme_builder.cli as cli
+    from theme_builder.detect import Community
+    comms = [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
+    _patch_failing_generation(monkeypatch, comms)
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")
+    await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    calls = _patch(monkeypatch)          # generation works again; same hA/hB communities
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+    assert calls["n"] == 1, "the preserved community must be retried, not treated as clean"
+    assert res["reports_regenerated"] == 1
+
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH (c:Community {group_id:$g, community_id:'sA'}) "
+                        "RETURN c.summary AS summary, c.stale AS stale", g=G)
+        a = await r.single()
+    assert a["summary"] == "NEW"
+    assert not a["stale"], "a freshly regenerated report is not stale"
+
+
+async def test_a_failed_regeneration_with_nothing_persisted_is_counted_as_lost(
+        extract_driver, monkeypatch):
+    """BACKLOG 5d. A brand-new community whose first report fails has nothing to
+    preserve -- that IS a loss, and the incremental path could not report it,
+    because `entries` only carries survivors. Incremental is the DEFAULT path, so
+    the blind spot sat exactly where routine runs happen."""
+    import theme_builder.cli as cli
+    from theme_builder.detect import Community
+    _patch_failing_generation(monkeypatch, [Community("hNEW", 2, ["e9"], None)])
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (:Entity {group_id:$g, uuid:'e9', created_at: datetime('2026-01-01')})", g=G)
+        await s.run("CREATE (:Episodic {group_id:$g, uuid:'ep1', created_at: datetime('2026-04-01')})", g=G)
+
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert res["reports_skipped"] == 1
+    assert res["reports_preserved"] == 0
+    assert res["lost_by_level"] == {2: 1}, "the level of the lost community must be visible"
+
+
+async def test_a_failed_regeneration_keeps_a_staged_report_staged(extract_driver, monkeypatch):
+    """A community staged by an earlier run is ALWAYS dirty, so it is retried; if
+    that retry fails outright it must be carried over in its STAGED shape. Writing
+    it as a normal entry would publish an unverified report (load_persisted reads
+    `summary` as '' for a staged row, so it would also be published empty)."""
+    import theme_builder.cli as cli
+    from theme_builder.detect import Community
+    _patch_failing_generation(monkeypatch, [Community("hA", 1, ["e1", "e2"], None)])
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run("CREATE (c:Community {group_id:$g, community_id:'sA', level:1, title:'T', "
+                    "pending_summary:'PS', pending_full_report:'[{\"finding\":\"F\"}]', "
+                    "rating:5.0, rating_explanation:'re', tags:['aws'], cited_fact_uuids:['f1'], "
+                    "verified:false, generated_at: datetime('2026-03-01'), member_count:2})", g=G)
+        for mu in ("e1", "e2"):
+            await s.run("MATCH (c:Community {community_id:'sA', group_id:$g}) "
+                        "MERGE (e:Entity {uuid:$mu, group_id:$g, created_at: datetime('2026-01-01')}) "
+                        "MERGE (e)-[:IN_COMMUNITY]->(c)", g=G, mu=mu)
+        await s.run("CREATE (:Episodic {group_id:$g, uuid:'ep1', created_at: datetime('2026-04-01')})", g=G)
+
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert res["reports_staged"] == 1
+    assert res["reports_skipped"] == 0 and res["lost_by_level"] == {}
+
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH (c:Community {group_id:$g, community_id:'sA'}) "
+                        "RETURN c.pending_summary AS ps, c.pending_full_report AS pfr, "
+                        "c.summary AS summary, c.embedding AS embedding, "
+                        "c.verified AS verified", g=G)
+        a = await r.single()
+    assert a is not None, "the staged community must survive the rebuild"
+    assert a["ps"] == "PS" and a["pfr"] == '[{"finding":"F"}]', "its pending text is intact"
+    assert a["summary"] is None and a["embedding"] is None
+    assert a["verified"] is False
