@@ -19,6 +19,18 @@ class _FakeNeo:
     def driver(self, *a, **k): return _FakeAsync()
 
 
+class _FakeLLM:
+    async def generate_response(self, *a, **k): return {}
+
+
+class _FakeGraphiti(_FakeAsync):
+    """_build_ingest_driver wraps graphiti.llm_client (dedup guard), so the
+    double must carry one; a bare string no longer suffices."""
+    def __init__(self, name):
+        self.name = name
+        self.llm_client = _FakeLLM()
+
+
 def test_root_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -145,8 +157,10 @@ async def test_build_ingest_driver_builds_cheap_tier_when_configured(monkeypatch
     from graph_extract.config import ExtractSettings
 
     built = []
-    monkeypatch.setattr(cli, "build_graphiti", lambda s: built.append("strong") or "SG")
-    monkeypatch.setattr(cli, "build_cheap_graphiti", lambda s: built.append("cheap") or "CG")
+    monkeypatch.setattr(cli, "build_graphiti",
+                        lambda s: built.append("strong") or _FakeGraphiti("SG"))
+    monkeypatch.setattr(cli, "build_cheap_graphiti",
+                        lambda s: built.append("cheap") or _FakeGraphiti("CG"))
     monkeypatch.setattr(cli, "make_docext_client", lambda **k: _FakeAsync())
     monkeypatch.setattr(cli, "AsyncGraphDatabase", _FakeNeo())
     async def _noop(g): return None
@@ -166,7 +180,7 @@ async def test_build_ingest_driver_strong_only_without_cheap_key(monkeypatch):
     import graph_extract.cli as cli
     from graph_extract.config import ExtractSettings
 
-    monkeypatch.setattr(cli, "build_graphiti", lambda s: "SG")
+    monkeypatch.setattr(cli, "build_graphiti", lambda s: _FakeGraphiti("SG"))
     monkeypatch.setattr(cli, "build_cheap_graphiti", lambda s: (_ for _ in ()).throw(AssertionError("must not build cheap")))
     monkeypatch.setattr(cli, "make_docext_client", lambda **k: _FakeAsync())
     monkeypatch.setattr(cli, "AsyncGraphDatabase", _FakeNeo())
