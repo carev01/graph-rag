@@ -170,8 +170,8 @@ _MAP_PROMPT = (
     "something the report SAYS. Do NOT write a point about what the report does not "
     "contain, does not mention, or cannot compare, and do not describe the report's "
     "scope. Absence of evidence is not a finding. Return an empty key_points list "
-    "({{\"key_points\": [], \"fact_ids\": []}}) only when the report says nothing about "
-    "any subject of the question. "
+    "({{\"key_points\": [], \"fact_ids\": []}}) only when nothing in the report bears "
+    "on the question. "
     "Do NOT write URLs.\n\n"
     "QUESTION: {q}\n\nCOMMUNITY \"{title}\": {summary}\nFINDINGS: {full_report}"
 )

@@ -52,5 +52,11 @@ async def test_map_prompt_forbids_commentary_on_what_the_report_lacks():
     await gs.map_report(client, "mm", "compare X and Y", _hit())
     prompt = client.calls[0]["messages"][0]["content"]
     assert "does not contain" in prompt and "Absence of evidence" in prompt
-    assert "empty" in prompt and "key_points" in prompt
+    assert "empty key_points list" in prompt
+    # The empty-list escape hatch must key on "bears on the question", not on
+    # "mentions a subject" -- a report can mention a subject of a multi-vendor
+    # question (e.g. AWS Backup) while saying nothing about the actual ask
+    # (e.g. restore workflows), and the old wording sanctioned an empty list
+    # only in the latter, narrower case.
+    assert "nothing in the report bears on the question" in prompt
     assert "cover only one" in prompt
