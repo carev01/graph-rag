@@ -38,7 +38,20 @@ attributed to report verification — was measured on a corpus missing its main 
 community. Those numbers describe a damaged graph. Re-run before drawing conclusions, and
 note `global_default_level = 0` is no longer needed as a workaround.
 
-### 0c. The reduce step over-refuses, and map meta-commentary is feeding it — **NEW P0**
+### 0c. ~~The reduce step over-refuses, and map meta-commentary is feeding it~~ — **DONE 2026-09-11**
+Fixed on branch `map-meta-commentary`; full account in `map-meta-commentary-fix-2026-09-10.md`.
+The hypothesis held for the compliance question (6/9 refusals with the meta-commentary,
+0/9 without, on identical map output) and was not reproduced for database restore. The
+first wording of the ban **over-corrected** — solar-pro4 returned nothing from
+single-vendor communities on two-vendor questions — so the shipped `_MAP_PROMPT` also says
+a report covering one side of the question returns that side. `_REDUCE_PROMPT` untouched.
+Eval: all five global-intent questions now scored (was 3/5); global 2.44 over 9/10 vs
+pre-repair 2.30 over 10/10 — **flat, not a gain**. New findings that are not this item:
+**range shorthand `[1]–[26]` collapses citations to endpoints** (3 of 9 live runs: 25→4,
+59→2, 53→6 facts; the judge then scores against the endpoints only — measure before 0b),
+and `_REFUSAL` conflates model refusal with the `_complete_or_none` None path (10
+length-exhaustions this eval, all recovered). Original trace kept below for the record.
+
 **Traced live 2026-09-10 on the repaired corpus.** Two of five global golden questions now
 **refuse** where they previously answered, which is what dragged the re-baseline to global
 1.5 with 3/29 unscored.
