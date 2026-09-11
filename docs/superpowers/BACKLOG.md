@@ -246,9 +246,24 @@ into one number that cannot distinguish "made it up" from "cited the wrong line"
 why three slices chased the wrong causes. Sequence after items 0 and 0b, since 0b is
 expected to move citation-precision sharply and the split is what will prove it.
 
-### 4. Slice B: out-of-range dedup indices during extraction
-Deferred deliberately from the citation-integrity slice — see
-`specs/2026-09-08-answer-citation-integrity-design.md` §8.
+### 4. ~~Slice B: out-of-range dedup indices during extraction~~ — **BUILT 2026-09-11, live measurement pending**
+`slice-b-dedup-indices-2026-09-11.md`. `graph_extract.dedup_guard` wraps the dedup LLM
+call: recovers N/M from the prompt, classifies every out-of-range index (inside the
+invalidation range = the confusion signature, vs beyond it = hallucinated), counts per
+article on `IngestArticleResult.dedup`, and re-issues the pristine prompt on the strong
+tier before graphiti sees the reply (`dedup_retry_on_strong`, default on). Both impact
+claims below confirmed from the code and pinned by tests, with one bound: a dropped
+contradicted index only costs an invalidation when the candidate has an earlier
+`valid_at`. The index-space-confusion hypothesis is **consistent with the one logged data
+point (4/4 indices inside the max possible invalidation range) but unconfirmed** — no
+run logs survive, and hermetic work cannot produce the rate. The `ingest` command now
+prints the decisive numbers; one cheap-tier ingest of ~50 articles settles it. Schema
+`maximum` was rejected as harmful (constrained decoding would turn `[10,11]` into an
+in-range wrong merge). Not fixed: duplicates already in the graph; the strong tier's own
+events (counted, not retried); the search cap of 10 same-pair candidates.
+
+Original entry, kept for the record. Deferred deliberately from the citation-integrity
+slice — see `specs/2026-09-08-answer-citation-integrity-design.md` §8.
 
 graphiti logs `LLM returned invalid duplicate_facts idx values [10,11,14,15] (valid
 range: 0-9)` at `edge_operations.py:735` and **drops them**, so dedup silently misses
@@ -659,8 +674,10 @@ incremental path *and* on `--full`.
 **Item 10 (request-level deadline) is de-prioritised by the user**: quality of the response
 always outranks bounding its latency.
 
-1. **Item 4 — Slice B, out-of-range dedup indices.** The largest untouched correctness item,
-   and the last one on the ingest side. Needs a re-ingest cycle to validate.
+1. **Item 4 — Slice B — BUILT, unmeasured.** Detection, per-article counters and the
+   strong-tier retry are on `slice-b-dedup-indices`. What remains is one cheap-tier
+   ingest (~50 articles) to read the rate, the in-range/beyond ratio and `retry_clean`;
+   the user decides whether to spend it.
 2. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
 3. **Item 6 — graphiti's false invalidations.** Corrupts the flagship temporal use case by
    inventing change events that never happened; a live minimal repro already exists, which
