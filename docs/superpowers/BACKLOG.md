@@ -239,7 +239,13 @@ strong tier" fits the existing shape. If in-flight proves infeasible, handle pos
 Separate slice because it is a different subsystem (ingest, not answer), a different test
 surface, and validating it requires a re-ingest cycle.
 
-### 5. `router.py:72` — the last `content or ""` site
+### 5. ~~`router.py:72` — the last `content or ""` site~~ — **DONE 2026-09-11**
+Closed with 5b (branch `answer-path-client-hardening`): the classifier reply goes through
+`usable_content`; an empty reply (no choices, or `content=None`) is logged as
+`cheap classifier ... returned no usable content (finish_reason=...)` and defaults, and
+an empty `choices` list no longer raises `IndexError` into the generic except. Still
+nothing aggregates `routing.via == "default"`. Original entry kept below.
+
 `max_tokens=8` against a possibly-reasoning classifier, then
 `(resp.choices[0].message.content or "").strip()`. An empty reply falls through silently
 to `default_mode`. Two problems: the unguarded `resp.choices[0]` (empty `choices` list
@@ -250,7 +256,27 @@ note. Use `synthesize._usable_content`. Observable today as `routing.via = "defa
 but nothing aggregates it, so a regression would be invisible. Routing accuracy 0.97 was
 measured with the current classifier, so it is not biting *now*.
 
-### 5b. Answer-path clients: no timeout, and UNBOUNDED REASONING — **P1, named fix ready**
+### 5b. ~~Answer-path clients: no timeout, and UNBOUNDED REASONING~~ — **DONE 2026-09-11**
+Fixed on branch `answer-path-client-hardening`; full account in
+`answer-path-hardening-2026-09-11.md`. `_prefer_fast_provider` moved to
+`graph_extract.usage.prefer_fast_provider` (re-exported by `theme_builder.report`) with a
+`bounded_llm_client` builder that all four answer-path tiers use: 180s timeout / 3 retries
+(classifier 20s / 2), throughput routing, per-tier reasoning bound. **Eval: empty-content
+retries 8 → 0 in ~40 reduce calls, wall-clock 1h44m → 26 min, slowest question 528s →
+184s; routing 0.97, grounding 0.92, unscored 0/29 unchanged; faithfulness 4.90 → 5.00 is
+synthesis-output variance, not judge leniency (judge probed: still 5/4/0/0 on a
+faithful/one-invented/mostly-invented/unsupported set).**
+
+**The named fix was wrong for two of the four tiers.** Measured: `upstage/solar-pro4`
+(map + classifier) does not reason by default, and `reasoning: {effort: low}` SWITCHES
+THINKING ON — every `max_tokens=8` classifier reply came back empty, and one of two
+`max_tokens=2000` map calls burned the whole budget on reasoning. The bound is a property
+of the model, so the settings are per tier (`synthesis_reasoning_effort="low"`,
+`map_reasoning_effort=""`, `eval_judge_reasoning_effort="low"`; classifier hard-wired to
+none). Left open: `theme_builder/report.py` still builds its two clients by hand (fold
+into BACKLOG 20); nothing thresholds a per-request `/answer` SLA (BACKLOG 10). Original
+entry kept below.
+
 **Escalated 2026-09-11 by 0b.** The reduce prompt is now 2-3x larger and empty-content
 first-calls rose to **8 of ~40 reduce calls** (previous run 5). All recovered via
 `_complete_or_none`'s 3x retry, so nothing was lost — but a fifth of reduce calls now pay a
