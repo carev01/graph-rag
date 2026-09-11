@@ -209,8 +209,7 @@ Per global-routed question (chosen = global), with the new columns:
 - The prompt change *could* lower scores mechanically — a range-free answer that
   previously kept 2 endpoints and now keeps 5 positional markers gives the judge more
   wrong-fact pairs to find — but this run cannot separate that from the run-to-run
-  variance, and the citation-retention ratio (39% → 40%) argues the change was neutral
-  on volume. Reverting the rule would restore silent citation loss without evidence it
+Reverting the rule would restore silent citation loss without evidence it
   would restore any score; it should stay.
 
 ## 5. Things we had not considered
