@@ -39,11 +39,18 @@ def _hit(cid="c1", title="T", cited=("f1", "f2")):
 @pytest.mark.asyncio
 async def test_map_prompt_forbids_commentary_on_what_the_report_lacks():
     """The rendered map prompt must (a) forbid key points about what the report
-    does NOT contain and (b) tell the model that a community with nothing
+    does NOT contain, (b) tell the model that a community with nothing
     relevant returns an EMPTY key_points list -- the only shape the reduce step
-    can safely ignore."""
+    can safely ignore -- and (c) say that a report covering only ONE side of a
+    multi-vendor question still returns that side's points. (c) is not optional:
+    the first wording of this ban, without it, made solar-pro4 return NOTHING
+    from single-vendor communities on "compare AWS and Azure" questions -- the
+    AWS Vault Lock community went from 5 points / 15 fact_ids to 0 / 0 on the
+    compliance-retention question, 3 runs out of 3 -- and the reduce step then
+    refused for lack of evidence instead of for meta-commentary."""
     client = _RecordingClient([json.dumps({"key_points": [], "fact_ids": []})])
     await gs.map_report(client, "mm", "compare X and Y", _hit())
     prompt = client.calls[0]["messages"][0]["content"]
     assert "does not contain" in prompt and "Absence of evidence" in prompt
     assert "empty" in prompt and "key_points" in prompt
+    assert "cover only one" in prompt
