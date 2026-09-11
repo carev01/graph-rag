@@ -14,7 +14,7 @@ from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
-from graph_extract.usage import instrument
+from graph_extract.usage import bounded_llm_client
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content,
@@ -183,7 +183,8 @@ def _map_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
     key = settings.map_llm_api_key or settings.judge_api_key or "not-needed"
     if not base or not model:
         raise ValueError("No map model configured. Set map_llm_* or judge_* (GLM-5.2).")
-    return instrument(AsyncOpenAI(api_key=key, base_url=base)), model
+    return bounded_llm_client(base, key,
+                              reasoning_effort=settings.map_reasoning_effort), model
 
 
 def _extract_json(raw: str) -> dict | None:
