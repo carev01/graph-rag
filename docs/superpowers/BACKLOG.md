@@ -155,7 +155,21 @@ compared meaningfully until 0d is fixed.
 *more* attractive to the reducer, so leaving this unfixed would confound 0b's result — and
 0b's whole purpose is to make citation correctness measurable.
 
-### 0b. Bind claims to their supporting facts in the reduce step — **the real fix**
+### 0b. ~~Bind claims to their supporting facts in the reduce step~~ — **DONE 2026-09-11**
+Fixed on branch `bind-claims-to-facts`; full account in `bind-claims-to-facts-2026-09-11.md`.
+The reduce block is now `[N] <fact>` lines (one batched fact-text read, numbering
+unchanged, missing text dropped loudly); key points are no longer rendered (A/B showed
+they added only tangential prose). **Per-claim audit on the deletion question: 0–2 of 9
+claims correctly cited before → 9–24 of 13–25 after (hand-checked 42/43); across all 15
+after-runs 179/224 (80%) vs 10/42 (24%) before. Eval: global faithfulness 1.6 → 4.7 over
+10/10, overall 3.75 → 4.90, unscored 0/29.** The diagnosis held. Folded in: the
+`markers per sentence` eval column (two large-pool answers still carry a 16- and
+19-marker bag sentence despite scoring 5), the `_range_markers` detection gaps, and the
+line-based rule count. Left open: uncited topic sentences and cross-vendor "Both…"
+summary sentences are now the residual error (synthesis, not binding); the reduce prompt
+is 2–3× larger and tripped the synthesis tier's empty-content retry 8 times in ~40 calls
+(all recovered) — BACKLOG 5b. Original entry kept below.
+
 `_MAP_PROMPT` returns `key_points[]` and `fact_ids[]` as **two unrelated lists**, and the
 reduce block renders `Supporting facts: [1] [2] … [19]` as a marker bag. The reducer cannot
 know which fact backs which point, so it numbers sentences **by position** — one traced
