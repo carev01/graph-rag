@@ -337,7 +337,40 @@ into one shared helper and use it for every tier. This is the third time in one 
 fix was applied at one call site instead of the layer that needed it — see
 [[llm-empty-reply-coerced-to-value]] for the same pattern.
 
-### 5d. The incremental path cannot report `lost_by_level` — **P1**
+### 5c / 5d. ~~`rep is None` drops a community; incremental cannot report `lost_by_level`~~ — **DONE 2026-09-11**
+Fixed on branch `preserve-verified-reports`. One rule, as the item proposed: **a failed NEW
+attempt never removes what is already persisted.** On the incremental path, when
+`generate_report` returns `None` with nothing staged (the `except Exception` route and the
+`_generate_once` → `None` route — measured 3/29 empty-`choices` replies on a real run), the
+community's persisted entry is now carried over instead of being omitted from `entries` and
+deleted by the rebuild's `DETACH DELETE`.
+
+- A **verified** persisted report is carried over **with its embedding** — it stays
+  retrievable, because losing it from retrieval is the harm being avoided.
+- A **staged** one is carried over in its staged shape, from `pending_summary` /
+  `pending_full_report`, which `load_persisted` now reads. Writing it normally would have
+  published an *empty* report: a staged row's `summary` reads back as `''`.
+- Only a community with **nothing persisted** is a real loss. It is counted, logged with its
+  level, and reported as `lost_by_level` (5d) — the caller accumulates it, since `entries`
+  holds only survivors. Also new: `reports_preserved`.
+
+**The non-obvious half — a preserved report must not look fresh.** It describes the member
+set it was written against, and the carrying run stamps a new `corpus_cursor`, so the edits
+that made it dirty fall *behind* the next run's watermark and it would read as clean
+forever. A new `stale` flag (persisted, read by `load_persisted`, honoured by `classify`)
+forces it dirty until it is actually regenerated. It keeps its embedding throughout — only
+its dirtiness is forced, never its retrievability. `verified` was deliberately **not**
+reused for this: that property means "its findings passed verification", which is still
+true.
+
+**Still open: the `--full` path.** `_run_theme_build` does not load persisted communities at
+all, so a `rep is None` there still loses the report. `write_communities` does report
+`lost_by_level`, so it is visible rather than silent, and `--full` is an explicit rebuild
+the operator asked for — but the rule above does not yet hold on that path.
+
+Original entries kept below for the record.
+
+### 5d. ~~The incremental path cannot report `lost_by_level`~~ — **P1**
 `write_communities` now reports per-level losses, which is what would have caught level 1
 draining. `write_communities_incremental` **cannot**: it receives only the surviving
 `entries`, so a genuinely-skipped community's level never reaches it — and incremental is
@@ -348,7 +381,7 @@ The fix is in the caller: `_run_theme_build_incremental` already loops
 `skipped` rather than `staged`. It needs to accumulate its own skipped-by-level dict and
 merge it into the result, the way it already adds `reports_skipped`.
 
-### 5c. `rep is None` still drops a community on the non-staged paths — **P1**
+### 5c. ~~`rep is None` still drops a community on the non-staged paths~~ — **P1**
 Staging (2026-09-10) covers only the verifier-blip path. The other `rep is None` routes —
 `except Exception` around report generation, and `_generate_once` returning `None` (measured
 3/29 empty-`choices` replies on a real theme-build) — still omit the community from
@@ -609,15 +642,10 @@ synthesis over-reach rather than mis-citation.
 **Item 5b is DONE** (answer-path clients bounded; eval 1h44m → 26 min) and **0e** landed the
 bag-pasting measure. Revised order:
 
-1. **Items 5c / 5d — a verified report is still destroyed by a failed *new* attempt.** The
-   highest-value remaining item and the only one that loses data the system cannot rebuild
-   cheaply. Staging covered the verifier-blip path only; `except Exception` around report
-   generation and `_generate_once` returning `None` (measured 3/29 empty-`choices` replies on
-   a real run) still omit the community, and `write_communities_incremental`'s `DETACH
-   DELETE` then removes it *with its previously verified report*. Incremental is the DEFAULT
-   path. 5d is the same blind spot in reporting: that path cannot emit `lost_by_level`, so
-   the loss is also invisible. Code-only — no re-ingest, no paid run.
-2. **Item 10 — request-level deadline (P1).** The 5b hardening bounds a *call* at 180s, not a
+**Items 5c / 5d are DONE** — a failed new attempt no longer destroys a persisted report on
+the incremental path.
+
+1. **Item 10 — request-level deadline (P1).** The 5b hardening bounds a *call* at 180s, not a
    *request*: with client retries plus `_complete_or_none`'s own, a hung reduce can still
    consume ~24 minutes of a user's `/answer`. "Cannot hang indefinitely" is true; "safe for a
    user request" is not.

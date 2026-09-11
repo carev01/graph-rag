@@ -121,16 +121,19 @@ async def write_communities_incremental(driver: AsyncDriver, group_id: str,
     here is what keeps the DEFAULT incremental path from losing a community to a
     transient verifier blip.
 
+    An entry marked `stale: True` is a previously verified report carried over
+    because a NEW attempt to regenerate it failed (BACKLOG 5c). It is written as a
+    normal, retrievable report -- embedding and all, because it was verified and
+    losing it from retrieval would be the very harm being avoided -- but the flag
+    makes `incremental.classify` treat it as dirty on the next run, so it is
+    retried rather than silently accepted as current.
+
     No lost_by_level here (unlike write_communities): `entries` only holds the
-    survivors -- clean/reused, regenerated, and staged rows -- so a community the
-    CLI genuinely skipped (no report, not staged) never shows up in `entries` at
-    all, not even its level. Computing lost_by_level would require the full
-    detected `communities` list alongside the per-community outcome, which only
-    the caller (theme_builder.cli._run_theme_build_incremental) has: it already
-    loops `for i, c in enumerate(communities)` and knows `c.level` for every
-    community it drops into `skipped` (as opposed to `staged`). That loop would
-    need to accumulate its own skipped-by-level dict and merge it into `res`
-    after this call returns, the same way it already adds `reports_skipped`."""
+    survivors -- clean/reused, regenerated, preserved and staged rows -- so a
+    community the CLI genuinely lost (no report, nothing staged, nothing
+    persisted) never shows up in `entries` at all, not even its level. It is the
+    caller, theme_builder.cli._run_theme_build_incremental, that accumulates
+    `lost_by_level` from its own loop and merges it into the result."""
     by_level: dict[int, int] = {}
     for e in entries:
         by_level[e["level"]] = by_level.get(e["level"], 0) + 1
@@ -158,11 +161,12 @@ async def write_communities_incremental(driver: AsyncDriver, group_id: str,
                     "SET c += {level:$level, title:$title, summary:$summary, "
                     "full_report:$full_report, rating:$rating, rating_explanation:$re, "
                     "tags:$tags, cited_fact_uuids:$cited, embedding:$emb, verified:true, "
-                    "member_count:$mc, generated_at:$ga, corpus_cursor:$cur}",
+                    "stale:$stale, member_count:$mc, generated_at:$ga, corpus_cursor:$cur}",
                     cid=e["community_id"], g=group_id, level=e["level"], title=e["title"],
                     summary=e["summary"], full_report=e["full_report"], rating=e["rating"],
                     re=e["rating_explanation"], tags=e["tags"], cited=e["cited_fact_uuids"],
-                    emb=e["embedding"], mc=len(e["member_uuids"]), ga=e["generated_at"],
+                    emb=e["embedding"], stale=bool(e.get("stale")),
+                    mc=len(e["member_uuids"]), ga=e["generated_at"],
                     cur=corpus_cursor)
             await tx.run(
                 "MATCH (c:Community {community_id:$cid, group_id:$g}) "

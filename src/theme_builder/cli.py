@@ -15,7 +15,8 @@ from graph_extract.graphiti_client import build_embedder
 from theme_builder.context import EntityRow, FactRow, assemble_context
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
-    classify, load_persisted, match_communities, prev_corpus_cursor, touched_entities)
+    PersistedCommunity, classify, load_persisted, match_communities, prev_corpus_cursor,
+    touched_entities)
 from theme_builder.report import (ReportStats, _regenerate_summary,
                                   _report_client_and_model, _verify_client_and_model,
                                   generate_report, verify_report)
@@ -139,6 +140,39 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
         await embedder.client.close()
 
 
+def _is_staged(p: PersistedCommunity) -> bool:
+    """A persisted community whose report was never verified. Its text lives in
+    pending_*; `summary`/`full_report` read back empty, so it must never be
+    carried over in the normal shape."""
+    return not p.verified or not p.embedding
+
+
+def _carry_over(base: dict, p: PersistedCommunity, *, stale: bool = False) -> dict:
+    """Build an entry that hands a persisted community back to the writer
+    unchanged, in whichever shape it already has.
+
+    `stale` marks a report kept because a NEW attempt failed rather than because
+    the community was clean. It keeps its embedding and stays retrievable -- it is
+    a real verified report, and dropping it from retrieval is the harm being
+    avoided -- but it describes the member set it was written against, and this
+    run stamps a fresh corpus_cursor, so `classify` needs the flag to know to
+    retry it. A staged community is already always-dirty, so the flag is not
+    applied to it."""
+    if _is_staged(p):
+        return {**base, "title": p.title,
+                "pending_summary": p.pending_summary,
+                "pending_full_report": p.pending_full_report,
+                "rating": p.rating, "rating_explanation": p.rating_explanation,
+                "tags": p.tags, "cited_fact_uuids": p.cited_fact_uuids,
+                "generated_at": p.generated_at, "staged": True}
+    return {**base, "title": p.title, "summary": p.summary,
+            "full_report": p.full_report, "rating": p.rating,
+            "rating_explanation": p.rating_explanation, "tags": p.tags,
+            "cited_fact_uuids": p.cited_fact_uuids,
+            "embedding": p.embedding, "generated_at": p.generated_at,
+            "stale": stale}
+
+
 async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: AsyncDriver) -> dict:
     communities = await detect_communities(
         driver, settings.group_id,
@@ -176,6 +210,8 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     reused = 0
     skipped = 0
     staged = 0
+    preserved = 0
+    lost_by_level: dict[int, int] = {}
     findings_dropped = reverified = unverified = 0
     now = datetime.now(timezone.utc)
     try:
@@ -186,11 +222,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
             if i in clean:
                 p = matches[i]
                 assert p is not None
-                entries.append({**base, "title": p.title, "summary": p.summary,
-                                "full_report": p.full_report, "rating": p.rating,
-                                "rating_explanation": p.rating_explanation, "tags": p.tags,
-                                "cited_fact_uuids": p.cited_fact_uuids,
-                                "embedding": p.embedding, "generated_at": p.generated_at})
+                entries.append(_carry_over(base, p))
                 reused += 1
                 continue
             try:
@@ -228,7 +260,29 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
                                     "generated_at": now, "staged": True})
                     staged += 1
                     continue
+                # Nothing was staged: generation itself failed (the `except` above,
+                # or `_generate_once` returning None -- measured 3/29 empty-choices
+                # replies on a real run). If this community already HAS a persisted
+                # report, a failed NEW attempt must not take it: carry it over
+                # rather than let the DETACH DELETE rebuild drop it. Only a
+                # community with nothing persisted is a genuine loss.
+                p = matches[i]
+                if p is not None:
+                    entries.append(_carry_over(base, p, stale=True))
+                    logger.warning(
+                        "theme-build: community %s produced no report; carrying over "
+                        "its persisted %s report, flagged stale for the next run",
+                        stable_ids[i], "staged" if _is_staged(p) else "verified")
+                    if _is_staged(p):
+                        staged += 1
+                    else:
+                        preserved += 1
+                    continue
+                logger.warning(
+                    "theme-build: community %s (level %s) produced no report and has "
+                    "nothing persisted; LOST", stable_ids[i], c.level)
                 skipped += 1
+                lost_by_level[c.level] = lost_by_level.get(c.level, 0) + 1
                 continue
             emb = (await embedder.create_batch([f"{rep.title}\n{rep.summary}"]))[0]
             entries.append({**base, "title": rep.title, "summary": rep.summary,
@@ -243,6 +297,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
         res.update({"communities_detected": len(communities),
                     "reports_regenerated": regenerated, "reports_reused": reused,
                     "reports_skipped": skipped, "reports_staged": staged,
+                    "reports_preserved": preserved, "lost_by_level": lost_by_level,
                     "communities_dissolved": len(persisted) - matched_persisted,
                     "findings_dropped": findings_dropped,
                     "reports_reverified": reverified,
