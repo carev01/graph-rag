@@ -1,5 +1,6 @@
 from __future__ import annotations
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import httpx
 from neo4j import AsyncDriver
@@ -7,8 +8,11 @@ from graph_extract.article_filter import is_navigation_article
 from graph_extract.article_router import is_dense_matrix
 from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
+from graph_extract.dedup_guard import CURRENT_DEDUP_STATS, DedupIndexStats
 from graph_extract.graphiti_client import add_text_episode, ExtractionTier
 from graph_extract.provenance import Provenance
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -20,6 +24,8 @@ class IngestArticleResult:
     edges: int = 0
     skipped_navigation: bool = False
     tier: str = "strong"
+    # Out-of-range dedup indices seen while extracting THIS article (dedup_guard).
+    dedup: DedupIndexStats = field(default_factory=DedupIndexStats)
 
 
 @dataclass
@@ -27,6 +33,7 @@ class IngestResult:
     articles: int = 0
     episodes_added: int = 0
     episodes_skipped: int = 0
+    dedup: DedupIndexStats = field(default_factory=DedupIndexStats)
 
 
 def _parse_ts(art) -> datetime:
@@ -67,6 +74,18 @@ class IngestDriver:
 
     async def ingest_article(self, article_id: str) -> IngestArticleResult:
         res = IngestArticleResult(article_id=article_id)
+        # Open the per-article scope the dedup guard records into. Reset in
+        # `finally` so a failed article never leaks its scope into the next one.
+        token = CURRENT_DEDUP_STATS.set(res.dedup)
+        try:
+            return await self._ingest_article(article_id, res)
+        finally:
+            CURRENT_DEDUP_STATS.reset(token)
+            if res.dedup.invalid_calls:
+                logger.warning("article %s (%s tier): out-of-range dedup indices -- %s",
+                               article_id, res.tier, res.dedup.summary())
+
+    async def _ingest_article(self, article_id: str, res: IngestArticleResult) -> IngestArticleResult:
         art = await content_fetch.fetch_article(self._docext, article_id)
         if is_navigation_article(art.title or ""):
             res.skipped_navigation = True
@@ -127,6 +146,7 @@ class IngestDriver:
             out.articles += 1
             out.episodes_added += r.episodes_added
             out.episodes_skipped += r.episodes_skipped
+            out.dedup.merge(r.dedup)
         return out
 
     async def _content_hash(self, article_id: str) -> str | None:
