@@ -15,27 +15,28 @@ section is by my recommended priority.
 
 ## P0 — Blocks trusting the system's own numbers
 
-### 0. Restore level 1, then re-baseline — **DO THIS FIRST**
-**Added 2026-09-10 from `faithfulness-investigation-2026-09-10.md`.** Global mode reads
-`global_default_level = 1`, and level 1 has **lost its Azure Backup community** (219
-entities, 705 intra-community facts, 701 of them Microsoft). It was rejected by
-`--verify-pending` under the summary rule that has since been removed, and nothing
-regenerated it. Detected vs retrievable by level: 19/17, **12/11**, 10/9. Every Azure golden
-article is unreachable at level 1.
+### 0. ~~Restore level 1, then re-baseline~~ — **DONE 2026-09-10**
+Level 1 is whole again: **19/19, 12/12, 9/9 retrievable, 0 staged, 0 dead.** The
+"Azure Backup: Encryption, Soft Delete, and Cross-Region Resiliency" community (219
+entities, 705 facts) is back at level 1, so global search sees both vendors again.
 
-Measured across all ten golden global/DRIFT questions, the Azure Backup community appears
-**0/10 at level 1** and **10/10 at levels 0 and 2**. The golden set is dominated by
-AWS-vs-Azure comparisons, so **every comparison question at the production level is
-half-unanswerable by construction.** This invalidates the eval as a measure of comparison
-quality — including the 1.6 → 2.33 gain previously attributed to report verification.
+How it went, because the sequence matters:
+1. `theme-build --full` under the fixed rules — 35 written, 5 staged, 0 destroyed. Under
+   the old summary rule those 5 would have been deleted.
+2. `--verify-pending` promoted 2, rejected 0.
+3. The remaining 3 would not promote no matter how often retried, because the verifier was
+   failing **deterministically** on large reports — see the merged fix below.
+4. With reasoning bounded, one more `--verify-pending` cleared every remaining staged
+   report: 1 promoted, 0 rejected, **0 still pending**.
 
-Note this is self-inflicted: a bug that was fixed without repairing the damage it did.
+`lost_by_level` now reports per-level losses so this cannot recur silently on the `--full`
+path (BACKLOG 5d covers the incremental path, which still cannot).
 
-**Do:** regenerate the two rejected communities and `--verify-pending` the two staged ones;
-add a lost-by-level counter to `theme-build` so this cannot recur silently; and until level 1
-is whole, set `global_default_level = 0` (the only complete level — it also puts the correct
-Azure community first on 8/10 questions) and re-baseline. Cheapest available step, and
-nothing else is measurable until it is done.
+**Re-baselining is NOT done.** The eval has not been re-run against the repaired corpus,
+so every faithfulness number on record — including global 2.30, and the 1.6 → 2.33 gain
+attributed to report verification — was measured on a corpus missing its main Azure
+community. Those numbers describe a damaged graph. Re-run before drawing conclusions, and
+note `global_default_level = 0` is no longer needed as a workaround.
 
 ### 0b. Bind claims to their supporting facts in the reduce step — **the real fix**
 `_MAP_PROMPT` returns `key_points[]` and `fact_ids[]` as **two unrelated lists**, and the
