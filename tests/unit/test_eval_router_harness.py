@@ -63,3 +63,23 @@ async def test_per_question_records_cited_count_and_surviving_ranges(monkeypatch
     assert rec["ranges"] == 1
     row = [ln for ln in er.format_report(summary).splitlines() if "| enc |" in ln][0]
     assert "| 2 | 1 |" in row                      # cited | ranges columns
+
+
+async def test_per_question_records_markers_per_sentence(monkeypatch):
+    """BACKLOG 0b: 19 markers pasted on one sentence must be distinguishable
+    from one marker per claim. Record the per-sentence distribution's mean and
+    max and print them as a `mps` column."""
+    async def _bag_router(*a, q, mode_override, vendor, settings):
+        env = _env("global", "A1")
+        env["answer"] = "KMS keys [1] [2] [3]. AES [4]."
+        env["citations"] = [dict(env["citations"][0], marker=m) for m in (1, 2, 3, 4)]
+        return env
+    monkeypatch.setattr(er.router_mod, "answer_router", _bag_router)
+    questions = [{"question": "enc", "intent": "global", "expected_modes": ["global"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S)
+    rec = summary["per_question"][0]
+    assert rec["mps_mean"] == 2.0 and rec["mps_max"] == 3
+    row = [ln for ln in er.format_report(summary).splitlines() if "| enc |" in ln][0]
+    assert "| 4 | 0 | 2.0/3 |" in row              # cited | ranges | mps columns
+    assert "| mps |" in er.format_report(summary)

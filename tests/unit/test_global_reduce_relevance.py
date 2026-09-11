@@ -37,6 +37,21 @@ class _EmptyRows:
         yield  # pragma: no cover - makes this an async generator
 
 
+class _FactRows:
+    """One row per requested uuid: the reduce step now reads fact text (BACKLOG
+    0b) and drops a fact it cannot read, so the fake must serve some."""
+
+    def __init__(self, uuids):
+        self._uuids = uuids
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for u in self._uuids:
+            yield {"uuid": u, "fact": f"fact {u}"}
+
+
 class _FakeProvenanceSession:
     async def __aenter__(self):
         return self
@@ -45,6 +60,8 @@ class _FakeProvenanceSession:
         return False
 
     async def run(self, cypher, **kw):
+        if "f.fact AS fact" in cypher:
+            return _FactRows(kw["u"])
         return _EmptyRows()
 
 

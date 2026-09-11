@@ -22,6 +22,34 @@ def _mean(xs: Sequence[int | float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
+_MARKER_RE = re.compile(r"\[\d+\]")
+# A sentence ends at . ! ? followed by whitespace, or at a line break (headings
+# and bullet lines are their own segments).
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_LEADING_MARKERS_RE = re.compile(r"^(?:\[\d+\]\s*)+")
+
+
+def markers_per_sentence(text: str) -> list[int]:
+    """Marker count of every sentence that carries at least one [N] marker, in
+    order. BACKLOG 0b: 19 markers pasted onto one sentence and one marker per
+    claim were indistinguishable in every measure the eval had (`cited`,
+    `ranges`, grounding, the judge); this is the distribution that tells them
+    apart. Markers written AFTER the full stop ("Claim. [1] [2] Next...") are
+    folded into the sentence before them -- the model put the stop first,
+    nothing more."""
+    counts: list[int] = []
+    for seg in _SENTENCE_SPLIT_RE.split(text or ""):
+        seg = seg.strip()
+        if not seg:
+            continue
+        lead = _LEADING_MARKERS_RE.match(seg)
+        if lead and counts:
+            counts[-1] += len(_MARKER_RE.findall(lead.group(0)))
+            seg = seg[lead.end():]
+        counts.append(len(_MARKER_RE.findall(seg)))
+    return [c for c in counts if c > 0]
+
+
 def aggregate(per_question: list[dict]) -> dict:
     n = len(per_question)
     # A failed question (e.g. an APIConnectionError) is not a routing miss --
@@ -52,6 +80,18 @@ def aggregate(per_question: list[dict]) -> dict:
             faith_by_mode_scored.setdefault(r["chosen"], []).append(r["faithfulness"])
     faith_by_mode = {m: (_mean(faith_by_mode_scored[m]) if m in faith_by_mode_scored else None)
                       for m in faith_by_mode_seen}
+
+    # Markers per sentence, by mode: mean of the per-question means, and the
+    # single worst sentence seen. Records written before the metric existed
+    # carry no mps keys and are skipped, not scored as 0.
+    mps_by_mode: dict[str, dict] = {}
+    mps_rows: dict[str, list[dict]] = {}
+    for r in per_question:
+        if r.get("mps_mean") is not None:
+            mps_rows.setdefault(r["chosen"], []).append(r)
+    for mode, rows in mps_rows.items():
+        mps_by_mode[mode] = {"mean": _mean([r["mps_mean"] for r in rows]),
+                             "max": max(r["mps_max"] for r in rows)}
 
     comp_rows = [r for r in per_question if "comparative" in r]
     comparative: dict | None = None
@@ -88,6 +128,7 @@ def aggregate(per_question: list[dict]) -> dict:
         "faithfulness_mean": _mean([r["faithfulness"] for r in faithed]) if faithed else None,
         "faithfulness_by_mode": faith_by_mode,
         "faithfulness_unscored": faithfulness_unscored,
+        "mps_by_mode": mps_by_mode,
         "comparative": comparative,
         "drift_wins": drift_wins,
         "per_question": per_question,

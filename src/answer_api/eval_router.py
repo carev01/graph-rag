@@ -22,7 +22,9 @@ from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
 from answer_api.router import _cheap_classify_client
-from answer_api.router_eval import _parse_judge_score, aggregate, routing_hit
+from answer_api.router_eval import (
+    _parse_judge_score, aggregate, markers_per_sentence, routing_hit,
+)
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -169,11 +171,17 @@ async def run_eval(clients, questions, settings) -> dict:
             # and a surviving range "[1]-[26]" means it saw 2 of 26. The harness
             # does not persist answer text, so without these two numbers a
             # range-shorthand answer and a well-cited one are indistinguishable.
+            # `mps` (markers per sentence, BACKLOG 0b): the distribution that
+            # separates one marker per claim from 19 markers pasted on one
+            # sentence -- identical in `cited`, `ranges` and the judge score.
+            mps = markers_per_sentence(env["answer"])
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
                          "grounding_hit": ghit, "faithfulness": faith,
                          "cited": len(env["citations"]),
-                         "ranges": len(_range_markers(env["answer"])), "failed": False}
+                         "ranges": len(_range_markers(env["answer"])),
+                         "mps_mean": round(sum(mps) / len(mps), 1) if mps else None,
+                         "mps_max": max(mps) if mps else None, "failed": False}
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
@@ -184,7 +192,8 @@ async def run_eval(clients, questions, settings) -> dict:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
-                   "cited": None, "ranges": None, "failed": True}
+                   "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
+                   "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -192,10 +201,18 @@ async def run_eval(clients, questions, settings) -> dict:
               f"routing={'-' if rec.get('failed') else rec['routing_hit']} "
               f"grounding={rec['grounding_hit']} "
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
-              f"cited={rec['cited']} ranges={rec['ranges']} "
+              f"cited={rec['cited']} ranges={rec['ranges']} mps={_mps_cell(rec)} "
               f"{elapsed:.0f}s", flush=True)
         per_question.append(rec)
     return aggregate(per_question)
+
+
+def _mps_cell(rec: dict) -> str:
+    """`mean/max` markers per sentence, or `-` (no cited sentence, or a record
+    written before the metric existed)."""
+    if rec.get("mps_mean") is None:
+        return "-"
+    return f"{rec['mps_mean']}/{rec['mps_max']}"
 
 
 def format_report(summary: dict) -> str:
@@ -209,13 +226,14 @@ def format_report(summary: dict) -> str:
              f"by mode: {summary['grounding_by_mode']}",
              f"Faithfulness mean: {faith_mean_str} "
              f"(unscored: {summary['faithfulness_unscored']}/{summary['n']})",
-             f"by mode: {summary['faithfulness_by_mode']}\n",
+             f"by mode: {summary['faithfulness_by_mode']}",
+             f"Markers per sentence by mode (mean/max): {summary.get('mps_by_mode')}\n",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
-             "| question |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| mps | question |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
@@ -224,7 +242,7 @@ def format_report(summary: dict) -> str:
         ranges_cell = r.get("ranges") if r.get("ranges") is not None else "-"
         lines.append(f"| {r['intent']} | {r['chosen']} | {routing_cell} | "
                      f"{r['grounding_hit']} | {faith_cell} | {cited_cell} | "
-                     f"{ranges_cell} | {r['question']} |")
+                     f"{ranges_cell} | {_mps_cell(r)} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 

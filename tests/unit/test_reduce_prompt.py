@@ -66,10 +66,34 @@ def test_forbids_range_shorthand_and_shows_the_individual_form():
     assert "never" in low and "range" in low and "span" in low
 
 
+def _rule_count() -> int:
+    """Lines that START with `- `. `rules.count("- ")` counted the substring
+    anywhere, so a rule containing `--` would have failed the test below with
+    a docstring claiming the tuned rules were disturbed (BACKLOG 0d follow-up)."""
+    return sum(1 for ln in _reduce_rules().splitlines() if ln.startswith("- "))
+
+
 def test_range_rule_did_not_disturb_the_tuned_rules():
     """Changing as little as possible: the refusal trigger and the
     meta-commentary ban must be exactly where they were."""
     rules = _reduce_rules().lower()
     assert "do not comment on what the findings do not contain" in rules
     assert "if the findings do not support an answer" in rules
-    assert rules.count("- ") == 7                 # six tuned rules + the one new rule
+    assert _rule_count() == 7                     # six tuned rules + the 0d range rule
+
+
+def test_explains_marker_bound_fact_lines_and_binds_the_citation_to_them():
+    """BACKLOG 0b. The FINDINGS are now `[N] <fact>` lines, so the prompt must
+    say what a marker IS (the fact printed beside it) and that a claim drawn
+    from that fact cites that marker. Before this slice neither phrase existed
+    anywhere in the prompt: it spoke of "the [N] fact markers shown" with the
+    facts themselves never shown at all."""
+    preamble = _REDUCE_PROMPT.split("Rules:", 1)[0].lower()
+    assert "followed by the fact" in preamble
+    rules = _reduce_rules().lower()
+    assert "must cite that [n]" in rules
+    # the 0d rule, the refusal trigger, the meta-commentary ban and the URL ban
+    # are all still there and still individually listed
+    assert "never write a range" in rules
+    assert "do not write any url" in rules
+    assert _rule_count() == 7
