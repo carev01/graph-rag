@@ -90,7 +90,31 @@ One rule added to `_REDUCE_PROMPT` (cite markers individually, never as a range)
 the eval report carries `cited` / `ranges` columns. **Live: ranges 17 → 0 over 15 runs
 (model complied); citations kept did NOT recover — 40% of available facts vs 39% at
 baseline.** The reducer's alternative to `[14]–[25]` is one marker per sentence, assigned
-by position: 0b with nothing left to hide behind. 0d was a symptom of 0b, not a lever.
+by position -- the problem moved from *quantity* of citations to *correctness* of them.
+
+**Correction, per review:** "0d was a symptom of 0b" is *consistent with* the evidence but
+not established by it. Ascending positional markers are equally explained by a benign
+confound that was never ruled out: the reducer writes community-by-community and facts are
+numbered in that same order, so a *correctly bound* answer would also read ascending within
+a block. The real evidence for 0b remains its own per-claim audit (6/6 claims supported, 0
+correctly cited), which is prior work, not this slice's.
+
+**Kept despite the metric.** Reverting would restore a *user-facing* defect -- the envelope
+silently dropping citations the prose rests on -- to protect a judge score that is an
+instrument, not the deliverable. Note the change may itself depress the score: where a range
+gave 2 endpoint citations, positional numbering gives ~5, handing the judge more mismatched
+pairs. This run cannot separate that from variance, and the aggregate retention ratio cannot
+detect it (it is a per-claim distribution effect, and map-step fact counts varied 3x between
+the two measurements).
+
+**Riding with 0b** (detection-only, no user impact): `_range_markers` misses `[1]-[2]-[3]`
+as two ranges (non-overlapping `findall`), capitalised `"[1] To [3]"`, and line-wrapped
+forms -- add `re.IGNORECASE` and `\s*`. And `rules.count("- ") == 7` counts the substring
+anywhere, so editing a rule to contain `--` would fail a test whose docstring claims the
+tuned rules were disturbed; count lines starting with `- ` instead.
+
+**New measurement gap:** pasting 19 markers onto one sentence is indistinguishable from good
+citation in every metric we have. Add a "markers per sentence" column when 0b lands.
 **Eval: global faithfulness 1.6 over 10/10 scored (prev 2.44 over 9/10); 0 ranges in all
 29 answers; the encryption control recovered 2 → 5 (17/17 cited).** Fourth flat-or-down
 global result in a row; the `cited` / `ranges` columns now show low scores sitting on
