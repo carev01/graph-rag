@@ -123,8 +123,11 @@ def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
             "check its own findings and confirm them. Set VERIFY_LLM_MODEL to a "
             "different model, ideally a different family so the two do not share "
             "failure modes.")
-    return instrument(AsyncOpenAI(api_key=key, base_url=base,
-                                  timeout=180.0, max_retries=3)), model
+    client = instrument(AsyncOpenAI(api_key=key, base_url=base,
+                                    timeout=180.0, max_retries=3))
+    if "openrouter" in base:
+        client = _prefer_fast_provider(client, settings.verify_reasoning_effort)
+    return client, model
 
 
 def _prefer_fast_provider(client: AsyncOpenAI, reasoning_effort: str = "") -> AsyncOpenAI:
