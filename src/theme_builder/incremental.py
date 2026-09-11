@@ -36,6 +36,16 @@ class PersistedCommunity:
     # must be treated as dirty until it is actually regenerated (BACKLOG 5c).
     stale: bool = False
 
+    @property
+    def is_staged(self) -> bool:
+        """This community's report was never verified: its text lives in
+        pending_*, and `summary`/`full_report` read back empty (load_persisted
+        coalesces the absent properties). Anything carrying it forward must keep
+        it in the staged shape -- writing it normally publishes an EMPTY,
+        unverified report with an embedding, reachable from every answering
+        path."""
+        return not self.verified or not self.embedding
+
 
 def _jaccard(a: set[str], b: set[str]) -> float:
     union = len(a | b)

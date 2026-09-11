@@ -30,7 +30,8 @@ How it went, because the sequence matters:
    report: 1 promoted, 0 rejected, **0 still pending**.
 
 `lost_by_level` now reports per-level losses so this cannot recur silently on the `--full`
-path (BACKLOG 5d covers the incremental path, which still cannot).
+path; since 2026-09-11 the incremental path reports it too (5d), and on both paths a failed
+regeneration carries the persisted report over rather than deleting it (5c).
 
 **Re-baselining is NOT done.** The eval has not been re-run against the repaired corpus,
 so every faithfulness number on record — including global 2.30, and the 1.6 → 2.33 gain
@@ -363,10 +364,14 @@ its dirtiness is forced, never its retrievability. `verified` was deliberately *
 reused for this: that property means "its findings passed verification", which is still
 true.
 
-**Still open: the `--full` path.** `_run_theme_build` does not load persisted communities at
-all, so a `rep is None` there still loses the report. `write_communities` does report
-`lost_by_level`, so it is visible rather than silent, and `--full` is an explicit rebuild
-the operator asked for — but the rule above does not yet hold on that path.
+**The `--full` path now holds the same rule.** `_run_theme_build` loads the persisted layer
+and matches it against the fresh detection, so a community whose regeneration fails is
+carried through `write_communities`' new `preserved` argument instead of being deleted by
+the `DETACH DELETE` rebuild. `--full` means "regenerate everything", not "destroy what we
+have if the regeneration fails". Fixed alongside it: `PARENT_OF` edges were only written
+between communities present in `reports`, so a staged **or** preserved community silently
+lost its place in the hierarchy on the very run that saved it — the gate is now the full set
+of communities this run wrote.
 
 Original entries kept below for the record.
 
@@ -449,7 +454,14 @@ unblock the rest.
 
 Fine at pilot scale, wrong at corpus scale.
 
-### 10. No REQUEST-level deadline — **P1, raised 2026-09-11**
+### 10. No REQUEST-level deadline — **P3, DE-PRIORITISED by the user 2026-09-11**
+User's call, recorded so it is not re-raised: *"I am not as concerned about bounding a
+response to 180s. Quality of the response is ALWAYS the priority."* The per-call timeout
+from 5b stays — it prevents an unbounded hang — but a request-level deadline that could
+truncate or degrade an answer to meet a clock is explicitly not wanted. Do not propose
+latency-for-quality trades. Original entry kept below.
+
+
 The 5b hardening bounds each *call* at 180s, which stops an unbounded hang. It does **not**
 bound a request: with `max_retries=3` on the client and `_complete_or_none`'s own 3x retry,
 a single hung reduce can still consume roughly **24 minutes** of a user's `/answer`.
@@ -639,20 +651,21 @@ operating system remains untested in anger.
 the faithfulness gap that drove five slices is largely closed, and what remains is
 synthesis over-reach rather than mis-citation.
 
-**Item 5b is DONE** (answer-path clients bounded; eval 1h44m → 26 min) and **0e** landed the
-bag-pasting measure. Revised order:
+**Also done since:** **5b** (answer-path clients bounded; eval 1h44m → 26 min), **0e** (the
+bag-pasting measure, plus the eval finally persisting the answers it scores), and
+**5c / 5d** — a failed new attempt no longer destroys a persisted report, on the
+incremental path *and* on `--full`.
 
-**Items 5c / 5d are DONE** — a failed new attempt no longer destroys a persisted report on
-the incremental path.
+**Item 10 (request-level deadline) is de-prioritised by the user**: quality of the response
+always outranks bounding its latency.
 
-1. **Item 10 — request-level deadline (P1).** The 5b hardening bounds a *call* at 180s, not a
-   *request*: with client retries plus `_complete_or_none`'s own, a hung reduce can still
-   consume ~24 minutes of a user's `/answer`. "Cannot hang indefinitely" is true; "safe for a
-   user request" is not.
-3. **Item 4 — Slice B, out-of-range dedup indices.** The largest untouched correctness item,
+1. **Item 4 — Slice B, out-of-range dedup indices.** The largest untouched correctness item,
    and the last one on the ingest side. Needs a re-ingest cycle to validate.
-4. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
-5. **Item 2 (judge split) — DE-PRIORITISED by evidence.** It existed because two
+2. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
+3. **Item 6 — graphiti's false invalidations.** Corrupts the flagship temporal use case by
+   inventing change events that never happened; a live minimal repro already exists, which
+   is the expensive half of the work.
+4. **Item 2 (judge split) — DE-PRIORITISED by evidence.** It existed because two
    interventions failed to move the number, implying the metric was suspect. When the real
    defect was fixed, judge score and per-claim audit moved *together* — the judge tracks
    reality. Still worth separating evidence-faithfulness from citation-precision eventually,

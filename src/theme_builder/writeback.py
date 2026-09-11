@@ -5,6 +5,7 @@ from __future__ import annotations
 from neo4j import AsyncDriver
 
 from theme_builder.detect import Community
+from theme_builder.incremental import PersistedCommunity
 from theme_builder.report import CommunityReport
 
 
@@ -12,14 +13,32 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
                             communities: list[Community],
                             reports: dict[str, CommunityReport],
                             corpus_cursor: str | None, *,
-                            pending: dict[str, CommunityReport] | None = None) -> dict:
+                            pending: dict[str, CommunityReport] | None = None,
+                            preserved: dict[str, PersistedCommunity] | None = None) -> dict:
+    """Full rebuild of the :Community layer: DETACH DELETE, then write back what
+    this call is handed.
+
+    `preserved` carries a community through UNTOUCHED, in whichever shape it
+    already has in the graph, because a NEW attempt to regenerate it failed
+    (BACKLOG 5c). Without it, this rebuild deletes a community whose report
+    generation blipped -- taking a report that had been generated, verified and
+    paid for, which is how level 1 drained. A preserved verified report keeps its
+    own embedding and its own `generated_at` (this run did not write it) and is
+    flagged `stale`, so the next incremental run treats it as dirty instead of
+    accepting it as current."""
     # A cid in BOTH maps would be written twice: the verified row first (with an
     # embedding), then the staged `SET c +=` on the same node -- which leaves the
     # embedding in place, making a staged report retrievable. Staging's whole
     # guarantee is the ABSENT embedding, so make the caller's invariant explicit.
+    preserved = preserved or {}
     assert not (set(reports) & set(pending or {})), (
         "a community cannot be both verified and staged: "
         f"{sorted(set(reports) & set(pending or {}))}")
+    # Same reasoning for a preserved cid: two `SET c +=` writes on one node merge
+    # into a row that is neither cleanly new nor cleanly carried over.
+    assert not (set(preserved) & (set(reports) | set(pending or {}))), (
+        "a community cannot be both preserved and regenerated/staged: "
+        f"{sorted(set(preserved) & (set(reports) | set(pending or {})))}")
     written = [c for c in communities if c.community_id in reports]
     texts = [f"{reports[c.community_id].title}\n{reports[c.community_id].summary}" for c in written]
     # graphiti's OpenAIEmbedder.create returns ONE vector; create_batch returns
@@ -37,9 +56,10 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
     # and global search reads level 1 only. Keyed by level so an operator can see
     # a retrieval-critical level draining without cross-referencing report logs.
     pending_ids = set(pending or {})
+    present = set(reports) | pending_ids | set(preserved)
     lost_by_level: dict[int, int] = {}
     for c in communities:
-        if c.community_id not in reports and c.community_id not in pending_ids:
+        if c.community_id not in present:
             lost_by_level[c.level] = lost_by_level.get(c.level, 0) + 1
 
     async def _rebuild(tx):
@@ -59,6 +79,46 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
                 summary=r.summary, full_report=r.full_report, rating=r.rating,
                 re=r.rating_explanation, tags=r.tags, cited=r.cited_fact_uuids,
                 emb=emb, mc=len(c.member_uuids), cur=corpus_cursor)
+            await tx.run(
+                "MATCH (c:Community {community_id:$cid, group_id:$g}) "
+                "UNWIND $members AS mu MATCH (e:Entity {uuid:mu, group_id:$g}) "
+                "MERGE (e)-[:IN_COMMUNITY]->(c)",
+                cid=c.community_id, g=group_id, members=c.member_uuids)
+        for c in communities:
+            pc = preserved.get(c.community_id)
+            if pc is None:
+                continue
+            # Carried through untouched because a NEW attempt failed. A verified
+            # one keeps its OWN embedding -- it stays retrievable, which is the
+            # harm being avoided -- and its own generated_at, since this run did
+            # not write it; `stale` is what makes the next incremental run retry
+            # it instead of reading it as current. A staged one stays staged: its
+            # text is in pending_*, and `summary` would read back empty.
+            if pc.is_staged:
+                await tx.run(
+                    "MERGE (c:Community {community_id:$cid, group_id:$g}) "
+                    "SET c += {level:$level, title:$title, pending_summary:$summary, "
+                    "pending_full_report:$full_report, rating:$rating, "
+                    "rating_explanation:$re, tags:$tags, cited_fact_uuids:$cited, "
+                    "verified:false, member_count:$mc, generated_at:$ga, "
+                    "corpus_cursor:$cur}",
+                    cid=c.community_id, g=group_id, level=c.level, title=pc.title,
+                    summary=pc.pending_summary, full_report=pc.pending_full_report,
+                    rating=pc.rating, re=pc.rating_explanation, tags=pc.tags,
+                    cited=pc.cited_fact_uuids, mc=len(c.member_uuids),
+                    ga=pc.generated_at, cur=corpus_cursor)
+            else:
+                await tx.run(
+                    "MERGE (c:Community {community_id:$cid, group_id:$g}) "
+                    "SET c += {level:$level, title:$title, summary:$summary, "
+                    "full_report:$full_report, rating:$rating, rating_explanation:$re, "
+                    "tags:$tags, cited_fact_uuids:$cited, embedding:$emb, verified:true, "
+                    "stale:true, member_count:$mc, generated_at:$ga, corpus_cursor:$cur}",
+                    cid=c.community_id, g=group_id, level=c.level, title=pc.title,
+                    summary=pc.summary, full_report=pc.full_report, rating=pc.rating,
+                    re=pc.rating_explanation, tags=pc.tags, cited=pc.cited_fact_uuids,
+                    emb=pc.embedding, mc=len(c.member_uuids), ga=pc.generated_at,
+                    cur=corpus_cursor)
             await tx.run(
                 "MATCH (c:Community {community_id:$cid, group_id:$g}) "
                 "UNWIND $members AS mu MATCH (e:Entity {uuid:mu, group_id:$g}) "
@@ -89,8 +149,12 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
                 "UNWIND $members AS mu MATCH (e:Entity {uuid:mu, group_id:$g}) "
                 "MERGE (e)-[:IN_COMMUNITY]->(c)",
                 cid=c.community_id, g=group_id, members=c.member_uuids)
-        for c in written:
-            if c.parent_id and c.parent_id in reports:
+        # Both endpoints must exist in the layer this run wrote, so gate on
+        # `present` (written + staged + preserved) rather than on `reports` alone
+        # -- otherwise a preserved community silently loses its place in the
+        # hierarchy on the run that saved it from deletion.
+        for c in communities:
+            if c.community_id in present and c.parent_id and c.parent_id in present:
                 await tx.run(
                     "MATCH (p:Community {community_id:$pid, group_id:$g}), "
                     "(c:Community {community_id:$cid, group_id:$g}) "
@@ -102,7 +166,8 @@ async def write_communities(driver: AsyncDriver, embedder, group_id: str,
     return {"reports_written": len(written), "by_level": by_level,
             "lost_by_level": lost_by_level,
             "facts_cited": sum(len(reports[c.community_id].cited_fact_uuids) for c in written),
-            "reports_staged": len(pending or {})}
+            "reports_staged": len(pending or {}),
+            "reports_preserved": len(preserved)}
 
 
 async def write_communities_incremental(driver: AsyncDriver, group_id: str,
