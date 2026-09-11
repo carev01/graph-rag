@@ -170,6 +170,22 @@ summary sentences are now the residual error (synthesis, not binding); the reduc
 is 2–3× larger and tripped the synthesis tier's empty-content retry 8 times in ~40 calls
 (all recovered) — BACKLOG 5b. Original entry kept below.
 
+**Review corrections, 2026-09-11:**
+- **What this did NOT improve.** Claims *supported by the facts given* went **95% → 86%**,
+  slightly down, while *correctly cited* went 24% → 80%. The judge's 1.6 → 4.7 is it being
+  handed the facts an answer actually rests on — exact provenance arriving (design decision
+  #2) — not answers becoming more true. The tables read the other way; they should not.
+- **"The tail is gone" is WITHDRAWN.** That capture covered only the five global-*intent*
+  questions, but all five drift-intent questions also route to global. Of the ten
+  global-mode answers **five carry a sentence with ≥8 markers** (16, 9, 9, 10, 19), all
+  scoring 4-5. Bag-pasting affects **half the mode**, not two outliers. Discounting the two
+  worst to 2 still leaves ~4.1 and the hand audit is judge-independent, so the result
+  survives — but `mps` only exposes it, nothing thresholds it. Add a "share of citations in
+  ≥8-marker sentences" measure.
+- **The before-24% is a LOWER BOUND**, not a tight figure: the pre-change prompt carried no
+  fact text, so that mapping cannot be re-derived. The after figures are safe.
+- `communities_used` still lists communities that contributed no block.
+
 `_MAP_PROMPT` returns `key_points[]` and `fact_ids[]` as **two unrelated lists**, and the
 reduce block renders `Supporting facts: [1] [2] … [19]` as a marker bag. The reducer cannot
 know which fact backs which point, so it numbers sentences **by position** — one traced
@@ -234,7 +250,19 @@ note. Use `synthesize._usable_content`. Observable today as `routing.via = "defa
 but nothing aggregates it, so a regression would be invisible. Routing accuracy 0.97 was
 measured with the current classifier, so it is not biting *now*.
 
-### 5b. Answer-path LLM clients have NO timeout and no provider routing — **P1**
+### 5b. Answer-path clients: no timeout, and UNBOUNDED REASONING — **P1, named fix ready**
+**Escalated 2026-09-11 by 0b.** The reduce prompt is now 2-3x larger and empty-content
+first-calls rose to **8 of ~40 reduce calls** (previous run 5). All recovered via
+`_complete_or_none`'s 3x retry, so nothing was lost — but a fifth of reduce calls now pay a
+4x retry and the largest prompts are exactly the ones that trip it.
+
+**The fix is already written and proven twice here.** `_prefer_fast_provider`
+(`theme_builder/report.py:133`) bounds reasoning effort and routes by throughput. It is
+applied to the report tier and the verifier tier and **still not to synthesis**. Apply it to
+the synthesis client with `effort: low` exactly as the verifier fix did — and NEVER
+`enabled: false`, which was measured returning a 13-token rubber stamp.
+
+Timeouts (original entry) belong to the same client construction; do both together.
 `report.py` was fixed on 2026-09-08 after a measured 380-second outlier: OpenRouter routes
 the same model to different providers (29 tok/s vs 9.4 tok/s on the same prompt), so it
 got `timeout=180.0, max_retries=3` plus `_prefer_fast_provider` (throughput sort). Its own
