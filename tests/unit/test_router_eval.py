@@ -1,5 +1,5 @@
 from answer_api.router_eval import (
-    aggregate, markers_per_sentence, _parse_judge_score, routing_hit,
+    aggregate, bag_share, markers_per_sentence, _parse_judge_score, routing_hit,
 )
 
 
@@ -45,6 +45,54 @@ def test_aggregate_reports_markers_per_sentence_by_mode():
     ]
     s = aggregate(pq)
     assert s["mps_by_mode"] == {"global": {"mean": 2.0, "max": 19}}
+
+
+# --- BACKLOG: threshold the bag-pasting --------------------------------------
+# `mps` exposes that a 19-marker sentence exists; it cannot say how much of the
+# answer's citation mass sits in such sentences. An answer with one bag and
+# thirty well-cited claims and an answer that is nothing but a bag share the
+# same mps_max. bag_share weights by markers, not by sentences.
+
+def test_bag_share_is_zero_when_every_sentence_cites_sparsely():
+    assert bag_share("KMS [1] [2]. AES [3]. WORM [4] [5] [6].") == 0.0
+
+
+def test_bag_share_counts_markers_not_sentences():
+    """One 8-marker bag beside four single-marker claims: 4 of 5 sentences are
+    clean, but 8 of 12 markers -- two thirds of the citation mass -- are bag."""
+    bag = " ".join(f"[{i}]" for i in range(1, 9))
+    text = f"Both vendors encrypt {bag}. A [9]. B [10]. C [11]. D [12]."
+    assert bag_share(text) == 8 / 12
+
+
+def test_bag_share_threshold_is_eight_inclusive():
+    seven = " ".join(f"[{i}]" for i in range(1, 8))
+    eight = " ".join(f"[{i}]" for i in range(1, 9))
+    assert bag_share(f"Claim {seven}.") == 0.0
+    assert bag_share(f"Claim {eight}.") == 1.0
+
+
+def test_bag_share_is_none_when_there_is_nothing_to_measure():
+    """A refusal or an uncited answer has no citation mass. Returning 0.0 would
+    read as 'no bag-pasting', the best possible score, for an answer that cited
+    nothing at all."""
+    assert bag_share("I don't have enough thematic coverage.") is None
+    assert bag_share("") is None
+
+
+def test_aggregate_reports_bag_share_by_mode():
+    pq = [
+        {"question": "a", "intent": "global", "chosen": "global", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": 5, "bag_share": 0.0},
+        {"question": "b", "intent": "global", "chosen": "global", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": 5, "bag_share": 0.6},
+        {"question": "c", "intent": "local", "chosen": "local", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": 5},          # older record: no key
+        {"question": "d", "intent": "global", "chosen": "global", "routing_hit": True,
+         "grounding_hit": None, "faithfulness": None, "bag_share": None},   # refusal
+    ]
+    s = aggregate(pq)
+    assert s["bag_share_by_mode"] == {"global": 0.3}
 
 
 def test_routing_hit():

@@ -23,7 +23,7 @@ from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
-    _parse_judge_score, aggregate, markers_per_sentence, routing_hit,
+    BAG_MARKERS, _parse_judge_score, aggregate, bag_share, markers_per_sentence, routing_hit,
 )
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
@@ -157,16 +157,22 @@ async def _score_one(clients, q, mode_override, settings):
     facts = await _cited_fact_texts(driver, settings.group_id,
                                     [c["fact_uuid"] for c in env["citations"]])
     faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
-    return env, ghit, faith
+    return env, ghit, faith, facts
 
 
 async def run_eval(clients, questions, settings) -> dict:
     per_question: list[dict] = []
+    # Every scored column this harness has gained -- `cited`, `ranges`, `mps`,
+    # `bag_share` -- cost a full paid eval run to observe, because the harness
+    # scored each answer and then discarded it. `raw` keeps the material each of
+    # those was derived from, so the next question asked of a run is a re-read
+    # rather than a re-run.
+    raw: list[dict] = []
     total = len(questions)
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith = await _score_one(clients, q, None, settings)
+            env, ghit, faith, facts = await _score_one(clients, q, None, settings)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
             # conditioned on (BACKLOG 0d): the judge sees only the cited facts,
@@ -176,6 +182,9 @@ async def run_eval(clients, questions, settings) -> dict:
             # `mps` (markers per sentence, BACKLOG 0b): the distribution that
             # separates one marker per claim from 19 markers pasted on one
             # sentence -- identical in `cited`, `ranges` and the judge score.
+            # `bag_share` is what `mps` cannot say: how much of the citation
+            # mass sits in those bags. Half the global-mode answers carried a
+            # >=8-marker sentence and all of them scored 4-5.
             mps = markers_per_sentence(env["answer"])
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
@@ -183,19 +192,27 @@ async def run_eval(clients, questions, settings) -> dict:
                          "cited": len(env["citations"]),
                          "ranges": len(_range_markers(env["answer"])),
                          "mps_mean": round(sum(mps) / len(mps), 1) if mps else None,
-                         "mps_max": max(mps) if mps else None, "failed": False}
+                         "mps_max": max(mps) if mps else None,
+                         "bag_share": _round_or_none(bag_share(env["answer"])),
+                         "failed": False}
+            raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
+                        "answer": env["answer"], "cited_facts": facts,
+                        "citations": env["citations"]})
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f = await _score_one(clients, q, m, settings)
+                    _e, _g, _f, _facts = await _score_one(clients, q, m, settings)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
+                    raw.append({"question": q["question"], "intent": q["intent"],
+                                "chosen": f"comparative:{m}", "answer": _e["answer"],
+                                "cited_facts": _facts, "citations": _e["citations"]})
                 rec["comparative"] = comp
         except Exception:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
-                   "failed": True}
+                   "bag_share": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -204,9 +221,22 @@ async def run_eval(clients, questions, settings) -> dict:
               f"grounding={rec['grounding_hit']} "
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
               f"cited={rec['cited']} ranges={rec['ranges']} mps={_mps_cell(rec)} "
-              f"{elapsed:.0f}s", flush=True)
+              f"bag={_cell(rec.get('bag_share'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
-    return aggregate(per_question)
+    summary = aggregate(per_question)
+    summary["raw"] = raw
+    return summary
+
+
+def _round_or_none(x: float | None) -> float | None:
+    return None if x is None else round(x, 2)
+
+
+def _cell(x) -> str:
+    """A measure that could not be taken renders as `-`, never as a legitimate
+    value -- an uncited answer scoring 0.0 on bag_share would read as the best
+    possible citation hygiene."""
+    return "-" if x is None else str(x)
 
 
 def _mps_cell(rec: dict) -> str:
@@ -229,22 +259,23 @@ def format_report(summary: dict) -> str:
              f"Faithfulness mean: {faith_mean_str} "
              f"(unscored: {summary['faithfulness_unscored']}/{summary['n']})",
              f"by mode: {summary['faithfulness_by_mode']}",
-             f"Markers per sentence by mode (mean/max): {summary.get('mps_by_mode')}\n",
+             f"Markers per sentence by mode (mean/max): {summary.get('mps_by_mode')}",
+             f"Share of citations in >={BAG_MARKERS}-marker sentences, by mode: "
+             f"{summary.get('bag_share_by_mode')}\n",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
-             "| mps | question |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| mps | bag | question |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
-        # .get(): summaries written before the cited/ranges columns existed.
-        cited_cell = r.get("cited") if r.get("cited") is not None else "-"
-        ranges_cell = r.get("ranges") if r.get("ranges") is not None else "-"
+        # .get(): summaries written before the cited/ranges/bag columns existed.
         lines.append(f"| {r['intent']} | {r['chosen']} | {routing_cell} | "
-                     f"{r['grounding_hit']} | {faith_cell} | {cited_cell} | "
-                     f"{ranges_cell} | {_mps_cell(r)} | {r['question']} |")
+                     f"{r['grounding_hit']} | {faith_cell} | {_cell(r.get('cited'))} | "
+                     f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
+                     f"{_cell(r.get('bag_share'))} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -263,9 +294,13 @@ async def main() -> None:
     try:
         summary = await run_eval(clients, questions, settings)
         report = format_report(summary)
-        out = (Path(__file__).resolve().parents[2]
-               / "docs" / "superpowers" / "router-eval-report.md")
-        out.write_text(report)
+        docs = Path(__file__).resolve().parents[2] / "docs" / "superpowers"
+        (docs / "router-eval-report.md").write_text(report)
+        # The answers this run scored, so a new metric can be computed from a
+        # past run instead of buying another one. Not committed -- it is run
+        # output, and it is large.
+        (docs / "router-eval-raw.json").write_text(
+            json.dumps(summary["raw"], indent=2, ensure_ascii=False))
         print(report)
     finally:
         await graphiti.close()

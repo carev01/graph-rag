@@ -50,6 +50,32 @@ def markers_per_sentence(text: str) -> list[int]:
     return [c for c in counts if c > 0]
 
 
+BAG_MARKERS = 8
+"""A sentence carrying this many markers or more is counted as bag-pasting.
+Set from the 0b measurement: five of ten global-mode answers carried a sentence
+of 16, 9, 9, 10 and 19 markers, and no answer cited between 7 and 9 -- the
+distribution is bimodal, and 8 sits in the gap."""
+
+
+def bag_share(text: str) -> float | None:
+    """Share of an answer's citation MASS that sits in >=`BAG_MARKERS`-marker
+    sentences, or None when the answer cites nothing.
+
+    `markers_per_sentence` says a bag exists; it cannot say how much of the
+    answer is bag. One 19-marker sentence beside thirty well-cited claims and an
+    answer that is one 19-marker sentence share the same `mps_max`. Weighting by
+    markers rather than by sentences separates them.
+
+    None, not 0.0: an uncited answer or a refusal has no citation mass, and 0.0
+    is the BEST score on this scale -- reporting it for an answer that cited
+    nothing would read as perfect citation hygiene."""
+    counts = markers_per_sentence(text)
+    total = sum(counts)
+    if total == 0:
+        return None
+    return sum(c for c in counts if c >= BAG_MARKERS) / total
+
+
 def aggregate(per_question: list[dict]) -> dict:
     n = len(per_question)
     # A failed question (e.g. an APIConnectionError) is not a routing miss --
@@ -93,6 +119,15 @@ def aggregate(per_question: list[dict]) -> dict:
         mps_by_mode[mode] = {"mean": _mean([r["mps_mean"] for r in rows]),
                              "max": max(r["mps_max"] for r in rows)}
 
+    # Bag share, by mode: mean of the per-question shares. A record with no key
+    # (written before the metric existed) and a None share (an answer that cited
+    # nothing) are both skipped -- neither is a 0.0, which is the best score.
+    bag_rows: dict[str, list[float]] = {}
+    for r in per_question:
+        if r.get("bag_share") is not None:
+            bag_rows.setdefault(r["chosen"], []).append(r["bag_share"])
+    bag_share_by_mode = {m: _mean(v) for m, v in bag_rows.items()}
+
     comp_rows = [r for r in per_question if "comparative" in r]
     comparative: dict | None = None
     drift_wins: bool | None = None
@@ -129,6 +164,7 @@ def aggregate(per_question: list[dict]) -> dict:
         "faithfulness_by_mode": faith_by_mode,
         "faithfulness_unscored": faithfulness_unscored,
         "mps_by_mode": mps_by_mode,
+        "bag_share_by_mode": bag_share_by_mode,
         "comparative": comparative,
         "drift_wins": drift_wins,
         "per_question": per_question,

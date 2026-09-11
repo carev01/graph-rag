@@ -65,6 +65,59 @@ async def test_per_question_records_cited_count_and_surviving_ranges(monkeypatch
     assert "| 2 | 1 |" in row                      # cited | ranges columns
 
 
+async def test_per_question_records_bag_share(monkeypatch):
+    """Threshold the bag-pasting: `mps` shows a bag exists, `bag` shows how much
+    of the answer's citation mass is bag. Here 8 of 9 markers."""
+    bag = " ".join(f"[{i}]" for i in range(1, 9))
+    async def _bag_router(*a, q, mode_override, vendor, settings):
+        env = _env("global", "A1")
+        env["answer"] = f"Both vendors encrypt {bag}. AES [9]."
+        env["citations"] = [dict(env["citations"][0], marker=m) for m in range(1, 10)]
+        return env
+    monkeypatch.setattr(er.router_mod, "answer_router", _bag_router)
+    questions = [{"question": "enc", "intent": "global", "expected_modes": ["global"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S)
+    assert summary["per_question"][0]["bag_share"] == round(8 / 9, 2)
+    report = er.format_report(summary)
+    assert "| bag |" in report
+    assert "| 0.89 |" in [ln for ln in report.splitlines() if "| enc |" in ln][0]
+
+
+async def test_a_refusal_records_no_bag_share(monkeypatch):
+    """0.0 is the best score on this scale; an answer that cited nothing must
+    not earn it."""
+    async def _refusal_router(*a, q, mode_override, vendor, settings):
+        env = _env("global", None)
+        env["answer"] = "I don't have enough thematic coverage to answer that."
+        return env
+    monkeypatch.setattr(er.router_mod, "answer_router", _refusal_router)
+    questions = [{"question": "enc", "intent": "global", "expected_modes": ["global"],
+                  "expected_article_ids": []}]
+    summary = await er.run_eval((None,) * 11, questions, _S)
+    assert summary["per_question"][0]["bag_share"] is None
+    assert summary["bag_share_by_mode"] == {}
+    assert "| - |" in [ln for ln in er.format_report(summary).splitlines()
+                       if "| enc |" in ln][0]
+
+
+async def test_the_run_persists_answer_text_and_cited_facts(monkeypatch, tmp_path):
+    """Every metric this harness has gained -- cited, ranges, mps, bag -- cost a
+    paid full eval run to observe, because the harness discarded the answers it
+    scored. Persist the raw material so the next metric is a re-read, not a
+    re-run."""
+    questions = [{"question": "loc", "intent": "local", "expected_modes": ["local"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S)
+    raw = summary["raw"]
+    assert raw[0]["question"] == "loc"
+    assert raw[0]["answer"] == "ans"
+    assert raw[0]["cited_facts"] == ["fact"]
+    assert raw[0]["chosen"] == "local"
+    # It is raw material, not a scored column: it must stay out of the report.
+    assert "cited_facts" not in er.format_report(summary)
+
+
 async def test_per_question_records_markers_per_sentence(monkeypatch):
     """BACKLOG 0b: 19 markers pasted on one sentence must be distinguishable
     from one marker per claim. Record the per-sentence distribution's mean and
