@@ -97,6 +97,18 @@ class ExtractSettings(BaseSettings):
     verify_llm_base_url: str = ""
     verify_llm_model: str = ""
     verify_llm_api_key: str = ""
+    # Reasoning effort for the verifier tier. Measured 2026-09 on an 11-finding
+    # report (~deepseek/deepseek-v4-flash-latest, a REASONING model) via
+    # theme_builder.report.verify_report: max_tokens=4000, retried at 12000, both
+    # exhausted on reasoning tokens alone (finish_reason='length', content=None) --
+    # raising the cap does not help, reasoning just expands to fill it. "low" fixed
+    # it (finish_reason='stop', 3028 completion tokens, a real verdict flagging 2 of
+    # 11 findings unsupported). Measured "enabled: false" too: it "works"
+    # (finish_reason='stop', valid JSON) but in 13 completion tokens it approved
+    # everything -- a rubber stamp, not a check. NEVER set this to disable
+    # reasoning entirely; "low" is the floor that keeps the verifier a judge rather
+    # than a reflex.
+    verify_reasoning_effort: str = "low"
     leiden_min_community_size: int = 3   # drop dust communities smaller than this
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
     # Output cap for a community report. 8000 was measured against GLM-5.2 (3000
