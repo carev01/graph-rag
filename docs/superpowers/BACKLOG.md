@@ -83,7 +83,19 @@ refusal on thin evidence is correct behaviour and worth keeping.
 **Until this is fixed the re-baseline is not comparable**: 3 unscored refusals make the
 global figure an average over 8 of 10 questions.
 
-### 0d. Range shorthand silently discards citations — **NEW P0, measure before 0b**
+### 0d. ~~Range shorthand silently discards citations~~ — **DONE 2026-09-11**
+Fixed on branch `no-range-citations`; full account in `no-range-citations-2026-09-11.md`.
+One rule added to `_REDUCE_PROMPT` (cite markers individually, never as a range);
+`_finalize_answer` now WARNs when a range survives, with markers-cited vs facts-available;
+the eval report carries `cited` / `ranges` columns. **Live: ranges 17 → 0 over 15 runs
+(model complied); citations kept did NOT recover — 40% of available facts vs 39% at
+baseline.** The reducer's alternative to `[14]–[25]` is one marker per sentence, assigned
+by position: 0b with nothing left to hide behind. 0d was a symptom of 0b, not a lever.
+**Eval: global faithfulness 1.6 over 10/10 scored (prev 2.44 over 9/10); 0 ranges in all
+29 answers; the encryption control recovered 2 → 5 (17/17 cited).** Fourth flat-or-down
+global result in a row; the `cited` / `ranges` columns now show low scores sitting on
+12–28 citations with no range, which is 0b's signature. Original entry kept below.
+
 **Found 2026-09-10 during the 0c fix; mechanism verified independently.** The reducer writes
 citation ranges like `[1]-[26]`. `_finalize_answer` keeps only literal markers, so that
 yields exactly **two** citations for prose resting on 26 facts:
