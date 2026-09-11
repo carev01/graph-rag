@@ -19,6 +19,11 @@
 > | ranges in any answer | — | — | 0/29 | **0/29** |
 > | comparative global / drift | — | 1.6 / 4.5 | 2.5 / 4.7 | **4.9 / 4.8** |
 >
+> **What moved is CITATION CORRECTNESS, not the truth of the content.** Claims correctly
+> cited went 24% → 80%; claims supported by the facts given went 95% → 86% (slightly down).
+> The judge is finally handed the facts an answer rests on. Read the jump below as exact
+> provenance arriving, not as answers becoming more accurate.
+>
 > **Global faithfulness 1.6 → 4.7 over all ten global-mode questions**; per question
 > 5,2,2,0,2 / 1,1,1,1,1 → 4,5,5,5,4 / 5,4,5,5,5. The per-claim audit behind it (same
 > deletion question: 0–2 of 9 claims correctly cited before, 9–24 of 13–25 after) is in

@@ -8,6 +8,17 @@
 **Tiers:** as the previous slice — map `upstage/solar-pro4`, reduce `z-ai/glm-5.3-flash`,
 rerank Voyage `rerank-3` (`top_n = 4`, floor 0.40), eval judge `deepseek-v4-flash`.
 
+## 0. What this slice did and did not improve
+
+**Citation correctness rose; the evidence-faithfulness of the content did not.** Claims
+*correctly cited to the fact they rest on* went **24% → 80%**. Claims *supported by the facts
+the reducer was given* went **95% → 86%** — slightly DOWN on the finer-grained after-audit.
+
+So the judge's 1.6 → 4.7 is it finally being handed the facts an answer actually rests on,
+not the answer becoming more true. That is a real product win — exact provenance is this
+system's core promise and design decision #2 — but "global faithfulness improved 3×" would
+read as better answers, and that is not what happened.
+
 ## 1. The defect, and what changed
 
 `map_report` returns `key_points[]` and `fact_ids[]` as two unrelated lists. The reduce
@@ -144,7 +155,7 @@ of 25. "J1" is the eval's own faithfulness prompt, byte-for-byte, over the cited
 | encryption (control) | 1 | 9 | 9 | **0** | 2 | 7 | 1 | 6/17 |
 | encryption (control) | 2 (bag: all 17 pasted) | 4 | 4 | **3** | 4 | 0 | 5 | 17/17 |
 
-Before total: 42 claims, 40 supported (95%), **10 correctly cited (24%)** — and **2 of 27
+Before total: 42 claims, 40 supported (95%), **10 correctly cited (24%)** — treat this as a LOWER BOUND of unverified tightness: the pre-change prompt carried no fact text, so the before mapping cannot be re-derived (see §7.6), unlike the after runs. The after figures are safe — and **2 of 27
 (7%)** on the three runs that did not paste the whole bag. J1 mean 2.60. Note the control:
 it scores 5 only when it pastes every marker; the non-bag encryption run is 0 of 9,
 J1 = 1, the same defect as deletion.
@@ -193,8 +204,19 @@ marker bag); after = 15 fresh runs, 3 per global golden question.
 | after | 15 | 489 | 275 (**56%**) | 119 | 2.77 | **7** | **0** |
 
 Distribution (markers per cited sentence → count): before `1:27 2:36 3:16 4:8 5:3 6:5 7:3
-9:1 10:1 11:3 13:2 19:1`; after `1:27 2:35 3:21 4:20 5:9 6:4 7:3`. The tail is gone: no
-after-run has a bag sentence, and the 3–5-marker sentences are the ones that genuinely
+9:1 10:1 11:3 13:2 19:1`; after `1:27 2:35 3:21 4:20 5:9 6:4 7:3`.
+
+**CORRECTION (review, 2026-09-11): "the tail is gone" is withdrawn.** That capture covered
+only the five global-*intent* questions. In the eval all five drift-intent questions also
+route to `chosen=global` and pass through the same reducer, and of the ten global-mode
+answers **five carry a sentence with ≥8 markers** (16, 9, 9, 10, 19) — every one of which
+scored 4-5. Eval global `mps` is 3.82/19 against the pre-change capture's 3.23/19. So
+bag-pasting affects **half the mode**, not two outliers. Bound on the damage: discounting
+the two worst answers to 2 still leaves ~4.1, and the 42/43 hand audit is judge-independent,
+so the result survives — but the claim below was measured on a subset and must not be read
+as mode-wide.
+
+The 3–5-marker sentences are the ones that genuinely
 rest on several near-duplicate facts (the graph holds `[11]` and `[12]` as two identical
 "lock removed by users with sufficient IAM permissions" facts, and five overlapping
 Min/MaxRetentionDays facts). Citation retention rose because the reducer now cites what
