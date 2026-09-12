@@ -477,7 +477,25 @@ the temporal-coherence live proof; no action decided.
 
 ## P2 — Scaling landmines (block broad ingestion, fine at pilot scale)
 
-### 8. Vector scan — no vector index — **MEASURED 2026-09-12, returned to P2**
+### 8. Vector scan — no vector index — **P0 SCALE BLOCKER, re-measured 2026-09-12**
+**`scale-wall-2026-09-12.md`. My demotion to P2 the same day was wrong for the roadmap.**
+The scan is linear in facts: `scan_ms = 241 + 0.0699 x facts`, fitted on a synthetic curve
+to 43k facts (probe isolated by group_id and deleted, 0 remaining).
+
+| corpus | facts | one scan |
+|---|---|---|
+| today | 3,469 | 0.5 s |
+| crossover with the 1,837 ms dedup LLM call | 22,840 | 1.8 s |
+| full corpus (~105k articles) | 610,000 | **42.9 s** |
+
+At 5.8 facts/article the crossover is **~3,900 articles — under 4% of the corpus**, and we
+are at 593. graphiti runs TWO such searches per extracted fact. The earlier "index is only
+1.8x" reading was correct for a corpus too small to need an index; brute force is linear,
+HNSW is ~logarithmic. **Nothing else about ingestion scale matters until this is fixed.**
+Prerequisites and hazards (index unused by graphiti's query shape; ANN recall vs dedup;
+`queryRelationships` deprecated in favour of `SEARCH`) are in the doc. Earlier entries below.
+
+### 8-measured. Vector scan — the pilot-scale measurement that demoted it
 **My P1 promotion was wrong and the measurement refuted it** (`dedup-cost-profile-2026-09-11.md`,
 second half). Three results:
 
