@@ -443,7 +443,22 @@ questions rather than five.
 Trace it alongside 0d, since range-shorthand citation loss is a candidate cause for the
 underlying low scores.
 
-### 6. graphiti's false invalidations (the "43 phantom invalidations")
+### 6. graphiti's false invalidations — **MEASURED 2026-09-12, and partly OURS not graphiti's**
+All 140 ingest-time invalidations are contradiction-driven (`expired_at` set, which only
+`resolve_edge_contradictions` writes). Hand inspection of the most-joinable subset found
+refinements and near-duplicates being treated as change events, e.g. *"supports Azure
+database for PostgreSQL"* invalidated by *"supports Azure Database for PostgreSQL Flexible
+Server"*. Six of six inspected; n small and selected, so directional.
+
+**Root cause is upstream of graphiti's logic:** with `valid_at` set to scrape time for
+present-tense facts, ordering within a scrape is crawl order (item 30).
+
+**And they are unauditable.** graphiti records no link from a victim to its invalidator; the
+only join (`invalid_at = invalidator.valid_at`) yields a **median of 21 candidates, max 172,
+and exactly 1 of 140 victims with an unambiguous match**. A fact can lose its currency with
+no recoverable reason. Original entry below.
+
+### 6-orig. graphiti's false invalidations (the "43 phantom invalidations")
 Review §2.3, and reproduced live during the temporal-coherence slice: graphiti
 invalidated a fact **at ingest time** (`invalid_at == the new fact's valid_at`,
 `expired_by_sweep=false`) in a 2-chunk minimal reproduction. Previously seen only
@@ -715,7 +730,25 @@ upstream report/PR or a local prompt override with a translation layer back to g
 expected index space. The override is real surgery — graphiti validates against its own
 numbering — and should not be attempted without tests that pin both directions.
 
-### 30. `valid_at` is set on only 23% of edges — contradiction detection is inert for the rest — **P1, for the USER to decide**
+### 30. `valid_at` semantics — **MEASURED 2026-09-12: do NOT go deterministic yet**
+`invalidation-measurement-2026-09-12.md`. The measurement inverted the recommendation.
+
+**There is no document revision date in the corpus.** DocExtractor returns
+`last_updated_at = None` for every article checked; `_parse_ts` falls through to
+`extracted_at`, so **reference time is DocExtractor's SCRAPE time**. My earlier claim that
+it was the article's `last_updated_at` was wrong.
+
+The timestamp prompt sets `valid_at = reference_time` for any *ongoing/present-tense* fact,
+and vendor docs are overwhelmingly present tense — hence 415 of 805 dated edges carrying
+exactly the scrape time, 172 of them sharing one value. Within a bulk scrape, articles are
+crawled seconds apart, and `resolve_edge_contradictions` invalidates on
+`valid_at < valid_at`. **So which of two contradicting facts survives is decided by crawl
+order.**
+
+Setting `valid_at = reference_time` for everything would extend that from 23% of the graph
+to 100%. Blocked on a real revision date, which is a question for DocExtractor's owners.
+
+### 30-orig. `valid_at` is set on only 23% of edges — the original framing
 Read-only measurement 2026-09-12: **3,469 edges, 805 with `valid_at` (23%)**; 140 expired,
 135 of them dated. `resolve_edge_contradictions` invalidates a candidate only when BOTH the
 candidate and the resolved edge carry `valid_at`, so **77% of facts can neither invalidate
