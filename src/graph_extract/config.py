@@ -87,6 +87,21 @@ class ExtractSettings(BaseSettings):
     # a partial (~76%) recovery is worth that. Detection and counting happen
     # regardless of this switch -- see graph_extract.dedup_guard.
     dedup_retry_on_strong: bool = False
+    # graphiti issues an UNFILTERED candidate search per extracted fact to feed
+    # contradiction detection. PROFILE shows it scanning every fact
+    # (NodeByLabelScan + Expand(All)) while the duplicate search is an index seek:
+    # scan_ms = 241 + 0.0699 x facts, so 42.9 s at the projected 610k-fact corpus
+    # and past the dedup LLM call's cost at ~3,900 articles -- under 4% of it.
+    #
+    # DEFAULT OFF. The feature that scan serves does not work: all 140 measured
+    # invalidations were contradiction-driven, and the inspectable ones are
+    # refinements and near-duplicates ordered by the sequence DocExtractor crawled
+    # the pages, because the corpus carries no document revision date. Re-enabling
+    # is NOT a flag flip -- see the spec's section 7.
+    #
+    # Scope: off suspends the scan and CROSS-PAIR invalidation. Same-pair
+    # contradiction via the duplicate candidates stays live either way (BACKLOG 33).
+    ingest_detect_contradictions: bool = False
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
     judge_base_url: str = ""

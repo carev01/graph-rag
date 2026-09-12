@@ -12,6 +12,7 @@ from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerCli
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.graphiti import AddEpisodeResults
 from graph_extract.config import ExtractSettings
+from graph_extract.contradiction_gate import install_contradiction_gate
 from graph_extract.lean_edge_search import install_lean_edge_search
 from graph_extract.usage import instrument
 from graph_extract.ontology import (
@@ -204,6 +205,10 @@ def build_graphiti(s: ExtractSettings) -> Graphiti:
     # twice per extracted fact) only for graphiti to pop it on arrival -- 2.8x on
     # the query that dominates ingestion. Idempotent; safe to call per build.
     install_lean_edge_search()
+    # Skips the O(corpus) invalidation-candidate search (BACKLOG 6/8/30).
+    # Idempotent; safe to call per build.
+    install_contradiction_gate(
+        detect_contradictions=s.ingest_detect_contradictions)
     embed_client = _batch_capped_embeddings(
         AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
                     timeout=90.0, max_retries=4), s.embed_max_batch)
