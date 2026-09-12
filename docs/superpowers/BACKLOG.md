@@ -734,7 +734,23 @@ item 6's phantom invalidations across the whole graph rather than a quarter of i
 **This is a product decision about temporal semantics, not a throughput optimisation.** Do
 not take it as one. Full analysis in `.superpowers/sdd/dedup-volume-review.md` §1.5, §4.4.
 
-### 31. Per-`prompt_name` LLM timing — **P1, hermetic, free**
+### 31. ~~Per-`prompt_name` LLM timing~~ — **DONE 2026-09-12, awaiting the next run**
+`graph_extract/llm_timing.py` + the existing `dedup_guard` wrapper, which already sees every
+`generate_response`. Records per prompt_name: call count, p50/p95, summed in-call time and
+share, plus **latency bucketed by in-flight count AT DISPATCH**. One `PromptTimings` is
+shared across both tiers and printed by `ingest` with the cost block.
+
+Reading it: **flat median across in-flight buckets = the calls really are parallel**, so
+reducing call COUNT saves nothing and item 32/batching are dead ends. **Rising roughly with
+the bucket = the provider queues us**, count is back on the critical path, and the review's
+central recommendation inverts.
+
+Recording at dispatch rather than completion is the whole point and was initially untested —
+mutation testing found the gap (a completion-time variant passed all nine tests), so a
+discriminating case was added: a slow call dispatched last among six and finishing alone
+buckets as `5-9`, not `1`. Costs an int increment and a `perf_counter` pair per call.
+
+### 31-orig. Per-`prompt_name` LLM timing — the original plan
 Recommended first step by the call-volume review, and the precondition for every other
 decision there. `dedup_guard` already intercepts every `generate_response`; extend it to
 record per-prompt-name call count, latency percentiles and in-flight count at dispatch, plus
@@ -824,7 +840,7 @@ repeats the mistake 24% of the time.
    shared return query cut BM25 2.7x and cosine 2.3x. The zero-candidate short-circuit
    fired **0 times in 560 calls**: provably correct, measured worthless, kept only for a
    cold-start graph — do not propose variants assuming empty candidate lists.
-   **Still ~45 s per episode.** Next step is **item 31** (free per-prompt timing), because
+   **Still ~45 s per episode.** Item 31 is BUILT; the next paid run reports it. Because
    the call-volume premise did not survive review: dedup calls run 20-wide concurrently, so
    the phase costs the slowest call rather than the sum, and "5.52 s x 67" was total wall
    divided by call count. See the CORRECTIONS section of the profile. Original notes below.

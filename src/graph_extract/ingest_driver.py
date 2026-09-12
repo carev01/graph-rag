@@ -9,6 +9,7 @@ from graph_extract.article_router import is_dense_matrix
 from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
 from graph_extract.dedup_guard import CURRENT_DEDUP_STATS, DedupIndexStats
+from graph_extract.llm_timing import PromptTimings
 from graph_extract.graphiti_client import add_text_episode, ExtractionTier
 from graph_extract.provenance import Provenance
 
@@ -56,6 +57,9 @@ class IngestDriver:
         self._docext = docext
         self._prov = provenance
         self._driver = driver
+        # Set by the CLI to the PromptTimings shared across both tiers' guards, so
+        # `ingest` can report where an episode's wall time went (BACKLOG 31).
+        self.timings = PromptTimings()
 
     def _tier_for(self, markdown: str) -> ExtractionTier:
         if self._cheap is None:

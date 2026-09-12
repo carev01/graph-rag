@@ -39,11 +39,14 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from contextvars import ContextVar
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from graphiti_core.prompts.models import Message
+
+from graph_extract.llm_timing import PromptTimings
 
 logger = logging.getLogger(__name__)
 
@@ -163,23 +166,41 @@ class DedupIndexGuard:
     fallback: Any | None      # object with async generate_response(messages, *a, **kw)
     unscoped: DedupIndexStats  # sink when no article scope is open
     raw: _Raw
+    # Every LLM call this client makes, keyed by prompt_name -- not just dedup.
+    # `_extract_edge_timestamps` issues a second call per new fact that nothing
+    # counted before (BACKLOG 31).
+    timings: PromptTimings = field(default_factory=PromptTimings)
 
     def stats(self) -> DedupIndexStats:
         return CURRENT_DEDUP_STATS.get() or self.unscoped
 
 
 def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
-                        unscoped: DedupIndexStats) -> DedupIndexGuard:
+                        unscoped: DedupIndexStats,
+                        timings: PromptTimings | None = None) -> DedupIndexGuard:
     """Wrap `graphiti.llm_client.generate_response` in place (the same instance-
     attribute pattern as the chat.completions wrappers in graphiti_client.py).
     `graphiti` only needs an `llm_client` attribute."""
     client = graphiti.llm_client
     orig = client.generate_response
-    guard = DedupIndexGuard(fallback=fallback, unscoped=unscoped, raw=_Raw(orig))
+    guard = DedupIndexGuard(fallback=fallback, unscoped=unscoped, raw=_Raw(orig),
+                            timings=timings or PromptTimings())
+
+    async def _timed(fn, label: str, messages, *args: Any, **kwargs: Any) -> Any:
+        """Time one call and record the in-flight count AT DISPATCH. The pairing
+        is what tests whether the provider actually runs our concurrent calls in
+        parallel -- flat latency across in-flight buckets means it does."""
+        at = guard.timings.start()
+        t0 = time.perf_counter()
+        try:
+            return await fn(messages, *args, **kwargs)
+        finally:
+            guard.timings.finish(label, (time.perf_counter() - t0) * 1000.0, at)
 
     async def generate_response(messages: list[Message], *args: Any, **kwargs: Any) -> Any:
-        if kwargs.get("prompt_name") != DEDUP_PROMPT_NAME:
-            return await orig(messages, *args, **kwargs)
+        name = kwargs.get("prompt_name") or "unknown"
+        if name != DEDUP_PROMPT_NAME:
+            return await _timed(orig, name, messages, *args, **kwargs)
         stats = guard.stats()
         stats.calls += 1
         counts = parse_candidate_counts(messages)
@@ -187,12 +208,12 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
             stats.parse_failures += 1
             logger.warning("dedup prompt not parseable (graphiti prompt format changed?); "
                            "index check skipped for this call")
-            return await orig(messages, *args, **kwargs)
+            return await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
         n, m = counts
         # graphiti's clients append schema/language text to the messages IN PLACE;
         # keep a pristine copy so the fallback sees the prompt as authored.
         pristine = [Message(role=msg.role, content=msg.content) for msg in messages]
-        response = await orig(messages, *args, **kwargs)
+        response = await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
         verdict = _classify(response, n, m)
         if verdict is None or verdict.clean:
             return response
@@ -205,7 +226,8 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
             stats.retried += 1
             # Not wrapped in try/except on purpose: a dead fallback tier must fail the
             # episode loudly, like any other LLM error in the pipeline.
-            response = await guard.fallback.generate_response(pristine, *args, **kwargs)
+            response = await _timed(guard.fallback.generate_response,
+                                    f"{DEDUP_PROMPT_NAME}:retry", pristine, *args, **kwargs)
             v2 = _classify(response, n, m)
             retry_clean = v2 is not None and v2.clean
             if retry_clean:

@@ -29,6 +29,7 @@ from graph_extract.graphiti_client import (
     build_graphiti, build_cheap_graphiti, init_indices, ExtractionTier,
 )
 from graph_extract.dedup_guard import DedupIndexStats, install_dedup_guard
+from graph_extract.llm_timing import PromptTimings
 from graph_extract.ingest_driver import IngestDriver
 from graphiti_core import Graphiti
 from graph_extract.ontology import EXTRACTION_INSTRUCTIONS, CHEAP_TIER_SALIENCE
@@ -94,8 +95,11 @@ async def _build_ingest_driver(
                                      settings.max_chunk_tokens)
         # Detection on the strong tier too (does gpt-5-mini ever do this? -- the
         # counters answer that); retry only makes sense for the cheap tier.
+        # One timings object across BOTH tiers: the question is how the provider
+        # behaves under our concurrency, and the tiers interleave on one host.
+        timings = PromptTimings()
         strong_guard = install_dedup_guard(graphiti, fallback=None,
-                                           unscoped=DedupIndexStats())
+                                           unscoped=DedupIndexStats(), timings=timings)
         cheap_tier: ExtractionTier | None = None
         if settings.extraction_routing and settings.cheap_llm_api_key:
             cheap_graphiti = build_cheap_graphiti(settings)
@@ -105,12 +109,13 @@ async def _build_ingest_driver(
                 # `.raw` = the strong client's UNGUARDED method, so a retry is not
                 # counted a second time by the strong tier's own guard.
                 fallback=strong_guard.raw if settings.dedup_retry_on_strong else None,
-                unscoped=DedupIndexStats())
+                unscoped=DedupIndexStats(), timings=timings)
             cheap_tier = ExtractionTier(
                 "cheap", cheap_graphiti,
                 EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,
                 settings.cheap_max_chunk_tokens)
         ingest = IngestDriver(settings, strong_tier, cheap_tier, docext, provenance, driver)
+        ingest.timings = timings          # BACKLOG 31: reported by the ingest command
     except Exception:
         for closer in (
             cheap_graphiti.close if cheap_graphiti is not None else None,
@@ -254,6 +259,9 @@ def ingest(
             # hypothesis; `retry_clean` vs `retry_dirty` says whether the strong tier
             # reads the same prompt correctly.
             typer.echo(f"dedup indices: {res.dedup.summary()}")
+            # BACKLOG 31: where an episode's wall time actually goes, and whether
+            # the provider runs our 20-wide concurrent dedup calls in parallel.
+            typer.echo(ingest_driver.timings.report())
             # Emit the cost report HERE, in-process: the usage tally is
             # process-local, so a separate `eval cost` invocation would see an
             # empty tally. This is the only path that reports real extraction
