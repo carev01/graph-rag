@@ -85,3 +85,76 @@ Order of work, cheapest evidence first:
 2. Only if the index alone does not reach it, supply the `SearchInterface` override.
 3. Re-measure a small ingest end to end, because the 9-minute figure is the only number
    that actually matters.
+
+---
+
+# The vector-index experiment — 2026-09-12
+
+I raised item 8 to P1 on the theory that the missing vector index was the lever for the
+9-minute article. **The measurement refutes that for the current corpus.** Reproduce with
+`.superpowers/sdd/profile-vector-index.py`.
+
+## 1. The index is not used by graphiti's query at all
+
+Neo4j only consults a vector index through `db.index.vector.query*` (now `SEARCH`).
+graphiti's `edge_similarity_search` emits a bare
+`vector.similarity.cosine(e.fact_embedding, $v)` inside a `WITH` — a brute-force scan —
+so the planner never touches an index.
+
+| graphiti's actual query | median |
+|---|---|
+| before the index existed | 254.6 ms |
+| after creating it (ONLINE, 100% populated) | 254.4 ms |
+| **change** | **0%** |
+
+Creating the index and changing nothing else is worth exactly nothing. Had I shipped "add
+a vector index" as the fix, it would have measured as a no-op and looked like bad luck.
+
+## 2. Even a correct index-backed query is only 1.8x here
+
+| query | median |
+|---|---|
+| brute force (what graphiti runs) | 255 ms |
+| `db.index.vector.queryRelationships` | **144 ms** |
+
+**1.8x**, not the order of magnitude the 9-minute article needs. At 3,096 facts the fixed
+overhead (~110–130 ms, measured earlier) dominates and ANN has little room to win. The
+crossover grows with corpus size — brute force is linear in facts, ANN is not — so this
+result says *"not the lever today"*, **not** *"never the lever"*. At millions of facts the
+same brute-force scan projects to tens of seconds and the index becomes unavoidable.
+
+## 3. ANN is approximate, and dedup depends on exact candidates
+
+At `k=1` the index returned the **rank-2** fact, not the true nearest. At `k=3` it returned
+all three in exactly the right order, and the top-3 uuids and scores match brute force
+precisely — so the earlier "top-1 disagrees" line in my first run was an artifact of asking
+the index for a single neighbour, not a semantic difference. My initial guess that it was an
+endpoint-label or group filtering difference was **wrong**: all 3,096 edges are in the
+group and 0 have non-`:Entity` endpoints.
+
+But the recall miss at `k=1` is the real point. graphiti asks for `limit=10` and feeds those
+candidates to dedup; a neighbour the index fails to surface is a **missed dedup** — the
+exact defect Slice B exists to make visible. Trading exact retrieval for 1.8x is a bad deal
+at this scale.
+
+## 4. The procedure we would have to call is deprecated
+
+Neo4j 2026.07.1 warns: `db.index.vector.queryRelationships is deprecated. It is replaced by
+SEARCH.` Any override written today should target `SEARCH`, not the procedure.
+
+## What this changes
+
+**Item 8 stays real but is NOT the fix for ingestion throughput.** The missing index is a
+genuine corpus-scale landmine; it is not why an article takes 9 minutes today. I raised it
+to P1 on a hypothesis and the measurement did not support it — the honest move is to put it
+back down and stop treating it as the throughput answer.
+
+**The index was dropped after measuring.** Leaving it would add write overhead to every
+fact insert during ingestion — the very path we are trying to speed up — in exchange for a
+benefit no query currently claims.
+
+**Where the throughput fix must come from instead:** something structural — fewer dedup
+calls, batched candidate retrieval, or real concurrency across articles — not a storage
+tweak. ~4.4 s per fact is *two* searches plus an LLM call, and no single component is a
+majority. That is the shape of a problem you fix by doing less work, not by doing the same
+work faster.

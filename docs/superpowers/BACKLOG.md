@@ -462,7 +462,27 @@ the temporal-coherence live proof; no action decided.
 
 ## P2 — Scaling landmines (block broad ingestion, fine at pilot scale)
 
-### 8. Vector scan — no vector index — **CONFIRMED 2026-09-11, raised to P1**
+### 8. Vector scan — no vector index — **MEASURED 2026-09-12, returned to P2**
+**My P1 promotion was wrong and the measurement refuted it** (`dedup-cost-profile-2026-09-11.md`,
+second half). Three results:
+
+1. **An index changes nothing for graphiti.** Neo4j uses a vector index only via
+   `db.index.vector.query*` / `SEARCH`; graphiti emits a bare `vector.similarity.cosine`
+   in a `WITH`. Measured: 254.6 ms before the index, 254.4 ms after — **0%**.
+2. **Even a correct index-backed query is only 1.8x here** (255 ms → 144 ms). At 3,096
+   facts the ~110-130 ms fixed overhead dominates. The crossover grows with corpus size, so
+   this is "not the lever today", NOT "never the lever" — at millions of facts the
+   brute-force scan projects to tens of seconds and the index becomes unavoidable.
+3. **ANN is approximate and dedup needs exact candidates.** At `k=1` the index returned the
+   rank-2 fact. graphiti asks for `limit=10` and feeds those to dedup, so a missed
+   neighbour is a missed dedup — the very defect Slice B makes visible.
+
+Also: `db.index.vector.queryRelationships` is **deprecated** in 2026.07.1 in favour of
+`SEARCH`, so any override must target `SEARCH`. The experimental index was **dropped** after
+measuring — keeping it would add write overhead to every fact insert on the path we are
+trying to speed up, for a benefit no current query claims. Original entry below.
+
+### 8-old. Vector scan — the confirmation and remediation route
 **Verified on the live graph: 40 indexes, of which VECTOR = 0.** graphiti 0.30.1 scores with
 `vector.similarity.cosine` per row and creates no vector index. This is no longer a
 "[verify first]" item — it is measured, and item 28's profile shows it sitting on the
@@ -756,12 +776,14 @@ always outranks bounding its latency.
 100% of 154 invalid indices, and the retry default was flipped off because `gpt-5-mini`
 repeats the mistake 24% of the time.
 
-1. **Item 8 — create the vector index and re-measure.** Profiling (item 28) showed SEARCH
-   is 58% of the dedup cycle and the unfiltered search is 2.6x its filtered twin, on a
-   graph with **zero** vector indexes. Creating the index and re-running
-   `.superpowers/sdd/profile-dedup-search.py` costs nothing and measures the ceiling before
-   any code is written. Ingestion throughput — 9 min/article — is the blocker to the
-   project's actual goal, and this is the cheapest evidence about it.
+1. **Ingestion throughput — and it needs a STRUCTURAL fix, not a storage one.** 9 min/article
+   is the blocker to the project's goal. Profiling (item 28) put the dedup cycle at ~4.4 s
+   per fact — two searches plus an LLM call, no single component a majority — and the
+   vector-index experiment (item 8) showed indexing buys **0%** as graphiti's query is
+   written and only 1.8x even rewritten. So the win has to come from doing **less work**:
+   fewer dedup calls, batched candidate retrieval, or concurrency across articles. Next
+   measurement: how much of the 9 minutes is already overlapped by `semaphore_gather`, since
+   that decides whether concurrency is the lever or is already spent.
 2. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
 3. **Item 6 — graphiti's false invalidations.** Corrupts the flagship temporal use case by
    inventing change events that never happened; a live minimal repro already exists, which
