@@ -776,7 +776,18 @@ always outranks bounding its latency.
 100% of 154 invalid indices, and the retry default was flipped off because `gpt-5-mini`
 repeats the mistake 24% of the time.
 
-1. **Ingestion throughput — and it needs a STRUCTURAL fix, not a storage one.** 9 min/article
+1. **Ingestion throughput — PROFILED 2026-09-12, `throughput-profile-2026-09-12.md`.**
+   The target is the query SHAPE, not the vector maths: `edge_similarity_search` is
+   **1,258 ms** while the cosine scan inside it is **253 ms** — **80% is graphiti binding
+   and materialising both endpoint nodes plus `DISTINCT` over the `(e,n,m)` triple.** That
+   is why the vector index bought so little: it optimises the 20%. Ruled out by measurement:
+   indexing (0% / 1.8x) and raw concurrency (graph saturates at ~1.9x by concurrency 4,
+   degrades by 16). Next: prototype a leaner similarity query standalone, behind graphiti's
+   pluggable `SearchInterface`, and time it against the 1,258 ms before writing any
+   integration. Concurrent chunks/articles are LAST — worth ~2x and they race graphiti's
+   dedup reads, which Slice B just showed already drops candidates silently.
+
+### 1-old. Ingestion throughput — the original framing 9 min/article
    is the blocker to the project's goal. Profiling (item 28) put the dedup cycle at ~4.4 s
    per fact — two searches plus an LLM call, no single component a majority — and the
    vector-index experiment (item 8) showed indexing buys **0%** as graphiti's query is
