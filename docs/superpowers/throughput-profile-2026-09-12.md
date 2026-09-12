@@ -116,3 +116,46 @@ decomposed; do not attribute it further without measuring.
 - No end-to-end re-measurement has been done. **The 9-minute article remains the only number
   that matters**, and any change must be re-validated against it, not against these
   components — `semaphore_gather` overlaps work in ways component timings do not capture.
+
+
+---
+
+# Shipped 2026-09-12 — the lean edge projection
+
+`graph_extract/lean_edge_search.py`, wired into `build_graphiti`.
+
+| `edge_similarity_search` | median |
+|---|---|
+| before | 1,072 ms |
+| after | **407 ms** |
+| speedup | **2.63x** |
+| identical results | yes |
+| `fact_embedding` on returned edges | `None` before AND after |
+
+That last row is the safety proof measured rather than argued: graphiti reads the vector
+from a top-level record key the search never returns, so search-derived edges never carried
+it. `properties(e)` shipped 768 floats into a dict whose next statement popped them.
+
+**Implementation note.** Cypher has no "map without key" — `map.drop`, `map.remove`, map
+subtraction and APOC were all probed and are unavailable on 2026.07.1 Community, and
+`e {.*}` re-includes the vector. Hence an explicit key projection, patched onto
+`search_utils`' own reference (it imports the function by name).
+
+Two guards, because an explicit projection is exactly the shape that drops data silently:
+if graphiti's query stops containing `properties(e) AS attributes` the patch returns the
+original unchanged and logs; and `assert_no_custom_edge_attributes` fails loudly naming any
+`:RELATES_TO` property outside the projection. A test also pins the premise, so if the
+library stops shipping the embedding the patch is reconsidered rather than silently kept.
+
+## What this does NOT achieve — BM25 is now the ceiling
+
+`search()` runs BM25 and cosine concurrently, so its floor is the slower one. Cosine fell
+1,258 → 407 ms, so **BM25 at 785 ms now caps it** and further cosine work is worthless until
+BM25 moves. Serial per-fact estimate: ~3,095 → ~2,622 ms (~15%), with the 1,837 ms LLM call
+now the largest single component.
+
+Revised order: **BM25 fulltext**, then **fewer than two searches per fact**, then the LLM
+call. Concurrency stays last — it races graphiti's dedup reads, and Slice B established
+those already drop candidates silently.
+
+**Still unmeasured end to end.** The 9-minute article remains the only number that matters.

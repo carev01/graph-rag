@@ -12,6 +12,7 @@ from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerCli
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.graphiti import AddEpisodeResults
 from graph_extract.config import ExtractSettings
+from graph_extract.lean_edge_search import install_lean_edge_search
 from graph_extract.usage import instrument
 from graph_extract.ontology import (
     ENTITY_TYPES, EDGE_TYPES, EDGE_TYPE_MAP, EXCLUDED_ENTITY_TYPES,
@@ -199,6 +200,10 @@ def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI
 
 
 def build_graphiti(s: ExtractSettings) -> Graphiti:
+    # Candidate searches shipped fact_embedding (768 floats x 20 candidates,
+    # twice per extracted fact) only for graphiti to pop it on arrival -- 2.8x on
+    # the query that dominates ingestion. Idempotent; safe to call per build.
+    install_lean_edge_search()
     embed_client = _batch_capped_embeddings(
         AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
                     timeout=90.0, max_retries=4), s.embed_max_batch)
