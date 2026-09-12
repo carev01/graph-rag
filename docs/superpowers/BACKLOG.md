@@ -246,20 +246,32 @@ into one number that cannot distinguish "made it up" from "cited the wrong line"
 why three slices chased the wrong causes. Sequence after items 0 and 0b, since 0b is
 expected to move citation-precision sharply and the split is what will prove it.
 
-### 4. ~~Slice B: out-of-range dedup indices during extraction~~ — **BUILT 2026-09-11, live measurement pending**
+### 4. ~~Slice B: out-of-range dedup indices during extraction~~ — **DONE + MEASURED 2026-09-11**
 `slice-b-dedup-indices-2026-09-11.md`. `graph_extract.dedup_guard` wraps the dedup LLM
 call: recovers N/M from the prompt, classifies every out-of-range index (inside the
 invalidation range = the confusion signature, vs beyond it = hallucinated), counts per
 article on `IngestArticleResult.dedup`, and re-issues the pristine prompt on the strong
-tier before graphiti sees the reply (`dedup_retry_on_strong`, default on). Both impact
-claims below confirmed from the code and pinned by tests, with one bound: a dropped
+tier before graphiti sees the reply (`dedup_retry_on_strong`, **default OFF** — see below).
+Both impact claims confirmed from the code and pinned by tests, with one bound: a dropped
 contradicted index only costs an invalidation when the candidate has an earlier
-`valid_at`. The index-space-confusion hypothesis is **consistent with the one logged data
-point (4/4 indices inside the max possible invalidation range) but unconfirmed** — no
-run logs survive, and hermetic work cannot produce the rate. The `ingest` command now
-prints the decisive numbers; one cheap-tier ingest of ~50 articles settles it. Schema
-`maximum` was rejected as harmful (constrained decoding would turn `[10,11]` into an
-in-range wrong merge). Not fixed: duplicates already in the graph; the strong tier's own
+`valid_at`. Schema `maximum` was rejected as harmful (constrained decoding would turn
+`[10,11]` into an in-range wrong merge).
+
+**MEASURED LIVE** (17 articles, **1,145 dedup calls**, run stopped early because the
+result was not in doubt): **85 calls (7.4%) carried an out-of-range index; 154 invalid
+duplicate indices, 154 of them (100%) inside the invalidation range, 0 beyond it, 0
+negative, 0 `contradicted_beyond_range`, 0 `parse_failures`.** The index-space-confusion
+hypothesis is **CONFIRMED** — every invalid value was an invalidation-candidate index in
+the `duplicate_facts` field, none hallucinated.
+
+**And `gpt-5-mini` repeats the mistake on 20 of 84 retries (24%)**, with graphiti's own
+drop warning still firing 21 times *after* the retry. A far stronger model reading the
+identical prompt fails the same way, so this is a **prompt/interface defect, not model
+quality** — and the retry is a ~76% partial recovery costing a slow strong-tier call on
+7.4% of every dedup call in the corpus. The default was flipped True → False on that
+evidence. Reinterpreting the indices stays rejected: an invalidation candidate does not
+share endpoints, so promoting one to "duplicate" would manufacture a permanent wrong
+merge — the same objection that killed schema `maximum`. Not fixed: duplicates already in the graph; the strong tier's own
 events (counted, not retried); the search cap of 10 same-pair candidates.
 
 Original entry, kept for the record. Deferred deliberately from the citation-integrity
@@ -617,6 +629,40 @@ truth. `_prefer_fast_provider` gates on `"openrouter" in base`, so
 
 ---
 
+### 28. graphiti's per-fact dedup call is the dominant extraction cost — **P1, measured 2026-09-11**
+Measured on the Slice B validation run, and not accounted for anywhere in the cost model:
+graphiti issues **one dedup LLM call per extracted fact**. Seventeen articles produced
+**1,145 dedup calls** — 13 to 207 per article, ~67 on average — at roughly **8 seconds
+each**. Wall clock: **2h34m for 17 articles**, which is ~9 minutes per article on the
+CHEAP tier.
+
+Extrapolated naively that is years for 105k articles, so broad ingestion cannot proceed on
+this shape regardless of token budget. The July cost model (item 25) counted extraction
+tokens and never counted this call volume, so the Phase 1 go/no-go was taken without it.
+
+Levers worth measuring before anything else: the candidate search is
+`EDGE_HYBRID_SEARCH_RRF` with `limit=10` per fact; whether dedup can be batched, skipped
+for facts with no same-endpoint candidates, or run concurrently is unknown. Do not assume
+it is inherent — measure where the 8s goes first.
+
+### 29. graphiti's dedup prompt shares one index space across two lists — **P2, upstream**
+The root cause behind item 4, now confirmed at 100% of 154 observed invalid indices.
+`resolve_extracted_edge` numbers `related_edges` (same-endpoint duplicate candidates)
+`0..N-1` and `existing_edges` (any-endpoint invalidation candidates) `N..N+M-1` into ONE
+prompt, then accepts only `0..N-1` in `duplicate_facts`. Models put the second list's
+indices in that field; graphiti drops them.
+
+**`gpt-5-mini` does it on 24% of retries**, so no tier swap fixes it. Our guard makes it
+visible and counted; it deliberately does not reinterpret the indices, because an
+invalidation candidate does not share endpoints and promoting one to "duplicate" would
+manufacture a permanent, invisible wrong merge.
+
+The fix is in the numbering: two independent 0-based lists, or an explicit per-list
+prefix. That is a library-owned prompt (`prompts/dedupe_edges.py`), so the options are an
+upstream report/PR or a local prompt override with a translation layer back to graphiti's
+expected index space. The override is real surgery — graphiti validates against its own
+numbering — and should not be attempted without tests that pin both directions.
+
 ## P4 — Roadmap and process
 
 ### 22. Rotate the leaked DocExtractor key and rewrite history
@@ -674,10 +720,13 @@ incremental path *and* on `--full`.
 **Item 10 (request-level deadline) is de-prioritised by the user**: quality of the response
 always outranks bounding its latency.
 
-1. **Item 4 — Slice B — BUILT, unmeasured.** Detection, per-article counters and the
-   strong-tier retry are on `slice-b-dedup-indices`. What remains is one cheap-tier
-   ingest (~50 articles) to read the rate, the in-range/beyond ratio and `retry_clean`;
-   the user decides whether to spend it.
+**Item 4 (Slice B) is DONE and MEASURED** — the confusion hypothesis is confirmed at
+100% of 154 invalid indices, and the retry default was flipped off because `gpt-5-mini`
+repeats the mistake 24% of the time.
+
+1. **Item 28 — the per-fact dedup cost.** Newly measured and the largest cost fact we
+   have: ~67 dedup LLM calls per article, 8s each. This dominates extraction time and
+   nothing in the cost model accounts for it.
 2. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
 3. **Item 6 — graphiti's false invalidations.** Corrupts the flagship temporal use case by
    inventing change events that never happened; a live minimal repro already exists, which

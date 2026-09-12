@@ -244,3 +244,75 @@ plausible event rate. Read the `dedup indices:` line and the per-article WARNING
 BACKLOG 7 (extraction is not deterministic at `temperature=0`) means the *specific*
 event will not reproduce; the *rate* will. Because the graph is written during that run,
 it is a real ingest, not a probe — the user decides whether to spend it.
+
+---
+
+# Live measurement — 2026-09-11, and what it changed
+
+**Run:** `ingest --source-id 6da00d8b… --limit 50`, cheap tier `upstage/solar-pro4`,
+strong tier `gpt-5-mini`, `dedup_retry_on_strong=True`. Stopped after **17 articles /
+1,145 dedup calls / 2h34m** because the result was already unambiguous and continuing
+would have bought precision on a number that was not in doubt. Raw log:
+`.superpowers/sdd/slice-b-live-ingest.log`. The run is resumable — `already_ingested`
+gates per episode on `content_hash`.
+
+## The hypothesis is confirmed, and not marginally
+
+| measure | value |
+|---|---|
+| dedup LLM calls observed | 1,145 |
+| calls with ≥1 out-of-range index | 85 (**7.4%**) |
+| out-of-range duplicate indices | **154** |
+| …inside the invalidation range (`N..N+M-1`) | **154 — 100%** |
+| …beyond the range, or negative | **0** |
+| `contradicted_beyond_range` | **0** |
+| `parse_failures` | **0** |
+
+Every invalid index was an **invalidation-candidate index placed in the
+`duplicate_facts` field**. Not one hallucinated value in 154. This is index-space
+confusion — a property of graphiti's prompt, which numbers two lists continuously and
+then accepts only one of them in that field.
+
+The evidence for this is *this table*, not the single archived log line that motivated
+the slice. That line remains one event and could never have established the rate.
+
+## The finding that changed the default: the strong tier makes the same mistake
+
+| measure | value |
+|---|---|
+| retries issued on `gpt-5-mini` | 84 |
+| `retry_clean` (strong tier answered in range) | 64 |
+| **`retry_dirty` (strong tier ALSO out of range)** | **20 — 24%** |
+| graphiti's own drop warning firing *after* our retry | 21 |
+
+**A far stronger model, reading the identical prompt, fails the same way on a quarter of
+the events.** That is the decisive argument that this is a prompt/interface defect and
+not a cheap-tier quality problem — and it is also the argument against the retry as a
+remedy: it buys a ~76% partial recovery at the price of a slow strong-tier call on ~7% of
+every dedup call in the corpus.
+
+**`dedup_retry_on_strong` therefore defaults to FALSE.** I set it to True on the
+reasoning that it was side-effect free and cheap per event, and that the clean/dirty split
+would itself be the experiment. The experiment ran and refuted the first half of that:
+per-event cost is real at corpus scale and the recovery is partial. Detection and counting
+are unaffected by the switch; turn it on deliberately if a partial recovery is worth the
+call.
+
+## What is still NOT established
+
+- **How often a dedup is actually lost.** The guard logs only the *invalid* indices, so a
+  reply of `[3, 11]` with `N=10` (one valid, one not) is indistinguishable in the log from
+  `[11]` alone — and only the all-invalid case costs a dedup. graphiti's own warning fired
+  21 times post-retry, which bounds the *calls* affected, not the *dedups lost*. Logging
+  the valid-index count alongside would close this; it is one line.
+- **Whether the confusion is worse for some article shapes than others.** Per-article
+  `invalid_calls/calls` ranged from 1/41 to 8/34 — a 10x spread that nothing here explains.
+
+## The real fix is upstream, and reinterpretation is still rejected
+
+`related_edges` are same-endpoint duplicate candidates; `existing_edges` are
+any-endpoint invalidation candidates. An index from the second list appearing in
+`duplicate_facts` cannot simply be promoted to "duplicate" — the model is pointing at a
+fact that does **not** share endpoints, so honouring it would manufacture a wrong merge,
+permanently and invisibly. The same objection that killed the schema-`maximum` idea kills
+this one. The fix belongs in the prompt's numbering, which is library-owned.

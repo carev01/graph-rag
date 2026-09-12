@@ -81,7 +81,10 @@ async def _dedup_call(graphiti) -> dict:
 
 async def test_cheap_tier_retries_on_the_strong_client_and_is_counted_once(stubs):
     strong, cheap = stubs
-    ingest, graphiti, docext, driver = await cli._build_ingest_driver(_settings())
+    # Explicit: the default is OFF since the 2026-09-11 measurement showed the
+    # strong tier repeats the mistake on 24% of retries.
+    ingest, graphiti, docext, driver = await cli._build_ingest_driver(
+        _settings(dedup_retry_on_strong=True))
     stats = DedupIndexStats()
     token = CURRENT_DEDUP_STATS.set(stats)
     try:
@@ -111,8 +114,10 @@ async def test_strong_tier_is_guarded_for_detection_only(stubs):
 
 
 async def test_retry_switch_off_leaves_the_cheap_reply_alone(stubs):
+    """Off is the DEFAULT: `_settings()` passes no flag, so this also pins that a
+    plain configuration does not spend a strong-tier call per event."""
     strong, cheap = stubs
-    ingest, *_ = await cli._build_ingest_driver(_settings(dedup_retry_on_strong=False))
+    ingest, *_ = await cli._build_ingest_driver(_settings())
     stats = DedupIndexStats()
     token = CURRENT_DEDUP_STATS.set(stats)
     try:
