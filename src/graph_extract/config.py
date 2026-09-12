@@ -73,12 +73,20 @@ class ExtractSettings(BaseSettings):
     # unrepresentable. 0 disables the bound.
     llm_max_index_array: int = 25
     # When the CHEAP tier answers graphiti's edge-dedup prompt with an out-of-range
-    # candidate index (graphiti would drop it silently: a missed dedup or a missed
-    # invalidation), re-issue that one small prompt on the strong tier and use its
-    # reply. Side-effect free (nothing is written until the reply is resolved);
-    # cost is one ~1-2k-token gpt-5-mini call per event. Detection and counting
-    # happen regardless of this switch -- see graph_extract.dedup_guard.
-    dedup_retry_on_strong: bool = True
+    # candidate index (graphiti drops it silently: a missed dedup or a missed
+    # invalidation), re-issue that one prompt on the strong tier and use its reply.
+    # Side-effect free -- nothing is written until the reply is resolved.
+    #
+    # DEFAULT OFF, set from the 2026-09-11 live measurement (17 articles, 1,145
+    # dedup calls): the strong tier makes the SAME mistake on 20 of 84 retries
+    # (24%), and graphiti's own drop warning still fired 21 times AFTER the retry.
+    # This is not a cheap-model quality problem -- all 154 out-of-range indices were
+    # invalidation-candidate indices placed in `duplicate_facts`, 0 hallucinated --
+    # so the retry treats a symptom of graphiti's shared index space at the price of
+    # a slow strong-tier call on ~10% of all dedup calls. Turn it on deliberately if
+    # a partial (~76%) recovery is worth that. Detection and counting happen
+    # regardless of this switch -- see graph_extract.dedup_guard.
+    dedup_retry_on_strong: bool = False
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
     judge_base_url: str = ""
