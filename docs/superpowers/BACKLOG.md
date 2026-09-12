@@ -462,7 +462,20 @@ the temporal-coherence live proof; no action decided.
 
 ## P2 — Scaling landmines (block broad ingestion, fine at pilot scale)
 
-### 8. Vector scan — no vector index **[verify first]**
+### 8. Vector scan — no vector index — **CONFIRMED 2026-09-11, raised to P1**
+**Verified on the live graph: 40 indexes, of which VECTOR = 0.** graphiti 0.30.1 scores with
+`vector.similarity.cosine` per row and creates no vector index. This is no longer a
+"[verify first]" item — it is measured, and item 28's profile shows it sitting on the
+dominant cost: the unfiltered candidate search is 42% of the dedup cycle and 2.6x its
+filtered twin.
+
+**Cheapest next step, which costs nothing:** create a vector index on
+`RELATES_TO.fact_embedding` and re-run `.superpowers/sdd/profile-dedup-search.py`. That
+measures the real ceiling before any code is written. An index changes the scan, not the
+two round trips, the RRF merge, or the 1.8 s LLM call — so it may not be sufficient, and
+assuming it is would repeat this project's most expensive habit. Original entry below.
+
+### 8-orig. Vector scan — the remediation route
 graphiti 0.30.1 scores with `vector.similarity.cosine` (`graph_queries.py:163`) and
 creates no vector index. Review §5 found a cheaper remediation than forking: the driver
 exposes a pluggable `SearchInterface`
@@ -629,7 +642,26 @@ truth. `_prefer_fast_provider` gates on `"openrouter" in base`, so
 
 ---
 
-### 28. graphiti's per-fact dedup call is the dominant extraction cost — **P1, measured 2026-09-11**
+### 28. graphiti's per-fact dedup cycle is the dominant extraction cost — **P1, PROFILED 2026-09-11**
+**Profiled: `dedup-cost-profile-2026-09-11.md`.** Per extracted fact graphiti runs **two**
+`EDGE_HYBRID_SEARCH_RRF` searches plus one LLM call: invalidation search **1,852 ms**,
+duplicate search 716 ms, LLM 1,837 ms, embed 35 ms — **~4.4 s per fact, of which SEARCH is
+58%, not the LLM.** That inverts the assumption this item was written under.
+
+**Correction to this item's original text:** the "~8 s per dedup call" was total elapsed
+divided by dedup calls, which charged all extraction work to dedup. The cycle is ~4.4 s.
+Dedup still dominates; the arithmetic did not.
+
+The **unfiltered** invalidation search is **2.6x** the `edge_uuids`-filtered duplicate
+search — constraining the candidate set is the whole difference, which is what an index
+does structurally. Scan cost rises with fact count (253 ms clean over 3,096 facts) and the
+corpus target is 2-3 orders of magnitude larger. This folds into item 8; do that first.
+Do NOT quote a "dedup is X% of ingestion" figure without a concurrency-aware measurement —
+`semaphore_gather` overlaps these searches, so components x facts overstates wall clock.
+
+Original entry kept below.
+
+### 28-orig. Per-fact dedup call volume — the raw measurement
 Measured on the Slice B validation run, and not accounted for anywhere in the cost model:
 graphiti issues **one dedup LLM call per extracted fact**. Seventeen articles produced
 **1,145 dedup calls** — 13 to 207 per article, ~67 on average — at roughly **8 seconds
@@ -724,9 +756,12 @@ always outranks bounding its latency.
 100% of 154 invalid indices, and the retry default was flipped off because `gpt-5-mini`
 repeats the mistake 24% of the time.
 
-1. **Item 28 — the per-fact dedup cost.** Newly measured and the largest cost fact we
-   have: ~67 dedup LLM calls per article, 8s each. This dominates extraction time and
-   nothing in the cost model accounts for it.
+1. **Item 8 — create the vector index and re-measure.** Profiling (item 28) showed SEARCH
+   is 58% of the dedup cycle and the unfiltered search is 2.6x its filtered twin, on a
+   graph with **zero** vector indexes. Creating the index and re-running
+   `.superpowers/sdd/profile-dedup-search.py` costs nothing and measures the ceiling before
+   any code is written. Ingestion throughput — 9 min/article — is the blocker to the
+   project's actual goal, and this is the cheapest evidence about it.
 2. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
 3. **Item 6 — graphiti's false invalidations.** Corrupts the flagship temporal use case by
    inventing change events that never happened; a live minimal repro already exists, which
