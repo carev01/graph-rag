@@ -477,25 +477,14 @@ the temporal-coherence live proof; no action decided.
 
 ## P2 — Scaling landmines (block broad ingestion, fine at pilot scale)
 
-### 8. Vector scan — no vector index — **P0 SCALE BLOCKER, re-measured 2026-09-12**
-**`scale-wall-2026-09-12.md`. My demotion to P2 the same day was wrong for the roadmap.**
-The scan is linear in facts: `scan_ms = 241 + 0.0699 x facts`, fitted on a synthetic curve
-to 43k facts (probe isolated by group_id and deleted, 0 remaining).
+### 8. ~~Vector scan — no vector index~~ — **RESOLVED 2026-09-12 by suspending contradiction detection**
+The O(corpus) scan was the invalidation-candidate search only; the duplicate search is
+already a `DirectedRelationshipIndexSeek` bounded by its candidate list. Suspending
+contradiction detection removes the scan entirely — no index, no ANN, no recall trade-off.
+The index question returns only if contradiction detection is re-enabled; see the spec's
+section 7. Earlier entries below.
 
-| corpus | facts | one scan |
-|---|---|---|
-| today | 3,469 | 0.5 s |
-| crossover with the 1,837 ms dedup LLM call | 22,840 | 1.8 s |
-| full corpus (~105k articles) | 610,000 | **42.9 s** |
-
-At 5.8 facts/article the crossover is **~3,900 articles — under 4% of the corpus**, and we
-are at 593. graphiti runs TWO such searches per extracted fact. The earlier "index is only
-1.8x" reading was correct for a corpus too small to need an index; brute force is linear,
-HNSW is ~logarithmic. **Nothing else about ingestion scale matters until this is fixed.**
-Prerequisites and hazards (index unused by graphiti's query shape; ANN recall vs dedup;
-`queryRelationships` deprecated in favour of `SEARCH`) are in the doc. Earlier entries below.
-
-### 8-measured. Vector scan — the pilot-scale measurement that demoted it
+### 8-scale. Vector scan — the measurement that made it a P0
 **My P1 promotion was wrong and the measurement refuted it** (`dedup-cost-profile-2026-09-11.md`,
 second half). Three results:
 
@@ -748,6 +737,9 @@ upstream report/PR or a local prompt override with a translation layer back to g
 expected index space. The override is real surgery — graphiti validates against its own
 numbering — and should not be attempted without tests that pin both directions.
 
+**Resolved 2026-09-12:** with no invalidation candidates the dedup prompt carries one index
+range instead of two, so the confusion is structurally impossible rather than mitigated.
+
 ### 30. `valid_at` semantics — **MEASURED 2026-09-12: do NOT go deterministic yet**
 `invalidation-measurement-2026-09-12.md`. The measurement inverted the recommendation.
 
@@ -829,6 +821,9 @@ shrinks every dedup prompt, removes the degenerate `related=0` shape, and elimin
 index range that **all 267** observed confused indices landed in. Estimated 3–20% of dedup
 calls skipped outright and ~70% fewer invalidation candidates in the rest; wall-clock effect
 small and honestly uncertain. Shadow-log one run before enabling.
+
+**Resolved 2026-09-12:** with no invalidation candidates the dedup prompt carries one index
+range instead of two, so the confusion is structurally impossible rather than mitigated.
 
 ## P4 — Roadmap and process
 
