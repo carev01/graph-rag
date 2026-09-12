@@ -438,13 +438,33 @@ def test_edge_operations_imports_search_by_name():
 
 
 def test_resolve_extracted_edges_has_exactly_two_search_call_sites():
-    """The discriminator is safe only because there are two, differing exactly in
-    whether edge_uuids is set."""
+    """The gate's discriminator is safe ONLY because there are exactly two
+    `search()` calls and they differ in whether `search_filter` carries
+    `edge_uuids`. Parsed with `ast` rather than matched as text: this asserts the
+    structural property the gate depends on, and does not break on reformatting.
+
+    Note this is not the `inspect.getsource` substring anti-pattern BACKLOG 16
+    warns about. That one tests OUR code through its text; this pins a fact about
+    a THIRD-PARTY library that has no behavioural probe -- nothing observable tells
+    us graphiti grew a third call site until the gate silently mishandles it."""
+    import ast
     import inspect
-    src = inspect.getsource(edge_operations.resolve_extracted_edges)
-    assert src.count("search(\n") == 2, "a third search() call site would need triage"
-    assert "SearchFilters(edge_uuids=" in src
-    assert "search_filter=SearchFilters(),\n" in src
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(edge_operations.resolve_extracted_edges))
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "search"]
+    assert len(calls) == 2, f"expected 2 search() call sites, found {len(calls)}"
+
+    def filter_has_edge_uuids(call: ast.Call) -> bool | None:
+        for kw in call.keywords:
+            if kw.arg == "search_filter":
+                return bool(getattr(kw.value, "keywords", []))
+        return None
+
+    assert [filter_has_edge_uuids(c) for c in calls] == [True, False], (
+        "expected one filtered (duplicate) and one unfiltered (invalidation) "
+        "search, in that order")
 
 
 def test_no_invalidation_candidates_means_no_invalidation():
