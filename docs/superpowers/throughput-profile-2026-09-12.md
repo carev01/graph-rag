@@ -147,15 +147,43 @@ original unchanged and logs; and `assert_no_custom_edge_attributes` fails loudly
 `:RELATES_TO` property outside the projection. A test also pins the premise, so if the
 library stops shipping the embedding the patch is reconsidered rather than silently kept.
 
-## What this does NOT achieve — BM25 is now the ceiling
+## CORRECTED — BM25 is NOT the ceiling; the patch fixed it too
 
-`search()` runs BM25 and cosine concurrently, so its floor is the slower one. Cosine fell
-1,258 → 407 ms, so **BM25 at 785 ms now caps it** and further cosine work is worthless until
-BM25 moves. Serial per-fact estimate: ~3,095 → ~2,622 ms (~15%), with the 1,837 ms LLM call
-now the largest single component.
+I wrote that BM25 would cap the gain at 785 ms. Wrong: `edge_fulltext_search` uses the same
+`get_entity_edge_return_query` (`search_utils.py:271`), so patching that reference fixed
+**both** halves. Re-measured:
 
-Revised order: **BM25 fulltext**, then **fewer than two searches per fact**, then the LLM
-call. Concurrency stays last — it races graphiti's dedup reads, and Slice B established
+| | before | after |
+|---|---|---|
+| BM25 | 782 ms | **291 ms** (2.7x) |
+| cosine | 914 ms | **402 ms** (2.3x) |
+| `search()` floor = max of the two | 914 ms | **402 ms** |
+
+Serial per-fact estimate: 2 searches + 1 LLM call, **~3,665 → ~2,641 ms (~28%)**. The
+**1,837 ms dedup LLM call is now ~70% of the cycle** and is the next target.
+
+Revised order: **the dedup LLM call** (~70% of the remaining cycle), then **fewer than two
+searches per fact**. Concurrency stays last — it races graphiti's dedup reads, and Slice B established
 those already drop candidates silently.
 
 **Still unmeasured end to end.** The 9-minute article remains the only number that matters.
+
+
+---
+
+# Second win — skip the dedup LLM call when there is nothing to dedup against
+
+`resolve_extracted_edge` issues its LLM call **unconditionally**
+(`edge_operations.py:726`); the `if related_edges or existing_edges` guards above and below
+it cover only a debug log and the contradiction block. So when BOTH candidate lists are
+empty graphiti asks a model to pick duplicates out of an empty list — and then discards the
+answer: `duplicate_fact_ids` filters every index against `len(related_edges) == 0`, and
+contradictions are skipped entirely.
+
+The reply therefore **cannot** affect the outcome, and the only correct answer is the empty
+one. `dedup_guard` already recovers N and M from the prompt, so it now short-circuits that
+case and returns `{"duplicate_facts": [], "contradicted_facts": []}` without a call. This is
+**exact, not an approximation** — and it saves the full ~1,837 ms each time it fires.
+
+How often it fires is unknown and deliberately not guessed: the new `no_candidate_skips`
+counter is printed per article and per run by `ingest`, so the next run measures it.
