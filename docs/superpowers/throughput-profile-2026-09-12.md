@@ -246,3 +246,75 @@ the largest single component and graphiti issues exactly one per extracted fact.
 
 The next lever is **call volume, not call latency** — and every option there changes
 behaviour, so it needs measurement rather than a confident patch.
+
+---
+
+# CORRECTIONS — 2026-09-12, from the call-volume review
+
+Four claims in this document were wrong. Full analysis:
+`.superpowers/sdd/dedup-volume-review.md`.
+
+## 1. "graphiti issues the dedup LLM call unconditionally" — FALSE
+
+`resolve_extracted_edge` **line 653**:
+
+```python
+if len(related_edges) == 0 and len(existing_edges) == 0:
+    ...          # attributes + timestamps only
+    return extracted_edge, [], []
+```
+
+The early return sits **above** both guards I cited. graphiti already skips the dedup call
+when there are no candidates.
+
+## 2. Therefore the zero-candidate short-circuit was unreachable, and its result proved nothing
+
+`dedup_guard`'s `n == 0 and m == 0` branch could never execute: graphiti never builds the
+dedup prompt in that case, so our wrapper never sees it. **`no_candidate_skips = 0` across
+560 calls was not evidence that "BM25 almost always matches something"** — it was evidence
+that the branch cannot run. I read my own instrument backwards.
+
+The code is removed. Two library pins replace it, so the assumption is checked rather than
+assumed: one asserts graphiti still returns early, one asserts the verbatim fast path still
+precedes the dedup call.
+
+Note the practical consequence is nil — graphiti was already doing the optimisation — but
+the reasoning was wrong and the conclusion drawn from it was unsupported.
+
+## 3. "Option 3" already exists in the library
+
+Lines 684–695 resolve a normalised exact `fact` + endpoint match deterministically, before
+any LLM call. Nothing to build.
+
+## 4. There is a SECOND per-fact LLM call nobody counted
+
+`_extract_edge_timestamps` (line 813) runs on every edge that resolves as **new**, and again
+at 680 on the no-candidate path. `dedup_guard` passes non-dedup prompts straight through, so
+it has never been counted. "One dedup LLM call per extracted fact" understates per-fact LLM
+work.
+
+## 5. And the strategic correction: call volume may not be on the critical path
+
+`resolve_extracted_edges` runs four `semaphore_gather` phases per episode with **no
+`max_coroutines`**, so each uses `SEMAPHORE_LIMIT` (default **20**). Our `max_coroutines=3`
+is threaded elsewhere and never reaches this path. With a mean of **6.9 facts per episode**,
+every dedup call of an episode is in flight at once — so the phase costs roughly the
+*slowest* call, not the sum.
+
+**"5.52 s per dedup call × 67 calls" is total ingest wall ÷ dedup call count**, charging
+chunking, node extraction, edge extraction, summaries and writes to dedup. The 09-11 profile
+retracted exactly this arithmetic once already and I reintroduced it. Solid figures are
+**~45 s per episode** (run 2) and the per-fact serial components (~0.4 + 0.4 + 1.84 s).
+
+The 1.47x between runs is also confounded: run 2 processed 68 leftover episodes across 50
+partially-ingested articles (358 skipped), a different mix. The lean projection's 2.3–2.7x on
+the searches is directly measured and stands; the end-to-end ratio is weaker evidence than I
+presented it as.
+
+## 6. The finding that reframes the quality argument
+
+`resolve_edge_contradictions` invalidates only when **both** edges carry `valid_at`. Live
+graph: **3,469 edges, 805 dated (23%)**. Contradiction detection is inert for **77%** of the
+graph — so design invariant #3's temporal promise is already unserved for three quarters of
+the facts, independently of anything measured here. That is a product question, not a
+throughput one.
