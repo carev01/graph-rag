@@ -120,6 +120,24 @@ def test_is_gate_installed_reports_state(restore_search):
 
 
 @pytest.mark.asyncio
+async def test_re_enabling_restores_the_original_search(restore_search):
+    seen, fake = _recording()
+    edge_operations.search = fake
+
+    assert cg.install_contradiction_gate(detect_contradictions=False) is True
+    assert cg.is_gate_installed() is True
+
+    assert cg.install_contradiction_gate(detect_contradictions=True) is False
+    assert cg.is_gate_installed() is False
+    assert edge_operations.search is fake
+
+    out = await edge_operations.search(
+        None, "a fact", group_ids=["g"], config=None, search_filter=SearchFilters())
+    assert out.edges == [_SENTINEL_EDGE]
+    assert len(seen) == 1, "an unfiltered search must be delegated once restored"
+
+
+@pytest.mark.asyncio
 async def test_a_delegated_failure_propagates(restore_search):
     async def _boom(clients, query, **kw):
         raise RuntimeError("neo4j down")

@@ -43,20 +43,29 @@ from graphiti_core.utils.maintenance import edge_operations
 logger = logging.getLogger(__name__)
 
 _MARKER = "_graph_extract_contradiction_gate"
+_ORIGINAL = "_graph_extract_contradiction_gate_original"
 
 
 def install_contradiction_gate(*, detect_contradictions: bool) -> bool:
     """Patch `edge_operations`' own `search` reference so the unfiltered
-    invalidation search never runs.
+    invalidation search never runs -- or, called with `detect_contradictions=True`
+    while a gate is installed, undo that patch.
 
     `edge_operations` does `from graphiti_core.search.search import search`, so the
     patch must target THAT module's attribute; patching the defining module would
     not be seen.
 
     Returns True when the gate is installed (contradiction detection suspended),
-    False when detection is left enabled. Idempotent.
+    False when detection is left enabled (or has just been restored). Idempotent
+    in both directions.
     """
     if detect_contradictions:
+        current = edge_operations.search
+        if getattr(current, _MARKER, False):
+            edge_operations.search = current.__dict__[_ORIGINAL]
+            logger.info(
+                "contradiction detection restored: the invalidation-candidate "
+                "search is delegated again")
         return False
     if getattr(edge_operations.search, _MARKER, False):
         return True
@@ -78,6 +87,7 @@ def install_contradiction_gate(*, detect_contradictions: bool) -> bool:
         return await original(*args, **kwargs)
 
     gated.__dict__[_MARKER] = True
+    gated.__dict__[_ORIGINAL] = original
     edge_operations.search = gated
     logger.info(
         "contradiction detection suspended: the unfiltered invalidation-candidate "
