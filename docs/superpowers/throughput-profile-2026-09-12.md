@@ -187,3 +187,62 @@ case and returns `{"duplicate_facts": [], "contradicted_facts": []}` without a c
 
 How often it fires is unknown and deliberately not guessed: the new `no_candidate_skips`
 counter is printed per article and per run by `ingest`, so the next run measures it.
+
+---
+
+# Validated end to end — 2026-09-12
+
+Second cheap-tier ingest on the same source, with both optimisations live. Raw log:
+`.superpowers/sdd/throughput-ab-ingest.log`.
+
+**Metric: seconds per dedup call, not per article.** The baseline run's "9 min/article"
+is contaminated — some of its 17 articles were already-ingested skips costing only a fetch
+and a chunking pass. Normalising by dedup calls removes that. Both figures charge *all*
+extraction work to dedup, so they are comparable to each other and to nothing else.
+
+| | baseline | after |
+|---|---|---|
+| dedup calls | 1,145 | 560 |
+| wall clock | 9,270 s | 3,093 s |
+| **s per dedup call** | **8.10** | **5.52** |
+| speedup | | **1.47x (-32%)** |
+
+The component profile predicted **-28%**; the live run delivered **-32%**. That agreement
+is the reason to trust the profile, not the other way round.
+
+**Conservatively biased against the new code:** the graph grew from 2,173 to 3,096+ facts
+between runs, so every candidate search scanned more data.
+
+## The short-circuit fired ZERO times — recorded as measured-ineffective
+
+`no_candidate_skips = 0` across all 560 calls. The zero-candidate short-circuit is provably
+correct and **worthless on this corpus**: hybrid search with BM25 almost always matches
+something, so a fact with no candidates at all essentially does not occur. **All 32% came
+from the lean projection.**
+
+Kept because it costs nothing and will matter on a sparse cold-start graph, but it must not
+be counted as a win, and no variant that assumes empty candidate lists are common should be
+proposed again — that is now measured and refuted.
+
+## Slice B reconfirmed on independent data
+
+| | run 1 | run 2 | total |
+|---|---|---|---|
+| out-of-range duplicate indices | 154 | 113 | **267** |
+| inside the invalidation range | 154 | 113 | **267 (100%)** |
+| beyond range / negative | 0 | 0 | **0** |
+| `parse_failures` | 0 | 0 | 0 |
+| invalid-call rate | 7.4% | 9.5% | — |
+
+Two independent runs, 267 of 267. The index-space-confusion diagnosis is as solid as this
+kind of evidence gets. The rate moved within the variation expected across different
+articles.
+
+## Where this leaves the goal
+
+5.52 s/call x ~67 calls ≈ **6 minutes per article**. Better than 9, nowhere near enough for
+105k articles. Per-call cost is close to exhausted: the dedup LLM call (~1,837 ms) is now
+the largest single component and graphiti issues exactly one per extracted fact.
+
+The next lever is **call volume, not call latency** — and every option there changes
+behaviour, so it needs measurement rather than a confident patch.
