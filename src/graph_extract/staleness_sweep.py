@@ -8,6 +8,14 @@ Graphiti to observe. This module is the deterministic, Cypher-only backstop
 for that case: a weekly sweep that expires facts with zero live supporting
 episodes.
 
+Since 2026-09-12 this is, in practice, the PRIMARY invalidation mechanism, not a
+backstop: ingest-time contradiction detection is suspended by default
+(`ingest_detect_contradictions=False`, graph_extract.contradiction_gate), which
+removes cross-pair invalidation entirely. The only remaining ingest-time path is
+a same-pair contradiction through the duplicate candidates (BACKLOG 33), so most
+`invalid_at` values written from here on come from this sweep. See the spec,
+docs/superpowers/specs/2026-09-12-suspend-contradiction-detection-design.md.
+
 Correctness rule (see graph_extract.episode_liveness, the single definition): a
 supporting episode is ALIVE iff its `HAS_EPISODE` edge is not `superseded`, the
 episode is not `removed`, and the article is not `removed`. Liveness is keyed on

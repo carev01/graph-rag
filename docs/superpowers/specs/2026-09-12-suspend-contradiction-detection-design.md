@@ -2,8 +2,18 @@
 
 **Project:** Temporal GraphRAG over DocExtractor
 **Date:** 2026-09-12
-**Status:** Approved design — ready for implementation planning
-**Backlog:** resolves the P0 scale blocker in item 8; supersedes item 32; acts on items 6, 29, 30
+**Status:** Approved design — implemented; claims corrected in the final whole-branch review (see §4, §9)
+**Backlog:** resolves the P0 scale blocker in item 8; supersedes item 32; acts on items 6, 29, 30; opens item 33
+
+> **Correction (final review, 2026-09-12).** The original text of §4 and §9 claimed that with
+> the gate installed "nothing is invalidated". That is false. `resolve_extracted_edge`
+> (`edge_operations.py:769-776`) fills `invalidation_candidates` from **both** candidate
+> lists: `contradicted_facts` indices below `len(related_edges)` select edges from the
+> **filtered duplicate search the gate delegates**. The gate suspends the O(corpus) scan and
+> **cross-pair** invalidation; **same-pair** contradiction remains live. The measured bad
+> invalidations (BACKLOG 6: six of six inspected, all same-endpoint, same-relation-name)
+> come from the path that stays open. See BACKLOG 33. The sections below are corrected in
+> place; the scale analysis in §1–§3 stands.
 
 ---
 
@@ -65,8 +75,10 @@ Rejected alternatives, with reasons:
 - **Bounding the invalidation candidates** (e.g. to edges sharing an endpoint). Attractive,
   but it is a **semantic change to graphiti's contradiction model**, not an optimisation:
   graphiti deliberately excludes same-pair edges from the invalidation list
-  (`edge_operations.py:419-429`, "keep it only in duplicate candidates"), so its model
-  assumes contradictions come from *different* entity pairs. Designing that narrowing
+  (`edge_operations.py:419-429`, "keep it only in duplicate candidates") — but note it
+  then lets the LLM mark a *duplicate* candidate as contradicted too
+  (`contradicted_facts` "from EITHER list", `edge_operations.py:769-776`), so same-pair
+  contradiction lives in the duplicate branch, not the invalidation one. Designing that narrowing
   requires timestamp semantics we do not have and a measurement of how many genuine
   contradictions this corpus contains — currently unmeasurable, since none of the 140
   observed are genuine. Deferred to its own design cycle. See §7.
@@ -131,17 +143,27 @@ those two words.
 
 With `existing_edges` empty for every fact:
 
-1. `resolve_edge_contradictions` returns `[]` — nothing is invalidated. No separate
-   suppression needed.
-2. The dedup prompt carries **one index space instead of two**, so the confusion behind all
-   **267** observed out-of-range indices (BACKLOG 29) becomes structurally impossible rather
-   than merely less likely.
+1. **Cross-pair invalidation is gone.** `existing_edges` contributes nothing to
+   `invalidation_candidates`, so no fact on a *different* entity pair can be invalidated.
+   **Same-pair invalidation is NOT gone** (corrected in the final review; the original text
+   here said "nothing is invalidated"): `contradicted_facts` indices in `0..n-1` still
+   select from `related_edges` (`edge_operations.py:769-776`), the duplicate candidates
+   the gate delegates, and those reach `resolve_edge_contradictions` unchanged. A same-pair
+   candidate with a later `valid_at` can also mark the *new* edge invalid on arrival
+   (`edge_operations.py:826-839`). The tripwire
+   `test_same_pair_contradiction_stays_live_through_the_duplicate_candidates` pins this.
+   Its share of the 140 measured invalidations is unmeasured; the six hand-inspected ones
+   were all same-pair (BACKLOG 33).
+2. The dedup prompt carries **one populated index space instead of two**, so the confusion
+   behind all **267** observed out-of-range indices (BACKLOG 29) becomes structurally
+   impossible rather than merely less likely.
 3. Where `related_edges` is also empty, graphiti's early return (`edge_operations.py:653`)
    skips the dedup LLM call entirely.
 4. Per-fact search work halves, and what remains is the index-seek-bounded duplicate search.
 
-One change removes the scale wall, the phantom invalidations, and the index-space defect
-together.
+One change removes the scale wall and the index-space defect. It removes the
+**cross-pair** phantom invalidations; the same-pair ones — the kind actually observed —
+are not addressed by this design and need their own (see §7, BACKLOG 33).
 
 ## 5. Error handling
 
@@ -172,14 +194,21 @@ into a legitimate-looking value has been the most expensive recurring defect her
 - `edge_operations` imports `search` by name.
 - `edge_operations` contains exactly two `search(` call sites, one filtered by `edge_uuids`
   and one not.
-- `resolve_edge_contradictions([])` returns `[]`.
+- `resolve_edge_contradictions([])` returns `[]` — pins only that an empty *cross-pair*
+  list invalidates nothing.
+- `resolve_extracted_edge` routes `contradicted_facts` indices below `len(related_edges)`
+  into `invalidation_candidates` — pins that the same-pair path is live (added in the final
+  review; the design originally assumed it was not).
 
-**Integration (real Neo4j):**
-- An ingest while suspended produces **zero** new edges with `invalid_at`.
-- Duplicate detection still works: a repeated fact resolves to the existing edge rather than
-  creating a second one.
-- The answer path is unaffected — a local search returns the same results whether the gate
-  module is installed or not.
+**Integration (real Neo4j, no paid endpoint):**
+- The gated invalidation search issues **zero** driver queries through graphiti's real
+  `search()`; the delegated duplicate search, same clients and counter, does reach the
+  database and returns the seeded fact.
+- The answer path is unaffected — `search_local` returns the same, **non-empty** result
+  before and after the gate is installed.
+- Not covered hermetically: "an ingest while suspended produces zero new `invalid_at`
+  edges" was originally listed here and is **not a property of this design** — see §4
+  item 1. A duplicate-detection-still-works ingest needs an LLM and is a paid run.
 
 **Discrimination:** every test must fail with its fix neutralised, proven by mutation and
 recorded, per this project's standing practice.
@@ -231,8 +260,13 @@ per-prompt timing, and the duplicate search. None depend on invalidation.
 
 1. No query in the ingest path scores more rows than the candidate list it was given —
    verified by `PROFILE`, not by timing.
-2. An ingest produces zero new `invalid_at` edges.
-3. Local search results are identical whether or not the gate is installed.
+2. ~~An ingest produces zero new `invalid_at` edges.~~ **Withdrawn in the final review** —
+   not a property of this design (§4 item 1). What the design delivers is: no
+   `invalid_at` is ever set from a candidate on a *different* entity pair. Same-pair
+   invalidations can still occur and their rate is unmeasured (BACKLOG 33).
+3. Local search results are identical whether or not the gate is installed — asserted on a
+   real, non-empty `search_local` result (the original test compared row counts around an
+   in-process assignment and could not fail; replaced in the final review).
 4. Per-fact search work is halved, visible in the item 31 per-prompt timing on the next run.
 5. `dup_in_invalidation_range` falls to **zero**, because that index range no longer exists.
    Note this is deliberately narrower than "out-of-range indices fall to zero":

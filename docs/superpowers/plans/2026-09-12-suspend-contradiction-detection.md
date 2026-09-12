@@ -4,6 +4,8 @@
 
 **Goal:** Stop graphiti issuing the O(corpus) invalidation-candidate search during ingest, removing the scale blocker that makes full-corpus ingestion impossible, and with it the phantom invalidations and the dedup index-space confusion.
 
+> **Correction (final review, 2026-09-12):** "and with it the phantom invalidations" is only true for **cross-pair** invalidations. Same-pair contradiction stays live through `contradicted_facts` indices into `related_edges` (`edge_operations.py:769-776`), and the measured phantom invalidations were same-pair. See the spec's correction note, Verification item 2 below, and BACKLOG 33. The CI breakage this plan caused (running unit and integration as separate halves hid a process-wide leak of the gate) is fixed by an autouse fixture in `tests/unit/conftest.py`.
+
 **Architecture:** One new module patches `graphiti_core.utils.maintenance.edge_operations.search` — the module imports that function by name, so the patch targets that module's attribute. The wrapper discriminates structurally: `search_filter.edge_uuids is None` means the invalidation search (unfiltered, scans the corpus) and returns an empty `SearchResults` without querying; anything else is the duplicate search (an index seek) and is delegated untouched. `edge_operations` has exactly two `search()` call sites and they differ precisely that way. The answer path never routes through `edge_operations`, so retrieval is unaffected by construction.
 
 **Tech Stack:** Python 3.12, `uv`, graphiti-core 0.30.1, Neo4j 2026.07.1 Community (no APOC), pytest + pytest-asyncio, testcontainers for integration.
@@ -473,6 +475,12 @@ def test_no_invalidation_candidates_means_no_invalidation():
     assert edge_operations.resolve_edge_contradictions(None, []) == []
 ```
 
+> **Corrected in the final review:** the docstring above is wrong as written and was
+> rewritten in the committed test. An empty `existing_edges` empties only the cross-pair
+> half of `invalidation_candidates`; the same-pair half comes from `related_edges`. A
+> further tripwire, `test_same_pair_contradiction_stays_live_through_the_duplicate_candidates`,
+> pins the residual path on the library's `ast`.
+
 - [ ] **Step 2: Run them to verify they pass against the real library**
 
 Run: `uv run --extra dev pytest tests/unit/test_contradiction_gate.py -q`
@@ -579,7 +587,7 @@ Expected: `3 passed` (a Neo4j testcontainer starts; Docker must be running).
 
 - [ ] **Step 5: Run the full gate**
 
-The integration suite takes ~11 minutes and the Bash tool auto-backgrounds past 120s, so run it in two halves rather than waiting on one command:
+The integration suite takes ~11 minutes and the Bash tool auto-backgrounds past 120s. **Do not verify with the two halves below alone** — that is exactly what hid the gate leaking from `tests/integration/test_compat_harness.py` into the unit tripwires (final review, Critical 2). Run the real CI command, `uv run --extra dev pytest -m "not live" -q`, in one process and wait for it. The halves are kept only as a fast pre-check:
 
 ```bash
 uv run ruff check src tests
@@ -632,8 +640,8 @@ search issues no query and that local retrieval is unchanged."
 After Task 3, confirm against the spec's success criteria:
 
 1. **No ingest query scores more rows than its candidate list** — the invalidation search issues no query at all (Task 3 integration test).
-2. **Zero new `invalid_at` edges** — follows from `resolve_edge_contradictions(None, []) == []` (Task 3 tripwire), pinned rather than assumed.
-3. **Local search unchanged** — Task 3 integration test.
+2. ~~**Zero new `invalid_at` edges** — follows from `resolve_edge_contradictions(None, []) == []` (Task 3 tripwire), pinned rather than assumed.~~ **Withdrawn in the final review.** The tripwire asserts a true but irrelevant fact: `invalidation_candidates` is not `existing_edges`. Same-pair invalidation remains live (`edge_operations.py:769-776`, `:826-839`). Criterion 2 is not delivered by this change; what is delivered is zero *cross-pair* invalidation. BACKLOG 33.
+3. **Local search unchanged** — Task 3 integration test, rewritten in the final review to call `search_local` against a real Graphiti on the testcontainer and compare non-empty results (the original compared Cypher row counts around an in-process assignment and could not fail).
 4. **Per-fact search work halved** — visible as the disappearance of the unfiltered search in the item 31 per-prompt timing, on the next ingest the user chooses to run. Not verifiable in CI.
 5. **`dup_in_invalidation_range` falls to zero** — same: it needs a live ingest, and `dup_beyond_range` may still be non-zero, which would be new information rather than a regression.
 

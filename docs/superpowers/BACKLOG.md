@@ -458,6 +458,12 @@ only join (`invalid_at = invalidator.valid_at`) yields a **median of 21 candidat
 and exactly 1 of 140 victims with an unambiguous match**. A fact can lose its currency with
 no recoverable reason. Original entry below.
 
+**Status after the contradiction gate (2026-09-12, corrected in its final review):** NOT
+resolved. The six inspected pairs were selected as *same endpoints and same relation name*
+— that is the same-pair path, which the gate leaves open (`contradicted_facts` indices into
+the duplicate candidates). The gate removed the cross-pair path and the corpus scan. See
+item 33.
+
 ### 6-orig. graphiti's false invalidations (the "43 phantom invalidations")
 Review §2.3, and reproduced live during the temporal-coherence slice: graphiti
 invalidated a fact **at ingest time** (`invalid_at == the new fact's valid_at`,
@@ -468,6 +474,43 @@ This corrupts the flagship temporal use case — "how did vendor X's treatment c
 time?" — by inventing change events that never happened. A live minimal repro exists,
 which is the expensive half of the work.
 
+### 33. Same-pair invalidation is still live after the contradiction gate — **P1, UNMEASURED**
+Recorded by the final whole-branch review of `suspend-contradiction-detection` (2026-09-12),
+which found the branch's spec claiming "nothing is invalidated" while the library says
+otherwise.
+
+**What it is.** `resolve_extracted_edge` builds `invalidation_candidates` from two lists
+(`edge_operations.py:769-776`). Indices `>= len(related_edges)` select cross-pair candidates
+from the unfiltered search — the O(corpus) scan the gate now skips. Indices
+`< len(related_edges)` select **same-pair** candidates from the filtered duplicate search,
+which the gate deliberately delegates. graphiti's dedup prompt invites exactly that
+(`contradicted_facts: idx values from EITHER list`, `prompts/dedupe_edges.py:57`; its worked
+example returns a contradiction on a same-pair refinement, "software engineer" → "senior
+engineer"). Those candidates reach `resolve_edge_contradictions` unchanged, and
+`edge_operations.py:826-839` can additionally set `invalid_at` on the **new** edge when a
+same-pair candidate carries a later `valid_at`. Neither path is touched by the gate.
+
+**What the branch delivered, and what it did not.** The scale fix is real: the corpus scan is
+gone and cross-pair invalidation with it. **The quality fix was claimed and is not
+delivered.** The branch's quality justification — item 6's six of six hand-inspected bad
+invalidations, all same-endpoint, same-relation-name refinements and near-duplicates — is
+evidence about *this* path, the one that stays open, not the one that was suspended.
+Nothing in the branch changes how those six pairs would be handled if ingested today. The
+spec's "zero new `invalid_at` edges" success criterion was withdrawn on these grounds.
+
+**Unmeasured.** How many of the 140 invalidations came from each path is unknown, and
+because graphiti records no victim→invalidator link (item 6) it cannot be recovered from the
+graph. It can only be measured forward: per dedup call, count `contradicted_facts` indices
+that land below `len(related_edges)`. `dedup_guard` already sees every reply and already
+classifies `duplicate_facts` indices by range, so this is one more counter, not a new
+mechanism. Get that number on the next paid run before deciding anything.
+
+**Not to be fixed as a side effect.** Filtering `contradicted_facts`, or suppressing
+`resolve_edge_contradictions`, is a second semantic patch into graphiti and gets its own
+design cycle with the measurement above as its input. The residual path is pinned by
+`test_same_pair_contradiction_stays_live_through_the_duplicate_candidates` so a library
+change in either direction fails loudly.
+
 ### 7. Extraction is not deterministic at `temperature=0.0`
 The dedup step's semantic search over existing facts can go either way between runs.
 Matters for any live extraction test and for reproducing extraction bugs. Recorded during
@@ -477,12 +520,14 @@ the temporal-coherence live proof; no action decided.
 
 ## P2 — Scaling landmines (block broad ingestion, fine at pilot scale)
 
-### 8. ~~Vector scan — no vector index~~ — **RESOLVED 2026-09-12 by suspending contradiction detection**
+### 8. ~~Vector scan — no vector index~~ — **RESOLVED 2026-09-12 by suspending the cross-pair invalidation search**
 The O(corpus) scan was the invalidation-candidate search only; the duplicate search is
-already a `DirectedRelationshipIndexSeek` bounded by its candidate list. Suspending
-contradiction detection removes the scan entirely — no index, no ANN, no recall trade-off.
-The index question returns only if contradiction detection is re-enabled; see the spec's
-section 7. Earlier entries below.
+already a `DirectedRelationshipIndexSeek` bounded by its candidate list. Skipping that
+search removes the scan entirely — no index, no ANN, no recall trade-off. What it suspends
+is *cross-pair* contradiction detection; same-pair contradiction through the duplicate
+candidates stays live (item 33) — the scale claim here does not depend on that. The index
+question returns only if the unfiltered search is re-enabled; see the spec's section 7.
+Earlier entries below.
 
 ### 8-scale. Vector scan — the measurement that made it a P0
 **My P1 promotion was wrong and the measurement refuted it** (`dedup-cost-profile-2026-09-11.md`,
@@ -737,8 +782,10 @@ upstream report/PR or a local prompt override with a translation layer back to g
 expected index space. The override is real surgery — graphiti validates against its own
 numbering — and should not be attempted without tests that pin both directions.
 
-**Resolved 2026-09-12:** with no invalidation candidates the dedup prompt carries one index
-range instead of two, so the confusion is structurally impossible rather than mitigated.
+**Resolved 2026-09-12:** with no invalidation candidates the dedup prompt carries one
+populated index range instead of two, so the confusion is structurally impossible rather
+than mitigated. Note the prompt's *other* cross-list rule is unaffected: `contradicted_facts`
+may still name a duplicate candidate, and graphiti still acts on it (item 33).
 
 ### 30. `valid_at` semantics — **MEASURED 2026-09-12: do NOT go deterministic yet**
 `invalidation-measurement-2026-09-12.md`. The measurement inverted the recommendation.
@@ -753,7 +800,8 @@ and vendor docs are overwhelmingly present tense — hence 415 of 805 dated edge
 exactly the scrape time, 172 of them sharing one value. Within a bulk scrape, articles are
 crawled seconds apart, and `resolve_edge_contradictions` invalidates on
 `valid_at < valid_at`. **So which of two contradicting facts survives is decided by crawl
-order.**
+order.** The contradiction gate (2026-09-12) does not change this mechanism for same-pair
+candidates — it removes the cross-pair candidates only (item 33).
 
 Setting `valid_at = reference_time` for everything would extend that from 23% of the graph
 to 100%. **Blocked on an upstream timestamp** — see
@@ -822,8 +870,11 @@ index range that **all 267** observed confused indices landed in. Estimated 3–
 calls skipped outright and ~70% fewer invalidation candidates in the rest; wall-clock effect
 small and honestly uncertain. Shadow-log one run before enabling.
 
-**Resolved 2026-09-12:** with no invalidation candidates the dedup prompt carries one index
-range instead of two, so the confusion is structurally impossible rather than mitigated.
+**Resolved 2026-09-12:** with no invalidation candidates the dedup prompt carries one
+populated index range instead of two, so the confusion is structurally impossible rather
+than mitigated. (Superseded by the gate, which drops the whole candidate list rather than
+the undated part of it. Same-pair candidates are not "invalidation candidates" in graphiti's
+terms and are unaffected — item 33.)
 
 ## P4 — Roadmap and process
 
@@ -926,7 +977,8 @@ repeats the mistake 24% of the time.
 2. **Act on `bag_share`** — only after a run produces the number. Do not set a policy first.
 3. **Item 6 — graphiti's false invalidations.** Corrupts the flagship temporal use case by
    inventing change events that never happened; a live minimal repro already exists, which
-   is the expensive half of the work.
+   is the expensive half of the work. **Still open after the contradiction gate** — the
+   observed cases are same-pair and that path is live; measure its share first (item 33).
 4. **Item 2 (judge split) — DE-PRIORITISED by evidence.** It existed because two
    interventions failed to move the number, implying the metric was suspect. When the real
    defect was fixed, judge score and per-claim audit moved *together* — the judge tracks

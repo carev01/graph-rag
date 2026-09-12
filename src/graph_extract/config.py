@@ -98,6 +98,9 @@ class ExtractSettings(BaseSettings):
     # refinements and near-duplicates ordered by the sequence DocExtractor crawled
     # the pages, because the corpus carries no document revision date. Re-enabling
     # is NOT a flag flip -- see the spec's section 7.
+    #
+    # Scope: off suspends the scan and CROSS-PAIR invalidation. Same-pair
+    # contradiction via the duplicate candidates stays live either way (BACKLOG 33).
     ingest_detect_contradictions: bool = False
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0

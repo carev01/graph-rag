@@ -20,10 +20,22 @@ the sequence DocExtractor happened to crawl the pages. There is no document
 revision date in the corpus to order them properly
 (docs/proposals/2026-09-12-docextractor-article-timestamps.md).
 
-So the scan is the scale blocker AND it serves the one feature that is broken.
-Suspending it removes both, plus the dedup index-space confusion: with no
-invalidation candidates the dedup prompt carries ONE index range instead of two,
-and all 267 observed out-of-range indices landed in the second one.
+So the scan is the scale blocker AND it serves the feature that is broken.
+Suspending it removes the scan, and with it CROSS-PAIR invalidation and the dedup
+index-space confusion: with no invalidation candidates the dedup prompt carries
+ONE index range instead of two, and all 267 observed out-of-range indices landed
+in the second one.
+
+What it does NOT remove -- read this before claiming otherwise (BACKLOG 33):
+SAME-PAIR contradiction stays live. `resolve_extracted_edge` routes
+`contradicted_facts` indices below `len(related_edges)` into
+`invalidation_candidates`, and `related_edges` comes from the FILTERED duplicate
+search this gate deliberately delegates. graphiti's dedup prompt invites exactly
+that ("idx values from EITHER list"; its worked example returns a contradiction
+on a same-pair refinement). A same-pair candidate with a later `valid_at` can
+also mark the NEW edge invalid on arrival. The six hand-inspected bad
+invalidations that justified this change were all same-endpoint, same-relation
+pairs -- that is this path, not the one suspended here. Its share is unmeasured.
 
 Scope: `edge_operations` is ingest-only. The answer path searches via
 `graphiti.search()` / `search_utils`, so retrieval is untouched by construction
@@ -74,9 +86,12 @@ def install_contradiction_gate(*, detect_contradictions: bool) -> bool:
 
     async def gated(*args: Any, **kwargs: Any) -> Any:
         # `search_filter` is the 5th positional parameter and is passed as a
-        # keyword by both call sites today. Read both, so a change in graphiti's
-        # call style degrades to "still skipped" rather than silently resuming a
-        # corpus scan.
+        # keyword by both call sites today. Read both. The failure modes are NOT
+        # symmetric: a switch to positional still discriminates ("still
+        # skipped"); a call site that OMITS `search_filter` altogether reads as
+        # None here, is delegated, and the corpus scan silently resumes. The
+        # call-site tripwire in tests/unit/test_contradiction_gate.py is what
+        # guards the second case, not this code.
         search_filter = kwargs.get("search_filter")
         if search_filter is None and len(args) >= 5:
             search_filter = args[4]

@@ -1,7 +1,9 @@
 """The invalidation-candidate search is the only O(corpus) query in the ingest
 path: PROFILE shows it scanning all 3,469 edges, while the duplicate search runs a
-DirectedRelationshipIndexSeek over 10. It exists to feed contradiction detection,
-which is suspended until the corpus has a real time axis."""
+DirectedRelationshipIndexSeek over 10. It exists to feed CROSS-PAIR contradiction
+detection, which is suspended until the corpus has a real time axis. Same-pair
+contradiction -- `contradicted_facts` indices pointing into the delegated
+duplicate-candidate list -- stays live; the last tripwire below pins that."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -169,7 +171,18 @@ def test_resolve_extracted_edges_has_exactly_two_search_call_sites():
     Note this is not the `inspect.getsource` substring anti-pattern BACKLOG 16
     warns about. That one tests OUR code through its text; this pins a fact about
     a THIRD-PARTY library that has no behavioural probe -- nothing observable tells
-    us graphiti grew a third call site until the gate silently mishandles it."""
+    us graphiti grew a third call site until the gate silently mishandles it.
+
+    Two known limits, recorded so nobody over-reads a green result:
+    - It parses `resolve_extracted_edges` ONLY. A `search()` call added elsewhere
+      in `edge_operations` (a new helper, say) would not trip it, and the gate
+      would discriminate that call by its filter like any other.
+    - `filter_has_edge_uuids` reads the `search_filter=` keyword LITERALLY: it is
+      True only for an inline `SearchFilters(...)` call carrying keywords. A call
+      site that passes a filter built into a variable (`search_filter=flt`) reads
+      as "unfiltered" (False) and the `[True, False]` assertion could stay green
+      while the second site had quietly gained an `edge_uuids` bound elsewhere.
+    Neither has a behavioural probe either; they are documented, not covered."""
     import ast
     import inspect
     import textwrap
@@ -191,6 +204,69 @@ def test_resolve_extracted_edges_has_exactly_two_search_call_sites():
 
 
 def test_no_invalidation_candidates_means_no_invalidation():
-    """With the gate installed, existing_edges is always empty. This pins that
-    graphiti then invalidates nothing, so the gate needs no separate suppression."""
+    """With the gate installed, `existing_edges` is always empty, so the
+    CROSS-PAIR half of `invalidation_candidates` is always empty. This pins only
+    that an empty candidate list invalidates nothing. It does NOT mean graphiti
+    invalidates nothing: `invalidation_candidates` is also fed from
+    `related_edges` (the delegated duplicate search) -- see the next tripwire."""
     assert edge_operations.resolve_edge_contradictions(None, []) == []
+
+
+def test_same_pair_contradiction_stays_live_through_the_duplicate_candidates():
+    """The residual invalidation path, pinned so it is documented rather than
+    forgotten (BACKLOG 33). `resolve_extracted_edge` routes `contradicted_facts`
+    indices below `len(related_edges)` into `invalidation_candidates`, and
+    `related_edges` comes from the FILTERED search the gate delegates. So with
+    the gate installed graphiti can still invalidate a same-pair fact, and can
+    still set `invalid_at` on the NEW edge from a same-pair candidate a few
+    lines later. The gate suspends the O(corpus) scan and cross-pair
+    invalidation only.
+
+    Same justification as the call-site tripwire: a third-party-library fact
+    with no behavioural probe (exercising it needs an LLM reply), asserted on the
+    `ast` of the library function. If graphiti ever stops routing those indices
+    -- or we decide to filter `contradicted_facts` ourselves -- this fails and
+    the claims around the gate must be re-examined, in either direction."""
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(edge_operations.resolve_extracted_edge))
+    tree = ast.parse(src)
+
+    def is_len_related_edges(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "len"
+                and len(node.args) == 1
+                and getattr(node.args[0], "id", None) == "related_edges")
+
+    def appends_related_edge_to_invalidation(stmt: ast.stmt) -> bool:
+        # invalidation_candidates.append(related_edges[idx])
+        if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+            return False
+        call = stmt.value
+        target = call.func
+        if not (isinstance(target, ast.Attribute) and target.attr == "append"
+                and getattr(target.value, "id", None) == "invalidation_candidates"):
+            return False
+        return (len(call.args) == 1 and isinstance(call.args[0], ast.Subscript)
+                and getattr(call.args[0].value, "id", None) == "related_edges")
+
+    routes = []
+    for loop in ast.walk(tree):
+        if not (isinstance(loop, ast.For)
+                and getattr(loop.iter, "id", None) == "contradicted_facts"):
+            continue
+        for branch in ast.walk(loop):
+            # if 0 <= idx < len(related_edges): invalidation_candidates.append(related_edges[idx])
+            if not (isinstance(branch, ast.If) and isinstance(branch.test, ast.Compare)):
+                continue
+            test = branch.test
+            below_len = (len(test.comparators) == 2
+                         and isinstance(test.ops[1], ast.Lt)
+                         and is_len_related_edges(test.comparators[1]))
+            if below_len and any(appends_related_edge_to_invalidation(s) for s in branch.body):
+                routes.append(branch)
+
+    assert len(routes) == 1, (
+        "expected resolve_extracted_edge to route contradicted_facts indices below "
+        f"len(related_edges) into invalidation_candidates exactly once; found {len(routes)}")
