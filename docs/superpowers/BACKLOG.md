@@ -776,7 +776,19 @@ always outranks bounding its latency.
 100% of 154 invalid indices, and the retry default was flipped off because `gpt-5-mini`
 repeats the mistake 24% of the time.
 
-1. **Ingestion throughput — PROFILED 2026-09-12, `throughput-profile-2026-09-12.md`.**
+1. **Ingestion throughput — TWO FIXES SHIPPED AND VALIDATED 2026-09-12**
+   (`throughput-profile-2026-09-12.md`). **8.10 → 5.52 s per dedup call, 1.47x, measured on
+   a live ingest** (predicted -28% from components, delivered -32%). The win was the
+   *payload*: graphiti's search returned `properties(e)`, which sweeps in `fact_embedding`
+   — 768 floats x 20 candidates, twice per fact — and then popped it on arrival. Fixing the
+   shared return query cut BM25 2.7x and cosine 2.3x. The zero-candidate short-circuit
+   fired **0 times in 560 calls**: provably correct, measured worthless, kept only for a
+   cold-start graph — do not propose variants assuming empty candidate lists.
+   **Still ~6 min/article.** Per-call cost is near exhausted; the dedup LLM call (~1,837 ms)
+   is now the largest component and graphiti issues one per extracted fact. Next lever is
+   **call volume**, under review. Original profile notes below.
+
+### 1-profiled. Ingestion throughput — the profile that found it
    The target is the PAYLOAD, not the vector maths and not the query shape:
    `edge_similarity_search` is **1,342 ms** while the cosine scan inside it is **253 ms**.
    graphiti's return query ends `properties(e) AS attributes`, which on Neo4j sweeps in
