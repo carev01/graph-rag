@@ -53,9 +53,8 @@ DEDUP_PROMPT_NAME = "dedupe_edges.resolve_edge"
 @dataclass
 class DedupIndexStats:
     """Counters for one scope (an article, or a whole run when merged)."""
-    calls: int = 0                      # dedup calls observed (incl. short-circuited)
+    calls: int = 0                      # dedup LLM calls observed
     parse_failures: int = 0             # N/M not recoverable -> call not checked
-    no_candidate_skips: int = 0         # zero candidates -> answered without an LLM call
     invalid_calls: int = 0              # calls with >=1 out-of-range index (either field)
     dup_in_invalidation_range: int = 0  # duplicate_facts entries in N..N+M-1
     dup_beyond_range: int = 0           # duplicate_facts entries > N+M-1 or < 0
@@ -190,17 +189,6 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                            "index check skipped for this call")
             return await orig(messages, *args, **kwargs)
         n, m = counts
-        if n == 0 and m == 0:
-            # No duplicate candidates and no invalidation candidates: there is
-            # nothing to be a duplicate OF. graphiti calls the LLM anyway
-            # (edge_operations.resolve_extracted_edge issues it unconditionally)
-            # and then DISCARDS the answer -- `duplicate_fact_ids` filters every
-            # index against `len(related_edges) == 0`, and the contradiction block
-            # is skipped by `if related_edges or existing_edges`. So the reply
-            # cannot affect the outcome, and the only correct answer is the empty
-            # one. This is exact, not an approximation.
-            stats.no_candidate_skips += 1
-            return {"duplicate_facts": [], "contradicted_facts": []}
         # graphiti's clients append schema/language text to the messages IN PLACE;
         # keep a pristine copy so the fallback sees the prompt as authored.
         pristine = [Message(role=msg.role, content=msg.content) for msg in messages]

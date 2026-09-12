@@ -715,6 +715,46 @@ upstream report/PR or a local prompt override with a translation layer back to g
 expected index space. The override is real surgery — graphiti validates against its own
 numbering — and should not be attempted without tests that pin both directions.
 
+### 30. `valid_at` is set on only 23% of edges — contradiction detection is inert for the rest — **P1, for the USER to decide**
+Read-only measurement 2026-09-12: **3,469 edges, 805 with `valid_at` (23%)**; 140 expired,
+135 of them dated. `resolve_edge_contradictions` invalidates a candidate only when BOTH the
+candidate and the resolved edge carry `valid_at`, so **77% of facts can neither invalidate
+nor be invalidated**, whatever the LLM says.
+
+Design invariant #3 ("updates append, never overwrite" — the temporal use case) is therefore
+already unserved for three quarters of the graph, and BACKLOG 6 says an unknown share of the
+140 expirations that *did* happen are phantom.
+
+The lever: `valid_at` could be set deterministically from the episode's `reference_time`
+instead of via `_extract_edge_timestamps`. That would remove a per-fact LLM call AND take
+invalidation coverage from 23% to 100%. But it changes what "valid from" *means* — from
+"when the fact says it became true" to "when we saw the document" — and it would amplify
+item 6's phantom invalidations across the whole graph rather than a quarter of it.
+
+**This is a product decision about temporal semantics, not a throughput optimisation.** Do
+not take it as one. Full analysis in `.superpowers/sdd/dedup-volume-review.md` §1.5, §4.4.
+
+### 31. Per-`prompt_name` LLM timing — **P1, hermetic, free**
+Recommended first step by the call-volume review, and the precondition for every other
+decision there. `dedup_guard` already intercepts every `generate_response`; extend it to
+record per-prompt-name call count, latency percentiles and in-flight count at dispatch, plus
+`(N, M, M_dated)` per dedup call, printed with the cost block.
+
+The next paid run the user makes **anyway** then answers, at no extra cost: how many
+`_extract_edge_timestamps` calls there are (uncounted today, ≥289 of ~1,062 in run 2 by graph
+arithmetic), what share of an episode's ~45 s each phase takes, and — decisively — whether
+per-call latency rises with in-flight count. That last one tests whether the provider
+serialises our concurrent dedup calls; if it does, call volume IS on the critical path and
+the review's central recommendation inverts.
+
+### 32. Drop undated invalidation candidates before the dedup call — **P2, exact**
+`resolve_edge_contradictions` cannot act on a candidate with `valid_at = None` (item 30), so
+removing those from `existing_edges` before the call **cannot change graph state**. It
+shrinks every dedup prompt, removes the degenerate `related=0` shape, and eliminates the
+index range that **all 267** observed confused indices landed in. Estimated 3–20% of dedup
+calls skipped outright and ~70% fewer invalidation candidates in the rest; wall-clock effect
+small and honestly uncertain. Shadow-log one run before enabling.
+
 ## P4 — Roadmap and process
 
 ### 22. Rotate the leaked DocExtractor key and rewrite history
@@ -784,9 +824,10 @@ repeats the mistake 24% of the time.
    shared return query cut BM25 2.7x and cosine 2.3x. The zero-candidate short-circuit
    fired **0 times in 560 calls**: provably correct, measured worthless, kept only for a
    cold-start graph — do not propose variants assuming empty candidate lists.
-   **Still ~6 min/article.** Per-call cost is near exhausted; the dedup LLM call (~1,837 ms)
-   is now the largest component and graphiti issues one per extracted fact. Next lever is
-   **call volume**, under review. Original profile notes below.
+   **Still ~45 s per episode.** Next step is **item 31** (free per-prompt timing), because
+   the call-volume premise did not survive review: dedup calls run 20-wide concurrently, so
+   the phase costs the slowest call rather than the sum, and "5.52 s x 67" was total wall
+   divided by call count. See the CORRECTIONS section of the profile. Original notes below.
 
 ### 1-profiled. Ingestion throughput — the profile that found it
    The target is the PAYLOAD, not the vector maths and not the query shape:

@@ -370,72 +370,27 @@ def test_stats_merge_sums_every_counter():
             a.retry_dirty) == (3, 2, 3, 3, 1, 1, 2, 1, 1)
 
 
-# --- zero-candidate short-circuit -------------------------------------------
-# graphiti issues the dedup LLM call unconditionally, then DISCARDS the answer
-# when there are no candidates: duplicate indices are filtered against
-# len(related_edges) == 0, and the contradiction block is guarded by
-# `if related_edges or existing_edges`. So the call costs ~1.8 s and cannot
-# affect the outcome.
+# --- graphiti's own zero-candidate early return ------------------------------
+# NOT our code: `resolve_extracted_edge` returns at line 653 when both candidate
+# lists are empty, BEFORE the dedup prompt is built. A short-circuit in our
+# wrapper for that case is unreachable, and was removed. This pin fails if the
+# library ever drops the early return, which would make the case worth handling.
 
-def _empty_messages():
-    return prompt_library.dedupe_edges.resolve_edge(
-        {"existing_edges": [], "edge_invalidation_candidates": [], "new_edge": "a new fact"})
-
-
-def _guard(reply_fn, stats):
-    primary = SimpleNamespace(generate_response=reply_fn)
-    holder = SimpleNamespace(llm_client=primary)
-    install_dedup_guard(holder, fallback=None, unscoped=stats)
-    return holder
+def test_graphiti_returns_early_when_there_are_no_candidates():
+    import inspect
+    from graphiti_core.utils.maintenance import edge_operations
+    src = inspect.getsource(edge_operations.resolve_extracted_edge)
+    guard = "if len(related_edges) == 0 and len(existing_edges) == 0:"
+    assert guard in src, "graphiti no longer short-circuits the no-candidate case"
+    # and it returns before ever naming the dedup prompt
+    assert src.index(guard) < src.index("dedupe_edges.resolve_edge")
 
 
-@pytest.mark.asyncio
-async def test_zero_candidates_answers_without_calling_the_llm():
-    calls = {"n": 0}
-
-    async def _never(messages, *a, **kw):
-        calls["n"] += 1
-        raise AssertionError("the LLM must not be called with zero candidates")
-
-    stats = DedupIndexStats()
-    holder = _guard(_never, stats)
-    out = await holder.llm_client.generate_response(
-        _empty_messages(), prompt_name=DEDUP_PROMPT_NAME)
-    assert out == {"duplicate_facts": [], "contradicted_facts": []}
-    assert calls["n"] == 0
-    assert stats.no_candidate_skips == 1
-    assert stats.calls == 1, "a short-circuited call is still a call that happened"
-
-
-@pytest.mark.asyncio
-async def test_the_short_circuit_result_satisfies_graphitis_own_model():
-    """graphiti does EdgeDuplicate(**llm_response); both fields are required."""
-    from graphiti_core.prompts.dedupe_edges import EdgeDuplicate
-
-    async def _never(messages, *a, **kw):
-        raise AssertionError("must not be called")
-
-    holder = _guard(_never, DedupIndexStats())
-    out = await holder.llm_client.generate_response(
-        _empty_messages(), prompt_name=DEDUP_PROMPT_NAME)
-    parsed = EdgeDuplicate(**out)
-    assert parsed.duplicate_facts == [] and parsed.contradicted_facts == []
-
-
-@pytest.mark.asyncio
-async def test_one_candidate_still_calls_the_llm():
-    """Prove the short-circuit discriminates: it must fire ONLY on 0/0."""
-    calls = {"n": 0}
-
-    async def _reply(messages, *a, **kw):
-        calls["n"] += 1
-        return {"duplicate_facts": [], "contradicted_facts": []}
-
-    stats = DedupIndexStats()
-    holder = _guard(_reply, stats)
-    msgs = prompt_library.dedupe_edges.resolve_edge(
-        {"existing_edges": [{"idx": 0, "fact": "f"}],
-         "edge_invalidation_candidates": [], "new_edge": "a new fact"})
-    await holder.llm_client.generate_response(msgs, prompt_name=DEDUP_PROMPT_NAME)
-    assert calls["n"] == 1
-    assert stats.no_candidate_skips == 0
+def test_graphiti_resolves_verbatim_duplicates_without_an_llm_call():
+    """The brief's 'option 3' already exists in the library: a normalised exact
+    fact+endpoints match returns before the dedup call."""
+    import inspect
+    from graphiti_core.utils.maintenance import edge_operations
+    src = inspect.getsource(edge_operations.resolve_extracted_edge)
+    assert "_normalize_string_exact" in src
+    assert src.index("_normalize_string_exact") < src.index("dedupe_edges.resolve_edge")
