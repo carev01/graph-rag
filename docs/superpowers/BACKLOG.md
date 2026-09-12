@@ -777,10 +777,15 @@ always outranks bounding its latency.
 repeats the mistake 24% of the time.
 
 1. **Ingestion throughput — PROFILED 2026-09-12, `throughput-profile-2026-09-12.md`.**
-   The target is the query SHAPE, not the vector maths: `edge_similarity_search` is
-   **1,258 ms** while the cosine scan inside it is **253 ms** — **80% is graphiti binding
-   and materialising both endpoint nodes plus `DISTINCT` over the `(e,n,m)` triple.** That
-   is why the vector index bought so little: it optimises the 20%. Ruled out by measurement:
+   The target is the PAYLOAD, not the vector maths and not the query shape:
+   `edge_similarity_search` is **1,342 ms** while the cosine scan inside it is **253 ms**.
+   graphiti's return query ends `properties(e) AS attributes`, which on Neo4j sweeps in
+   **`fact_embedding` — 768 floats per candidate edge**, 20 candidates, twice per extracted
+   fact. Dropping it alone is **2.8x on that query with identical rows** (751 → 269 ms).
+   (The library comment claiming `fact_embedding` "is not returned by default" is false for
+   the Neo4j path.) That is why the vector index bought so little: it optimises the 253 ms.
+   **Superseded hypothesis, recorded so it is not retried:** the `DISTINCT e,n,m` /
+   endpoint-binding shape is NOT the cost — reproduced standalone it runs 263 ms. Ruled out by measurement:
    indexing (0% / 1.8x) and raw concurrency (graph saturates at ~1.9x by concurrency 4,
    degrades by 16). Next: prototype a leaner similarity query standalone, behind graphiti's
    pluggable `SearchInterface`, and time it against the 1,258 ms before writing any

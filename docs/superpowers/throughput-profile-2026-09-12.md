@@ -45,24 +45,45 @@ BM25 and cosine **concurrently**, so its floor is the slower of the two.
 | → `search()` floor = max(the two) | ~1,258 ms |
 | dedup LLM call (`solar-pro4`) | 1,837 ms |
 
-## 4. The finding that matters: the vector maths is 20% of the vector search
+## 4. CORRECTED — the cost is the payload, not the query shape
 
-The raw cosine scan over all 3,096 facts is **253 ms**. The `edge_similarity_search` that
-wraps it is **1,258 ms**. **~1,000 ms — 80% — is the query around the maths.**
+**My first hypothesis in this document was wrong and I am replacing it.** I wrote that the
+~1,000 ms was graphiti binding both endpoint nodes and applying `DISTINCT` over `(e,n,m)`.
+Reproducing that exact shape standalone costs **263 ms** — indistinguishable from the raw
+253 ms scan. The shape is not the cost.
 
-It is not payload: `get_entity_edge_return_query` documents that `fact_embedding` is *not*
-returned. The difference is shape. graphiti runs
+Isolating each layer with the same Cypher:
+
+| layer | median | delta |
+|---|---|---|
+| raw neo4j session, `uuid + score` only | 253 ms | — |
+| + graphiti's full RETURN field list | 269 ms | +16 ms |
+| + `properties(e) AS attributes` | **751 ms** | **+482 ms** |
+| graphiti `driver.execute_query` wrapper | 389 ms | +136 ms over raw |
+| full `edge_similarity_search` | **1,342 ms** | +953 ms over the wrapper |
+
+**`properties(e)` returns every property on the relationship — including
+`fact_embedding`, 768 floats.** Confirmed by inspecting the returned dict:
 
 ```
-MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
-WITH DISTINCT e, n, m, vector.similarity.cosine(e.fact_embedding, $v) AS score
+attributes keys: ['reference_time', 'fact_embedding', 'fact', 'group_id',
+                  'source_node_uuid', 'name', 'created_at', 'target_node_uuid',
+                  'uuid', 'episodes']
+fact_embedding present: True | floats: 768
 ```
 
-binding and materialising **both endpoint nodes** for every candidate edge and applying
-`DISTINCT` over the `(e, n, m)` triple. My 253 ms scan touched the relationship alone.
+Dropping it alone is **2.8x** on that query (751 ms → 269 ms, identical rows). For 20
+candidates that is 15,360 floats serialised from a remote database and parsed into Python —
+**twice per extracted fact, ~67 facts per article.**
 
-This is why the earlier vector-index experiment bought so little: **the scan was never the
-bottleneck.** Indexing optimises the 20%.
+Note the code comment at `edge_db_queries.py:190` states `fact_embedding` "is not returned
+by default and must be manually loaded using `load_fact_embedding()`". That is **false for
+the Neo4j path**, where `properties(e)` sweeps it in. The comment is what made me look
+elsewhere first.
+
+The remaining ~590 ms sits between the driver wrapper and the returned objects — filter
+construction and pydantic `EntityEdge` building for 20 edges. Measured as a block, not yet
+decomposed; do not attribute it further without measuring.
 
 ## 5. What this rules in and out
 
@@ -72,11 +93,12 @@ bottleneck.** Indexing optimises the 20%.
 - *More concurrency alone.* The graph saturates at ~2x and degrades past 8.
 
 **Ruled in, in order of expected value:**
-1. **A leaner similarity query** via graphiti's pluggable `SearchInterface` — the same hook
-   item 8 identified, but aimed at the *shape* (drop the endpoint binding and the
-   `DISTINCT`) rather than at adding an index. Targets the 1,000 ms, needs no fork, and has
-   no correctness hazard: same inputs, same outputs, fewer materialised nodes. **Measure the
-   candidate query standalone before writing any integration.**
+1. **Stop shipping `fact_embedding` in the candidate search**, via graphiti's pluggable
+   `SearchInterface` — the same hook item 8 identified, but aimed at the *payload*.
+   **Measured 2.8x on the query, identical rows**, no fork, and no correctness hazard: the
+   dedup path never reads `attributes.fact_embedding`. Verify that last claim in graphiti's
+   code before shipping — if some caller does read it, `load_fact_embedding()` exists for
+   exactly that.
 2. **Fewer searches.** Two `search()` calls per fact, the unfiltered one 2.6x the filtered
    one. Whether both are needed per fact, or can be shared across an episode's edges, is
    unexamined.
