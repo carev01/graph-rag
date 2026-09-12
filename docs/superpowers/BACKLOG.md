@@ -746,7 +746,15 @@ crawled seconds apart, and `resolve_edge_contradictions` invalidates on
 order.**
 
 Setting `valid_at = reference_time` for everything would extend that from 23% of the graph
-to 100%. Blocked on a real revision date, which is a question for DocExtractor's owners.
+to 100%. **Blocked on an upstream timestamp** — see
+`docs/proposals/2026-09-12-docextractor-article-timestamps.md`, written for the DocExtractor
+maintainer (who is the user). The headline ask there is NOT a vendor revision date but
+`content_changed_at`: the first run in which the article's CURRENT `content_hash` was seen.
+DocExtractor already stores hashes and run times, so it is exactly derivable, available for
+100% of articles, and it makes a fact's date stable across re-crawls instead of moving with
+crawl order. Sampled evidence: `last_updated_at` null in 40/40 articles across AWS and
+Microsoft, and no `Last updated` marker in any of 24 articles' markdown, so text extraction
+is not a route.
 
 ### 30-orig. `valid_at` is set on only 23% of edges — the original framing
 Read-only measurement 2026-09-12: **3,469 edges, 805 with `valid_at` (23%)**; 140 expired,
