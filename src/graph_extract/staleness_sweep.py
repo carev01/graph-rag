@@ -64,10 +64,28 @@ CALL (eps) {{
   OPTIONAL MATCH (e:Episodic {{uuid: epu}})
   OPTIONAL MATCH (a:Article)-[he:HAS_EPISODE]->(e) WHERE {ALIVE_LINK}
   WITH e, count(he) AS live_links
-  RETURN sum(CASE WHEN {ALIVE_EPISODE} THEN 1 ELSE 0 END) AS alive
+  // Pattern comprehension, NOT a second OPTIONAL MATCH: that would cross-product
+  // with the rows above and inflate `live_links`. Harmless today (the predicate
+  // is `> 0`) and a trap the moment it becomes a count comparison.
+  WITH e, live_links,
+       [(dead:Article)-[:HAS_EPISODE]->(e)
+         WHERE dead.removed_at IS NOT NULL | dead.removed_at] AS deaths
+  RETURN sum(CASE WHEN {ALIVE_EPISODE} THEN 1 ELSE 0 END) AS alive,
+         max(reduce(m = null, d IN deaths |
+             CASE WHEN m IS NULL OR d > m THEN d ELSE m END)) AS died_at
 }}
-WITH f WHERE alive = 0
-SET f.invalid_at = datetime(), f.expired_by_sweep = true
+WITH f, died_at WHERE alive = 0
+// Date the expiry by WHEN THE SOURCE DIED, not when the sweep happened to run.
+// The sweep's own clock is a schedule artefact of exactly the kind that made
+// crawl-ordered `valid_at` meaningless. `removed_at` is upstream's soft-delete
+// timestamp (100% populated on tombstones). The regex guard keeps one malformed
+// value from failing the whole sweep -- `datetime()` throws on bad input and
+// Cypher has no try. A superseded-but-not-removed episode carries no death
+// timestamp anywhere, so those still fall back to now.
+SET f.invalid_at = CASE
+      WHEN died_at =~ '\\d{{4}}-\\d{{2}}-\\d{{2}}T.*' THEN datetime(died_at)
+      ELSE datetime() END,
+    f.expired_by_sweep = true
 RETURN count(f) AS expired, collect(f.uuid)[..20] AS sample
 """
 

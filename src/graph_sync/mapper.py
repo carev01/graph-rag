@@ -15,6 +15,10 @@ def map_content(rec: ContentRecord, info: SourceInfo) -> StructuralWrite:
                  "topic_key": rec.topic_key, "content_hash": rec.content_hash,
                  "estimated_tokens": rec.estimated_tokens, "sort_order": rec.sort_order,
                  "last_updated_at": rec.last_updated_at, "run_id": rec.run_id,
+                 "last_updated_source": rec.last_updated_source,
+                 "content_changed_at": rec.content_changed_at,
+                 "content_changed_basis": rec.content_changed_basis,
+                 "source_changed_at": rec.source_changed_at,
                  "seq": rec.seq, "source_id": rec.source_id, "removed": False},
     )
 

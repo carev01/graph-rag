@@ -99,3 +99,77 @@ async def test_liveness_is_per_edge_not_per_episode(extract_driver):
             "MATCH ()-[f:RELATES_TO {uuid:'f7'}]->() "
             "RETURN f.invalid_at IS NOT NULL AS dead")).single())["dead"]
     assert dead is False
+
+
+async def test_sweep_dates_the_expiry_by_removed_at_not_its_own_clock(extract_driver):
+    """The sweep used to stamp `invalid_at = datetime()` -- its own run clock, a
+    schedule artefact of exactly the kind that made crawl-ordered `valid_at`
+    meaningless. Upstream's soft-delete timestamp (100% populated on tombstones)
+    dates it properly."""
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run(
+            "CREATE (a:Article {id:'art1', removed:true, "
+            "                   removed_at:'2026-03-04T05:06:07Z'})"
+            "-[:HAS_EPISODE]->(e:Episodic {uuid:'ep1', group_id:$g})", g=g)
+        await s.run(
+            "CREATE (x:Entity {uuid:'e1', group_id:$g})"
+            "-[:RELATES_TO {group_id:$g, uuid:'f1', fact:'a fact', "
+            "               episodes:['ep1']}]->(y:Entity {uuid:'e2', group_id:$g})", g=g)
+
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    res = await sweep_stale_facts(extract_driver, g)
+    assert res["expired"] == 1
+
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH ()-[f:RELATES_TO {uuid:'f1'}]->() "
+                        "RETURN toString(f.invalid_at) AS at, f.expired_by_sweep AS sw")
+        row = await r.single()
+    assert row["sw"] is True
+    assert row["at"].startswith("2026-03-04T05:06:07"), (
+        f"expected the article's removed_at, got {row['at']} -- the sweep is still "
+        "stamping its own run time")
+
+
+async def test_sweep_falls_back_to_now_when_nothing_carries_a_death_date(extract_driver):
+    """A superseded-but-not-removed episode has no death timestamp anywhere, so
+    the fallback must remain -- and must not crash on the missing value."""
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run(
+            "CREATE (a:Article {id:'art1'})"
+            "-[:HAS_EPISODE {superseded:true}]->(e:Episodic {uuid:'ep1', group_id:$g})", g=g)
+        await s.run(
+            "CREATE (x:Entity {uuid:'e1', group_id:$g})"
+            "-[:RELATES_TO {group_id:$g, uuid:'f1', fact:'a fact', "
+            "               episodes:['ep1']}]->(y:Entity {uuid:'e2', group_id:$g})", g=g)
+
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    res = await sweep_stale_facts(extract_driver, g)
+    assert res["expired"] == 1
+
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH ()-[f:RELATES_TO {uuid:'f1'}]->() "
+                        "RETURN f.invalid_at IS NOT NULL AS dated")
+        assert (await r.single())["dated"] is True
+
+
+async def test_a_malformed_removed_at_does_not_fail_the_sweep(extract_driver):
+    """`datetime()` throws on bad input and Cypher has no try, so one bad value
+    would otherwise take down the whole run."""
+    g = "backup-docs"
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run(
+            "CREATE (a:Article {id:'art1', removed:true, removed_at:'not-a-date'})"
+            "-[:HAS_EPISODE]->(e:Episodic {uuid:'ep1', group_id:$g})", g=g)
+        await s.run(
+            "CREATE (x:Entity {uuid:'e1', group_id:$g})"
+            "-[:RELATES_TO {group_id:$g, uuid:'f1', fact:'a fact', "
+            "               episodes:['ep1']}]->(y:Entity {uuid:'e2', group_id:$g})", g=g)
+
+    from graph_extract.staleness_sweep import sweep_stale_facts
+    res = await sweep_stale_facts(extract_driver, g)
+    assert res["expired"] == 1
