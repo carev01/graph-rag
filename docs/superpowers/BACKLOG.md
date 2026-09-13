@@ -498,6 +498,12 @@ evidence about *this* path, the one that stays open, not the one that was suspen
 Nothing in the branch changes how those six pairs would be handled if ingested today. The
 spec's "zero new `invalid_at` edges" success criterion was withdrawn on these grounds.
 
+**The counter now exists** (2026-09-12): `DedupIndexStats.contradicted_same_pair` counts
+`contradicted_facts` indices in `0..N-1` on **every** dedup call, not only out-of-range ones
+— a same-pair contradiction is perfectly in range, so the call carrying it is otherwise
+"clean". It rides with the existing per-article and per-run dedup output, so the next paid
+ingest produces the number at no extra cost.
+
 **Unmeasured.** How many of the 140 invalidations came from each path is unknown, and
 because graphiti records no victim→invalidator link (item 6) it cannot be recovered from the
 graph. It can only be measured forward: per dedup call, count `contradicted_facts` indices
@@ -802,6 +808,27 @@ crawled seconds apart, and `resolve_edge_contradictions` invalidates on
 `valid_at < valid_at`. **So which of two contradicting facts survives is decided by crawl
 order.** The contradiction gate (2026-09-12) does not change this mechanism for same-pair
 candidates — it removes the cross-pair candidates only (item 33).
+
+**UPSTREAM ACCEPTED 2026-09-12.** DocExtractor is building `content_changed_at`, backfilled
+from retained version history to 2026-06-19 (`article_versions`: 70,816 versions over 51,310
+articles). Exchange: `docs/proposals/2026-09-12-docextractor-article-timestamps.md` and the
+reply `...-timestamps-reply.md`.
+
+Corrections to this item from their response, both against us: **`last_updated_at` is NOT
+null corpus-wide** — 1,732 articles across five vendors (Gearset, Druva, Trilio, GRAX,
+Flosum) carry real editorial dates back to 2020; our 0-of-40 sample was two vendors that
+happen not to expose one. And the crawl clustering is worse than we measured: **2,470
+articles share a single crawl minute**, not the 172 edges we saw.
+
+Open decision we returned to them: define `content_changed_at` over the **served** markdown
+(our re-ingest gate is keyed to the served-markdown `content_hash`, so raw-scrape semantics
+would create a class where we re-ingest while the timestamp says nothing changed) — pending
+their answer on whether that stays exactly backfillable. Also agreed: drop
+`http_last_modified` entirely (they measured AWS returning today's date, so it would
+fabricate a change daily), defer sitemap `lastmod`.
+
+Still true after all of it: timestamps are necessary but NOT sufficient to re-enable
+contradiction detection — see item 33 and the spec's §7.
 
 Setting `valid_at = reference_time` for everything would extend that from 23% of the graph
 to 100%. **Blocked on an upstream timestamp** — see

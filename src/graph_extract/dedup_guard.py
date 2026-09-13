@@ -62,6 +62,13 @@ class DedupIndexStats:
     dup_in_invalidation_range: int = 0  # duplicate_facts entries in N..N+M-1
     dup_beyond_range: int = 0           # duplicate_facts entries > N+M-1 or < 0
     contradicted_beyond_range: int = 0  # contradicted_facts entries outside 0..N+M-1
+    # contradicted_facts entries in 0..N-1 -- indices into the DUPLICATE candidate
+    # list. graphiti routes these to invalidation_candidates too
+    # (edge_operations.py:769-776), so they survive the contradiction gate, which
+    # only removes the cross-pair candidates. This is the residual same-pair
+    # invalidation path (BACKLOG 33) and it is counted on EVERY call, not just
+    # out-of-range ones -- a same-pair contradiction is perfectly in range.
+    contradicted_same_pair: int = 0
     retried: int = 0                    # invalid calls re-issued on the fallback
     retry_clean: int = 0                # ... whose fallback reply was in range
     retry_dirty: int = 0                # ... whose fallback reply was ALSO out of range
@@ -127,6 +134,7 @@ class _Verdict:
     dup_in_range: list[int]        # duplicate indices that fell in the invalidation range
     dup_beyond: list[int]          # duplicate indices beyond both ranges, or negative
     contradicted_beyond: list[int]
+    contradicted_same_pair: list[int]   # contradicted indices in 0..N-1 (BACKLOG 33)
 
     @property
     def clean(self) -> bool:
@@ -149,6 +157,7 @@ def _classify(response: dict[str, Any], n: int, m: int) -> _Verdict | None:
         dup_in_range=[i for i in dup if n <= i <= top],
         dup_beyond=[i for i in dup if i < 0 or i > top],
         contradicted_beyond=[i for i in contra if i < 0 or i > top],
+        contradicted_same_pair=[i for i in contra if 0 <= i < n],
     )
 
 
@@ -215,6 +224,11 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
         pristine = [Message(role=msg.role, content=msg.content) for msg in messages]
         response = await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
         verdict = _classify(response, n, m)
+        if verdict is not None:
+            # Recorded BEFORE the clean-path return: a same-pair contradiction is
+            # an in-range index, so the call it arrives on is usually "clean" and
+            # would never reach the counters below.
+            stats.contradicted_same_pair += len(verdict.contradicted_same_pair)
         if verdict is None or verdict.clean:
             return response
         stats.invalid_calls += 1
