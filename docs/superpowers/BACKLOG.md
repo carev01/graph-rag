@@ -498,6 +498,12 @@ evidence about *this* path, the one that stays open, not the one that was suspen
 Nothing in the branch changes how those six pairs would be handled if ingested today. The
 spec's "zero new `invalid_at` edges" success criterion was withdrawn on these grounds.
 
+**The counter now exists** (2026-09-12): `DedupIndexStats.contradicted_same_pair` counts
+`contradicted_facts` indices in `0..N-1` on **every** dedup call, not only out-of-range ones
+— a same-pair contradiction is perfectly in range, so the call carrying it is otherwise
+"clean". It rides with the existing per-article and per-run dedup output, so the next paid
+ingest produces the number at no extra cost.
+
 **Unmeasured.** How many of the 140 invalidations came from each path is unknown, and
 because graphiti records no victim→invalidator link (item 6) it cannot be recovered from the
 graph. It can only be measured forward: per dedup call, count `contradicted_facts` indices

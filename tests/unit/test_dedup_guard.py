@@ -394,3 +394,59 @@ def test_graphiti_resolves_verbatim_duplicates_without_an_llm_call():
     src = inspect.getsource(edge_operations.resolve_extracted_edge)
     assert "_normalize_string_exact" in src
     assert src.index("_normalize_string_exact") < src.index("dedupe_edges.resolve_edge")
+
+
+# --- BACKLOG 33: the residual same-pair invalidation path --------------------
+# The contradiction gate removes the cross-pair candidates by skipping the
+# unfiltered search. It does NOT stop `contradicted_facts` indices in 0..N-1,
+# which graphiti routes into invalidation_candidates from the DUPLICATE list
+# (edge_operations.py:769-776). Those indices are perfectly in range, so the call
+# carrying them is "clean" -- the counter must not live behind the invalid-call
+# branch.
+
+def _messages(n_related: int, n_invalidation: int):
+    return prompt_library.dedupe_edges.resolve_edge({
+        "existing_edges": [{"idx": i, "fact": f"r{i}"} for i in range(n_related)],
+        "edge_invalidation_candidates": [
+            {"idx": n_related + i, "fact": f"e{i}"} for i in range(n_invalidation)],
+        "new_edge": "a new fact"})
+
+
+@pytest.mark.asyncio
+async def test_a_same_pair_contradiction_is_counted_on_an_otherwise_clean_call():
+    async def _reply(messages, *a, **kw):
+        return {"duplicate_facts": [], "contradicted_facts": [0, 2]}
+
+    stats = DedupIndexStats()
+    primary = SimpleNamespace(generate_response=_reply)
+    holder = SimpleNamespace(llm_client=primary)
+    install_dedup_guard(holder, fallback=None, unscoped=stats)
+    token = CURRENT_DEDUP_STATS.set(stats)
+    try:
+        await holder.llm_client.generate_response(
+            _messages(5, 0), prompt_name=DEDUP_PROMPT_NAME)
+    finally:
+        CURRENT_DEDUP_STATS.reset(token)
+    assert stats.contradicted_same_pair == 2
+    assert stats.invalid_calls == 0, "in-range indices are not an out-of-range event"
+    assert stats.contradicted_beyond_range == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_pair_contradictions_are_not_counted_as_same_pair():
+    """Indices >= N point at the invalidation list, which the gate removes. They
+    must not inflate the residual-path number."""
+    async def _reply(messages, *a, **kw):
+        return {"duplicate_facts": [], "contradicted_facts": [5, 6]}
+
+    stats = DedupIndexStats()
+    holder = SimpleNamespace(llm_client=SimpleNamespace(generate_response=_reply))
+    install_dedup_guard(holder, fallback=None, unscoped=stats)
+    token = CURRENT_DEDUP_STATS.set(stats)
+    try:
+        await holder.llm_client.generate_response(
+            _messages(5, 3), prompt_name=DEDUP_PROMPT_NAME)
+    finally:
+        CURRENT_DEDUP_STATS.reset(token)
+    assert stats.contradicted_same_pair == 0
+    assert stats.contradicted_beyond_range == 0
