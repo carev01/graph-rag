@@ -67,9 +67,15 @@ CALL (eps) {{
   // Pattern comprehension, NOT a second OPTIONAL MATCH: that would cross-product
   // with the rows above and inflate `live_links`. Harmless today (the predicate
   // is `> 0`) and a trap the moment it becomes a count comparison.
+  // An episode dies either because its article was tombstoned (removed_at, from
+  // upstream's soft delete) or because a re-extraction superseded its link
+  // (superseded_at, stamped with the REPLACING content's content_changed_at).
+  // Both are properties of the content, not of when a job happened to run.
   WITH e, live_links,
        [(dead:Article)-[:HAS_EPISODE]->(e)
-         WHERE dead.removed_at IS NOT NULL | dead.removed_at] AS deaths
+         WHERE dead.removed_at IS NOT NULL | dead.removed_at]
+     + [(:Article)-[sl:HAS_EPISODE]->(e)
+         WHERE sl.superseded_at IS NOT NULL | sl.superseded_at] AS deaths
   RETURN sum(CASE WHEN {ALIVE_EPISODE} THEN 1 ELSE 0 END) AS alive,
          max(reduce(m = null, d IN deaths |
              CASE WHEN m IS NULL OR d > m THEN d ELSE m END)) AS died_at

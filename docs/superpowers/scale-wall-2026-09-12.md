@@ -39,8 +39,13 @@ scan_ms = 241 + 0.0699 x facts
 | ~17k articles | 100,000 | 7.2 s |
 | **full corpus (~105k articles)** | **610,000** | **42.9 s** |
 
-At 5.8 facts/article (measured: 3,469 facts / 593 articles), the crossover lands at
-**~3,900 articles — under 4% of the corpus.** We are at 593.
+**CORRECTED 2026-09-13.** This said 5.8 facts/article, from 3,469 facts / 593 articles.
+**593 is the STRUCTURAL `:Article` count; only 83 of them have episodes** — the rest were
+mapped by graph-sync and never extracted. The real figures are **41.8 facts and 7.9 episodes
+per ingested article**, ~7x what this doc assumed, and the error runs in the dangerous
+direction: the crossover is at **~546 articles, not ~3,900**, and we are at 83, not 593.
+Every per-article projection below is wrong by that factor; the per-FACT curve is unaffected
+because it was measured against fact counts directly.
 
 **graphiti runs two of these searches per extracted fact.** Past the crossover the
 scan is the whole cost and it keeps growing linearly, so full-corpus ingestion on

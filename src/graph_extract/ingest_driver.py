@@ -153,11 +153,12 @@ class IngestDriver:
                                        instructions=tier.instructions)
             await self._prov.link(art.id, r.episode.uuid, chunk_index=e.chunk_index,
                                   heading_path=e.heading_path, token_count=e.token_count,
-                                  content_hash=e.content_hash)
+                                  content_hash=e.content_hash,
+                                  superseded_at=ref.isoformat())
             res.episodes_added += 1
             res.entities += len(r.nodes)
             res.edges += len(r.edges)
-        await self._supersede_trailing_episodes(art.id, len(episodes))
+        await self._supersede_trailing_episodes(art.id, len(episodes), ref.isoformat())
         return res
 
     async def tombstone_article_episodes(self, article_id: str) -> int:
@@ -168,7 +169,8 @@ class IngestDriver:
             rec = await r.single()
             return rec["c"] if rec else 0
 
-    async def _supersede_trailing_episodes(self, article_id: str, new_count: int) -> None:
+    async def _supersede_trailing_episodes(self, article_id: str, new_count: int,
+                                           superseded_at: str | None = None) -> None:
         """A shrunk article drops trailing chunks. Flag the EDGE (not just the node)
         so the staleness sweep sees them as dead -- flagging only the node is what
         previously let facts from deleted content stay current forever."""
@@ -176,7 +178,10 @@ class IngestDriver:
             await s.run(
                 "MATCH (:Article {id:$a})-[r:HAS_EPISODE]->(e:Episodic) "
                 "WHERE r.chunk_index >= $n "
-                "SET r.superseded=true", a=article_id, n=new_count)
+                # coalesce: an episode dies once; a re-run must not move its death date.
+                "SET r.superseded=true, "
+                "    r.superseded_at=coalesce(r.superseded_at, $sat)",
+                a=article_id, n=new_count, sat=superseded_at)
 
     async def ingest_source(self, source_id: str, limit: int | None = None) -> IngestResult:
         ids = await self.list_article_ids(source_id)
