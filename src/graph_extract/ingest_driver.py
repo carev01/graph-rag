@@ -15,6 +15,10 @@ from graph_extract.provenance import Provenance
 
 logger = logging.getLogger(__name__)
 
+# Reference-time basis when upstream supplies no content_changed_at: ordering
+# by crawl sequence, which is the pre-2026-09-13 behaviour and a known defect.
+CRAWL_FALLBACK = "crawl-fallback"
+
 
 @dataclass
 class IngestArticleResult:
@@ -25,6 +29,9 @@ class IngestArticleResult:
     edges: int = 0
     skipped_navigation: bool = False
     tier: str = "strong"
+    # Which timestamp the episodes' reference time came from: the upstream
+    # content_changed_basis, or CRAWL_FALLBACK when upstream supplied none.
+    reference_basis: str = CRAWL_FALLBACK
     # Out-of-range dedup indices seen while extracting THIS article (dedup_guard).
     dedup: DedupIndexStats = field(default_factory=DedupIndexStats)
 
@@ -37,14 +44,45 @@ class IngestResult:
     dedup: DedupIndexStats = field(default_factory=DedupIndexStats)
 
 
-def _parse_ts(art) -> datetime:
-    raw = art.last_updated_at or art.extracted_at
-    if raw:
-        try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc)
+def _parse_iso(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _reference_time(art) -> tuple[datetime, str]:
+    """The episode's reference time, and the basis of that claim.
+
+    `content_changed_at` is the ordering axis: it is the moment the SERVED markdown
+    became current -- the same bytes `content_hash` covers and our re-ingest gate
+    keys on -- so a change we act on is always a change we can date. It is the only
+    timestamp with uniform semantics across the whole corpus, which is why it is
+    preferred over `last_updated_at` even where the vendor declares a real date.
+    Mixing the two would put "the vendor's declared day" and "the served bytes
+    became current" in one field, switching by vendor: exactly the incoherence that
+    produced this project's phantom invalidations.
+
+    `last_updated_at` and `source_changed_at` are persisted elsewhere and used for
+    display and for gating invalidation. They are never sorted by.
+
+    The returned basis is `content_changed_basis` (exact / lower_bound / first_seen)
+    or `CRAWL_FALLBACK`. The fallback is the pre-2026-09-13 behaviour -- ordering by
+    when the crawler happened to visit -- and it is LOUD, because reverting to it
+    silently is the original defect: 2,470 articles once shared a single crawl
+    minute, so within such a block the ordering is not approximate, it is arbitrary.
+    """
+    parsed = _parse_iso(getattr(art, "content_changed_at", None))
+    if parsed is not None:
+        return parsed, (getattr(art, "content_changed_basis", None) or "unlabelled")
+    logger.warning(
+        "article %s has no usable content_changed_at; falling back to crawl time, "
+        "which orders facts by crawl sequence rather than by content change",
+        getattr(art, "id", "?"))
+    return (_parse_iso(art.last_updated_at) or _parse_iso(art.extracted_at)
+            or datetime.now(timezone.utc)), CRAWL_FALLBACK
 
 
 class IngestDriver:
@@ -96,7 +134,7 @@ class IngestDriver:
             return res      # navigation page: no chunking, no extraction, 0 tokens
         tier = self._tier_for(art.content_markdown)
         res.tier = tier.name
-        ref = _parse_ts(art)
+        ref, res.reference_basis = _reference_time(art)
         # content_hash: reuse the article's stored hash from the graph, else hash markdown
         content_hash = await self._content_hash(article_id) or _sha(art.content_markdown)
         chapter_path = await self._chapter_path(article_id)
