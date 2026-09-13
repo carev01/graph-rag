@@ -835,6 +835,28 @@ Shipping: `content_changed_at` (outbox; exact for **70.1%**, labelled lower boun
 articles), and `last_updated_source` with `page_text` split into `page_markup` (structured
 `<time datetime>`, where all 1,732 real dates sit) vs `page_text` (prose, reserved/unused).
 
+**SHIPPED UPSTREAM 2026-09-13** (`...-timestamps-reply-3.md`). Five additive fields on the
+delta feed and article detail: `content_changed_at`, `content_changed_basis`
+(`exact` 70.1% / `lower_bound` / `first_seen`, never silently mixed), `source_changed_at`,
+`last_updated_at` + `last_updated_source`, `removed_at`. Their unplanned audit of all 194
+web sources took vendor-dated sources from **10 to 53** — the date lookup had been running
+against the already-scoped article body, so anything in `<head>` was structurally invisible.
+Headline: **34 Veeam sources** publish a real per-page revision date in JSON-LD
+(`schema.org dateModified`), which no check on either side had looked for. They refused three
+signals that would have fabricated dates, on the rule *a revision date must vary per page* —
+including Commvault's visible "Updated" date, which is real but is site-deploy mtime (12
+pages within 6 seconds; all 42,384 articles would have claimed one day).
+
+**OUR §9 RULE IS WITHDRAWN.** We had said we would prefer `last_updated_at` over
+`content_changed_at` when the source is `vendor_meta`. That would have recreated the exact
+defect this whole thread exists to fix: `valid_at` holding two kinds of date, switching by
+vendor. Their day-granularity point makes it concrete — `ms.date` is always midnight, ties in
+`valid_at` mean "no invalidation" in graphiti, so a day-granular ordering axis would silently
+stop detecting same-day changes. Three fields, three jobs instead:
+`content_changed_at` → `valid_at` (ordering axis, exact, agrees with the `content_hash` we
+gate on); `source_changed_at` → the invalidation gate (only a *vendor* change may expire a
+fact, never an enrichment); `last_updated_at` → persisted and surfaced, never sorted by.
+
 **RULE WE ADOPTED, applies when invalidation is re-enabled:** a fact may invalidate another
 only when **both articles are Tier 1 (`exact`)**. Tier 2 is a lower bound that may be early,
 so mixing tiers lets an older fact appear newer. Tier 2/3 content is ingested, ordered and
