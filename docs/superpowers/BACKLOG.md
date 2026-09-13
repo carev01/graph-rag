@@ -820,7 +820,29 @@ Flosum) carry real editorial dates back to 2020; our 0-of-40 sample was two vend
 happen not to expose one. And the crawl clustering is worse than we measured: **2,470
 articles share a single crawl minute**, not the 172 edges we saw.
 
-Open decision we returned to them: define `content_changed_at` over the **served** markdown
+**SETTLED 2026-09-13 (round 2, `...-timestamps-reply-2.md`).** Served-markdown semantics
+confirmed and backfillable — our worry about replaying caption injection was misplaced:
+their version rows archive `content_markdown` **as served** (captions and rewritten URLs
+included); only the adjacent hash is raw, which is what misled both sides. The real limit is
+elsewhere and they found it: **a caption injection changes the served bytes and writes no
+version row**, so version-derived dates are silently too early — for **65.1%** of articles
+that saw both change kinds. The correct source is their change outbox (from 2026-07-11,
+append-only, boundary fixed).
+
+Shipping: `content_changed_at` (outbox; exact for **70.1%**, labelled lower bound below),
+`content_changed_precision` (`exact` / `lower_bound` / `first_seen`), `source_changed_at`
+(version history — "the vendor actually edited"), `removed_at` (100% of 21,362 removed
+articles), and `last_updated_source` with `page_text` split into `page_markup` (structured
+`<time datetime>`, where all 1,732 real dates sit) vs `page_text` (prose, reserved/unused).
+
+**RULE WE ADOPTED, applies when invalidation is re-enabled:** a fact may invalidate another
+only when **both articles are Tier 1 (`exact`)**. Tier 2 is a lower bound that may be early,
+so mixing tiers lets an older fact appear newer. Tier 2/3 content is ingested, ordered and
+served normally — the restriction is on invalidation alone, the one operation that destroys
+information. `source_changed_at` is the second gate: only a *vendor* change should ever
+justify invalidating, never an enrichment.
+
+Superseded open decision, kept for the record: define `content_changed_at` over the **served** markdown
 (our re-ingest gate is keyed to the served-markdown `content_hash`, so raw-scrape semantics
 would create a class where we re-ingest while the timestamp says nothing changed) — pending
 their answer on whether that stays exactly backfillable. Also agreed: drop
