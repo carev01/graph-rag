@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 from graphiti_core.search.search import search as _defining_module_search
+from graphiti_core.search import search_utils
 from graphiti_core.utils.maintenance import edge_operations
 
 from graph_extract.config import ExtractSettings
@@ -28,21 +29,35 @@ def _hermetic_settings_env(monkeypatch):
         monkeypatch.delenv(field, raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _ungated_edge_operations_search():
-    """Make unit tests hermetic against the contradiction gate.
+# Every graphiti attribute this codebase patches PROCESS-WIDE, with the pristine
+# value captured here at conftest import -- which pytest does during collection,
+# before any test executes, so these are always the library's own functions.
+#
+# `build_graphiti` installs all of them and nothing uninstalls them. The CI
+# command (`pytest -m "not live"`) collects `tests/integration/` before
+# `tests/unit/` in ONE process, and `test_compat_harness.py` calls
+# `build_graphiti` in a non-live test -- so without this, whichever unit tests
+# assert on the pristine value fail depending on collection order. Running the
+# two halves separately hides it, which is exactly how it reached CI twice.
+#
+# This has now bitten three times (settings env vars, `edge_operations.search`,
+# `_extract_edge_timestamps`). Adding a patch site here is one line; writing a
+# fourth bespoke fixture is not.
+_PROCESS_WIDE_PATCHES = (
+    (edge_operations, "search", _defining_module_search),
+    (edge_operations, "_extract_edge_timestamps",
+     edge_operations._extract_edge_timestamps),
+    (search_utils, "get_entity_edge_return_query",
+     search_utils.get_entity_edge_return_query),
+)
 
-    `build_graphiti` installs the gate as a PROCESS-WIDE patch of
-    `edge_operations.search` and nothing uninstalls it. The CI command
-    (`pytest -m "not live"`) collects `tests/integration/` before `tests/unit/`
-    in one process, and `test_compat_harness.py` calls `build_graphiti` in a
-    non-live test -- so by the time the unit suite runs, the attribute is already
-    the gated wrapper and two tripwires in `test_contradiction_gate.py`
-    (`test_is_gate_installed_reports_state`,
-    `test_edge_operations_imports_search_by_name`) fail. Running the two halves
-    separately hid it. Pin the attribute to the defining module's function on
-    both sides of every unit test so the suite is order-independent again.
-    """
-    edge_operations.search = _defining_module_search
+
+@pytest.fixture(autouse=True)
+def _pristine_graphiti_attributes():
+    """Pin every process-wide graphiti patch to the library's own function on both
+    sides of each unit test, so the suite is order-independent."""
+    for module, name, pristine in _PROCESS_WIDE_PATCHES:
+        setattr(module, name, pristine)
     yield
-    edge_operations.search = _defining_module_search
+    for module, name, pristine in _PROCESS_WIDE_PATCHES:
+        setattr(module, name, pristine)

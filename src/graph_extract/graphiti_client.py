@@ -13,6 +13,7 @@ from graphiti_core.nodes import EpisodeType
 from graphiti_core.graphiti import AddEpisodeResults
 from graph_extract.config import ExtractSettings
 from graph_extract.contradiction_gate import install_contradiction_gate
+from graph_extract.deterministic_valid_at import install_deterministic_valid_at
 from graph_extract.lean_edge_search import install_lean_edge_search
 from graph_extract.usage import instrument
 from graph_extract.ontology import (
@@ -209,6 +210,9 @@ def build_graphiti(s: ExtractSettings) -> Graphiti:
     # Idempotent; safe to call per build.
     install_contradiction_gate(
         detect_contradictions=s.ingest_detect_contradictions)
+    # valid_at from the episode reference time, skipping a per-fact LLM call that
+    # dated 23% of facts for 21.7% of run time. Idempotent.
+    install_deterministic_valid_at(enabled=s.valid_at_from_content_changed)
     embed_client = _batch_capped_embeddings(
         AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
                     timeout=90.0, max_retries=4), s.embed_max_batch)
