@@ -29,6 +29,7 @@ async def run_concurrently(
     worker: Callable[[T], Awaitable[R]],
     *,
     limit: int,
+    is_cold: Callable[[T], Awaitable[bool]] | None = None,
 ) -> list[R | BaseException]:
     """Run `worker` over `items`, at most `limit` at a time.
 
@@ -36,6 +37,18 @@ async def run_concurrently(
     in that item's slot rather than raised, so one bad article cannot cancel its
     siblings -- the caller decides what a failure means. Nothing is swallowed: the
     exception object is handed back intact.
+
+    `is_cold` opts an item into the warm-up barrier: the item waits for every
+    task launched so far to FINISH, then runs alone. That is stricter than
+    "cold items are sequential among themselves", deliberately -- the hazard is
+    two in-flight episodes each creating an entity neither can see yet, and a
+    cold article of one source running beside a warm article of another is
+    exactly the cross-source hub case invariant #4 cares about. An exception
+    from `is_cold` is treated like a worker exception: it goes in the item's
+    slot and the siblings continue.
+
+    With `is_cold=None` this is byte-for-byte the pre-warm-up helper, which is
+    what makes shipping the warm-up default ON a no-op at concurrency 1.
     """
     if limit < 1:
         raise ValueError(f"limit must be >= 1, got {limit}")
@@ -45,5 +58,35 @@ async def run_concurrently(
         async with semaphore:
             return await worker(item)
 
-    return list(await asyncio.gather(
-        *(_one(item) for item in items), return_exceptions=True))
+    if is_cold is None:
+        return list(await asyncio.gather(
+            *(_one(item) for item in items), return_exceptions=True))
+
+    results: list[R | BaseException] = [None] * len(items)  # type: ignore[list-item]
+    launched: list[tuple[int, asyncio.Task[R]]] = []
+
+    async def _drain() -> None:
+        if not launched:
+            return
+        done = await asyncio.gather(
+            *(t for _, t in launched), return_exceptions=True)
+        for (idx, _), value in zip(launched, done):
+            results[idx] = value
+        launched.clear()
+
+    for index, item in enumerate(items):
+        try:
+            cold = await is_cold(item)
+        except Exception as exc:  # a predicate failure fails ITS item only
+            results[index] = exc
+            continue
+        if cold:
+            await _drain()
+            try:
+                results[index] = await _one(item)
+            except Exception as exc:
+                results[index] = exc
+        else:
+            launched.append((index, asyncio.ensure_future(_one(item))))
+    await _drain()
+    return results

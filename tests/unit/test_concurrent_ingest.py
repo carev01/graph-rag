@@ -121,3 +121,76 @@ async def test_a_limit_below_one_fails_fast_without_dispatching():
     with pytest.raises(ValueError, match="limit"):
         await asyncio.wait_for(run_concurrently([1], work, limit=0), timeout=1)
     assert calls == 0, "the guard must fire before any worker is scheduled"
+
+
+# -- The cold-item barrier (concurrency duplicate mitigation, task 1). The A/B at
+#    concurrency 4 produced 30 duplicate entities, all exact-name collisions on hub
+#    entities created by two in-flight episodes that could not see each other. An
+#    item `is_cold` opts into running ALONE: everything launched before it must
+#    FINISH first, and nothing launches until it is done.
+
+
+async def test_is_cold_none_is_byte_for_byte_the_old_helper():
+    """The default path must not change. This is what lets the warm-up knob
+    ship defaulted ON: at concurrency 1 it provably changes nothing."""
+    log: list[str] = []
+
+    async def worker(i: int) -> int:
+        log.append(f"start-{i}")
+        await asyncio.sleep(0.03 if i == 0 else 0)
+        log.append(f"end-{i}")
+        return i * 10
+
+    res = await run_concurrently([0, 1, 2], worker, limit=3)
+    assert res == [0, 10, 20]
+    # the slow first item must still be overlapped by the others
+    assert log.index("start-1") < log.index("end-0")
+
+
+async def test_a_cold_item_runs_with_nothing_else_in_flight():
+    """The strict barrier. A slow WARM item launched before the cold one must
+    have FINISHED before the cold item starts -- start order alone is satisfied
+    by a sequential implementation and proves nothing."""
+    log: list[str] = []
+
+    async def worker(name: str) -> str:
+        log.append(f"start-{name}")
+        await asyncio.sleep(0.05 if name == "slow-warm" else 0.01)
+        log.append(f"end-{name}")
+        return name
+
+    async def is_cold(name: str) -> bool:
+        return name == "cold"
+
+    res = await run_concurrently(
+        ["slow-warm", "cold", "after"], worker, limit=4, is_cold=is_cold)
+    assert res == ["slow-warm", "cold", "after"]
+    assert log.index("end-slow-warm") < log.index("start-cold"), log
+    assert log.index("end-cold") < log.index("start-after"), log
+
+
+async def test_is_cold_raising_lands_in_that_items_slot():
+    async def worker(i: int) -> int:
+        return i
+
+    async def is_cold(i: int) -> bool:
+        if i == 1:
+            raise RuntimeError("neo4j down")
+        return False
+
+    res = await run_concurrently([0, 1, 2], worker, limit=3, is_cold=is_cold)
+    assert res[0] == 0
+    assert isinstance(res[1], RuntimeError)
+    assert res[2] == 2
+
+
+async def test_results_stay_in_input_order_with_a_cold_item_in_the_middle():
+    async def worker(i: int) -> int:
+        await asyncio.sleep(0.02 if i == 2 else 0)
+        return i * 10
+
+    async def is_cold(i: int) -> bool:
+        return i == 1
+
+    assert await run_concurrently(
+        [0, 1, 2, 3], worker, limit=4, is_cold=is_cold) == [0, 10, 20, 30]
