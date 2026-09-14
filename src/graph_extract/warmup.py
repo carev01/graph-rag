@@ -28,6 +28,12 @@ from neo4j import AsyncDriver
 _LIVE_ARTICLES = (
     "MATCH (a:Article {source_id:$source_id})-[r:HAS_EPISODE]->"
     "(:Episodic {group_id:$group_id}) "
+    # Narrower than episode_liveness.ALIVE_LINK on purpose: `a.removed` and
+    # `e.removed` only mark, so a removed article's entities are still in the
+    # graph and still count as warmth. One path does delete them -- the cleanup
+    # sequence tombstone_navigation_articles -> prune_noise_entities (DETACH
+    # DELETE) -- but it prunes breadcrumbs and generic terms, not the vendor and
+    # product hubs warm-up protects, so an article it touched may still count.
     "WHERE coalesce(r.superseded, false) = false "
     "RETURN count(DISTINCT a) AS live"
 )
