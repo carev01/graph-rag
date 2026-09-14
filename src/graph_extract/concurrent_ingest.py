@@ -18,11 +18,18 @@ The same hazard exists ACROSS articles, and this module also owns the warm-up
 barrier that contains it. The A/B at concurrency 4 produced 30 duplicate
 entities, every one an exact-name collision, concentrated on hub entities (mean
 article span 7.6 for the duplicated names against 2.4 overall): two in-flight
-articles each met an entity the graph did not yet hold and each created it. A
-"cold" article -- one whose entities are not yet in the graph -- therefore runs
-alone (`is_cold` below); once its entities exist, later articles resolve to
-them. The barrier prevents most of those duplicates; the design spec has the
-measurements.
+articles each met an entity the graph did not yet hold and each created it.
+
+An item the caller calls "cold" therefore runs alone (`is_cold` below). This
+helper does not define coldness -- it only honours the predicate. The shipped
+predicate is per SOURCE, not per entity: a source is cold while fewer than
+`ingest_warmup_articles` of its articles have a live episode, because risk for
+an entity in k articles scales with k-1 and, per source in `sort_order`, the
+first 8 articles carry 79.5% of that weight (documentation sources open with
+overview pages naming the product and its core concepts).
+
+The duplicate figures above are measured; the barrier's effect on them is a
+PREDICTION (~30 down to ~6) that the design spec's section 9 tests with a paid run.
 """
 from __future__ import annotations
 

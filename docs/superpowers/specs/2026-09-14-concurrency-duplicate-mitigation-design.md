@@ -615,7 +615,9 @@ the minimum list; each test names the mutation(s) that must break it.
 | test | must fail under |
 |---|---|
 | `is_cold=None` produces the identical call and completion order to today's helper | any change to the non-cold path |
-| a cold item never overlaps: a slow warm item launched before it has *finished* before the cold item starts, and nothing starts until the cold item finishes | remove the drain-before-cold await; replace the direct await with a semaphore launch |
+| a cold item never overlaps: a slow warm item launched before it has *finished* before the cold item starts, and nothing starts until the cold item finishes | remove either drain around the cold item |
+| warm items on BOTH sides of a cold one still overlap each other | replace the whole `is_cold` body with a sequential loop — without this, "everything is a barrier" satisfies every other test and concurrency itself is unpinned |
+| a `BaseException` escaping `is_cold` leaves no task running detached | drop the `try/finally` that cancels and drains what was launched |
 | the first `W` items of a cold source run one at a time and the rest overlap (the "started when the slow one finished" pattern) | threshold ignored; predicate always warm |
 | a source found warm is never queried again in the run; a cold one is re-queried per item | drop the cache (query count assertion); make the cache unconditional |
 | `threshold=0` never queries the driver | remove the short-circuit |
