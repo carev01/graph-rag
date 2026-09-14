@@ -13,6 +13,16 @@ graphiti resolves entities by searching the graph as it currently stands, so two
 in-flight episodes extracting a not-yet-present entity would each create it under
 a different uuid. See the design spec for why partitioning is ruled out by design
 invariant #4.
+
+The same hazard exists ACROSS articles, and this module also owns the warm-up
+barrier that contains it. The A/B at concurrency 4 produced 30 duplicate
+entities, every one an exact-name collision, concentrated on hub entities (mean
+article span 7.6 for the duplicated names against 2.4 overall): two in-flight
+articles each met an entity the graph did not yet hold and each created it. A
+"cold" article -- one whose entities are not yet in the graph -- therefore runs
+alone (`is_cold` below); once its entities exist, later articles resolve to
+them. The barrier prevents most of those duplicates; the design spec has the
+measurements.
 """
 from __future__ import annotations
 
@@ -43,9 +53,14 @@ async def run_concurrently(
     "cold items are sequential among themselves", deliberately -- the hazard is
     two in-flight episodes each creating an entity neither can see yet, and a
     cold article of one source running beside a warm article of another is
-    exactly the cross-source hub case invariant #4 cares about. An exception
-    from `is_cold` is treated like a worker exception: it goes in the item's
-    slot and the siblings continue.
+    exactly the cross-source hub case invariant #4 cares about. The slot
+    semantics are the same on both paths: whatever the worker raises, a
+    self-raised `CancelledError` included, is returned in its slot. An
+    `Exception` from `is_cold` is treated the same way -- it goes in the item's
+    slot and the siblings continue. A `BaseException` escaping `is_cold` (an
+    outer cancellation, `KeyboardInterrupt`) propagates, but only after every
+    task launched so far has been cancelled and awaited: nothing is ever left
+    running detached.
 
     With `is_cold=None` this is byte-for-byte the pre-warm-up helper, which is
     what makes shipping the warm-up default ON a no-op at concurrency 1.
@@ -74,19 +89,35 @@ async def run_concurrently(
             results[idx] = value
         launched.clear()
 
-    for index, item in enumerate(items):
-        try:
-            cold = await is_cold(item)
-        except Exception as exc:  # a predicate failure fails ITS item only
-            results[index] = exc
-            continue
-        if cold:
-            await _drain()
+    try:
+        for index, item in enumerate(items):
             try:
-                results[index] = await _one(item)
-            except Exception as exc:
+                cold = await is_cold(item)
+            except Exception as exc:  # a predicate failure fails ITS item only
                 results[index] = exc
-        else:
+                continue
+            if cold:
+                await _drain()
+            # A cold item is a task too, drained at once: it still runs with
+            # nothing else in flight, and its slot has exactly the warm path's
+            # semantics -- gather(return_exceptions=True) hands back ANY
+            # BaseException, so a worker's self-raised CancelledError lands
+            # in the slot here the same as it would beside a warm sibling.
+            # Awaiting the coroutine directly instead could not distinguish a
+            # worker-raised CancelledError from an outer cancellation.
             launched.append((index, asyncio.ensure_future(_one(item))))
-    await _drain()
+            if cold:
+                await _drain()
+        await _drain()
+    finally:
+        # Any exit -- a BaseException escaping `is_cold`, an outer cancellation
+        # landing in a drain -- must leave nothing running detached: a task
+        # nobody awaits keeps doing Neo4j writes and LLM calls with nobody to
+        # collect its exception. A normal exit has already emptied `launched`.
+        if launched:
+            for _, task in launched:
+                task.cancel()
+            await asyncio.gather(
+                *(t for _, t in launched), return_exceptions=True)
+            launched.clear()
     return results

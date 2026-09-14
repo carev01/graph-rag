@@ -194,3 +194,121 @@ async def test_results_stay_in_input_order_with_a_cold_item_in_the_middle():
 
     assert await run_concurrently(
         [0, 1, 2, 3], worker, limit=4, is_cold=is_cold) == [0, 10, 20, 30]
+
+
+# -- Task 1 review fixes. The four tests above are all satisfied by a FULLY
+#    SEQUENTIAL is_cold body (a barrier test is satisfied by "everything is a
+#    barrier"), so nothing pinned that warm items still overlap on the path both
+#    call sites use. And the cold item used to be awaited directly under
+#    `except Exception`, so its slot semantics differed from a warm sibling's and
+#    a BaseException out of `is_cold` walked out with launched tasks orphaned.
+
+
+async def test_warm_items_still_overlap_on_either_side_of_a_cold_one():
+    """Concurrency is the point of the whole branch. Snapshot at the moment the
+    slow warm item FINISHES, on both sides of the barrier: a later warm item
+    must already have started. A sequential loop passes every other cold-path
+    test here and must fail this one."""
+    started: list[str] = []
+    seen_when_slow_finished: dict[str, list[str]] = {}
+
+    async def worker(name: str) -> str:
+        started.append(name)
+        if name.startswith("slow"):
+            await asyncio.sleep(0.05)
+            seen_when_slow_finished[name] = list(started)
+        return name
+
+    async def is_cold(name: str) -> bool:
+        return name == "cold"
+
+    res = await run_concurrently(
+        ["slow-a", "fast-a", "cold", "slow-b", "fast-b"], worker, limit=4, is_cold=is_cold)
+    assert res == ["slow-a", "fast-a", "cold", "slow-b", "fast-b"]
+    assert "fast-a" in seen_when_slow_finished["slow-a"], (
+        f"warm items before the cold one must overlap: {seen_when_slow_finished}")
+    assert "fast-b" in seen_when_slow_finished["slow-b"], (
+        f"warm items after the cold one must overlap: {seen_when_slow_finished}")
+    # and the barrier still held while they overlapped
+    assert "cold" not in seen_when_slow_finished["slow-a"], seen_when_slow_finished
+    assert "slow-b" not in seen_when_slow_finished["slow-a"], seen_when_slow_finished
+
+
+async def test_a_cold_workers_exception_lands_in_its_slot_and_siblings_complete():
+    """One bad opening article must not abort the whole source. Before the fix
+    this was an untested handler: deleting it failed nothing."""
+    finished: list[str] = []
+
+    async def worker(name: str) -> str:
+        if name == "cold":
+            raise ValueError("boom")
+        await asyncio.sleep(0.01)
+        finished.append(name)
+        return name
+
+    async def is_cold(name: str) -> bool:
+        return name == "cold"
+
+    res = await run_concurrently(
+        ["before", "cold", "after"], worker, limit=4, is_cold=is_cold)
+    assert finished == ["before", "after"], "siblings on both sides must complete"
+    assert res[0] == "before" and res[2] == "after"
+    assert isinstance(res[1], ValueError)
+
+
+async def test_a_cold_workers_self_raised_cancellation_lands_in_its_slot_like_a_warm_one():
+    """The slot contract is identical on both paths, BaseException included:
+    semantic_worker's "were cancelled" branch relies on a worker-raised
+    CancelledError arriving in the slot, and the cold path used to let it
+    propagate instead -- for exactly the articles the barrier singles out."""
+    async def worker(name: str) -> str:
+        if name == "cold":
+            raise asyncio.CancelledError()
+        return name
+
+    async def is_cold(name: str) -> bool:
+        return name == "cold"
+
+    res = await run_concurrently(
+        ["before", "cold", "after"], worker, limit=4, is_cold=is_cold)
+    assert res[0] == "before" and res[2] == "after"
+    assert isinstance(res[1], asyncio.CancelledError)
+
+
+class _Interrupt(BaseException):
+    """Stands in for an outer cancellation / KeyboardInterrupt escaping
+    `is_cold`. A real KeyboardInterrupt would take the event loop down with
+    it; this has the same `except Exception` blindness without the blast."""
+
+
+async def test_a_base_exception_escaping_is_cold_leaves_no_task_running():
+    """The orphan hole: the predicate blows up while a warm task is in flight.
+    The exception must still propagate -- but not before that task has been
+    cancelled and awaited. Orphaned, it would keep writing to Neo4j with nobody
+    to collect its result; here it would simply still be asleep."""
+    started: list[int] = []
+    finished: list[int] = []
+    cancelled: list[int] = []
+
+    async def worker(n: int) -> int:
+        started.append(n)
+        try:
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            cancelled.append(n)
+            raise
+        finished.append(n)
+        return n
+
+    async def is_cold(n: int) -> bool:
+        if n == 1:
+            await asyncio.sleep(0.01)  # let item 0's task actually start
+            raise _Interrupt()
+        return False
+
+    with pytest.raises(_Interrupt):
+        await run_concurrently([0, 1, 2], worker, limit=4, is_cold=is_cold)
+    assert started == [0], "item 0 must have been in flight when the predicate blew up"
+    assert finished + cancelled == [0], (
+        f"item 0 must be finished or cancelled, not left running: "
+        f"finished={finished} cancelled={cancelled}")
