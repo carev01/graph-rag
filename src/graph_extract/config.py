@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -115,6 +116,16 @@ class ExtractSettings(BaseSettings):
     # longer extracted into `invalid_at`. Accepted, because invalid_at should
     # record evidence of supersession, not a model's reading of prose.
     valid_at_from_content_changed: bool = True
+    # How many ARTICLES to ingest concurrently. Episodes within an article always
+    # stay sequential: consecutive chunks of one document share entities most
+    # heavily, and graphiti resolves entities by searching the graph as it
+    # currently stands, so two in-flight episodes extracting a not-yet-present
+    # entity would each create it under a different uuid.
+    #
+    # DEFAULT 1 -- byte-for-byte today's call order. Raising it is gated on the
+    # A/B in the design spec's section 8: re-ingest the same 83 pilot articles and
+    # compare entity count against the sequential baseline of 999.
+    ingest_article_concurrency: int = 1
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
     judge_base_url: str = ""
@@ -235,6 +246,16 @@ class ExtractSettings(BaseSettings):
     # does the selecting. 0.45 would have cut the very community that complaint
     # wanted ranked higher; 0.55+ refuses 3 of 10 answerable questions.
     rerank_score_floor: float = 0.40
+
+    @field_validator("ingest_article_concurrency")
+    @classmethod
+    def _at_least_one(cls, v: int) -> int:
+        # Rejected, not clamped: a 0 in the environment means someone believes
+        # they configured something, and silently running sequentially would hide
+        # that from them.
+        if v < 1:
+            raise ValueError(f"ingest_article_concurrency must be >= 1, got {v}")
+        return v
 
 
 @lru_cache

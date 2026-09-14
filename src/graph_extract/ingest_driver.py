@@ -6,6 +6,7 @@ import httpx
 from neo4j import AsyncDriver
 from graph_extract.article_filter import is_navigation_article
 from graph_extract.article_router import is_dense_matrix
+from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
 from graph_extract.dedup_guard import CURRENT_DEDUP_STATS, DedupIndexStats
@@ -188,12 +189,23 @@ class IngestDriver:
         if limit is not None:
             ids = ids[:limit]
         out = IngestResult()
-        for aid in ids:
-            r = await self.ingest_article(aid)
+        results = await run_concurrently(
+            ids, self.ingest_article, limit=self._s.ingest_article_concurrency)
+        failures: list[BaseException] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                failures.append(r)
+                continue
             out.articles += 1
             out.episodes_added += r.episodes_added
             out.episodes_skipped += r.episodes_skipped
             out.dedup.merge(r.dedup)
+        if failures:
+            # Raised AFTER the batch rather than mid-loop. Today's code propagates
+            # immediately and silently abandons every article after the failure;
+            # this completes the ones already dispatched and still surfaces the
+            # error. Deliberate change, pinned by a test.
+            raise failures[0]
         return out
 
     async def _content_hash(self, article_id: str) -> str | None:
