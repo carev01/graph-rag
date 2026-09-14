@@ -152,3 +152,33 @@ async def test_the_first_failure_in_article_order_is_the_one_raised():
     drv = _driver(_settings(ingest_article_concurrency=2), results)
     with pytest.raises(ValueError, match="first"):
         await drv.ingest_source("s")
+
+
+async def test_every_failure_is_logged_and_only_the_first_is_raised(caplog):
+    """Five articles, three fail: none of the three may vanish. Each WARNING must
+    name its own article id, and the exception raised must still be the first
+    failure in article order."""
+    def ok(aid):
+        async def _work():
+            return IngestArticleResult(article_id=aid, episodes_added=1)
+        return _work
+
+    def boom(aid):
+        async def _work():
+            raise ValueError(f"boom-{aid}")
+        return _work
+
+    results = {"a": ok("a"), "b": boom("b"), "c": ok("c"),
+               "d": boom("d"), "e": boom("e")}
+    drv = _driver(_settings(ingest_article_concurrency=5), results)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ValueError, match="boom-b"):
+            await drv.ingest_source("s")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3, "every failing article must get its own WARNING"
+    messages = [r.getMessage() for r in warnings]
+    for aid in ("b", "d", "e"):
+        assert any(aid in m for m in messages), f"article {aid} must be named in a WARNING"
+    for r in warnings:
+        assert r.exc_info is not None, "the traceback must be preserved, not just str(e)"

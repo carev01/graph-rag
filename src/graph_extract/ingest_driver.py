@@ -192,9 +192,10 @@ class IngestDriver:
         results = await run_concurrently(
             ids, self.ingest_article, limit=self._s.ingest_article_concurrency)
         failures: list[BaseException] = []
-        for r in results:
+        for article_id, r in zip(ids, results):
             if isinstance(r, BaseException):
                 failures.append(r)
+                logger.warning("article %s failed during ingest_source", article_id, exc_info=r)
                 continue
             out.articles += 1
             out.episodes_added += r.episodes_added
@@ -204,7 +205,11 @@ class IngestDriver:
             # Raised AFTER the batch rather than mid-loop. Today's code propagates
             # immediately and silently abandons every article after the failure;
             # this completes the ones already dispatched and still surfaces the
-            # error. Deliberate change, pinned by a test.
+            # error. Deliberate change, pinned by a test. Every failure is logged
+            # above (naming its article) so a multi-failure batch is fully visible
+            # in the logs even though only the first one propagates -- raising all
+            # of them isn't an option, so this is the compromise that keeps the
+            # rest from vanishing silently.
             raise failures[0]
         return out
 
