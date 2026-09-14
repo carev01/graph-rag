@@ -138,10 +138,11 @@ Values below 1 are rejected at config validation rather than silently coerced.
 |---|---|
 | One article raises | Its exception is returned in its result slot; siblings continue. `ingest_source` re-raises after the batch if any failed. **This is a deliberate behaviour change, not a preservation:** today a raising article propagates immediately out of the `for` loop (`ingest_driver.py`, `ingest_source`), so every article after it is silently never attempted. Under concurrency, articles already dispatched complete and the failure still surfaces at the end. Better — a mid-run failure no longer abandons the rest of the batch — but it IS different, and a test pins the new contract. |
 | One worker job raises | Unchanged: that job fails and retries via the existing backoff. Other groups are unaffected. |
-| `limit = 1` | Exactly the sequential path, including ordering. |
+| `limit = 1` | The sequential path in call order and results. Failure handling is the one intended difference, per the row above: even at 1, a raising article no longer abandons those after it. |
 | A large batch | The semaphore bounds in-flight work, so connection and memory use stay bounded regardless of batch size. |
 
-No retry logic changes. Nothing is swallowed: a failure that used to surface still surfaces.
+No retry logic changes. Nothing is swallowed: a failure that used to surface still surfaces —
+later, and without taking the rest of the batch with it.
 
 ## 7. Testing
 
