@@ -1,5 +1,7 @@
 import pytest
 
+from graph_extract.ingest_driver import IngestArticleResult
+
 from graph_extract import usage
 from graph_sync.semantic_worker import run_worker_once
 
@@ -127,6 +129,7 @@ async def test_worker_withholds_bootstrap_over_budget(state_store):
 
         async def ingest_article(self, aid):
             self.upserted.append(aid)
+            return IngestArticleResult(article_id=aid)
 
         async def tombstone_article_episodes(self, aid):
             return 0

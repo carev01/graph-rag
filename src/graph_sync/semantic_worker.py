@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 
+from graph_extract.dedup_guard import DedupIndexStats
+from graph_extract.ingest_driver import CRAWL_FALLBACK
 from graph_extract.usage import get_tally
 
 logger = logging.getLogger(__name__)
@@ -16,6 +19,14 @@ async def run_worker_once(
     store, ingest, *, batch: int, budget: int, max_attempts: int,
     backoff_base: float, backoff_cap: float, lease: float,
 ) -> int:
+    # Everything the ingest driver measures is per-article and was being DISCARDED
+    # here: `ingest_article` returns dedup counters, the reference-time basis and
+    # (on the driver) per-prompt timings, and the production worker is the path
+    # that actually runs at scale. The CLI printed them; this did not, so the
+    # measurements built to ride on a real ingest were invisible exactly where it
+    # matters. Accumulated and logged per batch below.
+    batch_dedup = DedupIndexStats()
+    basis_counts: Counter[str] = Counter()
     await store.reap_stale_jobs(lease, max_attempts)
     include_bootstrap = await store.today_token_total() < budget
     jobs = await store.claim_semantic_jobs(batch, include_bootstrap)
@@ -24,7 +35,14 @@ async def run_worker_once(
         t0 = before.prompt_tokens + before.completion_tokens
         try:
             if job["op"] == "upsert":
-                await ingest.ingest_article(job["article_id"])
+                res = await ingest.ingest_article(job["article_id"])
+                # Observability must never fail the work it observes. A driver
+                # double, or a future refactor returning None, must not raise in
+                # here -- that would fail the job and poison the queue for the
+                # sake of a counter. Explicit check, not a blanket try/except.
+                if res is not None:
+                    batch_dedup.merge(res.dedup)
+                    basis_counts[res.reference_basis] += 1
             elif job["op"] == "remove":
                 await ingest.tombstone_article_episodes(job["article_id"])
             else:
@@ -42,6 +60,18 @@ async def run_worker_once(
             delta = (after.prompt_tokens + after.completion_tokens) - t0
             if delta:
                 await store.record_tokens(delta)
+    if jobs:
+        logger.info("semantic batch: jobs=%d reference_basis=%s dedup: %s",
+                    len(jobs), dict(basis_counts), batch_dedup.summary())
+        fallbacks = basis_counts.get(CRAWL_FALLBACK, 0)
+        if fallbacks:
+            logger.warning(
+                "%d of %d articles had no usable content_changed_at and were ordered "
+                "by crawl time -- their facts cannot be trusted for temporal ordering",
+                fallbacks, len(jobs))
+        timings = getattr(ingest, "timings", None)
+        if timings is not None and timings.by_prompt:
+            logger.info("%s", timings.report())
     return len(jobs)
 
 
