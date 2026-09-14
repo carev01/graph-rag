@@ -71,9 +71,29 @@ async def run_worker_once(
             if delta:
                 await store.record_tokens(delta)
 
+    # `_run_job` catches Exception, so what escapes a group is the failure path
+    # ITSELF raising -- fail_semantic_job / record_tokens, i.e. Postgres down --
+    # or a CancelledError. That is not a bad article, it is broken
+    # infrastructure, and carrying on ingests every remaining article at full
+    # LLM cost with nowhere to record completion: all stay in_progress, all get
+    # reaped and re-run. The sequential loop aborted the batch on the spot; this
+    # flag reproduces that for the groups not yet started, while groups already
+    # in flight finish. Skipped jobs stay in_progress for reap_stale_jobs, the
+    # same outcome the old abort produced. The flag is read and written on the
+    # event loop with no await between the check and the set, so it cannot
+    # race.
+    escaped_early = False
+
     async def _run_group(group) -> None:
-        for job in group:
-            await _run_job(job)
+        nonlocal escaped_early
+        if escaped_early:
+            return
+        try:
+            for job in group:
+                await _run_job(job)
+        except BaseException:
+            escaped_early = True
+            raise
 
     # Grouped by article_id, NOT fanned out over raw jobs. Today the queue cannot
     # hand us two jobs for one article: `ux_semantic_jobs_pending` is UNIQUE on
@@ -89,10 +109,8 @@ async def run_worker_once(
         groups.setdefault(job["article_id"], []).append(job)
     results = await run_concurrently(
         list(groups.values()), _run_group, limit=concurrency)
-    # `_run_job` catches Exception, so anything that reaches a result slot has
-    # escaped the per-job handler: a CancelledError, or an exception from the
-    # failure path itself (fail_semantic_job / record_tokens -- i.e. Postgres
-    # down). The sequential loop propagated those out of here; discarding the
+    # Anything in a result slot escaped the per-job handler (see the flag
+    # above). The sequential loop propagated those out of here; discarding the
     # slots would make a database outage vanish with no log and no failed job.
     # Same contract as ingest_source: every one is logged naming its article,
     # the first propagates.
@@ -101,17 +119,19 @@ async def run_worker_once(
         if isinstance(r, BaseException):
             escaped.append(r)
             if isinstance(r, asyncio.CancelledError):
-                # A shutdown is not an error. Under an outer cancellation gather
-                # fills EVERY in-flight slot, so ERROR-with-traceback here would
-                # emit one traceback per in-flight article for a normal stop.
+                # Only a CancelledError a worker raised ITSELF lands here: an
+                # outer cancellation cancels the gather, which re-raises
+                # without returning slots, so this loop never runs for a real
+                # shutdown. WARNING because a cancellation is a stop, not a
+                # fault -- there is no defect for a traceback to point at.
                 logger.warning("semantic jobs for article %s were cancelled",
                                article_id)
             else:
                 logger.error("semantic jobs for article %s escaped the job handler",
                              article_id, exc_info=r)
     # The batch summary below comes BEFORE the escaped exception propagates:
-    # every group has already run to completion, and raising first would drop
-    # the dedup/basis summary and the timing report for the whole batch.
+    # every group that ran has finished, and raising first would drop the
+    # dedup/basis summary and the timing report for the whole batch.
     if jobs:
         logger.info("semantic batch: jobs=%d reference_basis=%s dedup: %s",
                     len(jobs), dict(basis_counts), batch_dedup.summary())

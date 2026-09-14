@@ -195,7 +195,7 @@ class IngestDriver:
         for article_id, r in zip(ids, results):
             if isinstance(r, BaseException):
                 failures.append(r)
-                logger.warning("article %s failed during ingest_source", article_id, exc_info=r)
+                logger.error("article %s failed during ingest_source", article_id, exc_info=r)
                 continue
             out.articles += 1
             out.episodes_added += r.episodes_added
@@ -204,8 +204,9 @@ class IngestDriver:
         if failures:
             # Raised AFTER the batch rather than mid-loop. Today's code propagates
             # immediately and silently abandons every article after the failure;
-            # this completes the ones already dispatched and still surfaces the
-            # error. Deliberate change, pinned by a test. Every failure is logged
+            # this attempts every article (gather creates all the tasks up front,
+            # whatever the limit) and still surfaces the error. Deliberate
+            # change, pinned by a test. Every failure is logged
             # above (naming its article) so a multi-failure batch is fully visible
             # in the logs even though only the first one propagates -- raising all
             # of them isn't an option, so this is the compromise that keeps the

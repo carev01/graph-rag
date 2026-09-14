@@ -79,7 +79,8 @@ heavily, so they remain sequential. Articles run N-way concurrent.
 This does not eliminate the duplicate risk; it reduces the highest-overlap case and makes
 the remainder measurable. We have an unusually good instrument for that: the pilot produced
 **999 entities over 655 episodes from a known set of 83 articles, sequentially**. Re-running
-the identical set concurrently isolates duplication as the single variable.
+the identical set concurrently bounds the duplication from above (§8 explains why it is a
+bound rather than a clean single-variable measurement).
 
 ## 4. Architecture
 
@@ -104,10 +105,16 @@ episodes stay sequential within an article.
 **Groups claimed jobs by `article_id` first, then fans out over the groups.** Jobs within a
 group run in their existing order.
 
-This is load-bearing, not tidiness: `claim_semantic_jobs` has no `DISTINCT` on
-`article_id` (`state_store.py:145-147`), so one batch can legitimately contain an upsert and
-a later remove for the same article. Fanning out over raw jobs could apply them out of
-order and tombstone episodes that the upsert then recreates, or the reverse.
+Today the queue cannot hand a batch two jobs for one article: `ux_semantic_jobs_pending` is
+UNIQUE on `(article_id) WHERE status='pending'` (`state_store.py:28-29`),
+`enqueue_semantic_job` collapses an upsert-then-remove into one row via
+`ON CONFLICT ... SET op=excluded.op` (`:129-136`), and `claim_semantic_jobs` selects only
+`status='pending'` (`:138-149`). So one claim batch holds at most one job per article.
+
+The grouping is defence in depth that does not depend on that index staying. If it ever
+went, fanning out over raw jobs could run an upsert and a later remove for the same article
+out of order and tombstone episodes the upsert just created, or the reverse. Grouping costs
+nothing today and pins the ordering contract for the day the queue changes.
 
 ### 4.3 What the existing instrumentation does under concurrency
 
@@ -132,17 +139,30 @@ measurement justifies raising it, so this is mergeable before anything is spent.
 
 Values below 1 are rejected at config validation rather than silently coerced.
 
+### 5.1 Before raising the knob
+
+The daily budget gate (`today_token_total() < budget` in `run_worker_once`) is evaluated
+once per batch, before the claim, and not again inside the batch. That shape is pre-existing
+and concurrency amplifies it: at N in flight a batch burns through
+`semantic_daily_token_budget` N times faster between checks, so the day's budget is reached
+in 1/N of the wall time and the window in which runaway spend can be noticed shrinks by the
+same factor. The overshoot *ceiling* is still one batch's spend — but to keep N slots fed the
+natural move is to raise `batch` to at least N, and the ceiling grows with `batch`, not with
+the gate. Size `batch` and the budget together before raising N.
+
 ## 6. Error handling
 
 | case | behaviour |
 |---|---|
-| One article raises | Its exception is returned in its result slot; siblings continue. `ingest_source` re-raises after the batch if any failed. **This is a deliberate behaviour change, not a preservation:** today a raising article propagates immediately out of the `for` loop (`ingest_driver.py`, `ingest_source`), so every article after it is silently never attempted. Under concurrency, articles already dispatched complete and the failure still surfaces at the end. Better — a mid-run failure no longer abandons the rest of the batch — but it IS different, and a test pins the new contract. |
+| One article raises | Its exception is returned in its result slot; siblings continue. `ingest_source` re-raises after the batch if any failed. **This is a deliberate behaviour change, not a preservation:** today a raising article propagates immediately out of the `for` loop (`ingest_driver.py`, `ingest_source`), so every article after it is silently never attempted. Under the fan-out **every article in the source is attempted, whatever the limit**: `asyncio.gather` creates a task per article up front (`concurrent_ingest.py`), and the semaphore only decides how many run at once, so one slot's failure never withholds a later article. Better for a per-article fault — a mid-run failure no longer abandons the rest of the batch — but it cuts the other way for a *systemic* one: a dead fallback tier or an expired key that used to abort after article 1 now walks the entire source, failing each article in turn at whatever it costs before it fails. It IS different, and a test pins the new contract. |
 | One worker job raises | Unchanged: that job fails and retries via the existing backoff. Other groups are unaffected. |
-| `limit = 1` | The sequential path in call order and results. Failure handling is the one intended difference, per the row above: even at 1, a raising article no longer abandons those after it. |
-| A large batch | The semaphore bounds in-flight work, so connection and memory use stay bounded regardless of batch size. |
+| The worker's failure path itself raises | **The worker's intended difference.** `_run_job` catches `Exception`, so what escapes a group is `fail_semantic_job` or `record_tokens` raising (Postgres down) or a `CancelledError`. That is broken infrastructure, not a bad article: carrying on would ingest every remaining article at full LLM cost with nowhere to record completion, leaving all of them `in_progress` to be reaped and re-run. So a flag shared across groups stops the batch: groups already in flight finish, groups not yet started return immediately, and their jobs stay `in_progress` for `reap_stale_jobs` — the outcome the sequential abort produced. Every escape is logged naming its article (ERROR with traceback; WARNING without for a cancellation), the batch summary is emitted, then the first escape propagates. |
+| `limit = 1` | The sequential path in call order and results. Two intended differences, per the rows above: in `ingest_source`, a raising article no longer abandons those after it — every article is attempted; in the worker, an escape from the failure path emits the batch summary before it propagates (at 1 nothing else is in flight, so the skip is exactly the old abort). |
+| A large batch | The semaphore bounds **in-flight work and open connections**, not memory: `gather` materialises one coroutine, one `Task` and one context copy per item before any work starts (50 articles at `limit=1` is 51 live tasks). Small per item, and the worker's `batch` caps it; `ingest_source` with no `limit` holds one task per article in the source. |
 
 No retry logic changes. Nothing is swallowed: a failure that used to surface still surfaces —
-later, and without taking the rest of the batch with it.
+later, and without taking the rest of the batch with it, unless it is the worker's own
+failure path that broke, in which case the rest of the batch is deliberately not spent.
 
 ## 7. Testing
 
@@ -154,6 +174,10 @@ later, and without taking the rest of the batch with it.
 - `run_worker_once` fans out over **article groups**, not raw jobs: a batch with two jobs
   for one article applies them in order.
 - Results are returned in input order regardless of completion order.
+- Per-article dedup attribution under concurrency: two overlapping articles record distinct
+  counts through the guard's own scope resolution, and neither sees the other's.
+- An escape from the worker's failure path skips the groups not yet started and lets the
+  groups in flight finish.
 
 **Discrimination:** every test must fail with its fix neutralised, proven by mutation.
 
@@ -170,8 +194,19 @@ the sequential baseline already recorded:
 | episodes | 655 | 655 expected |
 | wall clock | 6 h 55 m | ? |
 
-Identical input, identical code, one variable. **Any excess over 999 entities is
-duplication.** Cost roughly $10 and ~1.7 h at N=4.
+Identical input, identical code — but not quite one variable. graphiti builds each
+episode's extraction context from `previous_episodes`, retrieved by `reference_time` across
+the whole corpus-wide group (`graphiti_core/graphiti.py:1087-1094`; `add_text_episode` passes
+no explicit `previous_episode_uuids`). Sequentially that set is deterministic for a given
+graph state; concurrently it depends on which in-flight episodes have landed first. So the
+excess over 999 conflates two effects: duplicate entities created by overlapping resolution,
+and entities extracted differently because the context differed.
+
+**Any excess over 999 entities is an upper bound on duplication, not an estimate of it.**
+The A/B is still worth running and still informative — a zero or small excess is a clean
+result, and a large one is a real signal — but it cannot be read as a single-variable
+measurement, and a good result must not be reported as one. Cost roughly $10 and ~1.7 h at
+N=4.
 
 Report the duplicate rate and the speedup together; a large speedup does not justify an
 unbounded duplicate rate, and the decision to raise or lower N is the user's.
@@ -181,9 +216,11 @@ run — otherwise the second run dedups against the first's entities and measure
 
 ## 9. Success criteria
 
-1. `limit=1` is indistinguishable from today in call order and results. The one intended
-   difference is failure handling (§6): even at `limit=1` a raising article no longer
-   abandons the articles after it. That is the change, stated rather than smuggled.
+1. `limit=1` is indistinguishable from today in call order and results. Two intended
+   differences (§6), stated rather than smuggled: in `ingest_source` a raising article no
+   longer abandons the articles after it — every article is attempted; in the worker an
+   escape from the failure path stops the batch (in-flight groups finish, unstarted groups
+   are skipped) and the batch summary is emitted before it propagates.
 2. A batch containing two jobs for one article applies them in order.
 3. One failing article does not prevent its siblings completing.
 4. The A/B reports both entity count against 999 and wall clock against 6 h 55 m.

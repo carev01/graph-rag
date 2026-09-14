@@ -121,34 +121,71 @@ async def test_one_failing_group_does_not_stop_another():
     assert store.completed == ["j2"]
 
 
-# --- What escapes a job must not vanish into a discarded result slot ---------
+# --- What escapes a job must not vanish, and must stop the batch -------------
 #
 # `_run_job` catches Exception, so the only things that can reach a
 # run_concurrently result slot are (a) a BaseException such as CancelledError,
 # and (b) an Exception raised by the failure path itself -- the store's
-# fail_semantic_job or record_tokens, i.e. Postgres being down. Today's loop
-# propagates both out of run_worker_once. A fan-out that ignores its results
-# would swallow them: no log, no failed job, no trace.
+# fail_semantic_job or record_tokens, i.e. Postgres being down. A fan-out that
+# ignored its results would swallow them: no log, no failed job, no trace.
+#
+# An escape is broken infrastructure, not a bad article. A bad article is
+# per-item and its siblings should carry on (the test above); an escape means
+# every further article would be ingested at full LLM cost with nowhere to
+# record completion, so the groups not yet started must be skipped. Groups
+# already in flight finish. Today's sequential loop aborted on the spot, which
+# at concurrency=1 is the same outcome.
 
 
-async def test_a_store_failure_in_the_failure_path_escapes(caplog):
+class _PgDown(_Store):
+    """The failure path itself is broken: fail_semantic_job raises."""
+
+    async def fail_semantic_job(self, jid, *a, **k):
+        raise RuntimeError("pg down")
+
+
+class _Boom(_Ingest):
+    """`bad` fails after an await so a concurrent sibling is genuinely in flight
+    when the failure path escapes; everything else behaves like `_Ingest`."""
+
+    async def ingest_article(self, article_id):
+        if article_id == "bad":
+            self.log.append(("upsert-start", article_id))
+            await asyncio.sleep(0.01)
+            raise ValueError("boom")
+        return await super().ingest_article(article_id)
+
+
+def _attempted(log) -> list[str]:
+    return [aid for ev, aid in log if ev == "upsert-start"]
+
+
+async def test_an_escape_skips_the_groups_not_yet_started():
+    """concurrency=1: nothing else is in flight when `bad` escapes, so neither
+    of the two later articles may ever be handed to ingest_article."""
     log: list[tuple[str, str]] = []
+    store = _PgDown([_job("j1", "bad"), _job("j2", "b"), _job("j3", "c")])
+    with pytest.raises(RuntimeError, match="pg down"):
+        await run_worker_once(store, _Boom(log), concurrency=1, **_KW)
+    assert _attempted(log) == ["bad"], (
+        f"after the failure path escaped, no further article may be ingested; got {log}")
+    assert store.completed == []
 
-    class _PgDown(_Store):
-        async def fail_semantic_job(self, jid, *a, **k):
-            raise RuntimeError("pg down")
 
-    class _Boom(_Ingest):
-        async def ingest_article(self, article_id):
-            if article_id == "bad":
-                raise ValueError("boom")
-            return await super().ingest_article(article_id)
-
-    store = _PgDown([_job("j1", "bad"), _job("j2", "good")])
+async def test_an_escape_lets_in_flight_groups_finish_and_skips_the_rest(caplog):
+    """concurrency=2: `slow` was dispatched alongside `bad` and is mid-flight
+    when `bad` escapes, so it finishes and completes; `late` was still waiting
+    on the semaphore and is never attempted. A sequential implementation would
+    complete nothing, so `completed` is what tells the two apart."""
+    log: list[tuple[str, str]] = []
+    store = _PgDown([_job("j1", "bad"), _job("j2", "slow"), _job("j3", "late")])
     with caplog.at_level(logging.ERROR, logger="graph_sync.semantic_worker"):
         with pytest.raises(RuntimeError, match="pg down"):
-            await run_worker_once(store, _Boom(log), concurrency=4, **_KW)
-    assert store.completed == ["j2"], "the sibling group still runs to completion"
+            await run_worker_once(store, _Boom(log, delays={"slow": 0.03}),
+                                  concurrency=2, **_KW)
+    assert store.completed == ["j2"], (
+        f"the group already in flight must finish, the unstarted one must not; got {log}")
+    assert _attempted(log) == ["bad", "slow"]
     assert any("bad" in r.getMessage() for r in caplog.records
                if r.levelno >= logging.ERROR), (
         "the escaped error must be logged naming its article group")
@@ -167,32 +204,23 @@ async def test_a_cancelled_job_does_not_vanish(caplog):
     with caplog.at_level(logging.WARNING, logger="graph_sync.semantic_worker"):
         with pytest.raises(asyncio.CancelledError):
             await run_worker_once(store, _Cancels(log), concurrency=4, **_KW)
-    assert store.completed == ["j2"]
+    assert store.completed == [], "the not-yet-started sibling is skipped, like any escape"
     assert store.failed == [], "CancelledError is not a job failure to be retried"
     named = [r for r in caplog.records if "cancelled" in r.getMessage()]
     assert named, "the cancelled group must be logged naming its article"
-    # A shutdown is not an error: under an outer cancellation every in-flight
-    # slot holds a CancelledError, and ERROR-with-traceback per article is noise.
+    # Only a worker-raised CancelledError reaches the slot loop (an outer
+    # cancellation cancels the gather, which re-raises without returning
+    # slots). A cancellation is a stop, not a fault: WARNING, no traceback.
     assert [r.levelno for r in named] == [logging.WARNING], (
         f"CancelledError must log at WARNING, not ERROR; got {[r.levelname for r in named]}")
     assert all(r.exc_info is None for r in named), "no traceback for a cancellation"
 
 
 async def test_a_batch_with_an_escaped_job_still_logs_its_summary(caplog):
-    """Every group ran to completion, so the batch summary (dedup/basis mix and
-    the timing report) exists -- raising before logging it would throw it away."""
+    """The groups that ran have finished, so the batch summary (dedup/basis mix
+    and the timing report) exists -- raising before logging it would throw it
+    away."""
     log: list[tuple[str, str]] = []
-
-    class _PgDown(_Store):
-        async def fail_semantic_job(self, jid, *a, **k):
-            raise RuntimeError("pg down")
-
-    class _Boom(_Ingest):
-        async def ingest_article(self, article_id):
-            if article_id == "bad":
-                raise ValueError("boom")
-            return await super().ingest_article(article_id)
-
     store = _PgDown([_job("j1", "bad"), _job("j2", "good")])
     ingest = _Boom(log)
     at = ingest.timings.start()

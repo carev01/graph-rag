@@ -9,6 +9,7 @@ import asyncio
 import pytest
 
 from graph_extract.config import ExtractSettings
+from graph_extract.dedup_guard import DedupIndexGuard, DedupIndexStats
 from graph_extract.ingest_driver import IngestArticleResult, IngestDriver
 
 
@@ -143,19 +144,24 @@ async def test_a_failing_article_does_not_prevent_its_siblings(concurrency):
 
 
 async def test_the_first_failure_in_article_order_is_the_one_raised():
-    def boom(msg):
+    """Article `a` fails AFTER an await, so it completes second: completion
+    order is b, a while article order is a, b. Only the article order may
+    decide which exception propagates."""
+    def boom(msg, delay=0.0):
         async def _work():
+            if delay:
+                await asyncio.sleep(delay)
             raise ValueError(msg)
         return _work
 
-    results = {"a": boom("first"), "b": boom("second")}
+    results = {"a": boom("first", delay=0.02), "b": boom("second")}
     drv = _driver(_settings(ingest_article_concurrency=2), results)
     with pytest.raises(ValueError, match="first"):
         await drv.ingest_source("s")
 
 
 async def test_every_failure_is_logged_and_only_the_first_is_raised(caplog):
-    """Five articles, three fail: none of the three may vanish. Each WARNING must
+    """Five articles, three fail: none of the three may vanish. Each ERROR must
     name its own article id, and the exception raised must still be the first
     failure in article order."""
     def ok(aid):
@@ -171,14 +177,51 @@ async def test_every_failure_is_logged_and_only_the_first_is_raised(caplog):
     results = {"a": ok("a"), "b": boom("b"), "c": ok("c"),
                "d": boom("d"), "e": boom("e")}
     drv = _driver(_settings(ingest_article_concurrency=5), results)
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("ERROR"):
         with pytest.raises(ValueError, match="boom-b"):
             await drv.ingest_source("s")
 
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 3, "every failing article must get its own WARNING"
-    messages = [r.getMessage() for r in warnings]
+    # ERROR, not WARNING: an article that failed hard and is about to be
+    # re-raised is an error, the same level the worker gives an escape.
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 3, "every failing article must get its own ERROR"
+    messages = [r.getMessage() for r in errors]
     for aid in ("b", "d", "e"):
-        assert any(aid in m for m in messages), f"article {aid} must be named in a WARNING"
-    for r in warnings:
+        assert any(aid in m for m in messages), f"article {aid} must be named in an ERROR"
+    for r in errors:
         assert r.exc_info is not None, "the traceback must be preserved, not just str(e)"
+
+
+async def test_concurrent_articles_keep_their_own_dedup_attribution():
+    """The design's §9.5: per-article dedup attribution stays correct under
+    concurrency. This goes through the REAL `ingest_article` -- the scope it
+    opens on `CURRENT_DEDUP_STATS` -- with only `_ingest_article` stubbed, and
+    records through the guard's own `stats()` resolution. Two overlapping
+    articles interleave across an await and record distinct counts; each must
+    see only its own. A shared (non-context) holder would hand `a`'s second
+    record to `b` and `b`'s to the unscoped sink."""
+    guard = DedupIndexGuard(fallback=None, unscoped=DedupIndexStats(), raw=None)
+    seen: dict[str, DedupIndexStats] = {}
+    plan = {"a": (1, 0.01, 1), "b": (1, 0.02, 2)}   # (before, sleep, after)
+
+    async def _fake_ingest(article_id, res):
+        before, delay, after = plan[article_id]
+        seen[article_id] = res.dedup
+        guard.stats().invalid_calls += before
+        await asyncio.sleep(delay)
+        guard.stats().invalid_calls += after
+        return res
+
+    drv = IngestDriver.__new__(IngestDriver)
+    drv._s = _settings(ingest_article_concurrency=2)
+    drv._ingest_article = _fake_ingest
+
+    async def _list(source_id, *a, **k):
+        return list(plan)
+
+    drv.list_article_ids = _list
+    out = await drv.ingest_source("s")
+    assert seen["a"].invalid_calls == 2, f"a saw a sibling's records: {seen['a'].summary()}"
+    assert seen["b"].invalid_calls == 3, f"b saw a sibling's records: {seen['b'].summary()}"
+    assert guard.unscoped.invalid_calls == 0, "nothing may fall through to the unscoped sink"
+    assert out.dedup.invalid_calls == 5

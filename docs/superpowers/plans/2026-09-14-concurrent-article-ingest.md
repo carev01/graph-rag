@@ -4,7 +4,7 @@
 
 **Goal:** Process articles concurrently during ingest — never episodes within an article — behind a limit that defaults to today's sequential behaviour.
 
-**Architecture:** One shared `run_concurrently` helper bounded by an `asyncio.Semaphore`, returning results in input order with exceptions in their slots. `IngestDriver.ingest_source` fans out over article ids. `run_worker_once` groups claimed jobs by `article_id` first and fans out over the *groups*, because a batch can legitimately hold an upsert and a later remove for the same article.
+**Architecture:** One shared `run_concurrently` helper bounded by an `asyncio.Semaphore`, returning results in input order with exceptions in their slots. `IngestDriver.ingest_source` fans out over article ids. `run_worker_once` groups claimed jobs by `article_id` first and fans out over the *groups*: the pending-unique index means a batch holds at most one job per article today, and the grouping is defence in depth that keeps an upsert and a later remove for one article ordered if that index ever goes.
 
 **Tech Stack:** Python 3.12, `uv`, asyncio, pydantic-settings, graphiti-core 0.30.1, pytest + pytest-asyncio.
 
@@ -12,9 +12,9 @@
 
 - Concurrency is **across articles only**. Episodes within an article stay sequential.
 - `ingest_article_concurrency: int = 1` — default is byte-for-byte today's call order. Values below 1 are **rejected at config validation**, not silently coerced.
-- `run_worker_once` must group by `article_id` before fanning out (`state_store.py:145-147` has no `DISTINCT`).
+- `run_worker_once` must group by `article_id` before fanning out. `ux_semantic_jobs_pending` (`state_store.py:28-29`) is UNIQUE on `(article_id) WHERE status='pending'`, `enqueue_semantic_job` collapses an upsert-then-remove into one row (`:129-136`) and `claim_semantic_jobs` selects only `status='pending'` (`:138-149`), so one claim batch holds at most one job per article today. The grouping is defence in depth that does not depend on that index staying.
 - One failing article must not cancel its siblings; the failure must still surface.
-- **Known behaviour change, applies even at limit=1:** today a raising article propagates out of `ingest_source`'s loop and every article after it is silently never attempted. After this change, dispatched siblings complete and the failure is raised at the end.
+- **Known behaviour change, applies even at limit=1:** today a raising article propagates out of `ingest_source`'s loop and every article after it is silently never attempted. After this change every article is attempted (`gather` creates all the tasks up front, whatever the limit) and the failure is raised at the end.
 - Do not swallow exceptions. Do not change retry/backoff logic.
 - CI gate, all three clean: `uv run ruff check src tests` (lints tests too: E702 no semicolons, E402 imports at top), `uv run mypy src`, `uv run --extra dev pytest -m "not live"`.
 - **Never run `python -m graph_extract.cli ingest`, `theme-build`, or `answer_api.eval_router`** — all three spend real money. The paid A/B in the spec's §8 is the user's decision, not this plan's.
@@ -453,10 +453,14 @@ Create `tests/unit/test_worker_concurrency.py`:
 ```python
 """The worker fans out over ARTICLE GROUPS, never raw jobs.
 
-`claim_semantic_jobs` has no DISTINCT on article_id (state_store.py:145-147), so
-one batch can legitimately hold an upsert and a later remove for the same article.
-Fanning out over raw jobs could apply them out of order -- tombstoning episodes
-that the upsert then recreates, or the reverse.
+Today the queue cannot produce two jobs for one article in a batch: the
+`ux_semantic_jobs_pending` index is UNIQUE on (article_id) WHERE status='pending'
+(state_store.py:28-29), `enqueue_semantic_job` collapses an upsert-then-remove into
+one row (:129-136), and `claim_semantic_jobs` selects only status='pending'
+(:138-149). The grouping is defence in depth that does not depend on that index
+staying: without it, fanning out over raw jobs could apply an upsert and a later
+remove out of order -- tombstoning episodes that the upsert then recreates, or the
+reverse.
 """
 from __future__ import annotations
 
@@ -611,10 +615,15 @@ and replace the `for job in jobs:` loop with a per-job coroutine plus a grouped 
         for job in group:
             await _run_job(job)
 
-    # Grouped by article_id, NOT fanned out over raw jobs: claim_semantic_jobs has
-    # no DISTINCT on article_id (state_store.py:145-147), so one batch can hold an
-    # upsert and a later remove for the same article, and applying those out of
-    # order would tombstone episodes the upsert just created.
+    # Grouped by article_id, NOT fanned out over raw jobs. Today the queue cannot
+    # hand us two jobs for one article: `ux_semantic_jobs_pending` is UNIQUE on
+    # (article_id) WHERE status='pending' (state_store.py:28-29), enqueue
+    # collapses an upsert-then-remove into one row via ON CONFLICT ... SET
+    # op=excluded.op (:129-136), and claim_semantic_jobs selects only
+    # status='pending' (:138-149). The grouping is defence in depth that does not
+    # depend on that index staying: if it ever went, running an upsert and a
+    # later remove for the same article out of order would tombstone episodes
+    # the upsert just created.
     groups: dict[str, list] = {}
     for job in jobs:
         groups.setdefault(job["article_id"], []).append(job)
@@ -655,9 +664,10 @@ Expected: green. **Report the observed count.**
 git add src/graph_sync/semantic_worker.py tests/unit/test_worker_concurrency.py
 git commit -m "feat(worker): fan out over article groups, not raw jobs
 
-claim_semantic_jobs has no DISTINCT on article_id, so a batch can hold an upsert
-and a later remove for one article; grouping keeps those ordered while different
-articles overlap. concurrency defaults to 1."
+The pending-unique index means a batch holds at most one job per article today;
+grouping is defence in depth that keeps an upsert and a later remove for one
+article ordered if that index ever goes, while different articles overlap.
+concurrency defaults to 1."
 ```
 
 ---
@@ -670,7 +680,7 @@ Against the spec's §9 success criteria:
 2. **A batch with two jobs for one article applies them in order** — Task 3, proven discriminating in Step 5.
 3. **One failing article does not prevent siblings completing** — Task 1 and Task 2.
 4. **The A/B reports entity count against 999 and wall clock against 6h55m** — **not in this plan.** It is a paid run and the user's decision.
-5. **Per-article dedup attribution stays correct under concurrency** — holds by construction (`CURRENT_DEDUP_STATS` is a `ContextVar` and `asyncio.create_task` copies context at creation), and is observable in the worker's batch log. No new test: the existing `test_worker_observability.py` covers the reporting, and a concurrency-specific assertion would be testing asyncio rather than our code.
+5. **Per-article dedup attribution stays correct under concurrency** — `CURRENT_DEDUP_STATS` is a `ContextVar` and `asyncio.create_task` copies context at creation, and it is observable in the worker's batch log. Pinned by `test_concurrent_articles_keep_their_own_dedup_attribution` in `tests/unit/test_ingest_source_concurrency.py`, which runs the real `ingest_article` scope with two overlapping articles recording distinct counts through the guard's own `stats()` resolution: the claim is about our scope, not about asyncio, and a shared holder in place of the ContextVar fails it.
 
 ## Notes for the implementer
 
