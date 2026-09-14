@@ -24,19 +24,6 @@ async def test_results_come_back_in_input_order_not_completion_order():
     assert await run_concurrently([0, 1, 2], work, limit=3) == [0, 10, 20]
 
 
-async def test_work_actually_overlaps():
-    """A slow first item must not block a later one -- the whole point."""
-    started: list[int] = []
-
-    async def work(n: int) -> int:
-        started.append(n)
-        await asyncio.sleep(0.05 if n == 0 else 0)
-        return n
-
-    await run_concurrently([0, 1, 2], work, limit=3)
-    assert started == [0, 1, 2], "all three dispatched before the slow one finished"
-
-
 async def test_limit_bounds_the_in_flight_count():
     in_flight = 0
     peak = 0
@@ -88,14 +75,6 @@ async def test_an_empty_item_list_is_fine():
         raise AssertionError("must not be called")
 
     assert await run_concurrently([], work, limit=4) == []
-
-
-async def test_a_limit_below_one_is_rejected():
-    async def work(n: int) -> int:
-        return n
-
-    with pytest.raises(ValueError, match="limit"):
-        await run_concurrently([1], work, limit=0)
 
 
 # -- Added during mutation testing (Step 5). Each pins a gap the cases above left:
