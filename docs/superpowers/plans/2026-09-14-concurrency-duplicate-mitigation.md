@@ -739,7 +739,16 @@ git commit -m "feat(ingest): apply the warm-up barrier on both ingest paths"
   async def count_duplicates(driver: AsyncDriver, group_id: str) -> int
   async def plan_merges(driver: AsyncDriver, group_id: str) -> dict
   ```
-  `plan_merges` returns the report payload: `{"groups": [...], "totals": {...}, "near_duplicates_not_merged": [...], "label_conflicts": [...]}`. Each group is `{"name", "survivor", "losers", "members": [{"uuid","created_at","labels","degree","summary_len"}], "name_embedding_cosine"}`. Tasks 5, 6 and 7 all consume these two functions. **This task writes nothing to the graph.**
+  `plan_merges` returns the report payload:
+  ```python
+  {"groups": [{"name": str, "survivor": str, "losers": list[str],
+               "members": [{"uuid", "created_at", "labels", "degree", "summary_len"}],
+               "name_embedding_cosine": float | None}],
+   "totals": {"groups": int, "excess": int},     # excess == count_duplicates
+   "near_duplicates_not_merged": [{"normalized": str, "names": list[str]}],
+   "label_conflicts": [{"name": str, "labels": list[list[str]]}]}
+  ```
+  `apply_merges` (Task 5) returns this same payload with `merged`, `edges_moved`, `self_loops_created` added to `totals` and a `summary_dropped` list. Tasks 5, 6 and 7 all consume these two functions, and Task 7 reads `totals.excess` specifically. **This task writes nothing to the graph.**
 
 Survivor rule: earliest `created_at`, ties broken by ascending `uuid` — a total order, so the survivor is a pure function of the group. It is the node sequential ingestion would have produced (the first extraction creates it; every later one resolves onto it) and the one most likely to be referenced from outside.
 
@@ -789,8 +798,9 @@ async def test_case_variants_are_not_a_group_but_are_reported(neo4j_driver):
 async def test_another_group_id_is_not_a_duplicate(neo4j_driver):
     await _seed(neo4j_driver, uuid="a", name="X", group_id="backup-docs")
     await _seed(neo4j_driver, uuid="b", name="X", group_id="other")
-    assert await plan_merges(neo4j_driver, "backup-docs") == {
-        **await plan_merges(neo4j_driver, "backup-docs"), "groups": []}
+    plan = await plan_merges(neo4j_driver, "backup-docs")
+    assert plan["groups"] == []
+    assert plan["totals"]["excess"] == 0
     assert await count_duplicates(neo4j_driver, "backup-docs") == 0
 
 
@@ -1100,7 +1110,8 @@ git commit -m "feat(cli): merge-duplicates, report-only by default"
 
 **Interfaces:**
 - Consumes: `count_duplicates`, `plan_merges` (Task 4).
-- Produces: `theme-build --allow-duplicates`.
+- Produces: `assert_no_duplicates(driver, group_id, *, allow) -> int` and
+  `DuplicateEntitiesError` in `merge_duplicates.py`; `theme-build --allow-duplicates`.
 
 `theme-build` refuses because community detection over a fragmented entity graph yields communities that are *wrong*, not merely stale: a duplicated `Microsoft Azure` splits one real community in two, and the strong-tier reports written over that partition are plausible and wrong in a way nothing downstream can detect. A merge *after* `theme-build` also invalidates every report citing the loser's membership, so enforcing merge → theme-build costs nothing and saves a regeneration.
 
@@ -1110,18 +1121,68 @@ The worker does **not** print the count per batch: on a million-entity graph tha
 
 - [ ] **Step 1: Write the failing tests**
 
+**The guard is a function, not inline code in the command.** `theme-build` with
+`--allow-duplicates` proceeds into a real community build, which costs strong-tier
+LLM calls — so a test may never invoke that path. Test the guard directly instead;
+the command's only job is to call it before doing any work.
+
+Add to `src/graph_extract/merge_duplicates.py`:
+
 ```python
-async def test_theme_build_refuses_while_duplicates_exist(neo4j_driver):
+async def assert_no_duplicates(driver, group_id: str, *, allow: bool) -> int:
+    """Raise unless the entity graph is free of exact-name duplicates.
+
+    Community detection over a fragmented entity graph yields communities that
+    are WRONG, not merely stale: a duplicated `Microsoft Azure` splits one real
+    community in two, and the strong-tier reports written over that partition are
+    plausible and wrong in a way nothing downstream can detect. Returns the count
+    so a caller can report it.
+    """
+    excess = await count_duplicates(driver, group_id)
+    if excess and not allow:
+        raise DuplicateEntitiesError(
+            f"{excess} exact-name duplicate entities in group {group_id!r}. "
+            f"Run `merge-duplicates` to see them, then `merge-duplicates --apply`. "
+            f"Use --allow-duplicates to proceed anyway.")
+    return excess
+```
+
+```python
+async def test_the_guard_raises_while_duplicates_exist(neo4j_driver):
     await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=2)
+    with pytest.raises(DuplicateEntitiesError, match="merge-duplicates"):
+        await assert_no_duplicates(neo4j_driver, "backup-docs", allow=False)
+
+
+async def test_allow_duplicates_returns_the_count_instead_of_raising(neo4j_driver):
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    assert await assert_no_duplicates(neo4j_driver, "backup-docs", allow=True) == 2
+
+
+async def test_the_guard_passes_on_a_clean_graph(neo4j_driver):
+    await _seed(neo4j_driver, uuid="a", name="Unique")
+    assert await assert_no_duplicates(neo4j_driver, "backup-docs", allow=False) == 0
+
+
+def test_theme_build_calls_the_guard_before_doing_any_work(monkeypatch):
+    """Hermetic: every dependency is stubbed, so no LLM call can happen. Proves
+    the guard runs BEFORE the build, which is the whole point -- a guard that
+    runs after the reports are generated has saved nothing."""
+    calls: list[str] = []
+
+    async def _fake_guard(driver, group_id, *, allow):
+        calls.append("guard")
+        raise DuplicateEntitiesError("2 exact-name duplicate entities")
+
+    async def _fake_build(*a, **k):
+        calls.append("build")
+        return {}
+
+    monkeypatch.setattr(theme_cli, "assert_no_duplicates", _fake_guard)
+    monkeypatch.setattr(theme_cli, "_run_theme_build_incremental", _fake_build)
     result = CliRunner().invoke(theme_app, ["theme-build"])
     assert result.exit_code != 0
-    assert "merge-duplicates" in result.stdout + str(result.exception)
-
-
-async def test_allow_duplicates_overrides_the_refusal(neo4j_driver):
-    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=2)
-    result = CliRunner().invoke(theme_app, ["theme-build", "--allow-duplicates"])
-    assert "duplicate" not in result.stdout.lower() or result.exit_code == 0
+    assert calls == ["guard"], f"the build must not start; got {calls}"
 
 
 async def test_cleanup_reports_duplicates_and_never_merges(neo4j_driver):
@@ -1138,7 +1199,17 @@ async def test_cleanup_reports_duplicates_and_never_merges(neo4j_driver):
 - [ ] **Step 2: Run to verify they fail**
 - [ ] **Step 3: Implement** — add the guard to `theme_build` before any work begins, the `duplicates` key to `cleanup`/`maintenance`'s `_dump`, and the count line at the end of `ingest`.
 - [ ] **Step 4: Run to verify they pass**
-- [ ] **Step 5: Mutations** — remove the guard; invert it; make `cleanup` call `apply_merges`; each must fail its test. Record to `.superpowers/sdd/task-7-mutations.json`.
+- [ ] **Step 5: Mutations** — each must fail the named test:
+
+| mutant | must fail |
+|---|---|
+| remove the `not allow` condition (always raise) | `test_allow_duplicates_returns_the_count_instead_of_raising` |
+| invert it (raise only when `allow`) | `test_the_guard_raises_while_duplicates_exist` |
+| call the guard AFTER the build in `theme_build` | `test_theme_build_calls_the_guard_before_doing_any_work` |
+| make `cleanup` call `apply_merges` instead of `plan_merges` | `test_cleanup_reports_duplicates_and_never_merges` |
+| drop the `duplicates` key from `cleanup`'s payload | same test |
+
+Record to `.superpowers/sdd/task-7-mutations.json`.
 - [ ] **Step 6: Full gate as ONE process, then commit**
 
 ```bash
