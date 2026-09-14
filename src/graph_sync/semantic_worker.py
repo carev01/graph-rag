@@ -7,7 +7,7 @@ from collections import Counter
 from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
 from graph_extract.ingest_driver import CRAWL_FALLBACK
-from graph_extract.usage import get_tally
+from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +34,15 @@ async def run_worker_once(
     jobs = await store.claim_semantic_jobs(batch, include_bootstrap)
 
     async def _run_job(job) -> None:
-        before = get_tally()
-        t0 = before.prompt_tokens + before.completion_tokens
+        # The job's spend is read from a scope opened for THIS job, not as a
+        # before/after delta on the module-global tally: with N articles in
+        # flight a global delta includes every sibling's tokens (two overlapping
+        # 100-token jobs would record 400), and record_tokens feeds
+        # today_token_total, which decides whether the bootstrap lane runs at
+        # all. Inflated numbers fail that gate closed. The scope wraps the whole
+        # try/except/finally so a job that fails still records what it spent.
+        spent = UsageTally()
+        scope = CURRENT_USAGE_TALLY.set(spent)
         try:
             if job["op"] == "upsert":
                 res = await ingest.ingest_article(job["article_id"])
@@ -59,8 +66,8 @@ async def run_worker_once(
                     job["attempts"] + 1, base=backoff_base, cap=backoff_cap),
                 claimed_at=job["claimed_at"])
         finally:
-            after = get_tally()
-            delta = (after.prompt_tokens + after.completion_tokens) - t0
+            CURRENT_USAGE_TALLY.reset(scope)
+            delta = spent.prompt_tokens + spent.completion_tokens
             if delta:
                 await store.record_tokens(delta)
 
@@ -68,10 +75,15 @@ async def run_worker_once(
         for job in group:
             await _run_job(job)
 
-    # Grouped by article_id, NOT fanned out over raw jobs: claim_semantic_jobs has
-    # no DISTINCT on article_id (state_store.py:145-147), so one batch can hold an
-    # upsert and a later remove for the same article, and applying those out of
-    # order would tombstone episodes the upsert just created.
+    # Grouped by article_id, NOT fanned out over raw jobs. Today the queue cannot
+    # hand us two jobs for one article: `ux_semantic_jobs_pending` is UNIQUE on
+    # (article_id) WHERE status='pending' (state_store.py:28-29), enqueue
+    # collapses an upsert-then-remove into one row via ON CONFLICT ... SET
+    # op=excluded.op (:129-136), and claim_semantic_jobs selects only
+    # status='pending' (:138-149). The grouping is defence in depth that does not
+    # depend on that index staying: if it ever went, running an upsert and a
+    # later remove for the same article out of order would tombstone episodes
+    # the upsert just created.
     groups: dict[str, list] = {}
     for job in jobs:
         groups.setdefault(job["article_id"], []).append(job)
@@ -88,10 +100,18 @@ async def run_worker_once(
     for article_id, r in zip(groups, results):
         if isinstance(r, BaseException):
             escaped.append(r)
-            logger.error("semantic jobs for article %s escaped the job handler",
-                         article_id, exc_info=r)
-    if escaped:
-        raise escaped[0]
+            if isinstance(r, asyncio.CancelledError):
+                # A shutdown is not an error. Under an outer cancellation gather
+                # fills EVERY in-flight slot, so ERROR-with-traceback here would
+                # emit one traceback per in-flight article for a normal stop.
+                logger.warning("semantic jobs for article %s were cancelled",
+                               article_id)
+            else:
+                logger.error("semantic jobs for article %s escaped the job handler",
+                             article_id, exc_info=r)
+    # The batch summary below comes BEFORE the escaped exception propagates:
+    # every group has already run to completion, and raising first would drop
+    # the dedup/basis summary and the timing report for the whole batch.
     if jobs:
         logger.info("semantic batch: jobs=%d reference_basis=%s dedup: %s",
                     len(jobs), dict(basis_counts), batch_dedup.summary())
@@ -104,6 +124,8 @@ async def run_worker_once(
         timings = getattr(ingest, "timings", None)
         if timings is not None and timings.by_prompt:
             logger.info("%s", timings.report())
+    if escaped:
+        raise escaped[0]
     return len(jobs)
 
 

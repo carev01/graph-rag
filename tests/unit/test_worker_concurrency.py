@@ -1,9 +1,13 @@
 """The worker fans out over ARTICLE GROUPS, never raw jobs.
 
-`claim_semantic_jobs` has no DISTINCT on article_id (state_store.py:145-147), so
-one batch can legitimately hold an upsert and a later remove for the same article.
-Fanning out over raw jobs could apply them out of order -- tombstoning episodes
-that the upsert then recreates, or the reverse.
+Today the queue cannot produce two jobs for one article in a batch: the
+`ux_semantic_jobs_pending` index is UNIQUE on (article_id) WHERE status='pending'
+(state_store.py:28-29), `enqueue_semantic_job` collapses an upsert-then-remove into
+one row (:129-136), and `claim_semantic_jobs` selects only status='pending'
+(:138-149). The grouping is defence in depth that does not depend on that index
+staying: without it, fanning out over raw jobs could apply an upsert and a later
+remove out of order -- tombstoning episodes that the upsert then recreates, or the
+reverse.
 
 The fake ingest logs a START and an END event per upsert. Start-only logging
 cannot tell overlap from sequence: a slow article's start always precedes a fast
@@ -18,6 +22,7 @@ import logging
 
 import pytest
 
+from graph_extract import usage
 from graph_extract.ingest_driver import IngestArticleResult
 from graph_extract.llm_timing import PromptTimings
 from graph_sync import semantic_worker
@@ -67,6 +72,8 @@ _KW = dict(batch=10, budget=10**9, max_attempts=3, backoff_base=1.0,
 
 
 async def test_two_jobs_for_one_article_stay_in_order():
+    """Pins the grouping contract. The pending-unique index means the queue
+    cannot currently produce this input; the contract must hold if it ever does."""
     # The upsert is slow so that a raw-job fan-out would run the remove while
     # the upsert is still in flight -- exactly the tombstone-before-episodes
     # hazard. Grouping must hold the remove until the upsert has ENDED.
@@ -157,13 +164,103 @@ async def test_a_cancelled_job_does_not_vanish(caplog):
             return await super().ingest_article(article_id)
 
     store = _Store([_job("j1", "cancelled"), _job("j2", "good")])
-    with caplog.at_level(logging.ERROR, logger="graph_sync.semantic_worker"):
+    with caplog.at_level(logging.WARNING, logger="graph_sync.semantic_worker"):
         with pytest.raises(asyncio.CancelledError):
             await run_worker_once(store, _Cancels(log), concurrency=4, **_KW)
     assert store.completed == ["j2"]
     assert store.failed == [], "CancelledError is not a job failure to be retried"
-    assert any("cancelled" in r.getMessage() for r in caplog.records
-               if r.levelno >= logging.ERROR)
+    named = [r for r in caplog.records if "cancelled" in r.getMessage()]
+    assert named, "the cancelled group must be logged naming its article"
+    # A shutdown is not an error: under an outer cancellation every in-flight
+    # slot holds a CancelledError, and ERROR-with-traceback per article is noise.
+    assert [r.levelno for r in named] == [logging.WARNING], (
+        f"CancelledError must log at WARNING, not ERROR; got {[r.levelname for r in named]}")
+    assert all(r.exc_info is None for r in named), "no traceback for a cancellation"
+
+
+async def test_a_batch_with_an_escaped_job_still_logs_its_summary(caplog):
+    """Every group ran to completion, so the batch summary (dedup/basis mix and
+    the timing report) exists -- raising before logging it would throw it away."""
+    log: list[tuple[str, str]] = []
+
+    class _PgDown(_Store):
+        async def fail_semantic_job(self, jid, *a, **k):
+            raise RuntimeError("pg down")
+
+    class _Boom(_Ingest):
+        async def ingest_article(self, article_id):
+            if article_id == "bad":
+                raise ValueError("boom")
+            return await super().ingest_article(article_id)
+
+    store = _PgDown([_job("j1", "bad"), _job("j2", "good")])
+    ingest = _Boom(log)
+    at = ingest.timings.start()
+    ingest.timings.finish("dedupe_edges.resolve_edge", 1800.0, at)
+    with caplog.at_level(logging.INFO, logger="graph_sync.semantic_worker"):
+        with pytest.raises(RuntimeError, match="pg down"):
+            await run_worker_once(store, ingest, concurrency=4, **_KW)
+    assert "semantic batch: jobs=2" in caplog.text, "the batch summary must be emitted"
+    assert "llm timing by prompt" in caplog.text, "and so must the timing report"
+
+
+# --- Each job records ITS OWN tokens, not the batch's -----------------------
+#
+# `record_tokens` accumulates into today's ledger and `today_token_total() <
+# budget` decides whether the bootstrap lane runs at all. A before/after delta
+# on the module-global tally includes every concurrent sibling's spend, so with
+# N in flight the ledger is inflated and the budget gate fails closed. Harmless
+# at concurrency=1; wrong the moment the knob is raised.
+
+
+class _Ledger(_Store):
+    def __init__(self, jobs):
+        super().__init__(jobs)
+        self.recorded: list[int] = []
+
+    async def record_tokens(self, n): self.recorded.append(n)
+
+
+class _Spends(_Ingest):
+    """Spends through the production path (usage.record) with an await between
+    two calls, so two in-flight articles interleave their spend."""
+
+    async def ingest_article(self, article_id):
+        usage.record("llm", prompt=100, completion=0)
+        await asyncio.sleep(0.01)
+        usage.record("llm", prompt=100, completion=0)
+        return IngestArticleResult(article_id=article_id)
+
+
+async def test_concurrent_jobs_record_their_own_tokens_not_the_batch_sum():
+    store = _Ledger([_job("j1", "a1"), _job("j2", "a2")])
+    await run_worker_once(store, _Spends([]), concurrency=4, **_KW)
+    assert sorted(store.recorded) == [200, 200], (
+        f"each job spent 200; a global before/after delta would record a sibling's "
+        f"tokens too; got {store.recorded}")
+
+
+async def test_a_failing_job_still_records_its_tokens():
+    class _BurnThenBoom(_Ingest):
+        async def ingest_article(self, article_id):
+            usage.record("llm", prompt=100, completion=0)
+            raise ValueError("write timeout after extraction")
+
+    store = _Ledger([_job("j1", "a1")])
+    await run_worker_once(store, _BurnThenBoom([]), concurrency=4, **_KW)
+    assert store.failed == ["j1"]
+    assert store.recorded == [100], (
+        f"tokens burned before the failure must reach the ledger; got {store.recorded}")
+
+
+async def test_the_global_tally_still_accumulates_across_jobs():
+    # eval.py and probe.py read the global tally for a whole run; the per-job
+    # scope is a second write, not a move.
+    usage.reset_tally()
+    store = _Ledger([_job("j1", "a1"), _job("j2", "a2")])
+    await run_worker_once(store, _Spends([]), concurrency=4, **_KW)
+    assert usage.get_tally().prompt_tokens == 400
+    assert usage.get_tally().calls == 4
 
 
 # --- The knob must reach run_worker_once through run_worker -----------------

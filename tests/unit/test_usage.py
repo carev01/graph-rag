@@ -45,6 +45,22 @@ def test_tally_responses_api_cached():
     assert usage.get_tally().cached_tokens == 640
 
 
+def test_tally_usage_writes_the_open_scope_and_the_global():
+    # The instrumented client path is `_tally_usage`, not `record` directly; a
+    # scope that only `record` honours would leave the worker's ledger at 0.
+    usage.reset_tally()
+    scoped = UsageTally()
+    token = usage.CURRENT_USAGE_TALLY.set(scoped)
+    try:
+        usage._tally_usage(_resp(1000, 200, cached=768))
+    finally:
+        usage.CURRENT_USAGE_TALLY.reset(token)
+    usage._tally_usage(_resp(10, 1))  # outside the scope: global only
+    assert (scoped.prompt_tokens, scoped.completion_tokens, scoped.cached_tokens) == (1000, 200, 768)
+    assert scoped.calls == 1
+    assert usage.get_tally().prompt_tokens == 1010 and usage.get_tally().calls == 2
+
+
 @pytest.mark.asyncio
 async def test_cost_report_includes_cached_tokens_and_hit_rate():
     usage.reset_tally()

@@ -69,7 +69,7 @@ async def test_worker_reaps_budgets_meters_and_retries(state_store):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("transient")
-            usage.get_tally().add("llm", prompt=100, completion=0)
+            usage.record("llm", prompt=100, completion=0)
 
         async def tombstone_article_episodes(self, aid):
             return 0
@@ -100,7 +100,7 @@ async def test_worker_records_tokens_on_failure(state_store):
         fails on a later step (e.g. a Neo4j write timeout)."""
 
         async def ingest_article(self, aid):
-            usage.get_tally().add("llm", prompt=100, completion=0)
+            usage.record("llm", prompt=100, completion=0)
             raise RuntimeError("write timeout after extraction")
 
         async def tombstone_article_episodes(self, aid):

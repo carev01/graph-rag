@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
@@ -28,6 +29,24 @@ def reset_tally() -> None:
     global _TALLY
     _TALLY = UsageTally()
 
+# A per-scope tally alongside the global one. The global `_TALLY` is what
+# eval.py / probe.py read for a whole run; it cannot attribute spend to one
+# article once articles run concurrently (a before/after delta on it includes
+# every sibling's tokens). asyncio copies the context per task, so a scope set
+# in one article's task is invisible to the others -- the same pattern as
+# CURRENT_DEDUP_STATS in dedup_guard.py.
+CURRENT_USAGE_TALLY: ContextVar[UsageTally | None] = ContextVar(
+    "CURRENT_USAGE_TALLY", default=None)
+
+
+def record(kind: str, *, prompt: int, completion: int, cached: int = 0) -> None:
+    """Dual write: the global tally always, plus the open scope when there is one."""
+    _TALLY.add(kind, prompt=prompt, completion=completion, cached=cached)
+    scoped = CURRENT_USAGE_TALLY.get()
+    if scoped is not None:
+        scoped.add(kind, prompt=prompt, completion=completion, cached=cached)
+
+
 def _tally_usage(resp) -> None:
     u = getattr(resp, "usage", None)
     if u is None:
@@ -42,7 +61,7 @@ def _tally_usage(resp) -> None:
         completion = getattr(u, "output_tokens", 0)
     details = getattr(u, "prompt_tokens_details", None) or getattr(u, "input_tokens_details", None)
     cached = getattr(details, "cached_tokens", 0) if details is not None else 0
-    _TALLY.add("llm", prompt=prompt or 0, completion=completion or 0, cached=cached or 0)
+    record("llm", prompt=prompt or 0, completion=completion or 0, cached=cached or 0)
 
 
 def instrument(async_openai):
