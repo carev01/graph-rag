@@ -41,6 +41,11 @@ def driver(monkeypatch):
         return SimpleNamespace(id=article_id, title=f"Article {article_id}",
                                source_url="https://example.test/a", content_markdown="body",
                                last_updated_at=None, extracted_at="2026-07-12T16:00:17Z",
+                               # Post-2026-09-13 upstream contract. Without it the
+                               # driver correctly warns about falling back to crawl
+                               # ordering, which is a second record in caplog.
+                               content_changed_at="2026-08-01T14:03:11Z",
+                               content_changed_basis="exact",
                                images=[])
 
     async def fake_chunk(*a, **k):

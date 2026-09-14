@@ -16,6 +16,18 @@ class ContentRecord(BaseModel):
     title: str
     source_url: str
     last_updated_at: str | None = None
+    # Added upstream 2026-09-13; optional so a pre-deploy feed still validates
+    # (extra="ignore" hides absent keys, so they must be declared to be captured).
+    #   content_changed_at    -- served markdown became current; the ORDERING AXIS
+    #   content_changed_basis -- exact | lower_bound | first_seen; invalidation is
+    #                            restricted to `exact` (BACKLOG 30)
+    #   source_changed_at     -- the VENDOR's page changed, not a re-render or an
+    #                            enrichment; gates invalidation, never ordering
+    #   last_updated_source   -- vendor_meta | page_markup
+    content_changed_at: str | None = None
+    content_changed_basis: str | None = None
+    source_changed_at: str | None = None
+    last_updated_source: str | None = None
     content_hash: str
     estimated_tokens: int
     parent_chapter: str | None = None

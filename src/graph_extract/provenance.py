@@ -16,7 +16,14 @@ class Provenance:
             return await r.single() is not None
 
     async def link(self, article_id: str, episode_uuid: str, *, chunk_index: int,
-                   heading_path: str, token_count: int, content_hash: str) -> None:
+                   heading_path: str, token_count: int, content_hash: str,
+                   superseded_at: str | None = None) -> None:
+        """`superseded_at` dates the DEATH of the edge this one replaces: the old
+        episode stopped being current the moment the replacing content became
+        current, so the caller passes the new content's reference time
+        (`content_changed_at`), never `now()`. Using the write clock here would
+        reintroduce one layer down the schedule artefact that made crawl-ordered
+        `valid_at` meaningless. The staleness sweep reads it to date an expiry."""
         async with self._driver.session() as s:
             await s.run(
                 # The old edge is FLAGGED, never deleted: its existence is what makes
@@ -28,11 +35,16 @@ class Provenance:
                 "MATCH (e:Episodic {uuid:$u}) "
                 "OPTIONAL MATCH (a)-[old:HAS_EPISODE {chunk_index:$i}]->(oldE:Episodic) "
                 "WHERE oldE.uuid <> $u "
-                "SET old.superseded = true "
+                # coalesce: an episode dies ONCE. Re-stamping an already-superseded
+                # edge on a later run would walk its death date forward and
+                # silently re-date every expiry the sweep derives from it.
+                "SET old.superseded = true, "
+                "    old.superseded_at = coalesce(old.superseded_at, $sat) "
                 "WITH DISTINCT a, e "
                 "MERGE (a)-[r:HAS_EPISODE {chunk_index:$i}]->(e) "
                 "SET r.heading_path=$hp, r.token_count=$tc, r.content_hash=$h, "
                 "    r.superseded = false",
+                sat=superseded_at,
                 a=article_id, u=episode_uuid, i=chunk_index, hp=heading_path,
                 tc=token_count, h=content_hash)
 
