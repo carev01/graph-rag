@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from graph_sync.config import get_settings
 from graph_extract.config import ExtractSettings
 
@@ -70,3 +73,26 @@ def test_theme_refresh_tau_default():
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                         neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
     assert s.theme_refresh_jaccard_tau == 0.5
+
+
+def test_warmup_default_is_eight():
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x",
+                        docext_read_key="k", neo4j_uri="bolt://x",
+                        neo4j_user="u", neo4j_password="p")
+    assert s.ingest_warmup_articles == 8
+
+
+def test_warmup_zero_is_accepted_as_off():
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x",
+                        docext_read_key="k", neo4j_uri="bolt://x",
+                        neo4j_user="u", neo4j_password="p",
+                        ingest_warmup_articles=0)
+    assert s.ingest_warmup_articles == 0
+
+
+def test_a_negative_warmup_is_rejected_not_clamped():
+    with pytest.raises(ValidationError):
+        ExtractSettings(_env_file=None, docext_base_url="http://x",
+                        docext_read_key="k", neo4j_uri="bolt://x",
+                        neo4j_user="u", neo4j_password="p",
+                        ingest_warmup_articles=-1)

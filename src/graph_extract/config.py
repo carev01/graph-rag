@@ -126,6 +126,17 @@ class ExtractSettings(BaseSettings):
     # A/B in the design spec's section 8: re-ingest the same 83 pilot articles and
     # compare entity count against the sequential baseline of 999.
     ingest_article_concurrency: int = 1
+    # Articles at the start of a source that run one at a time, with nothing
+    # else in flight, before the fan-out begins. 0 = off.
+    #
+    # Measured (docs/superpowers/ab-concurrency-2026-09-14.md): at N=4 the
+    # pilot produced 30 duplicate entities, all exact-name, concentrated on hub
+    # entities (mean article span 7.6 vs 2.4). Duplicate risk for an entity in
+    # k articles scales with k-1, and per source by sort_order the first 8
+    # articles carry 79.5% of that risk weight -- documentation sources open
+    # with overview pages that name the product and its core concepts. The knee
+    # is at 4 (71.3%); 12 buys 3 more points for 50% more sequential articles.
+    ingest_warmup_articles: int = 8
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
     judge_base_url: str = ""
@@ -255,6 +266,15 @@ class ExtractSettings(BaseSettings):
         # that from them.
         if v < 1:
             raise ValueError(f"ingest_article_concurrency must be >= 1, got {v}")
+        return v
+
+    @field_validator("ingest_warmup_articles")
+    @classmethod
+    def _not_negative(cls, v: int) -> int:
+        # Rejected, not clamped, for the same reason as its sibling: a -1 in
+        # the environment means someone believes they configured something.
+        if v < 0:
+            raise ValueError(f"ingest_warmup_articles must be >= 0, got {v}")
         return v
 
 
