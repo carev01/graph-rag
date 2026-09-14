@@ -224,6 +224,11 @@ def worker(
                 backoff_base=settings.semantic_backoff_base_seconds,
                 backoff_cap=settings.semantic_backoff_cap_seconds,
                 lease=settings.semantic_reaper_lease_seconds,
+                # The fan-out knob lives on ExtractSettings, not graph_sync's
+                # Settings: it is the same object `_build_worker_deps` gave the
+                # driver (get_extract_settings is lru_cached), so the worker and
+                # the driver path read one value.
+                concurrency=get_extract_settings().ingest_article_concurrency,
             )
         finally:
             await store.close()

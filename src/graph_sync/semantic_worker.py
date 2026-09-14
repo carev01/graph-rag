@@ -110,7 +110,7 @@ async def run_worker_once(
 async def run_worker(
     store, ingest, *, batch: int, poll_seconds: float, stop_event: asyncio.Event,
     budget: int, max_attempts: int, backoff_base: float, backoff_cap: float,
-    lease: float, max_batches: int | None = None,
+    lease: float, max_batches: int | None = None, concurrency: int = 1,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
 
@@ -126,7 +126,8 @@ async def run_worker(
     while not stop_event.is_set():
         n = await run_worker_once(
             store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
-            backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease)
+            backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
+            concurrency=concurrency)
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

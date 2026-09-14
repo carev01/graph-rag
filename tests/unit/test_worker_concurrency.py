@@ -20,7 +20,8 @@ import pytest
 
 from graph_extract.ingest_driver import IngestArticleResult
 from graph_extract.llm_timing import PromptTimings
-from graph_sync.semantic_worker import run_worker_once
+from graph_sync import semantic_worker
+from graph_sync.semantic_worker import run_worker, run_worker_once
 
 pytestmark = pytest.mark.asyncio
 
@@ -163,3 +164,26 @@ async def test_a_cancelled_job_does_not_vanish(caplog):
     assert store.failed == [], "CancelledError is not a job failure to be retried"
     assert any("cancelled" in r.getMessage() for r in caplog.records
                if r.levelno >= logging.ERROR)
+
+
+# --- The knob must reach run_worker_once through run_worker -----------------
+#
+# `run_worker` is the production loop; `run_worker_once` is what fans out. A
+# `concurrency` that `run_worker` accepts but does not forward leaves the
+# fan-out unreachable from the cli while every unit test above still passes.
+# So this asserts the value `run_worker_once` RECEIVES, not the signature.
+
+
+async def test_run_worker_forwards_concurrency_to_run_worker_once(monkeypatch):
+    received: dict = {}
+
+    async def _fake_once(store, ingest, **kw):
+        received.update(kw)
+        return 0
+
+    monkeypatch.setattr(semantic_worker, "run_worker_once", _fake_once)
+    await run_worker(
+        _Store([]), None, poll_seconds=0.01, stop_event=asyncio.Event(),
+        max_batches=1, concurrency=7, **_KW)
+    assert received.get("concurrency") == 7, (
+        f"run_worker_once must observe the concurrency run_worker was given; got {received}")
