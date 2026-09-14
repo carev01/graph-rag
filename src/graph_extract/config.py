@@ -102,6 +102,19 @@ class ExtractSettings(BaseSettings):
     # Scope: off suspends the scan and CROSS-PAIR invalidation. Same-pair
     # contradiction via the duplicate candidates stays live either way (BACKLOG 33).
     ingest_detect_contradictions: bool = False
+    # Derive a fact's `valid_at` from its episode's reference time
+    # (`content_changed_at`) instead of graphiti's per-fact timestamp LLM call.
+    #
+    # DEFAULT ON. Measured on the 2026-09-14 pilot re-ingest: the LLM call dated
+    # only 817 of 3,590 facts (23%), cost 21.7% of all LLM time (5,476 s of a
+    # 6.9 h run), and produced semantically mixed dates -- an in-world date from
+    # the fact text on about half, the reference time on the rest -- which is the
+    # mixture that caused this project's phantom invalidations.
+    #
+    # The cost of the switch: in-text END dates ("deprecated in 2024") are no
+    # longer extracted into `invalid_at`. Accepted, because invalid_at should
+    # record evidence of supersession, not a model's reading of prose.
+    valid_at_from_content_changed: bool = True
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
     judge_base_url: str = ""
