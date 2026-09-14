@@ -37,6 +37,7 @@ from graph_extract.probe import DEFAULT_MODES, run_probe
 from graph_extract.provenance import Provenance
 from graph_extract.reconcile import reconcile_same_as
 from graph_extract.staleness_sweep import sweep_stale_facts
+from graph_extract.warmup import WarmupGate
 from docext.client import make_docext_client
 
 app = typer.Typer()
@@ -114,7 +115,14 @@ async def _build_ingest_driver(
                 "cheap", cheap_graphiti,
                 EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,
                 settings.cheap_max_chunk_tokens)
-        ingest = IngestDriver(settings, strong_tier, cheap_tier, docext, provenance, driver)
+        # ingest_warmup_articles=0 is OFF: no gate at all, so `ingest_source`
+        # takes the byte-for-byte pre-warm-up fan-out (a gate at threshold 0
+        # would answer False every time, which is equivalent but not identical).
+        warmup_gate = (
+            WarmupGate(driver, settings.group_id, settings.ingest_warmup_articles)
+            if settings.ingest_warmup_articles > 0 else None)
+        ingest = IngestDriver(settings, strong_tier, cheap_tier, docext, provenance, driver,
+                              warmup_gate=warmup_gate)
         ingest.timings = timings          # BACKLOG 31: reported by the ingest command
     except Exception:
         for closer in (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Awaitable, Callable
 
 from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
@@ -20,6 +21,7 @@ async def run_worker_once(
     store, ingest, *, batch: int, budget: int, max_attempts: int,
     backoff_base: float, backoff_cap: float, lease: float,
     concurrency: int = 1,
+    is_cold: Callable[[str], Awaitable[bool]] | None = None,
 ) -> int:
     # Everything the ingest driver measures is per-article and was being DISCARDED
     # here: `ingest_article` returns dedup counters, the reference-time basis and
@@ -107,8 +109,23 @@ async def run_worker_once(
     groups: dict[str, list] = {}
     for job in jobs:
         groups.setdefault(job["article_id"], []).append(job)
+    # The warm-up barrier (concurrent_ingest / warmup). `is_cold` is per
+    # ARTICLE -- WarmupGate.is_cold_article resolves the article to its source
+    # -- and a group is one article, so it is asked once per group. An
+    # Exception from the predicate (Neo4j unreachable for the lookup) lands in
+    # that group's slot like an escape: logged naming the article, its jobs
+    # left in_progress for the reaper, the first one re-raised after the batch.
+    group_is_cold: Callable[[list], Awaitable[bool]] | None = None
+    if is_cold is not None:
+        async def _group_is_cold(group: list) -> bool:
+            # Tombstoning extracts nothing, so a remove-only group cannot race
+            # over an entity and never needs the barrier.
+            if all(j["op"] == "remove" for j in group):
+                return False
+            return await is_cold(group[0]["article_id"])
+        group_is_cold = _group_is_cold
     results = await run_concurrently(
-        list(groups.values()), _run_group, limit=concurrency)
+        list(groups.values()), _run_group, limit=concurrency, is_cold=group_is_cold)
     # Anything in a result slot escaped the per-job handler (see the flag
     # above). The sequential loop propagated those out of here; discarding the
     # slots would make a database outage vanish with no log and no failed job.
@@ -153,6 +170,7 @@ async def run_worker(
     store, ingest, *, batch: int, poll_seconds: float, stop_event: asyncio.Event,
     budget: int, max_attempts: int, backoff_base: float, backoff_cap: float,
     lease: float, max_batches: int | None = None, concurrency: int = 1,
+    is_cold: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
 
@@ -169,7 +187,7 @@ async def run_worker(
         n = await run_worker_once(
             store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
             backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
-            concurrency=concurrency)
+            concurrency=concurrency, is_cold=is_cold)
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

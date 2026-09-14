@@ -312,3 +312,67 @@ async def test_run_worker_forwards_concurrency_to_run_worker_once(monkeypatch):
         max_batches=1, concurrency=7, **_KW)
     assert received.get("concurrency") == 7, (
         f"run_worker_once must observe the concurrency run_worker was given; got {received}")
+
+
+async def test_run_worker_forwards_is_cold_to_run_worker_once(monkeypatch):
+    """Same shape as the concurrency test, same reason: an `is_cold` that
+    `run_worker` accepts but does not forward leaves the warm-up unreachable
+    from the cli while every `run_worker_once` test still passes."""
+    received: dict = {}
+
+    async def _fake_once(store, ingest, **kw):
+        received.update(kw)
+        return 0
+
+    async def _is_cold(article_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(semantic_worker, "run_worker_once", _fake_once)
+    await run_worker(
+        _Store([]), None, poll_seconds=0.01, stop_event=asyncio.Event(),
+        max_batches=1, is_cold=_is_cold, **_KW)
+    assert received.get("is_cold") is _is_cold, (
+        f"run_worker_once must observe the is_cold run_worker was given; got {received}")
+
+
+# --- The warm-up barrier, per article group ---------------------------------
+#
+# The predicate is per ARTICLE (WarmupGate.is_cold_article resolves the article
+# to its source); the worker wraps it per group. Asserted on FINISH-before-START,
+# never on start order: a slow group's start precedes a later group's start
+# under every implementation, so start order cannot tell "ran alone" from
+# "ran first".
+
+
+async def test_a_cold_group_runs_alone_and_warm_groups_overlap():
+    log: list[str] = []
+
+    async def is_cold(article_id: str) -> bool:
+        return article_id == "cold"
+
+    class _Timed(_Ingest):
+        async def ingest_article(self, article_id):
+            log.append(f"start-{article_id}")
+            await asyncio.sleep(0.04 if article_id == "slow" else 0.01)
+            log.append(f"end-{article_id}")
+            return IngestArticleResult(article_id=article_id)
+
+    store = _Store([_job("j1", "slow"), _job("j2", "cold"), _job("j3", "warm")])
+    await run_worker_once(store, _Timed(log), concurrency=4, is_cold=is_cold, **_KW)
+    assert log.index("end-slow") < log.index("start-cold"), log
+    assert log.index("end-cold") < log.index("start-warm"), log
+    assert sorted(store.completed) == ["j1", "j2", "j3"]
+
+
+async def test_a_remove_only_group_is_never_cold():
+    """Tombstoning extracts nothing, so there is no entity to race over."""
+    asked: list[str] = []
+
+    async def is_cold(article_id: str) -> bool:
+        asked.append(article_id)
+        return True
+
+    store = _Store([_job("j1", "a1", op="remove")])
+    await run_worker_once(store, _Ingest([]), concurrency=4, is_cold=is_cold, **_KW)
+    assert asked == [], "a remove-only group must not consult the predicate"
+    assert store.completed == ["j1"]

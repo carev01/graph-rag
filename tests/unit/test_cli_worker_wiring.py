@@ -1,14 +1,19 @@
 """The `worker` cli command passes `ExtractSettings.ingest_article_concurrency`
-to `run_worker`. Every constructor is stubbed; nothing connects.
+and a warm-up predicate built from `ExtractSettings.ingest_warmup_articles` to
+`run_worker`. Every constructor is stubbed; nothing connects.
 
-The knob lives on `ExtractSettings` (the object `_build_worker_deps` gives the
-driver), not on graph_sync's `Settings`, so the cli reads it from
-`get_extract_settings()`. A distinctive value is used: the parameter defaults
-to 1, so a test built on 1 would pass with the argument missing altogether.
+Both knobs live on `ExtractSettings` (the object `_build_worker_deps` gives the
+driver), not on graph_sync's `Settings`, so the cli reads them from
+`get_extract_settings()`. Distinctive values are used: `concurrency` defaults
+to 1 and the warm-up threshold to 8, so a test built on the default would pass
+with the argument missing or the value hard-coded.
 """
 from __future__ import annotations
 
+import pytest
+
 from graph_extract.config import ExtractSettings
+from graph_extract.warmup import WarmupGate
 from graph_sync import cli
 from graph_sync.config import Settings
 
@@ -59,3 +64,42 @@ def test_worker_command_passes_ingest_article_concurrency_to_run_worker(monkeypa
     assert received.get("concurrency") == 7, (
         f"run_worker must receive ExtractSettings.ingest_article_concurrency; got {received}")
     assert received.get("max_batches") == 1
+
+
+@pytest.mark.parametrize("threshold", [5, 0])
+def test_worker_command_passes_a_warmup_predicate_iff_the_threshold_is_positive(
+        monkeypatch, threshold):
+    """`ingest_warmup_articles > 0` -> `is_cold` is `WarmupGate.is_cold_article`,
+    bound to a gate built on THIS threshold, THIS group and the neo4j driver
+    `_build_worker_deps` returned. `0` (off) -> `is_cold=None`, so the fan-out
+    takes the byte-for-byte pre-warm-up path rather than a predicate that
+    always answers False."""
+    received: dict = {}
+    neo4j_driver = _Closable()
+
+    async def _deps(settings):
+        return _Closable(), _Ingest(), _Closable(), _Closable(), neo4j_driver
+
+    async def _fake_run_worker(store, ingest, **kw):
+        received.update(kw)
+
+    monkeypatch.setattr(cli, "get_settings", _sync_settings)
+    monkeypatch.setattr(cli, "get_extract_settings",
+                        lambda: _extract_settings(ingest_warmup_articles=threshold,
+                                                  group_id="g-wiring"))
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+
+    cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    assert "is_cold" in received, f"run_worker must receive is_cold; got {received}"
+    is_cold = received["is_cold"]
+    if threshold == 0:
+        assert is_cold is None, "threshold 0 is OFF: no predicate, not an always-False one"
+        return
+    assert is_cold is not None
+    assert is_cold.__func__ is WarmupGate.is_cold_article, "the worker path is per ARTICLE"
+    gate = is_cold.__self__
+    assert gate._threshold == threshold, "the knob must reach the gate, not a hard-coded 8"
+    assert gate._group_id == "g-wiring"
+    assert gate._driver is neo4j_driver, "the gate counts on the neo4j driver, not the store"

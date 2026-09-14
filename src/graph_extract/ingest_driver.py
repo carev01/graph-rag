@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import httpx
@@ -13,6 +14,7 @@ from graph_extract.dedup_guard import CURRENT_DEDUP_STATS, DedupIndexStats
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.graphiti_client import add_text_episode, ExtractionTier
 from graph_extract.provenance import Provenance
+from graph_extract.warmup import WarmupGate
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,8 @@ def _reference_time(art) -> tuple[datetime, str]:
 class IngestDriver:
     def __init__(self, settings: ExtractSettings, strong_tier: ExtractionTier,
                  cheap_tier: ExtractionTier | None, docext: httpx.AsyncClient,
-                 provenance: Provenance, driver: AsyncDriver):
+                 provenance: Provenance, driver: AsyncDriver,
+                 warmup_gate: WarmupGate | None = None):
         self._s = settings
         self._strong = strong_tier
         self._cheap = cheap_tier
@@ -99,6 +102,12 @@ class IngestDriver:
         # Set by the CLI to the PromptTimings shared across both tiers' guards, so
         # `ingest` can report where an episode's wall time went (BACKLOG 31).
         self.timings = PromptTimings()
+        # The warm-up barrier `ingest_source` applies (see concurrent_ingest and
+        # warmup for the measured rationale). None = no barrier, which is also
+        # what `ingest_warmup_articles=0` builds: the fan-out then takes the
+        # byte-for-byte pre-warm-up path rather than a predicate that always
+        # answers False.
+        self.warmup_gate = warmup_gate
 
     def _tier_for(self, markdown: str) -> ExtractionTier:
         if self._cheap is None:
@@ -189,8 +198,19 @@ class IngestDriver:
         if limit is not None:
             ids = ids[:limit]
         out = IngestResult()
+        is_cold: Callable[[str], Awaitable[bool]] | None = None
+        gate = self.warmup_gate
+        if gate is not None:
+            async def _source_is_cold(_article_id: str) -> bool:
+                # Warmth is a property of the SOURCE, so every article of this
+                # call asks the same question; the gate caches the warm answer.
+                # "Warm" is "at least `threshold` articles have a live episode"
+                # as the graph stands when asked -- not "that many finished".
+                return await gate.is_cold_source(source_id)
+            is_cold = _source_is_cold
         results = await run_concurrently(
-            ids, self.ingest_article, limit=self._s.ingest_article_concurrency)
+            ids, self.ingest_article,
+            limit=self._s.ingest_article_concurrency, is_cold=is_cold)
         failures: list[BaseException] = []
         for article_id, r in zip(ids, results):
             if isinstance(r, BaseException):
@@ -202,15 +222,25 @@ class IngestDriver:
             out.episodes_skipped += r.episodes_skipped
             out.dedup.merge(r.dedup)
         if failures:
-            # Raised AFTER the batch rather than mid-loop. Today's code propagates
-            # immediately and silently abandons every article after the failure;
-            # this attempts every article (gather creates all the tasks up front,
-            # whatever the limit) and still surfaces the error. Deliberate
-            # change, pinned by a test. Every failure is logged
-            # above (naming its article) so a multi-failure batch is fully visible
-            # in the logs even though only the first one propagates -- raising all
-            # of them isn't an option, so this is the compromise that keeps the
-            # rest from vanishing silently.
+            # Raised AFTER the batch rather than mid-loop. The pre-fan-out code
+            # propagated immediately and silently abandoned every article after
+            # the failure; this attempts every article and still surfaces the
+            # error. Deliberate change, pinned by a test. "Every article" holds
+            # because a worker exception lands in its own slot instead of
+            # cancelling the batch: with no gate, gather creates all the tasks
+            # up front, whatever the limit; with a gate, tasks are created up
+            # front only BETWEEN cold boundaries (a cold article drains what is
+            # in flight, runs alone, then the fan-out resumes). The one thing
+            # that does abandon the remaining articles is a BaseException
+            # escaping the predicate (an outer cancellation) -- it propagates
+            # out of run_concurrently after every launched task has been
+            # cancelled and awaited, and never reaches this loop. A plain
+            # Exception from the predicate lands in its article's slot and is
+            # handled here like any other failure. Every failure is logged
+            # above (naming its article) so a multi-failure batch is fully
+            # visible in the logs even though only the first one propagates --
+            # raising all of them isn't an option, so this is the compromise
+            # that keeps the rest from vanishing silently.
             raise failures[0]
         return out
 

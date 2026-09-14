@@ -23,6 +23,7 @@ def _settings(**kw) -> ExtractSettings:
 def _driver(settings, results):
     drv = IngestDriver.__new__(IngestDriver)
     drv._s = settings
+    drv.warmup_gate = None
     drv._article_ids = list(results)
     drv._results = results
 
@@ -34,6 +35,23 @@ def _driver(settings, results):
 
     drv.list_article_ids = _list
     drv.ingest_article = _ingest
+    return drv
+
+
+def _driver_with(ingest_article, *, concurrency: int, gate, n: int = 4):
+    """A driver over a source of articles a1..a{n} whose `ingest_article` is the
+    given coroutine function (it receives the article id) and whose warm-up gate
+    is `gate` (None = no barrier)."""
+    drv = IngestDriver.__new__(IngestDriver)
+    drv._s = _settings(ingest_article_concurrency=concurrency)
+    drv.warmup_gate = gate
+    ids = [f"a{i}" for i in range(1, n + 1)]
+
+    async def _list(source_id, *a, **k):
+        return list(ids)
+
+    drv.list_article_ids = _list
+    drv.ingest_article = ingest_article
     return drv
 
 
@@ -214,6 +232,7 @@ async def test_concurrent_articles_keep_their_own_dedup_attribution():
 
     drv = IngestDriver.__new__(IngestDriver)
     drv._s = _settings(ingest_article_concurrency=2)
+    drv.warmup_gate = None
     drv._ingest_article = _fake_ingest
 
     async def _list(source_id, *a, **k):
@@ -225,3 +244,77 @@ async def test_concurrent_articles_keep_their_own_dedup_attribution():
     assert seen["b"].invalid_calls == 3, f"b saw a sibling's records: {seen['b'].summary()}"
     assert guard.unscoped.invalid_calls == 0, "nothing may fall through to the unscoped sink"
     assert out.dedup.invalid_calls == 5
+
+
+# --- The warm-up barrier -----------------------------------------------------
+#
+# Warmth is a property of the SOURCE, so every article of one `ingest_source`
+# call asks the gate the same question. "Warm" means the source has at least
+# `ingest_warmup_articles` articles with at least one live episode -- NOT that
+# that many articles have finished: the count is over `HAS_EPISODE` edges as the
+# graph currently stands.
+
+
+async def test_the_first_articles_of_a_cold_source_do_not_overlap():
+    """The opening articles run one at a time; once the source is warm the rest
+    overlap. Asserted on FINISH-before-START, not on dispatch order -- a
+    sequential implementation satisfies dispatch order identically.
+
+    Two details of the fake gate are load-bearing, both modelled on the real one:
+    an article counts as live from its FIRST episode (`live` is bumped at start,
+    not at end -- `count(DISTINCT a)` over HAS_EPISODE is not a count of finished
+    articles), and the predicate yields once (the real one awaits a Neo4j
+    round-trip, during which a launched task progresses). With the count bumped
+    at the end instead, a barrier that launches the cold article and forgets to
+    wait for it is invisible: the next article's predicate under-counts, calls
+    itself cold, and its own pre-launch drain repairs the missing wait -- the
+    correct and the broken log coincide. Modelled faithfully, that same mutant
+    lets a2 overlap a still-extracting a1 and the first assertion catches it."""
+    log: list[str] = []
+    live = {"n": 0}
+
+    class _Gate:
+        async def is_cold_source(self, source_id: str) -> bool:
+            await asyncio.sleep(0)         # the count query's round-trip
+            return live["n"] < 2
+
+    async def fake_ingest_article(article_id: str):
+        log.append(f"start-{article_id}")
+        live["n"] += 1                     # first episode linked: now "live"
+        await asyncio.sleep(0.03)          # ...the rest of the article extracts
+        log.append(f"end-{article_id}")
+        return IngestArticleResult(article_id=article_id)
+
+    driver = _driver_with(fake_ingest_article, concurrency=4, gate=_Gate())
+    await driver.ingest_source("s1")
+
+    # a1 and a2 are cold: each finished before the next started
+    assert log.index("end-a1") < log.index("start-a2")
+    assert log.index("end-a2") < log.index("start-a3")
+    # a3 and a4 are warm: they overlap
+    assert log.index("start-a4") < log.index("end-a3")
+
+
+async def test_warmup_is_inert_at_concurrency_one():
+    """THE test that justifies shipping ingest_warmup_articles defaulted to 8.
+    It must assert on ORDER, never on counts. If it is ever weakened, the
+    default loses its justification (spec 3.6)."""
+    orders = {}
+    for threshold in (0, 8):
+        log: list[str] = []
+
+        class _Gate:
+            async def is_cold_source(self, source_id: str) -> bool:
+                return threshold > 0
+
+        async def fake_ingest_article(article_id: str):
+            log.append(f"start-{article_id}")
+            await asyncio.sleep(0.01)
+            log.append(f"end-{article_id}")
+            return IngestArticleResult(article_id=article_id)
+
+        driver = _driver_with(fake_ingest_article, concurrency=1, gate=_Gate())
+        await driver.ingest_source("s1")
+        orders[threshold] = list(log)
+    assert orders[0] == orders[8], (
+        f"warm-up must be inert at concurrency 1; got {orders}")

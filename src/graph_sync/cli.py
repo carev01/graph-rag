@@ -14,6 +14,7 @@ from neo4j import AsyncDriver
 from graph_extract.cli import _build_ingest_driver
 from graph_extract.config import get_extract_settings
 from graph_extract.ingest_driver import IngestDriver
+from graph_extract.warmup import WarmupGate
 from graph_sync.catalog import Catalog
 from graph_sync.config import Settings, get_settings
 from graph_sync.delta_client import make_client
@@ -216,6 +217,19 @@ def worker(
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, stop_event.set)
+            # The fan-out and warm-up knobs live on ExtractSettings, not
+            # graph_sync's Settings: it is the same object `_build_worker_deps`
+            # gave the driver (get_extract_settings is lru_cached), so the
+            # worker and the driver path read one value.
+            extract = get_extract_settings()
+            # ingest_warmup_articles=0 is OFF: no predicate at all, so the
+            # fan-out takes the byte-for-byte pre-warm-up path. The worker's
+            # predicate is per ARTICLE (a claimed batch spans sources and has
+            # no notion of a start); the gate resolves each to its source.
+            is_cold = (
+                WarmupGate(driver, extract.group_id, extract.ingest_warmup_articles)
+                .is_cold_article
+                if extract.ingest_warmup_articles > 0 else None)
             await run_worker(
                 store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event,
                 max_batches=max_batches,
@@ -224,11 +238,8 @@ def worker(
                 backoff_base=settings.semantic_backoff_base_seconds,
                 backoff_cap=settings.semantic_backoff_cap_seconds,
                 lease=settings.semantic_reaper_lease_seconds,
-                # The fan-out knob lives on ExtractSettings, not graph_sync's
-                # Settings: it is the same object `_build_worker_deps` gave the
-                # driver (get_extract_settings is lru_cached), so the worker and
-                # the driver path read one value.
-                concurrency=get_extract_settings().ingest_article_concurrency,
+                concurrency=extract.ingest_article_concurrency,
+                is_cold=is_cold,
             )
         finally:
             await store.close()
