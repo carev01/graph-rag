@@ -18,10 +18,18 @@ test pins the collected order itself.
 
 The apply half (second section) is destructive, so a count is never enough:
 the conservation test compares every edge's FULL property map keyed by uuid
-before and after, the foreign-edge test's loser carries edges that steps 1-5
+before and after; the foreign-edge test's loser carries edges that steps 1-5
 move BEFORE step 6 refuses (so an auto-commit mutant leaves a visibly
-half-rewired group), and the other-group test gives the other group the
-SAME uuids so a `MATCH` that dropped `group_id` has something to hit.
+half-rewired group) and one foreign edge in EACH direction (so a guard that
+only looked outward would miss the incoming one); the other-group test gives
+the other group the SAME uuids and one edge of every shape steps 1-5 match
+(outgoing fact, incoming fact, MENTIONS, IN_COMMUNITY, SAME_AS), so a `MATCH`
+in any of steps 0-7 that dropped `group_id` has something to hit -- steps 1-5
+would move the other group's edge, step 0 would find two nodes per uuid,
+step 6 would meet the other loser's edges, step 7 would stamp the other
+survivor; and the three-member tests seed the production shape, because a
+fact between two losers and a label disagreement between two losers do not
+exist at two members.
 """
 
 import json
@@ -404,13 +412,16 @@ async def _edge_snapshot(driver):
 
 
 async def _snapshot_group(driver, group_id):
-    """`_snapshot` restricted to one group's nodes and the edges among them."""
+    """`_snapshot` restricted to one group's nodes and every edge that touches
+    one of them. "Touches", not "among": a structural `:Product` carries no
+    `group_id`, so its `SAME_AS` edge into the group is only seen this way."""
     nodes = await driver.execute_query(
         "MATCH (n {group_id:$g}) RETURN elementId(n) AS id, labels(n) AS labels, "
         "properties(n) AS props", g=group_id)
     rels = await driver.execute_query(
-        "MATCH (a {group_id:$g})-[r]->(b {group_id:$g}) RETURN elementId(a) AS a, type(r) AS t, "
-        "properties(r) AS props, elementId(b) AS b", g=group_id)
+        "MATCH (a)-[r]->(b) WHERE a.group_id = $g OR b.group_id = $g "
+        "RETURN elementId(a) AS a, type(r) AS t, properties(r) AS props, elementId(b) AS b",
+        g=group_id)
     def rows(result):
         return sorted(json.dumps(dict(r), sort_keys=True, default=str) for r in result.records)
     return {"nodes": rows(nodes), "rels": rows(rels)}
@@ -465,12 +476,20 @@ async def test_a_foreign_edge_type_aborts_the_group_and_stops_the_run(neo4j_driv
 
     `degree=2` is one step past the brief: the loser must carry edges that
     steps 1-5 move BEFORE step 6 refuses, otherwise "rolls back whole" is
-    indistinguishable from "auto-committed every step and then stopped"."""
+    indistinguishable from "auto-committed every step and then stopped".
+
+    One foreign edge in EACH direction, and the abort must name both. The
+    realistic unenumerated type is incoming -- graphiti's community membership
+    is `(:Community)-[:HAS_MEMBER]->(:Entity)` -- and a guard that only looked
+    outward would miss `BAR`: the plain `DELETE` would still refuse, but with
+    Neo4j's constraint error instead of the type's name, which is exactly the
+    degradation the guard exists to prevent."""
     await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=2, degree=2)
     await neo4j_driver.execute_query(
-        "MATCH (l:Entity {uuid:$l}) CREATE (l)-[:FOO]->(:Thing)", l=_LOSER)
+        "MATCH (l:Entity {uuid:$l}) CREATE (l)-[:FOO]->(:Thing) CREATE (:Thing)-[:BAR]->(l)",
+        l=_LOSER)
     before = await _snapshot(neo4j_driver)
-    with pytest.raises(Exception, match="FOO"):
+    with pytest.raises(MergeAborted, match=r"\['BAR', 'FOO'\]"):
         await apply_merges(neo4j_driver, "backup-docs")
     assert await _snapshot(neo4j_driver) == before, "the group must roll back whole"
 
@@ -687,17 +706,31 @@ async def test_the_survivor_rule_holds_at_apply(neo4j_driver):
 
 
 async def test_the_same_name_in_another_group_is_untouched(neo4j_driver):
-    """Invariant #4 scoping: the other group holds the SAME names AND the
-    SAME uuids, so any `MATCH` that dropped `group_id` has something to hit
-    -- and its snapshot must be byte-identical afterwards."""
+    """Invariant #4 scoping: the other group holds the SAME names AND the SAME
+    uuids, and its loser carries one edge of every shape steps 1-5 match -- an
+    outgoing fact, an incoming fact, a MENTIONS from an episode, an
+    IN_COMMUNITY, a SAME_AS from a structural product -- so a `MATCH` in any
+    step that dropped `group_id` has something to hit: steps 1-5 would move
+    the other group's edge onto this group's survivor, step 0 would find two
+    nodes per uuid and abort, step 6's guard would meet the other loser's
+    edges and abort, its delete would be refused, and step 7 would stamp the
+    other survivor. Every one of those was run as a mutant against this
+    fixture and each is killed. The other group's snapshot (nodes and every
+    edge touching them) must be byte-identical afterwards."""
     await _seed_realistic_group(neo4j_driver)
     for uuid, name in ((_S, "AWS Backup"), (_LOSER, "AWS Backup"), (_X, _X)):
         await _seed(neo4j_driver, uuid=uuid, name=name, group_id="other")
     await neo4j_driver.execute_query(
         "MATCH (l:Entity {uuid:$l, group_id:'other'}), (x:Entity {uuid:$x, group_id:'other'}) "
-        "CREATE (l)-[:RELATES_TO {uuid:'other-f-lx', group_id:'other', fact:'o'}]->(x)",
+        "CREATE (l)-[:RELATES_TO {uuid:'other-f-lx', group_id:'other', fact:'o'}]->(x) "
+        "CREATE (x)-[:RELATES_TO {uuid:'other-f-xl', group_id:'other', fact:'o'}]->(l) "
+        "CREATE (:Episodic {uuid:'other-ep', group_id:'other', entity_edges:['other-f-lx']})"
+        "-[:MENTIONS {uuid:'other-ep->l', group_id:'other'}]->(l) "
+        "CREATE (l)-[:IN_COMMUNITY]->(:Community {uuid:'other-c', group_id:'other', stale:false}) "
+        "CREATE (:Product {id:'other-p', name:'other-p'})-[:SAME_AS]->(l)",
         l=_LOSER, x=_X)
     other_before = await _snapshot_group(neo4j_driver, "other")
+    assert len(other_before["rels"]) == 5, "the fixture must hold one edge per step 1-5 pattern"
     res = await apply_merges(neo4j_driver, GROUP)
     assert res["totals"]["merged"] == 1
     assert await _snapshot_group(neo4j_driver, "other") == other_before
@@ -753,3 +786,125 @@ async def test_merge_group_refuses_a_plan_whose_survivor_vanished(neo4j_driver):
     with pytest.raises(MergeAborted, match=_S):
         await merge_group(neo4j_driver, GROUP, group)
     assert await _snapshot(neo4j_driver) == before
+
+
+# --- the production shape: three members --------------------------------------
+# The live graph's duplicates are `AWS Backup` x3, `Amazon EC2` x3, `Azure
+# Backup` x3. Two things exist only from three members up: a fact BETWEEN two
+# losers (relocated once per loser), and two losers whose labels disagree.
+
+_L1 = "AWS Backup-1"
+_L2 = "AWS Backup-2"
+
+
+async def _seed_three_member_group(driver):
+    """S, L1, L2 (survivor order by `created_at`) and an outside node X, with
+    a fact in every direction the per-loser loop must handle:
+
+        S->X  L1->X  L2->X    meet after the merge (kept as three)
+        X->L1  X->L2          incoming
+        L1->L2  L2->L1        loser-to-loser: moved TWICE, end as S->S
+        L1->S  S->L2  L2->L2  become S->S
+
+    Nine facts are relocated, two of them twice: eleven move operations and
+    five self-loops. One episode mentions all three and cites every fact.
+    S has no summary; both losers do, and they differ."""
+    await _seed_duplicate_group(driver, name="AWS Backup", n=3, name_embedding=[0.5, 0.5, 0.5])
+    await driver.execute_query(
+        "MATCH (l1:Entity {uuid:$l1}), (l2:Entity {uuid:$l2}) SET l1.summary = $s1, l2.summary = $s2",
+        l1=_L1, l2=_L2, s1="the first loser's words", s2="the second loser's words")
+    await _seed(driver, uuid=_X, name=_X)
+    facts = [("f-sx", _S, _X), ("f-l1x", _L1, _X), ("f-l2x", _L2, _X),
+             ("f-xl1", _X, _L1), ("f-xl2", _X, _L2),
+             ("f-l1l2", _L1, _L2), ("f-l2l1", _L2, _L1),
+             ("f-l1s", _L1, _S), ("f-sl2", _S, _L2), ("f-l2l2", _L2, _L2)]
+    for i, (uuid, src, dst) in enumerate(facts):
+        await _fact(driver, src=src, dst=dst, uuid=uuid, embedding=_vec(i), episodes=["ep1"],
+                    valid_at=f"2025-0{i % 9 + 1}-01T00:00:00Z",
+                    **({"invalid_at": "2025-12-01T00:00:00Z"} if i % 3 == 0 else {}))
+    await _episode(driver, uuid="ep1", mentions=[_S, _L1, _L2, _X],
+                   entity_edges=[uuid for uuid, _, _ in facts])
+    return [uuid for uuid, _, _ in facts]
+
+
+async def test_three_members_conserve_every_edge_and_count_moves_and_loops(neo4j_driver):
+    """The conservation properties the two-member tests assert, at the
+    production shape: every uuid and full property map survives, every fact
+    ends on S or X with stored endpoints agreeing, `merged_from` accumulates
+    both losers in survivor order, the FIRST loser with a non-empty summary
+    lends it and the second's is audited, `self_loops_created` is exact, and
+    `edges_moved.RELATES_TO` is the documented move-operation count (eleven,
+    for nine distinct facts -- the two loser-to-loser facts move twice)."""
+    facts = await _seed_three_member_group(neo4j_driver)
+    before = {r["uuid"]: r for r in await _edge_snapshot(neo4j_driver)}
+    res = await apply_merges(neo4j_driver, GROUP)
+    json.dumps(res)
+    after = {r["uuid"]: r for r in await _edge_snapshot(neo4j_driver)}
+    assert set(before) == set(after), "every edge uuid must survive"
+    for uuid, old in before.items():
+        for key, value in old["props"].items():
+            if key not in ("source_node_uuid", "target_node_uuid"):
+                assert after[uuid]["props"][key] == value, f"{uuid}.{key} changed"
+    assert {u: (r["a"], r["b"]) for u, r in after.items() if r["type"] == "RELATES_TO"} == {
+        "f-sx": (_S, _X), "f-l1x": (_S, _X), "f-l2x": (_S, _X),
+        "f-xl1": (_X, _S), "f-xl2": (_X, _S),
+        "f-l1l2": (_S, _S), "f-l2l1": (_S, _S), "f-l1s": (_S, _S), "f-sl2": (_S, _S),
+        "f-l2l2": (_S, _S)}
+    r = await neo4j_driver.execute_query(
+        "MATCH (a:Entity)-[f:RELATES_TO]->(b:Entity) "
+        "WHERE f.source_node_uuid <> a.uuid OR f.target_node_uuid <> b.uuid RETURN count(f) AS n")
+    assert r.records[0]["n"] == 0
+    r = await neo4j_driver.execute_query(
+        "MATCH (ep:Episodic) UNWIND ep.entity_edges AS u "
+        "WITH DISTINCT u OPTIONAL MATCH ()-[f:RELATES_TO {uuid:u}]->() RETURN u, count(f) AS n")
+    assert {rec["u"]: rec["n"] for rec in r.records} == dict.fromkeys(facts, 1)
+    assert res["totals"] == {"groups": 1, "excess": 2, "merged": 2}
+    assert res["self_loops_created"] == 5
+    assert res["edges_moved"] == {"RELATES_TO": 11, "MENTIONS": 2, "IN_COMMUNITY": 0, "SAME_AS": 0}
+    survivor = await _entity(neo4j_driver, _S)
+    assert survivor["props"]["merged_from"] == [_L1, _L2]
+    assert survivor["props"]["summary"] == "the first loser's words"
+    assert res["summary_dropped"] == [
+        {"name": "AWS Backup", "survivor": _S, "loser": _L2, "summary": "the second loser's words"}]
+    assert res["labels_promoted"] == []
+    assert await _entity(neo4j_driver, _L1) is None
+    assert await _entity(neo4j_driver, _L2) is None
+    assert await count_duplicates(neo4j_driver, GROUP) == 0
+
+
+async def test_three_members_promote_labels_only_when_the_typed_losers_agree(neo4j_driver):
+    """Spec §4.4: a bare survivor adopts a typed loser's labels; ANY other
+    disagreement is dropped and reported under `label_conflicts`. Two losers
+    disagreeing with each other is such a disagreement -- nothing is promoted
+    (not the union, not the first), and the group is reported. A bare loser
+    has no say. Invisible at two members: one loser has nobody to disagree
+    with. Bare survivors throughout:
+
+        Agree     :Product, :Product  -> :Product promoted
+        Mixed     bare, :Product      -> :Product promoted
+        Disagree  :Product, :Tool     -> nothing promoted, reported
+
+    Run through `merge_group` directly, so the per-group payload carries the
+    same `labels_promoted` element shape `apply_merges` reports."""
+    for name, labels in (("Agree", ((), ("Product",), ("Product",))),
+                         ("Mixed", ((), (), ("Product",))),
+                         ("Disagree", ((), ("Product",), ("Tool",)))):
+        for i, member_labels in enumerate(labels):
+            await _seed(neo4j_driver, uuid=f"{name}-{i}", name=name, labels=member_labels,
+                        created_at=f"2026-01-0{i + 1}T00:00:00Z")
+    plan = await plan_merges(neo4j_driver, GROUP)
+    assert plan["label_conflicts"] == [
+        {"name": "Disagree", "labels": [["Entity"], ["Entity", "Product"], ["Entity", "Tool"]]}]
+    outcomes = {g["name"]: await merge_group(neo4j_driver, GROUP, g) for g in plan["groups"]}
+    assert outcomes["Agree"]["labels_promoted"] == [
+        {"name": "Agree", "survivor": "Agree-0", "labels": ["Product"]}]
+    assert outcomes["Mixed"]["labels_promoted"] == [
+        {"name": "Mixed", "survivor": "Mixed-0", "labels": ["Product"]}]
+    assert outcomes["Disagree"]["labels_promoted"] == []
+    for name, expected in (("Agree", ["Entity", "Product"]), ("Mixed", ["Entity", "Product"]),
+                           ("Disagree", ["Entity"])):
+        survivor = await _entity(neo4j_driver, f"{name}-0")
+        assert sorted(survivor["labels"]) == expected, name
+        assert survivor["props"]["labels"] == expected, name
+        assert survivor["props"]["merged_from"] == [f"{name}-1", f"{name}-2"]
+    assert await count_duplicates(neo4j_driver, GROUP) == 0

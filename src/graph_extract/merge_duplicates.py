@@ -1,4 +1,4 @@
-"""Exact-name duplicate entities: the read-only planner.
+"""Exact-name duplicate entities: the read-only planner and the transactional merge.
 
 Why this exists (measured, `docs/superpowers/specs/2026-09-14-concurrency-
 duplicate-mitigation-design.md` §1): re-ingesting the 83 pilot articles at
@@ -197,16 +197,30 @@ def _custom_labels(labels: list[str]) -> set[str]:
     return {label for label in labels if label != "Entity"}
 
 
-def _label_conflict(survivor: dict[str, Any], losers: list[dict[str, Any]]) -> bool:
-    """A conflict is a custom label some loser carries that the survivor does
-    not AND that the merge will NOT promote. Promotion (spec §4.4, graphiti's
-    `_promote_resolved_node` mirror) happens only onto a bare `:Entity`
-    survivor, so a typed survivor facing any foreign loser label is a conflict;
-    a bare survivor never is, and a bare loser never contributes one."""
-    survivor_custom = _custom_labels(survivor["labels"])
-    if not survivor_custom:
-        return False
-    return any(_custom_labels(loser["labels"]) - survivor_custom for loser in losers)
+def _label_decision(survivor_labels: list[str], loser_labels: list[list[str]],
+                    ) -> tuple[list[str], bool]:
+    """Spec §4.4's label rule as ONE function, so the planner's
+    `label_conflicts` and the apply step's promotion can never disagree:
+    returns `(labels to promote, whether the group is a label conflict)`.
+
+    Promotion (graphiti's `_promote_resolved_node` mirror) happens only onto a
+    bare `:Entity` survivor, and only when every TYPED loser carries the same
+    custom labels -- that set is then promoted. A bare loser has nothing to
+    say and never contributes a conflict. Anything else is a disagreement the
+    merge does NOT resolve: it promotes nothing and reports the group. That
+    covers a typed survivor facing a foreign loser label, and two typed losers
+    that disagree with each other -- the union of the two is not what the spec
+    allows, and `graph_cleanup.prune_noise_entities` reads `[0]` of a node's
+    custom labels, so a node with two would be typed by an unspecified pick."""
+    survivor_custom = _custom_labels(survivor_labels)
+    typed = [custom for custom in map(_custom_labels, loser_labels) if custom]
+    if survivor_custom:
+        return [], any(custom - survivor_custom for custom in typed)
+    if not typed:
+        return [], False
+    if all(custom == typed[0] for custom in typed):
+        return sorted(typed[0]), False
+    return [], True
 
 
 def _public_member(member: dict[str, Any]) -> dict[str, Any]:
@@ -241,7 +255,7 @@ async def plan_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
             "name_embedding_cosine": _min_pairwise_cosine(
                 [m.get("name_embedding") for m in members]),
         })
-        if _label_conflict(survivor, losers):
+        if _label_decision(survivor["labels"], [m["labels"] for m in losers])[1]:
             label_conflicts.append({
                 "name": row["name"],
                 "labels": [list(m["labels"]) for m in members],
@@ -433,11 +447,11 @@ def _decide_step7(group: dict[str, Any], members: dict[str, dict[str, Any]]) -> 
     """The survivor's field rules (spec §4.4), decided from the rows step 0
     read before any loser was deleted.
 
-    Labels: promoted onto a bare `:Entity` survivor only -- graphiti's
-    `_promote_resolved_node` rule. The union over all losers is promoted at
-    once so the outcome matches what the planner reported (a bare survivor is
-    never a `label_conflicts` entry); a typed survivor keeps its labels and
-    the planner has already reported the disagreement.
+    Labels: `_label_decision` -- promoted onto a bare `:Entity` survivor only,
+    and only the labels every typed loser agrees on; a disagreement promotes
+    nothing (the planner has reported it under `label_conflicts`). Decided
+    from the whole group at once, not loser by loser, so the outcome is the
+    same list the planner's rule saw.
 
     Summary: the survivor's, unless empty, in which case the first loser
     (in survivor order) with a non-empty summary lends its own. Every other
@@ -448,9 +462,9 @@ def _decide_step7(group: dict[str, Any], members: dict[str, dict[str, Any]]) -> 
     name = group["name"]
     survivor = members[group["survivor"]]
     survivor_props = survivor["props"] or {}
-    survivor_custom = _custom_labels(survivor["labels"] or [])
+    promote, _ = _label_decision(
+        survivor["labels"] or [], [members[u]["labels"] or [] for u in group["losers"]])
 
-    promote: list[str] = []
     adopted: str | None = None
     summary = survivor_props.get("summary") or ""
     dropped: list[dict[str, Any]] = []
@@ -461,10 +475,6 @@ def _decide_step7(group: dict[str, Any], members: dict[str, dict[str, Any]]) -> 
         props = loser["props"] or {}
         merged_from.append(loser_uuid)
         merged_from.extend(str(u) for u in (props.get("merged_from") or []))
-        if not survivor_custom:
-            for label in sorted(_custom_labels(loser["labels"] or [])):
-                if label not in promote:
-                    promote.append(label)
         loser_summary = props.get("summary") or ""
         if loser_summary:
             if not summary:
@@ -493,6 +503,11 @@ async def _merge_group_in(tx: AsyncTransaction, group_id: str, group: dict[str, 
     members = _verify_members(group, rows)
     decision = _decide_step7(group, members)
 
+    # `moved` counts MOVE OPERATIONS, not distinct edges. A fact between two
+    # losers is relocated twice (once per loser: L1->L2 becomes S->L2, then
+    # S->S), so `RELATES_TO` can exceed the number of distinct edges in a group
+    # of three or more. `self_loops_created` is exact (a loop is counted at the
+    # one move that closes it) and `totals.merged` is nodes, not edges.
     moved = dict.fromkeys(_EDGE_TYPES, 0)
     self_loops = 0
     for loser in group["losers"]:
@@ -527,7 +542,8 @@ async def _merge_group_in(tx: AsyncTransaction, group_id: str, group: dict[str, 
         "losers": list(group["losers"]),
         "edges_moved": moved,
         "self_loops_created": self_loops,
-        "labels_promoted": decision["promote"],
+        "labels_promoted": ([{"name": name, "survivor": survivor, "labels": decision["promote"]}]
+                            if decision["promote"] else []),
         "summary_dropped": decision["summary_dropped"],
         "properties_dropped": decision["properties_dropped"],
     }
@@ -537,7 +553,16 @@ async def merge_group(driver: AsyncDriver, group_id: str, group: dict[str, Any])
     """Merge one planned group in ONE explicit transaction. The group is a
     `plan_merges` entry (`name`, `survivor`, `losers`). Committed only if
     every step succeeded; any exception -- a Python-level abort or a server
-    refusal -- leaves the group exactly as it was."""
+    refusal -- leaves the group exactly as it was.
+
+    Returns `{name, survivor, losers, edges_moved, self_loops_created,
+    labels_promoted, summary_dropped, properties_dropped}`. `edges_moved`
+    is move operations by type (see `_merge_group_in`: a loser-to-loser fact
+    is moved twice). The three audit lists carry the SAME element shapes
+    `apply_merges` returns -- `labels_promoted` is `[{name, survivor, labels}]`
+    (empty or one entry), `summary_dropped` is `[{name, survivor, loser,
+    summary}]`, `properties_dropped` is `[{name, loser, keys}]` -- so a caller
+    of either function reads one type under one key."""
     async with driver.session() as session:
         async with await session.begin_transaction() as tx:
             outcome = await _merge_group_in(tx, group_id, group)
@@ -549,8 +574,11 @@ async def apply_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
     """Plan, then merge every exact-name group in `group_id`, one transaction
     per group, stopping at the first failure. Returns the `plan_merges`
     payload plus `totals.merged` (loser nodes removed), `edges_moved` by
-    type, `self_loops_created`, `summary_dropped`, `labels_promoted` and
-    `properties_dropped`. A graph with no duplicates is not touched at all."""
+    type (move operations, not distinct edges -- a fact between two losers
+    counts twice), `self_loops_created`, `summary_dropped`, `labels_promoted`
+    and `properties_dropped` (each a list of the dicts `merge_group`
+    documents, concatenated over groups). A graph with no duplicates is not
+    touched at all."""
     plan = await plan_merges(driver, group_id)
     edges_moved = dict.fromkeys(_EDGE_TYPES, 0)
     self_loops = 0
@@ -566,9 +594,7 @@ async def apply_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
         self_loops += outcome["self_loops_created"]
         summary_dropped.extend(outcome["summary_dropped"])
         properties_dropped.extend(outcome["properties_dropped"])
-        if outcome["labels_promoted"]:
-            labels_promoted.append({"name": outcome["name"], "survivor": outcome["survivor"],
-                                    "labels": outcome["labels_promoted"]})
+        labels_promoted.extend(outcome["labels_promoted"])
     plan["totals"]["merged"] = merged
     return {
         **plan,
