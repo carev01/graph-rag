@@ -95,6 +95,15 @@ def test_cleanup_help():
     assert result.exit_code == 0
 
 
+def test_merge_duplicates_help():
+    """Report-only unless `--apply`, and the help itself says so: the operator
+    reads this before the command ever prints its runtime warning."""
+    result = runner.invoke(app, ["merge-duplicates", "--help"])
+    assert result.exit_code == 0
+    assert "--apply" in result.stdout
+    assert "Report-only by default" in result.stdout
+
+
 def test_quality_baseline_help():
     result = runner.invoke(app, ["quality-baseline", "--help"])
     assert result.exit_code == 0

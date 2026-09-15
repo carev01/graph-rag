@@ -31,6 +31,7 @@ from graph_extract.graphiti_client import (
 from graph_extract.dedup_guard import DedupIndexStats, install_dedup_guard
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.ingest_driver import IngestDriver
+from graph_extract.merge_duplicates import apply_merges, plan_merges
 from graphiti_core import Graphiti
 from graph_extract.ontology import EXTRACTION_INSTRUCTIONS, CHEAP_TIER_SALIENCE
 from graph_extract.probe import DEFAULT_MODES, run_probe
@@ -439,6 +440,61 @@ def cleanup(
             retype = await retype_region_entities(
                 driver, settings.group_id, force=force_demote)
             _dump({"prune": prune, "retype": retype})
+        finally:
+            await driver.close()
+
+    asyncio.run(_run())
+
+
+@app.command("merge-duplicates")
+def merge_duplicates(
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Actually merge. Without this the command only reports. Never run it "
+             "while an ingest or semantic worker is running: an in-flight episode "
+             "that resolved onto a node this deletes loses its facts silently."),
+) -> None:
+    """Merge :Entity nodes sharing a byte-identical name within one group_id.
+
+    Report-only by default. Concurrent ingest creates these: the A/B measured 30
+    at N=4, every one an exact-name collision on a hub entity. They are not
+    static -- graphiti escalates to an LLM dedup call on EVERY later mention of
+    an ambiguous name, so a duplicate is a permanent tax on the hottest names in
+    the corpus.
+    """
+
+    async def _run() -> None:
+        settings = get_extract_settings()
+        driver = await _build_driver(settings)
+        try:
+            if apply:
+                typer.echo(
+                    "WARNING: --apply must not run while any ingest or semantic "
+                    "worker is running. graphiti saves facts with MATCH "
+                    "(source:Entity {uuid}) ... MERGE; if an in-flight episode "
+                    "resolved an entity to a node this deletes, that edge is "
+                    "SILENTLY not written -- no error, no log, no retry. This "
+                    "command cannot check that condition for you.", err=True)
+                # `apply_merges` stops and raises on the first failing group
+                # without returning, and the committed groups' audit (edges
+                # moved, self-loops, dropped summary texts) exists nowhere but
+                # in this list. Print it, then let the error out unchanged --
+                # including on Ctrl-C, when the record is worth more, not less.
+                committed: list[dict] = []
+                try:
+                    _dump(await apply_merges(driver, settings.group_id, committed=committed))
+                except BaseException:
+                    _dump({"stopped": True, "committed": committed,
+                           "totals": {"groups": len(committed),
+                                      "merged": sum(len(g["losers"]) for g in committed)}})
+                    typer.echo(
+                        f"merge-duplicates: stopped after {len(committed)} committed "
+                        "group(s). The JSON above is their audit; the group that failed "
+                        "was rolled back whole and nothing after it was attempted. "
+                        "The error follows.", err=True)
+                    raise
+            else:
+                _dump(await plan_merges(driver, settings.group_id))
         finally:
             await driver.close()
 

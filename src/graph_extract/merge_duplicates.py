@@ -582,7 +582,8 @@ async def merge_group(driver: AsyncDriver, group_id: str, group: dict[str, Any])
     return outcome
 
 
-async def apply_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
+async def apply_merges(driver: AsyncDriver, group_id: str, *,
+                       committed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Plan, then merge every exact-name group in `group_id`, one transaction
     per group, stopping at the first failure. Returns the `plan_merges`
     payload plus `totals.merged` (loser nodes removed), `edges_moved` by
@@ -590,7 +591,15 @@ async def apply_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
     counts twice), `self_loops_created`, `summary_dropped`, `labels_promoted`
     and `properties_dropped` (each a list of the dicts `merge_group`
     documents, concatenated over groups). A graph with no duplicates is not
-    touched at all."""
+    touched at all.
+
+    `committed`, if given, receives each group's `merge_group` outcome the
+    moment that group's transaction has committed, in run order. When a LATER
+    group raises, this function stops and raises without returning, and that
+    list is then the only record of what the committed groups did: their
+    `merged_from`/`merged_at` stamps survive on the survivors, but the edges
+    moved, the self-loops created and the dropped summary texts do not exist
+    anywhere else. The CLI passes a list and prints it on failure."""
     plan = await plan_merges(driver, group_id)
     edges_moved = dict.fromkeys(_EDGE_TYPES, 0)
     self_loops = 0
@@ -600,6 +609,8 @@ async def apply_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
     properties_dropped: list[dict[str, Any]] = []
     for group in plan["groups"]:
         outcome = await merge_group(driver, group_id, group)
+        if committed is not None:
+            committed.append(outcome)
         merged += len(outcome["losers"])
         for edge_type, n in outcome["edges_moved"].items():
             edges_moved[edge_type] += n

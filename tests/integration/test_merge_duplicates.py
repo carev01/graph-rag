@@ -34,12 +34,15 @@ fact between two losers and a label disagreement between two losers do not
 exist at two members.
 """
 
+import asyncio
 import json
 
 import pytest
 import pytest_asyncio
+from typer.testing import CliRunner
 
-from graph_extract import merge_duplicates
+from graph_extract import cli, merge_duplicates
+from graph_extract.config import ExtractSettings
 from graph_extract.merge_duplicates import (
     _GROUPS,
     _STEP6_DELETE,
@@ -940,3 +943,115 @@ async def test_three_members_promote_labels_only_when_the_typed_losers_agree(neo
         assert survivor["props"]["labels"] == expected, name
         assert survivor["props"]["merged_from"] == [f"{name}-1", f"{name}-2"]
     assert await count_duplicates(neo4j_driver, GROUP) == 0
+
+
+# =============================================================================
+# The `merge-duplicates` command: report-only by default, destructive behind --apply
+# =============================================================================
+# The command builds its own driver from `get_extract_settings()`, which reads
+# `.env` -- the LIVE graph. Two independent layers point it at the container
+# instead: the module global the command body resolves at call time is
+# replaced, AND the `NEO4J_*` environment beats `.env` for pydantic-settings if
+# anything ever constructed settings the ordinary way. Either alone suffices; a
+# test that MERGES must not depend on one thing being right.
+#
+# `_invoke` runs the command in a worker thread: the command body calls
+# `asyncio.run`, which refuses to start inside the test's already-running
+# module loop. In its own thread it gets its own loop and its own driver, and
+# the test's driver on the module loop sees the committed result afterwards.
+
+
+@pytest.fixture
+def cli_targets_the_container(extract_neo4j, monkeypatch):
+    uri, user, password = extract_neo4j
+    settings = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                               neo4j_uri=uri, neo4j_user=user, neo4j_password=password,
+                               group_id=GROUP)
+    monkeypatch.setenv("NEO4J_URI", uri)
+    monkeypatch.setenv("NEO4J_USER", user)
+    monkeypatch.setenv("NEO4J_PASSWORD", password)
+    monkeypatch.setattr(cli, "get_extract_settings", lambda: settings)
+
+
+async def _invoke(*args):
+    return await asyncio.to_thread(CliRunner().invoke, cli.app, ["merge-duplicates", *args])
+
+
+# --- the brief's test, verbatim (the invoke hops threads, see above) -----------
+
+@pytest.mark.usefixtures("cli_targets_the_container")
+async def test_report_mode_is_the_default_and_writes_nothing(neo4j_driver):
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    before = await _snapshot(neo4j_driver)
+    result = await _invoke()
+    assert result.exit_code == 0
+    assert "AWS Backup" in result.stdout
+    assert await _snapshot(neo4j_driver) == before
+
+
+@pytest.mark.usefixtures("cli_targets_the_container")
+async def test_apply_warns_before_it_merges_and_prints_the_full_audit(neo4j_driver):
+    """`--apply` on the realistic group: the concurrency warning is on stderr
+    and precedes the merge (`result.output` interleaves the two streams in
+    write order), stdout is the `apply_merges` payload as JSON with the same
+    counts the library test pins, and the loser is gone. The warning is the
+    only guard against running this beside an ingest worker -- the command
+    cannot check that itself -- so its text is pinned, not just its presence."""
+    await _seed_realistic_group(neo4j_driver)
+    result = await _invoke("--apply")
+    assert result.exit_code == 0, result.output
+    assert "must not run while any ingest or semantic worker is running" in result.stderr
+    assert "SILENTLY not written" in result.stderr
+    assert result.output.index("WARNING: --apply") < result.output.index('"merged"'), \
+        "the warning must be printed before the merge, not after"
+    payload = json.loads(result.stdout)
+    assert payload["totals"] == {"groups": 1, "excess": 1, "merged": 1}
+    assert payload["edges_moved"] == {"RELATES_TO": 5, "MENTIONS": 2, "IN_COMMUNITY": 2, "SAME_AS": 2}
+    assert payload["self_loops_created"] == 3
+    assert await _entity(neo4j_driver, _LOSER) is None
+    assert await count_duplicates(neo4j_driver, GROUP) == 0
+
+
+@pytest.mark.usefixtures("cli_targets_the_container")
+async def test_apply_prints_the_audit_of_the_committed_groups_when_a_later_one_aborts(neo4j_driver):
+    """Task 5 review M4: `apply_merges` stops and raises on the first failing
+    group WITHOUT returning what the earlier groups did, and that is exactly
+    when the operator most needs it. The command must print the audit of every
+    group that committed, then let the error out unchanged and exit non-zero.
+
+    `Alpha` merges first (groups run in name order); `Zeta` aborts on a
+    foreign edge type and rolls back. Alpha's loser carries two facts AND a
+    summary that differs from the survivor's, so the printed audit has to show
+    `edges_moved` and the dropped text -- the two things the library's return
+    value would have carried and that `merged_from`/`merged_at` on the
+    survivor do not. An audit that listed only names, or listed the planned
+    groups instead of the committed ones, or an exit that swallowed the
+    exception, each produces a different result here."""
+    await _seed(neo4j_driver, uuid="Alpha-0", name="Alpha", summary="the survivor's words",
+                created_at="2026-01-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="Alpha-1", name="Alpha", summary="only the audit has these words",
+                created_at="2026-01-02T00:00:00Z", degree=2)
+    await _seed_duplicate_group(neo4j_driver, name="Zeta", n=2, degree=1)
+    await neo4j_driver.execute_query(
+        "MATCH (l:Entity {uuid:'Zeta-1'}) CREATE (l)-[:FOO]->(:Thing)")
+    zeta_before = await _snapshot_group(neo4j_driver, GROUP)
+    result = await _invoke("--apply")
+    assert result.exit_code != 0
+    assert isinstance(result.exception, MergeAborted), "the error must come out unchanged"
+    assert "FOO" in str(result.exception)
+    assert "stopped after 1 committed group" in result.stderr
+    audit = json.loads(result.stdout)
+    assert audit["stopped"] is True
+    assert [g["name"] for g in audit["committed"]] == ["Alpha"], "committed groups only, not planned"
+    alpha = audit["committed"][0]
+    assert alpha["survivor"] == "Alpha-0" and alpha["losers"] == ["Alpha-1"]
+    assert alpha["edges_moved"] == {"RELATES_TO": 2, "MENTIONS": 0, "IN_COMMUNITY": 0, "SAME_AS": 0}
+    assert alpha["summary_dropped"] == [{"name": "Alpha", "survivor": "Alpha-0", "loser": "Alpha-1",
+                                         "summary": "only the audit has these words"}]
+    assert audit["totals"] == {"groups": 1, "merged": 1}
+    # the graph agrees with the audit: Alpha merged, Zeta rolled back whole
+    assert await _entity(neo4j_driver, "Alpha-1") is None
+    assert (await _entity(neo4j_driver, "Alpha-0"))["props"]["merged_from"] == ["Alpha-1"]
+    zeta_after = await _snapshot_group(neo4j_driver, GROUP)
+    zeta_rows = [r for r in zeta_before["nodes"] + zeta_before["rels"] if "Zeta" in r]
+    assert [r for r in zeta_after["nodes"] + zeta_after["rels"] if "Zeta" in r] == zeta_rows
