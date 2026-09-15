@@ -40,6 +40,35 @@ This module's planner **writes nothing**. Every query runs through a
 READ-routed `execute_query`, so even a stray write clause would be refused
 by the server rather than silently applied. The destructive half
 (`apply_merges`) lives alongside it and consumes `plan_merges` verbatim.
+
+The destructive half (spec §4.5) rests on two mechanics, both load-bearing:
+
+1. **Every edge is re-created with its full property map INCLUDING its
+   original uuid, then the original is deleted.** Neo4j cannot re-point a
+   relationship. The 655 baseline episodes carry 4,886 `Episodic.entity_edges`
+   references BY EDGE UUID, and `Community.cited_fact_uuids`,
+   `resolve_citations` and the staleness sweep all address facts by uuid. A
+   regenerated uuid would orphan every one of them silently -- the graph
+   would still answer, just wrongly. There is no uniqueness constraint on
+   `RELATES_TO.uuid`, so old and new sharing a uuid inside the transaction is
+   legal.
+2. **The loser is removed with `DELETE`, never `DETACH DELETE`.** Any
+   relationship type this module did not enumerate makes Neo4j refuse the
+   delete and abort the transaction instead of dropping the edge with the
+   loser. A guard before the `DELETE` names the surviving types so the error
+   is readable; the plain `DELETE` is the belt under those braces.
+
+One explicit transaction per name group: a crash leaves a group either
+untouched or fully merged, never half-rewired. The run STOPS on the first
+failing group and raises (unlike `ingest_source`, which continues): a
+failure in a destructive pass means the graph is not what the design
+assumed, and the operator should look before more is changed.
+
+Edges that meet after a merge (`S->X` and `L->X`) are KEPT as two edges, and
+`L->S` / `S->L` / `L->L` facts become self-loops on `S`, kept and counted:
+each carries its own fact, episodes and provenance, and the baseline already
+holds 440 multi-edge pairs and 10 self-loops from ordinary sequential ingest
+(spec §4.6). Collapsing them would violate design invariant #3.
 """
 
 from __future__ import annotations
@@ -47,7 +76,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from neo4j import AsyncDriver, RoutingControl
+from neo4j import AsyncDriver, AsyncTransaction, RoutingControl
 
 # Excess = sum over duplicated names of (copies - 1): the number of nodes a
 # merge pass would remove, NOT the number of duplicated names. Tasks 6/7 read
@@ -228,4 +257,324 @@ async def plan_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
             {"normalized": row["norm"], "names": sorted(row["names"])} for row in near_rows
         ],
         "label_conflicts": label_conflicts,
+    }
+
+
+# --- the destructive half ------------------------------------------------------
+
+
+class MergeAborted(RuntimeError):
+    """A group could not be merged safely; its transaction was rolled back and
+    the run stopped. The message names the group and the reason."""
+
+
+# Properties graphiti itself writes on an `:Entity`, plus this module's own
+# audit stamps. Anything else on a loser is a custom attribute; it is listed in
+# the audit and NOT copied onto the survivor (spec §4.4: no silent overwrite
+# in either direction).
+_ENTITY_STANDARD_KEYS = frozenset({
+    "uuid", "name", "group_id", "created_at", "summary", "name_embedding", "labels",
+    "merged_from", "merged_at",
+})
+
+# The edge types this pass knows how to rewire. Step 6 refuses to delete a
+# loser that still carries ANY relationship; this tuple is only the order the
+# report lists counts in.
+_EDGE_TYPES = ("RELATES_TO", "MENTIONS", "IN_COMMUNITY", "SAME_AS")
+
+# Step 0 -- re-verify the plan inside the transaction: every member must still
+# exist under this uuid, in this group, with THIS name. `count(e)` is 0 for a
+# member that vanished or was renamed since the plan and >1 if two nodes share
+# a uuid in the group (never seen; refused rather than guessed at). The row also
+# carries what step 7 needs from each member (labels, summary, custom keys),
+# read before any loser is deleted. The name embedding is masked: 768 floats
+# per member the caller never uses.
+_STEP0 = (
+    "UNWIND $uuids AS u "
+    "OPTIONAL MATCH (e:Entity {uuid:u, group_id:$g, name:$name}) "
+    "RETURN u, count(e) AS n, collect(labels(e))[0] AS labels, "
+    "collect(e{.*, name_embedding: null})[0] AS props"
+)
+
+# Step 1 -- outgoing facts: `L->X`, `L->S` (becomes a self-loop on S) and
+# `L->L` (likewise). The new edge is created with the old edge's ENTIRE
+# property map (uuid included), then the stored endpoints are rewritten to the
+# new topology, then the vector is re-set through the same procedure graphiti
+# uses (the plain-`SET` copy leaves a float list whose storage form cannot be
+# told apart from the schema; the procedure removes the question), and only
+# then is the old edge deleted. The CALL is a scoped unit subquery so a fact
+# with no embedding (never seen from graphiti, but not this pass's problem)
+# skips the procedure instead of failing it.
+_STEP1_OUT = (
+    "MATCH (l:Entity {uuid:$loser, group_id:$g}), (s:Entity {uuid:$survivor, group_id:$g}) "
+    "MATCH (l)-[old:RELATES_TO]->(t) "
+    "WITH s, l, old, properties(old) AS props, old.fact_embedding AS emb, "
+    "     CASE WHEN t = l THEN s ELSE t END AS target "
+    "CREATE (s)-[new:RELATES_TO]->(target) "
+    "SET new = props "
+    "SET new.source_node_uuid = s.uuid, new.target_node_uuid = target.uuid "
+    "WITH s, old, new, emb, target "
+    "CALL (new, emb) { "
+    "  WITH new, emb WHERE emb IS NOT NULL "
+    "  CALL db.create.setRelationshipVectorProperty(new, 'fact_embedding', emb) "
+    "} "
+    "DELETE old "
+    "RETURN count(new) AS moved, sum(CASE WHEN target = s THEN 1 ELSE 0 END) AS loops"
+)
+
+# Step 2 -- incoming facts: `X->L` and `S->L` (a self-loop on S). Step 1
+# already removed every edge that STARTED at the loser, so a loser self-loop
+# is not seen twice here.
+_STEP2_IN = (
+    "MATCH (l:Entity {uuid:$loser, group_id:$g}), (s:Entity {uuid:$survivor, group_id:$g}) "
+    "MATCH (x)-[old:RELATES_TO]->(l) "
+    "WITH s, x, old, properties(old) AS props, old.fact_embedding AS emb "
+    "CREATE (x)-[new:RELATES_TO]->(s) "
+    "SET new = props "
+    "SET new.source_node_uuid = x.uuid, new.target_node_uuid = s.uuid "
+    "WITH s, x, old, new, emb "
+    "CALL (new, emb) { "
+    "  WITH new, emb WHERE emb IS NOT NULL "
+    "  CALL db.create.setRelationshipVectorProperty(new, 'fact_embedding', emb) "
+    "} "
+    "DELETE old "
+    "RETURN count(new) AS moved, sum(CASE WHEN x = s THEN 1 ELSE 0 END) AS loops"
+)
+
+# Step 3 -- MENTIONS. An episode that already mentions the survivor keeps BOTH
+# edges: each has its own uuid and created_at, and collapsing them is a
+# judgement this pass does not make.
+_STEP3_MENTIONS = (
+    "MATCH (l:Entity {uuid:$loser, group_id:$g}), (s:Entity {uuid:$survivor, group_id:$g}) "
+    "MATCH (ep:Episodic)-[old:MENTIONS]->(l) "
+    "CREATE (ep)-[new:MENTIONS]->(s) "
+    "SET new = properties(old) "
+    "DELETE old "
+    "RETURN count(new) AS moved"
+)
+
+# Step 4 -- IN_COMMUNITY: membership is a set, so MERGE. `stale` is the flag
+# `theme_builder.incremental` already treats as "regenerate this community";
+# without it the merge would be invisible to the incremental refresh, which
+# keys `touched_entities` on `created_at` (the survivor keeps its own).
+_STEP4_COMMUNITY = (
+    "MATCH (l:Entity {uuid:$loser, group_id:$g}), (s:Entity {uuid:$survivor, group_id:$g}) "
+    "MATCH (l)-[old:IN_COMMUNITY]->(c) "
+    "MERGE (s)-[:IN_COMMUNITY]->(c) "
+    "SET c.stale = true "
+    "DELETE old "
+    "RETURN count(old) AS moved"
+)
+
+# Step 5 -- SAME_AS from a structural Vendor/Product: a set as well, so MERGE.
+_STEP5_SAME_AS = (
+    "MATCH (l:Entity {uuid:$loser, group_id:$g}), (s:Entity {uuid:$survivor, group_id:$g}) "
+    "MATCH (v)-[old:SAME_AS]->(l) "
+    "MERGE (v)-[:SAME_AS]->(s) "
+    "DELETE old "
+    "RETURN count(old) AS moved"
+)
+
+# Step 6 -- the guard, then the delete. Any relationship still on the loser is
+# one this pass did not enumerate; name its type and abort. And `DELETE`, NOT
+# `DETACH DELETE`: even if the guard were wrong, Neo4j refuses to delete a node
+# with relationships, so an unknown edge type can never vanish with the loser.
+_STEP6_REMAINING = (
+    "MATCH (l:Entity {uuid:$loser, group_id:$g}) "
+    "OPTIONAL MATCH (l)-[r]-() "
+    "RETURN collect(DISTINCT type(r)) AS types"
+)
+_STEP6_DELETE = "MATCH (l:Entity {uuid:$loser, group_id:$g}) DELETE l RETURN count(*) AS deleted"
+
+# Step 7 -- audit stamps and the field rules of spec §4.4 on the survivor.
+# `merged_from` also folds in a loser's own `merged_from`, so a chain of
+# merges keeps every uuid that ever pointed at this name. `coalesce($summary,
+# s.summary)` keeps the survivor's summary unless the caller chose a loser's
+# (only when the survivor's is empty). The label promotion clause is appended
+# only when there is something to promote.
+_STEP7_STAMP = (
+    "MATCH (s:Entity {uuid:$survivor, group_id:$g, name:$name}) "
+    "SET s.merged_from = coalesce(s.merged_from, []) + $merged_from, "
+    "    s.merged_at = datetime(), "
+    "    s.summary = coalesce($summary, s.summary) "
+)
+_STEP7_PROMOTE = (
+    "WITH s, coalesce(s.labels, labels(s)) AS had "
+    "SET s:$($promote) "
+    "SET s.labels = had + [x IN $promote WHERE NOT x IN had] "
+)
+
+
+async def _tx_rows(tx: AsyncTransaction, query: str, **params: Any) -> list[dict[str, Any]]:
+    result = await tx.run(query, params)
+    return [dict(rec) async for rec in result]
+
+
+async def _tx_one(tx: AsyncTransaction, query: str, **params: Any) -> dict[str, Any]:
+    rows = await _tx_rows(tx, query, **params)
+    return rows[0] if rows else {}
+
+
+def _verify_members(group: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Step 0's Python half: every member exactly once, or abort naming why."""
+    name = group["name"]
+    by_uuid = {row["u"]: row for row in rows}
+    missing = [u for u, row in by_uuid.items() if row["n"] == 0]
+    ambiguous = [u for u, row in by_uuid.items() if row["n"] > 1]
+    if missing or ambiguous:
+        raise MergeAborted(
+            f"group {name!r}: plan no longer matches the graph "
+            f"(missing or renamed: {missing}, ambiguous uuid: {ambiguous}); "
+            "nothing was changed for this group")
+    return by_uuid
+
+
+def _decide_step7(group: dict[str, Any], members: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """The survivor's field rules (spec §4.4), decided from the rows step 0
+    read before any loser was deleted.
+
+    Labels: promoted onto a bare `:Entity` survivor only -- graphiti's
+    `_promote_resolved_node` rule. The union over all losers is promoted at
+    once so the outcome matches what the planner reported (a bare survivor is
+    never a `label_conflicts` entry); a typed survivor keeps its labels and
+    the planner has already reported the disagreement.
+
+    Summary: the survivor's, unless empty, in which case the first loser
+    (in survivor order) with a non-empty summary lends its own. Every other
+    non-empty loser summary that differs from what the survivor ends up with
+    is emitted in the audit -- nothing vanishes unseen.
+
+    Custom properties on a loser are listed by key, never copied."""
+    name = group["name"]
+    survivor = members[group["survivor"]]
+    survivor_props = survivor["props"] or {}
+    survivor_custom = _custom_labels(survivor["labels"] or [])
+
+    promote: list[str] = []
+    adopted: str | None = None
+    summary = survivor_props.get("summary") or ""
+    dropped: list[dict[str, Any]] = []
+    properties_dropped: list[dict[str, Any]] = []
+    merged_from: list[str] = []
+    for loser_uuid in group["losers"]:
+        loser = members[loser_uuid]
+        props = loser["props"] or {}
+        merged_from.append(loser_uuid)
+        merged_from.extend(str(u) for u in (props.get("merged_from") or []))
+        if not survivor_custom:
+            for label in sorted(_custom_labels(loser["labels"] or [])):
+                if label not in promote:
+                    promote.append(label)
+        loser_summary = props.get("summary") or ""
+        if loser_summary:
+            if not summary:
+                adopted = summary = loser_summary
+            elif loser_summary != summary:
+                dropped.append({"name": name, "survivor": group["survivor"],
+                                "loser": loser_uuid, "summary": loser_summary})
+        extra = sorted(set(props) - _ENTITY_STANDARD_KEYS)
+        if extra:
+            properties_dropped.append({"name": name, "loser": loser_uuid, "keys": extra})
+    return {
+        "merged_from": merged_from,
+        "promote": promote,
+        "summary": adopted,
+        "summary_dropped": dropped,
+        "properties_dropped": properties_dropped,
+    }
+
+
+async def _merge_group_in(tx: AsyncTransaction, group_id: str, group: dict[str, Any],
+                          ) -> dict[str, Any]:
+    """Steps 0-7 of spec §4.5 inside an already-open transaction. Raises on
+    anything unexpected; the caller's transaction then rolls back."""
+    name, survivor = group["name"], group["survivor"]
+    rows = await _tx_rows(tx, _STEP0, uuids=[survivor, *group["losers"]], g=group_id, name=name)
+    members = _verify_members(group, rows)
+    decision = _decide_step7(group, members)
+
+    moved = dict.fromkeys(_EDGE_TYPES, 0)
+    self_loops = 0
+    for loser in group["losers"]:
+        params = {"loser": loser, "survivor": survivor, "g": group_id}
+        out = await _tx_one(tx, _STEP1_OUT, **params)
+        inc = await _tx_one(tx, _STEP2_IN, **params)
+        moved["RELATES_TO"] += int(out.get("moved", 0)) + int(inc.get("moved", 0))
+        self_loops += int(out.get("loops", 0)) + int(inc.get("loops", 0))
+        moved["MENTIONS"] += int((await _tx_one(tx, _STEP3_MENTIONS, **params)).get("moved", 0))
+        moved["IN_COMMUNITY"] += int(
+            (await _tx_one(tx, _STEP4_COMMUNITY, **params)).get("moved", 0))
+        moved["SAME_AS"] += int((await _tx_one(tx, _STEP5_SAME_AS, **params)).get("moved", 0))
+
+        remaining = (await _tx_one(tx, _STEP6_REMAINING, loser=loser, g=group_id)).get("types")
+        if remaining:
+            raise MergeAborted(
+                f"group {name!r}: loser {loser} still has relationships of type(s) "
+                f"{sorted(remaining)} this pass does not know how to rewire; "
+                "refusing to delete it, rolling the group back")
+        deleted = await _tx_one(tx, _STEP6_DELETE, loser=loser, g=group_id)
+        if int(deleted.get("deleted", 0)) != 1:
+            raise MergeAborted(f"group {name!r}: loser {loser} was not deleted (matched "
+                               f"{deleted.get('deleted', 0)} nodes); rolling the group back")
+
+    stamp = _STEP7_STAMP + (_STEP7_PROMOTE if decision["promote"] else "")
+    await _tx_rows(tx, stamp, survivor=survivor, g=group_id, name=name,
+                   merged_from=decision["merged_from"], summary=decision["summary"],
+                   promote=decision["promote"])
+    return {
+        "name": name,
+        "survivor": survivor,
+        "losers": list(group["losers"]),
+        "edges_moved": moved,
+        "self_loops_created": self_loops,
+        "labels_promoted": decision["promote"],
+        "summary_dropped": decision["summary_dropped"],
+        "properties_dropped": decision["properties_dropped"],
+    }
+
+
+async def merge_group(driver: AsyncDriver, group_id: str, group: dict[str, Any]) -> dict[str, Any]:
+    """Merge one planned group in ONE explicit transaction. The group is a
+    `plan_merges` entry (`name`, `survivor`, `losers`). Committed only if
+    every step succeeded; any exception -- a Python-level abort or a server
+    refusal -- leaves the group exactly as it was."""
+    async with driver.session() as session:
+        async with await session.begin_transaction() as tx:
+            outcome = await _merge_group_in(tx, group_id, group)
+            await tx.commit()
+    return outcome
+
+
+async def apply_merges(driver: AsyncDriver, group_id: str) -> dict[str, Any]:
+    """Plan, then merge every exact-name group in `group_id`, one transaction
+    per group, stopping at the first failure. Returns the `plan_merges`
+    payload plus `totals.merged` (loser nodes removed), `edges_moved` by
+    type, `self_loops_created`, `summary_dropped`, `labels_promoted` and
+    `properties_dropped`. A graph with no duplicates is not touched at all."""
+    plan = await plan_merges(driver, group_id)
+    edges_moved = dict.fromkeys(_EDGE_TYPES, 0)
+    self_loops = 0
+    merged = 0
+    summary_dropped: list[dict[str, Any]] = []
+    labels_promoted: list[dict[str, Any]] = []
+    properties_dropped: list[dict[str, Any]] = []
+    for group in plan["groups"]:
+        outcome = await merge_group(driver, group_id, group)
+        merged += len(outcome["losers"])
+        for edge_type, n in outcome["edges_moved"].items():
+            edges_moved[edge_type] += n
+        self_loops += outcome["self_loops_created"]
+        summary_dropped.extend(outcome["summary_dropped"])
+        properties_dropped.extend(outcome["properties_dropped"])
+        if outcome["labels_promoted"]:
+            labels_promoted.append({"name": outcome["name"], "survivor": outcome["survivor"],
+                                    "labels": outcome["labels_promoted"]})
+    plan["totals"]["merged"] = merged
+    return {
+        **plan,
+        "edges_moved": edges_moved,
+        "self_loops_created": self_loops,
+        "summary_dropped": summary_dropped,
+        "labels_promoted": labels_promoted,
+        "properties_dropped": properties_dropped,
     }
