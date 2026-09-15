@@ -85,6 +85,18 @@ The delta feed is gap-free and idempotent, but only if the consumer follows thes
 
 ## Cost awareness
 
+**Before any run that spends money, prove the variable under test is engaged.**
+Configuration set, object constructed and env var exported are NOT evidence that a
+call site consults it, and a slower wall clock is NOT evidence a barrier engaged
+(provider latency varies ~30% run to run). Put a hard assertion in the runner — a
+predicate call counter, a state change only the mechanism produces — smoke it on ~2
+items first, and refuse to launch if the count is zero. Bypassing the production
+call path (driving a captured id list instead of `ingest_source`, say) means you
+have also bypassed everything that path wires up; enumerate what you lost.
+*2026-09-15: a section 9 validation spent ~$10 and 2.6 h measuring nothing because
+its runner called `run_concurrently(...)` without `is_cold=`, so the warm-up it
+existed to measure never engaged.*
+
 Full bootstrap is ~260M content tokens → ~0.8–1.5B LLM tokens through Graphiti's multi-call extraction pipeline. Use the cheap model tier for extraction, phase the bootstrap vendor-by-vendor in priority order, and meter the `add_episode` work queue against a daily token budget (incremental updates preempt bootstrap backfill). Phase 1 gates full-corpus rollout on a measured cost/quality benchmark over ~200 articles.
 
 ## Roadmap
