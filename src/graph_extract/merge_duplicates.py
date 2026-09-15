@@ -63,8 +63,21 @@ _COUNT = (
 # name embedding and degree. `created_at` is a zoned datetime written by
 # graphiti; the epoch pair is the exact ordering key (no string comparison of
 # offsets), the string form is what the report carries.
+#
+# The ORDER BY before `collect(e)` is deliberate and deliberately BACKWARDS:
+# members arrive latest-first, largest-uuid-first -- the exact opposite of the
+# survivor rule. `plan_merges` sorts in Python and that sort is the only
+# authority on the survivor; this clause exists so the collected order is
+# specified rather than whatever the scan happens to produce (insertion order
+# under a label scan, uuid-ascending under graphiti's `:Entity(uuid)` index),
+# and adverse so that a planner which stopped sorting, or dropped the uuid
+# tie-break, could never pick the right survivor by luck. Verified on
+# neo4j:2026.07.1-community: the plan is Sort -> EagerAggregation and the
+# collected order follows the sort under label scan, index-hinted scan and a
+# 200-member shuffled group.
 _GROUPS = (
     "MATCH (e:Entity {group_id:$group_id}) "
+    "WITH e ORDER BY e.created_at DESC, e.uuid DESC "
     "WITH e.name AS name, collect(e) AS nodes WHERE size(nodes) > 1 "
     "RETURN name, [n IN nodes | {uuid: n.uuid, created_at: toString(n.created_at), "
     "  created_at_epoch: [n.created_at.epochSeconds, n.created_at.nanosecond], "

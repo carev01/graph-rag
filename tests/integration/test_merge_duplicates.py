@@ -3,9 +3,18 @@
 Every fixture here is built so the correct behaviour produces a DIFFERENT
 observable result from the plausible broken ones: the survivor test's
 earliest node is neither the smallest uuid nor the highest degree; the
-cosine test seeds one identical and one differing pair; the label test seeds
-one promotable and one conflicting group; the zero-duplicate test asserts the
+cosine test's drifted group has three members so the worst pair (0.0) and
+the best pair (1.0) are different numbers; the label test seeds one
+promotable and one conflicting group; the zero-duplicate test asserts the
 snapshot, not just an empty list.
+
+And that difference must not depend on luck. `_GROUPS` hands members back in
+an order ADVERSE to the survivor rule (latest first, largest uuid first), so
+a planner that stopped sorting could never land on the right survivor because
+the scan happened to produce it first. The survivor and tie-break tests seed
+in the FAVOURABLE insertion order on purpose: if the query's ORDER BY were
+lost, insertion order would hide the missing sort -- which is why a separate
+test pins the collected order itself.
 """
 
 import json
@@ -13,7 +22,7 @@ import json
 import pytest
 import pytest_asyncio
 
-from graph_extract.merge_duplicates import count_duplicates, plan_merges
+from graph_extract.merge_duplicates import _GROUPS, _read, count_duplicates, plan_merges
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
@@ -23,8 +32,11 @@ GROUP = "backup-docs"
 @pytest_asyncio.fixture(loop_scope="module")
 async def neo4j_driver(extract_driver):
     """The module-scoped testcontainer driver, wiped before each test -- the
-    container is shared, and these tests all use the same group id."""
+    container is shared, and these tests all use the same group id. The uuid
+    index one test creates is dropped here too, so a failure inside that test
+    cannot leave it behind to change the scan order of the others."""
     await extract_driver.execute_query("MATCH (n) DETACH DELETE n")
+    await extract_driver.execute_query("DROP INDEX entity_uuid IF EXISTS")
     yield extract_driver
 
 
@@ -103,10 +115,31 @@ async def test_the_survivor_is_the_earliest_created_at(neo4j_driver):
 
 
 async def test_ties_on_created_at_break_by_ascending_uuid(neo4j_driver):
-    await _seed(neo4j_driver, uuid="bbb", name="X", created_at="2026-01-01T00:00:00Z")
+    """`aaa` is seeded FIRST: under insertion order a planner with no
+    tie-break would pick it by accident. `_GROUPS` orders uuid DESC before
+    collecting, so `bbb` arrives first and only the tie-break can choose `aaa`."""
     await _seed(neo4j_driver, uuid="aaa", name="X", created_at="2026-01-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="bbb", name="X", created_at="2026-01-01T00:00:00Z")
     plan = await plan_merges(neo4j_driver, "backup-docs")
     assert plan["groups"][0]["survivor"] == "aaa"
+
+
+async def test_groups_query_hands_members_back_in_adverse_order(neo4j_driver):
+    """The collected order is specified, not incidental: latest `created_at`
+    first, then largest uuid first -- the reverse of the survivor rule. Seeded
+    in survivor-first insertion order AND with graphiti's `:Entity(uuid)` index
+    present, so neither a label scan nor an index scan could produce this
+    order on its own; only the ORDER BY can."""
+    await neo4j_driver.execute_query(
+        "CREATE INDEX entity_uuid IF NOT EXISTS FOR (n:Entity) ON (n.uuid)")
+    await neo4j_driver.execute_query("CALL db.awaitIndexes(60)")
+    await _seed(neo4j_driver, uuid="aaa", name="X", created_at="2026-01-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="bbb", name="X", created_at="2026-01-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="ccc", name="X", created_at="2026-06-01T00:00:00Z")
+    rows = await _read(neo4j_driver, _GROUPS, group_id=GROUP)
+    assert [m["uuid"] for m in rows[0]["members"]] == ["ccc", "bbb", "aaa"]
+    plan = await plan_merges(neo4j_driver, GROUP)
+    assert plan["groups"][0]["survivor"] == "aaa", "the Python sort stays authoritative"
 
 
 async def test_case_variants_are_not_a_group_but_are_reported(neo4j_driver):
@@ -178,19 +211,28 @@ async def test_the_payload_is_json_and_never_carries_an_embedding(neo4j_driver):
 
 
 async def test_name_embedding_cosine_checks_the_same_vector_assumption(neo4j_driver):
-    """Identical vectors -> 1.0; differing vectors -> strictly less; a member
-    without a vector -> None (unknown is not 1.0)."""
+    """Identical vectors -> 1.0; a group with ONE drifted member -> the worst
+    pair, not the best; a member without a vector -> None (unknown is not 1.0).
+
+    The drifted group has three members: two identical (cosine 1.0 with each
+    other) and one orthogonal to both (0.0). The field must report 0.0 -- an
+    instrument that reported the best pair (1.0) would say "nothing to see
+    here" about a group whose assumption has demonstrably failed. The drifted
+    member is the LATEST, so it is last after sorting and no "first pair only"
+    shortcut can see it either."""
     await _seed_duplicate_group(neo4j_driver, name="Same", n=2,
                                 name_embedding=[0.1, 0.2, 0.3])
-    await _seed(neo4j_driver, uuid="d0", name="Differs", name_embedding=[1.0, 0.0, 0.0])
-    await _seed(neo4j_driver, uuid="d1", name="Differs", name_embedding=[0.0, 1.0, 0.0],
+    await _seed(neo4j_driver, uuid="d0", name="Drifted", name_embedding=[1.0, 0.0, 0.0])
+    await _seed(neo4j_driver, uuid="d1", name="Drifted", name_embedding=[1.0, 0.0, 0.0],
                 created_at="2026-02-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="d2", name="Drifted", name_embedding=[0.0, 1.0, 0.0],
+                created_at="2026-03-01T00:00:00Z")
     await _seed(neo4j_driver, uuid="m0", name="Missing", name_embedding=[1.0, 0.0, 0.0])
     await _seed(neo4j_driver, uuid="m1", name="Missing", created_at="2026-02-01T00:00:00Z")
     by_name = {g["name"]: g["name_embedding_cosine"]
                for g in (await plan_merges(neo4j_driver, GROUP))["groups"]}
     assert abs(by_name["Same"] - 1.0) < 1e-9
-    assert by_name["Differs"] < 0.5
+    assert abs(by_name["Drifted"]) < 1e-9, "the worst pair is orthogonal; the best pair is 1.0"
     assert by_name["Missing"] is None
 
 
