@@ -32,10 +32,11 @@ GROUP = "backup-docs"
 @pytest_asyncio.fixture(loop_scope="module")
 async def neo4j_driver(extract_driver):
     """The module-scoped testcontainer driver, wiped before each test -- the
-    container is shared, and these tests all use the same group id. The uuid
-    index one test creates is dropped here too, so a failure inside that test
-    cannot leave it behind to change the scan order of the others."""
+    container is shared, and these tests all use the same group id. The two
+    indexes one test creates are dropped here too, so a failure inside that
+    test cannot leave them behind to change the plan of the others."""
     await extract_driver.execute_query("MATCH (n) DETACH DELETE n")
+    await extract_driver.execute_query("DROP INDEX entity_group_id IF EXISTS")
     await extract_driver.execute_query("DROP INDEX entity_uuid IF EXISTS")
     yield extract_driver
 
@@ -126,20 +127,32 @@ async def test_ties_on_created_at_break_by_ascending_uuid(neo4j_driver):
 
 async def test_groups_query_hands_members_back_in_adverse_order(neo4j_driver):
     """The collected order is specified, not incidental: latest `created_at`
-    first, then largest uuid first -- the reverse of the survivor rule. Seeded
-    in survivor-first insertion order AND with graphiti's `:Entity(uuid)` index
-    present, so neither a label scan nor an index scan could produce this
-    order on its own; only the ORDER BY can."""
+    first, then largest uuid first -- the reverse of the survivor rule.
+
+    The fixture is built so every plausible wrong order is a DIFFERENT
+    sequence from the right one. The latest node (`aaa`, June) has the
+    SMALLEST uuid, so `created_at` order and uuid order disagree:
+
+        (created_at DESC, uuid DESC)  -> aaa, ccc, bbb   the clause as written
+        (uuid DESC, created_at DESC)  -> ccc, bbb, aaa   keys swapped
+        (created_at ASC, uuid ASC)    -> bbb, ccc, aaa   favourable direction
+        insertion order (no ORDER BY) -> bbb, ccc, aaa   seeded survivor-first
+
+    Both indexes graphiti creates on `:Entity` (`entity_group_id`, which this
+    query's plan seeks on, and `entity_uuid`, which it does not use) are
+    present, so the query plans as it does on the live graph."""
+    await neo4j_driver.execute_query(
+        "CREATE INDEX entity_group_id IF NOT EXISTS FOR (n:Entity) ON (n.group_id)")
     await neo4j_driver.execute_query(
         "CREATE INDEX entity_uuid IF NOT EXISTS FOR (n:Entity) ON (n.uuid)")
     await neo4j_driver.execute_query("CALL db.awaitIndexes(60)")
-    await _seed(neo4j_driver, uuid="aaa", name="X", created_at="2026-01-01T00:00:00Z")
     await _seed(neo4j_driver, uuid="bbb", name="X", created_at="2026-01-01T00:00:00Z")
-    await _seed(neo4j_driver, uuid="ccc", name="X", created_at="2026-06-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="ccc", name="X", created_at="2026-01-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="aaa", name="X", created_at="2026-06-01T00:00:00Z")
     rows = await _read(neo4j_driver, _GROUPS, group_id=GROUP)
-    assert [m["uuid"] for m in rows[0]["members"]] == ["ccc", "bbb", "aaa"]
+    assert [m["uuid"] for m in rows[0]["members"]] == ["aaa", "ccc", "bbb"]
     plan = await plan_merges(neo4j_driver, GROUP)
-    assert plan["groups"][0]["survivor"] == "aaa", "the Python sort stays authoritative"
+    assert plan["groups"][0]["survivor"] == "bbb", "the Python sort stays authoritative"
 
 
 async def test_case_variants_are_not_a_group_but_are_reported(neo4j_driver):

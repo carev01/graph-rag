@@ -67,14 +67,29 @@ _COUNT = (
 # The ORDER BY before `collect(e)` is deliberate and deliberately BACKWARDS:
 # members arrive latest-first, largest-uuid-first -- the exact opposite of the
 # survivor rule. `plan_merges` sorts in Python and that sort is the only
-# authority on the survivor; this clause exists so the collected order is
-# specified rather than whatever the scan happens to produce (insertion order
-# under a label scan, uuid-ascending under graphiti's `:Entity(uuid)` index),
-# and adverse so that a planner which stopped sorting, or dropped the uuid
-# tie-break, could never pick the right survivor by luck. Verified on
-# neo4j:2026.07.1-community: the plan is Sort -> EagerAggregation and the
-# collected order follows the sort under label scan, index-hinted scan and a
-# 200-member shuffled group.
+# authority on the survivor.
+#
+# Why pin the order at all: an unordered `collect()` returns rows in scan
+# order, and scan order is unspecified -- Cypher promises nothing about it,
+# and it is free to change with the plan, the store, or the Neo4j version.
+# That alone is the reason for the clause; it does not rest on any claim
+# about which order the scan produces today.
+#
+# Why adverse rather than favourable: if the collected order matched the
+# survivor rule, a planner that stopped sorting, or dropped the uuid
+# tie-break, would still pick the right survivor by luck and no test could
+# tell. Latest-first, largest-uuid-first means the collected order is wrong
+# for BOTH keys, so only the Python sort can be right.
+#
+# What was observed (not guaranteed), on neo4j:2026.07.1-community: the plan
+# is Sort -> EagerAggregation and the collected order followed the sort in
+# every configuration tried, including a 200-member shuffled group. On the
+# live graph the query plans as a NodeIndexSeek on graphiti's
+# `entity_group_id` index -- `group_id` equality is its only predicate -- and
+# the `entity_uuid` index is not used by it; the unordered variant returned
+# insertion order there, not uuid order. A different version or plan may
+# behave differently, which is exactly why the order is pinned and a test
+# (`test_groups_query_hands_members_back_in_adverse_order`) checks it.
 _GROUPS = (
     "MATCH (e:Entity {group_id:$group_id}) "
     "WITH e ORDER BY e.created_at DESC, e.uuid DESC "
