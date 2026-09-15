@@ -691,7 +691,7 @@ What must be **proven** for a destructive merge — a count is never enough:
 | zero-duplicate graph: no-op, zero counts | §4.9 | — the test must still assert the snapshot, or it is vacuous |
 | step 0: rename a member between plan and apply → that group aborts, others merge | re-verification | drop `name = $name` from the re-match |
 | `theme-build` guard: refuses with duplicates present; `--allow-duplicates` proceeds; zero duplicates proceeds | §4.8 | remove the guard; invert it |
-| `ingest` CLI prints the count; `cleanup`/`maintenance` audits include `duplicates.report` and never `merged` | §4.8 | — |
+| `ingest` CLI prints the count; `cleanup`/`maintenance` audits carry the report-mode payload directly under `duplicates` (`groups`, `totals`, `near_duplicates_not_merged`, `label_conflicts`) and never `totals.merged` | §4.8 | — |
 
 "Byte-identical snapshot" means the full node and relationship property maps plus
 labels and endpoints for the whole test group, compared as data, not counts.
