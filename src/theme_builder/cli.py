@@ -12,6 +12,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder
+from graph_extract.merge_duplicates import DuplicateEntitiesError, assert_no_duplicates
 from theme_builder.context import EntityRow, FactRow, assemble_context
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
@@ -425,13 +426,42 @@ def theme_build(
             False, "--verify-pending",
             help="Re-verify only reports staged by an earlier run and promote the ones "
                  "that pass. Recovers from a transient verifier outage without "
-                 "regenerating anything. Wins over --full if both are given.")) -> None:
-    """Refresh the community-report layer (incremental by default; --full rebuilds all)."""
+                 "regenerating anything. Wins over --full if both are given."),
+        allow_duplicates: bool = typer.Option(
+            False, "--allow-duplicates",
+            help="Proceed even though the entity graph holds exact-name duplicate "
+                 "entities. By default the command refuses: communities detected "
+                 "over a fragmented graph are wrong, not stale, and the reports "
+                 "written over them are plausible and wrong in a way nothing "
+                 "downstream can detect. Run `merge-duplicates --apply` first; use "
+                 "this only after reading the report and deciding the duplicates "
+                 "are immaterial to the communities at hand.")) -> None:
+    """Refresh the community-report layer (incremental by default; --full rebuilds all).
+
+    Refuses to run while exact-name duplicate entities exist (see
+    --allow-duplicates); the check is one aggregation, no LLM, and runs before
+    any work in every mode.
+    """
     async def _main() -> None:
         settings = get_extract_settings()
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
         try:
+            # The guard comes FIRST, before any runner: a guard that ran after
+            # the reports were generated would have saved nothing. Refusal is
+            # a clean non-zero exit carrying the count and the remedy.
+            try:
+                excess = await assert_no_duplicates(
+                    driver, settings.group_id, allow=allow_duplicates)
+            except DuplicateEntitiesError as exc:
+                typer.echo(f"theme-build: refusing to run. {exc}", err=True)
+                raise typer.Exit(code=1)
+            if excess:
+                typer.echo(
+                    f"theme-build: WARNING: proceeding over {excess} exact-name duplicate "
+                    f"entities in group {settings.group_id!r} (--allow-duplicates); the "
+                    "communities and reports below may be split along those duplicates.",
+                    err=True)
             if verify_pending:
                 res = await _run_verify_pending(settings, driver=driver)
             else:

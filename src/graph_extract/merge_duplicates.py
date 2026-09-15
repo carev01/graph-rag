@@ -153,6 +153,30 @@ async def count_duplicates(driver: AsyncDriver, group_id: str) -> int:
     return int(rows[0]["excess"]) if rows else 0
 
 
+class DuplicateEntitiesError(RuntimeError):
+    """The entity graph holds exact-name duplicates and the caller did not
+    opt to proceed over them. The message carries the count, the group, the
+    remedy (`merge-duplicates`, then `--apply`) and the override."""
+
+
+async def assert_no_duplicates(driver: AsyncDriver, group_id: str, *, allow: bool) -> int:
+    """Raise unless the entity graph is free of exact-name duplicates.
+
+    Community detection over a fragmented entity graph yields communities that
+    are WRONG, not merely stale: a duplicated `Microsoft Azure` splits one real
+    community in two, and the strong-tier reports written over that partition are
+    plausible and wrong in a way nothing downstream can detect. Returns the count
+    so a caller can report it.
+    """
+    excess = await count_duplicates(driver, group_id)
+    if excess and not allow:
+        raise DuplicateEntitiesError(
+            f"{excess} exact-name duplicate entities in group {group_id!r}. "
+            f"Run `merge-duplicates` to see them, then `merge-duplicates --apply`. "
+            f"Use --allow-duplicates to proceed anyway.")
+    return excess
+
+
 def _order_key(member: dict[str, Any]) -> tuple[bool, int, int, str]:
     """(created_at, uuid) as a total order. A member with no `created_at`
     sorts LAST: it cannot honestly claim to be the earliest."""

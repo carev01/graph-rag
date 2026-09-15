@@ -31,7 +31,7 @@ from graph_extract.graphiti_client import (
 from graph_extract.dedup_guard import DedupIndexStats, install_dedup_guard
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.ingest_driver import IngestDriver
-from graph_extract.merge_duplicates import apply_merges, plan_merges
+from graph_extract.merge_duplicates import apply_merges, count_duplicates, plan_merges
 from graphiti_core import Graphiti
 from graph_extract.ontology import EXTRACTION_INSTRUCTIONS, CHEAP_TIER_SALIENCE
 from graph_extract.probe import DEFAULT_MODES, run_probe
@@ -279,6 +279,17 @@ def ingest(
             # only), and TEI embeddings are not token-metered.
             typer.echo("--- cost (this run) ---")
             _dump(await cost_report(res.episodes_added))
+            # Last, and AFTER the run (spec 4.8): one aggregation over :Entity
+            # by name, no LLM. Concurrent ingest creates exact-name duplicates
+            # (30 measured at N=4), and the merge is deliberately not automatic
+            # -- so the run ends with the number and the remedy instead of a
+            # number someone has to go and compute. The worker does not do
+            # this per batch: on a million-entity graph the aggregation is
+            # seconds per batch for a number that only changes per source.
+            excess = await count_duplicates(driver, settings.group_id)
+            typer.echo(
+                f"{excess} exact-name duplicate entities in group {settings.group_id!r}"
+                + ("; run `merge-duplicates` to see them" if excess else ""))
         finally:
             await driver.close()
             await docext.aclose()
@@ -430,7 +441,9 @@ def cleanup(
     ),
 ) -> None:
     """Run the deterministic post-ingest correctors: prune noise entities,
-    then retype (promote+demote) region entities against the gazetteer."""
+    then retype (promote+demote) region entities against the gazetteer; then
+    REPORT exact-name duplicate entities (never merge them -- see
+    merge-duplicates)."""
 
     async def _run() -> None:
         settings = get_extract_settings()
@@ -439,7 +452,10 @@ def cleanup(
             prune = await prune_noise_entities(driver, settings.group_id)
             retype = await retype_region_entities(
                 driver, settings.group_id, force=force_demote)
-            _dump({"prune": prune, "retype": retype})
+            # The REPORT, never the apply: a composite command on a timer must
+            # not delete nodes on its own. Same key and payload in `maintenance`.
+            duplicates = await plan_merges(driver, settings.group_id)
+            _dump({"prune": prune, "retype": retype, "duplicates": duplicates})
         finally:
             await driver.close()
 
@@ -505,10 +521,11 @@ def merge_duplicates(
 def maintenance() -> None:
     """Full housekeeping pass: prune noise, retype regions, tombstone
     navigation-article episodes, sweep stale facts, reconcile structural<->
-    semantic SAME_AS. Composes the deterministic jobs; run weekly (scheduling
-    is a deployment concern -- see maintenance-runbook). Navigation
-    tombstoning runs before the sweep so the same run expires the now-
-    unsupported nav facts."""
+    semantic SAME_AS, and REPORT exact-name duplicate entities (never merge
+    them -- that is `merge-duplicates --apply`, run by an operator). Composes
+    the deterministic jobs; run weekly (scheduling is a deployment concern --
+    see maintenance-runbook). Navigation tombstoning runs before the sweep so
+    the same run expires the now-unsupported nav facts."""
 
     async def _run() -> None:
         settings = get_extract_settings()
@@ -519,8 +536,10 @@ def maintenance() -> None:
             navigation = await tombstone_navigation_articles(driver, settings.group_id)
             sweep = await sweep_stale_facts(driver, settings.group_id)
             reconcile = await reconcile_same_as(driver, settings.group_id)
+            # Report only, never `apply_merges`: this runs on a weekly timer.
+            duplicates = await plan_merges(driver, settings.group_id)
             _dump({"prune": prune, "retype": retype, "navigation": navigation,
-                   "sweep": sweep, "reconcile": reconcile})
+                   "sweep": sweep, "reconcile": reconcile, "duplicates": duplicates})
         finally:
             await driver.close()
 

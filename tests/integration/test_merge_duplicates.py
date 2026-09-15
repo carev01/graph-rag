@@ -46,9 +46,11 @@ from graph_extract.config import ExtractSettings
 from graph_extract.merge_duplicates import (
     _GROUPS,
     _STEP6_DELETE,
+    DuplicateEntitiesError,
     MergeAborted,
     _read,
     apply_merges,
+    assert_no_duplicates,
     count_duplicates,
     merge_group,
     plan_merges,
@@ -973,8 +975,12 @@ def cli_targets_the_container(extract_neo4j, monkeypatch):
     monkeypatch.setattr(cli, "get_extract_settings", lambda: settings)
 
 
+async def _invoke_command(command, *args):
+    return await asyncio.to_thread(CliRunner().invoke, cli.app, [command, *args])
+
+
 async def _invoke(*args):
-    return await asyncio.to_thread(CliRunner().invoke, cli.app, ["merge-duplicates", *args])
+    return await _invoke_command("merge-duplicates", *args)
 
 
 # --- the brief's test, verbatim (the invoke hops threads, see above) -----------
@@ -1055,3 +1061,111 @@ async def test_apply_prints_the_audit_of_the_committed_groups_when_a_later_one_a
     zeta_after = await _snapshot_group(neo4j_driver, GROUP)
     zeta_rows = [r for r in zeta_before["nodes"] + zeta_before["rels"] if "Zeta" in r]
     assert [r for r in zeta_after["nodes"] + zeta_after["rels"] if "Zeta" in r] == zeta_rows
+
+
+# =============================================================================
+# Task 7: the theme-build guard, and the report inside cleanup / maintenance
+# =============================================================================
+# The guard is a FUNCTION (`assert_no_duplicates`), tested here directly against
+# the container. `theme-build` itself is never invoked from a test: with
+# `--allow-duplicates` it proceeds into a real community build on the strong
+# tier. The hermetic ordering test that pins WHERE the command calls the guard
+# lives in tests/unit/test_theme_cli_guard.py.
+#
+# Fixture discrimination: the guard tests seed n=3 where the count is asserted,
+# so excess (2), groups (1) and nodes (3) are three different numbers -- a guard
+# that returned the wrong one of them gives a different answer.
+
+
+# --- the brief's tests, verbatim ---------------------------------------------
+
+async def test_the_guard_raises_while_duplicates_exist(neo4j_driver):
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=2)
+    with pytest.raises(DuplicateEntitiesError, match="merge-duplicates"):
+        await assert_no_duplicates(neo4j_driver, "backup-docs", allow=False)
+
+
+async def test_allow_duplicates_returns_the_count_instead_of_raising(neo4j_driver):
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    assert await assert_no_duplicates(neo4j_driver, "backup-docs", allow=True) == 2
+
+
+async def test_the_guard_passes_on_a_clean_graph(neo4j_driver):
+    await _seed(neo4j_driver, uuid="a", name="Unique")
+    assert await assert_no_duplicates(neo4j_driver, "backup-docs", allow=False) == 0
+
+
+@pytest.mark.usefixtures("cli_targets_the_container")
+async def test_cleanup_reports_duplicates_and_never_merges(neo4j_driver):
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    before = await _snapshot(neo4j_driver)
+    result = await _invoke_command("cleanup")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["duplicates"]["totals"]["excess"] == 2
+    assert "merged" not in payload["duplicates"]["totals"]
+    assert await _snapshot(neo4j_driver) == before
+
+
+# --- the rest of the surface --------------------------------------------------
+
+async def test_the_guard_names_the_count_the_group_and_the_remedy(neo4j_driver):
+    """The refusal is the operator's only clue: it must carry the number (the
+    excess, 2 here, not the group count of 1), the group, the report command
+    and the apply command, and the override -- and it must be scoped to the
+    group it was asked about, so the same name in another group is not
+    counted."""
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    await _seed(neo4j_driver, uuid="elsewhere", name="AWS Backup", group_id="other")
+    with pytest.raises(DuplicateEntitiesError) as excinfo:
+        await assert_no_duplicates(neo4j_driver, "backup-docs", allow=False)
+    message = str(excinfo.value)
+    assert message.startswith("2 exact-name duplicate entities in group 'backup-docs'")
+    assert "`merge-duplicates`" in message and "`merge-duplicates --apply`" in message
+    assert "--allow-duplicates" in message
+    assert await assert_no_duplicates(neo4j_driver, "other", allow=False) == 0
+
+
+async def test_the_guard_writes_nothing_in_either_mode(neo4j_driver):
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    before = await _snapshot(neo4j_driver)
+    with pytest.raises(DuplicateEntitiesError):
+        await assert_no_duplicates(neo4j_driver, GROUP, allow=False)
+    await assert_no_duplicates(neo4j_driver, GROUP, allow=True)
+    assert await _snapshot(neo4j_driver) == before
+
+
+@pytest.mark.usefixtures("cli_targets_the_container")
+async def test_maintenance_reports_duplicates_and_never_merges(neo4j_driver):
+    """`maintenance` is the weekly composite; it carries the same report under
+    the same key and, like `cleanup`, must not merge. The two jobs are
+    independent code paths, so each is pinned on its own."""
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=3)
+    before = await _snapshot(neo4j_driver)
+    result = await _invoke_command("maintenance")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["duplicates"]["totals"] == {"groups": 1, "excess": 2}
+    assert [g["name"] for g in payload["duplicates"]["groups"]] == ["AWS Backup"]
+    assert set(payload) == {"prune", "retype", "navigation", "sweep", "reconcile", "duplicates"}
+    assert await _snapshot(neo4j_driver) == before
+
+
+@pytest.mark.usefixtures("cli_targets_the_container")
+async def test_cleanup_carries_the_whole_report_not_just_a_count(neo4j_driver):
+    """The audit an operator reads on a timer must be the report `merge-
+    duplicates` would print -- groups with their planned survivor and the
+    near-duplicate list -- not a bare number that sends them to run another
+    command to learn which names are involved."""
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=2)
+    await _seed(neo4j_driver, uuid="ac0", name="Access Control")
+    await _seed(neo4j_driver, uuid="ac1", name="Access control")
+    result = await _invoke_command("cleanup")
+    assert result.exit_code == 0, result.output
+    duplicates = json.loads(result.stdout)["duplicates"]
+    assert duplicates["totals"] == {"groups": 1, "excess": 1}
+    assert duplicates["groups"][0]["name"] == "AWS Backup"
+    assert duplicates["groups"][0]["survivor"] == _S
+    assert duplicates["near_duplicates_not_merged"] == [
+        {"normalized": "access control", "names": ["Access Control", "Access control"]}]
+    assert await count_duplicates(neo4j_driver, GROUP) == 1, "reported, not merged"
