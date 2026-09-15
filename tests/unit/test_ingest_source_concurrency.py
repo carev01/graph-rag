@@ -346,3 +346,41 @@ async def test_warmup_is_inert_at_concurrency_one():
         orders[threshold] = list(log)
     assert orders[0] == orders[8], (
         f"warm-up must be inert at concurrency 1; got {orders}")
+
+
+async def test_a_predicate_failure_propagates_out_of_ingest_source():
+    """The CLI path and the worker path DELIBERATELY differ when the warm-up
+    lookup raises. The worker (`semantic_worker._group_is_cold`) catches, logs
+    at WARNING and answers cold: it is a long-running process with per-job
+    backoff behind it, and a transient Neo4j blip must not kill it. This path
+    has no such catch: `ingest_source` is what the `ingest` command runs, a
+    human is watching, and a lookup failure must SURFACE. Swallowing it here
+    would degrade a paid run into silent full serialisation -- every article
+    "cold", one at a time, at concurrency 1 for the whole source, with nothing
+    in the output saying so. A visible error is the cheaper failure.
+
+    The observable is the exception reaching the caller: the failed article's
+    slot holds it (run_concurrently), `ingest_source` re-raises it after the
+    batch, and the article itself was never attempted. A copy of the worker's
+    try/except-return-True here completes normally with all four ingested, so
+    a test that only checked the articles ran would pass under both."""
+    done: list[str] = []
+    asked = {"n": 0}
+
+    class _Gate:
+        async def is_cold_source(self, source_id: str) -> bool:
+            asked["n"] += 1
+            if asked["n"] == 2:                # a blip on a2's lookup only
+                raise ConnectionError("neo4j unreachable")
+            return False
+
+    async def fake_ingest_article(article_id: str):
+        done.append(article_id)
+        return IngestArticleResult(article_id=article_id)
+
+    driver = _driver_with(fake_ingest_article, concurrency=4, gate=_Gate())
+    with pytest.raises(ConnectionError, match="neo4j unreachable"):
+        await driver.ingest_source("s1")
+    assert sorted(done) == ["a1", "a3", "a4"], (
+        f"siblings still run; the article whose lookup failed must NOT be "
+        f"silently ingested as cold; got {done}")
