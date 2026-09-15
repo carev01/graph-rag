@@ -748,7 +748,7 @@ git commit -m "feat(ingest): apply the warm-up barrier on both ingest paths"
    "near_duplicates_not_merged": [{"normalized": str, "names": list[str]}],
    "label_conflicts": [{"name": str, "labels": list[list[str]]}]}
   ```
-  `apply_merges` (Task 5) returns this same payload with `merged`, `edges_moved`, `self_loops_created` added to `totals` and a `summary_dropped` list. Tasks 5, 6 and 7 all consume these two functions, and Task 7 reads `totals.excess` specifically. **This task writes nothing to the graph.**
+  `apply_merges` (Task 5) returns this same payload with `merged` added to `totals`, and `edges_moved` (by type), `self_loops_created`, `summary_dropped`, `labels_promoted` and `properties_dropped` at the **top level** of the payload, beside `groups`/`totals` — not inside `totals` (as built: `merge_duplicates.py`, `apply_merges`' return; the runbook's "Duplicate entities" section describes the same shape). Tasks 5, 6 and 7 all consume these two functions, and Task 7 reads `totals.excess` specifically. **This task writes nothing to the graph.**
 
 Survivor rule: earliest `created_at`, ties broken by ascending `uuid` — a total order, so the survivor is a pure function of the group. It is the node sequential ingestion would have produced (the first extraction creates it; every later one resolves onto it) and the one most likely to be referenced from outside.
 
@@ -885,7 +885,7 @@ git commit -m "feat(merge): read-only exact-name duplicate planner"
 
 **Interfaces:**
 - Consumes: `plan_merges` (Task 4).
-- Produces: `async def apply_merges(driver: AsyncDriver, group_id: str) -> dict` — plans, then merges each group in **one explicit transaction per group**, returning the report payload plus `merged`, `edges_moved` (by type), `self_loops_created`, `summary_dropped`.
+- Produces: `async def apply_merges(driver: AsyncDriver, group_id: str) -> dict` — plans, then merges each group in **one explicit transaction per group**, returning the report payload plus `totals.merged`, and — at the payload's top level, not under `totals` — `edges_moved` (by type), `self_loops_created`, `summary_dropped`, `labels_promoted`, `properties_dropped`.
 
 This is the destructive core. The whole safety argument rests on two mechanics; implement them exactly.
 

@@ -116,7 +116,9 @@ mention of an ambiguous name, so each duplicate is a permanent tax on the
 hottest names in the corpus, and community detection over the split graph
 yields wrong communities, not stale ones. The merge is pure Cypher, one
 transaction per name group: the survivor (earliest `created_at`, ties by lowest
-uuid; a member with no `created_at` never survives) keeps its uuid; every
+uuid; a member with no `created_at` sorts after every dated member, so it
+survives only when *no* member of the group is dated — then the lowest uuid
+wins) keeps its uuid; every
 `RELATES_TO`, `MENTIONS`, `IN_COMMUNITY` and `SAME_AS` edge on a loser is
 recreated on the survivor with
 its full property map and uuid; the loser is removed with `DELETE` (not
@@ -145,15 +147,24 @@ audit of the groups already committed.
 (`run merge-duplicates to see them`) when N is non-zero. `cleanup` and
 `maintenance` carry the full report-mode payload under the
 `duplicates` key of their JSON audit — the report, never the merge: a job on a
-timer must not delete nodes on its own. `theme-build` refuses to run while the
-count is non-zero (exit 1, naming the count and the remedy);
-`--allow-duplicates` overrides it for an operator who has read the report and
-decided the duplicates are immaterial to the communities at hand.
+timer must not delete nodes on its own. `theme-build` refuses to *build* while
+the count is non-zero (exit 1, naming the count and the remedy) — the
+incremental default and `--full`; `--allow-duplicates` overrides it for an
+operator who has read the report and decided the duplicates are immaterial to
+the communities at hand. `--verify-pending` is not gated: it promotes reports an
+earlier run staged and generates nothing, and the count *now* says nothing
+about the graph those reports were built over (BACKLOG 34 — a report staged
+with `--allow-duplicates` over a fragmented graph can still be promoted after
+the merge; the guard cannot see that).
 
 **Prevention, and re-deriving the warm-up size.** The warm-up barrier
-(`ingest_warmup_articles`, default 8) runs the first `W` articles of each
-never-before-ingested source strictly sequentially, because the hub entities a
-source keeps mentioning are named in its opening overview pages: on the
+(`ingest_warmup_articles`, default 8) runs a source's articles strictly
+sequentially while fewer than `W` of its articles carry a live episode in the
+configured group — so a never-before-ingested source warms up over its first
+`W` articles, and a partially-ingested one (three articles in, resumed later)
+warms up over the next `W-3`; a source already past `W` never warms up again.
+The reason is that the hub entities a source keeps mentioning are named in its
+opening overview pages: on the
 baseline, the first 8 articles of each source carry 79.5% of the duplicate-risk
 weight (spec §1.1). If a concurrent run still leaves many more duplicates than
 the model predicts, re-derive `W` from that run's own spans instead of paying

@@ -517,6 +517,45 @@ design cycle with the measurement above as its input. The residual path is pinne
 `test_same_pair_contradiction_stays_live_through_the_duplicate_candidates` so a library
 change in either direction fails loudly.
 
+### 34. Reports staged over a fragmented graph can still be promoted — **P1, real gap, not closed by the guard**
+Recorded by the whole-branch review of `concurrency-duplicate-mitigation` (2026-09-15).
+
+**What it is.** `theme-build` refuses to *build* while exact-name duplicate entities
+exist (`theme_builder/cli.py`, `assert_no_duplicates` before either build runner). It does
+**not** gate `--verify-pending`, and deliberately so: that mode promotes reports an
+earlier run staged (`pending_summary` / `pending_full_report`), and the hazard the guard
+names — communities detected and reports written over a split entity graph — is fixed at
+*staging* time. A count of the graph as it stands at promotion time cannot tell the two
+orderings apart:
+
+- built with 0 duplicates → staged clean → duplicates appear later →
+  `--verify-pending` — no hazard ever existed; a gate here would refuse a legitimate
+  recovery from a verifier outage;
+- built with `--allow-duplicates` over a fragmented graph → staged fragmented →
+  `merge-duplicates --apply` → count is now 0 → `--verify-pending` — the actual hazard,
+  and a gate here would wave it through.
+
+The branch originally gated all three modes, which added a false refusal to the first
+path and gave zero protection on the second. Narrowing the guard to the build modes
+removed the false refusal. **It did not close the second path.** Today an operator who
+builds with `--allow-duplicates`, merges, and then runs `--verify-pending` promotes
+reports whose community membership was computed over the split graph, and nothing
+downstream can tell. (The merge does flag the losers' communities `stale`, so the *next*
+incremental build regenerates them — but promotion happens first, and a stale-flagged
+community's staged report is still promoted as written.)
+
+**What closing it needs.** Record the duplicate count *at staging time* alongside the
+staged report (e.g. `c.pending_staged_over_duplicates = <excess>` next to
+`pending_summary`), and have `--verify-pending` refuse — or at least warn and skip — a
+report staged over a non-zero count. That is the only signal that survives the merge.
+Out of scope for the branch; pinned as ungated by
+`test_verify_pending_is_not_gated_by_the_duplicate_guard` so a future edit cannot quietly
+re-add the useless promotion-time gate instead of the staging-time record.
+
+**Exposure today.** Requires an operator to have used `--allow-duplicates` — the override
+the runbook tells them to use only after reading the report. Not reachable from the
+defaults.
+
 ### 7. Extraction is not deterministic at `temperature=0.0`
 The dedup step's semantic search over existing facts can go either way between runs.
 Matters for any live extraction test and for reproducing extraction bugs. Recorded during
@@ -606,6 +645,47 @@ retries — is the real fix. Until it exists, the worst case is bounded but not 
 ### 10b. 90-second timeouts
 Confirmed at `graphiti_client.py:150,154,204,256`. Add chonkie `timeout=120`
 (`ingest_driver.py:80`) and docext `timeout=300` (`docext/client.py:12`) to the same fix.
+
+### 36. `cleanup` / `maintenance` gained two full `:Entity` scans; `_NEAR` is unbounded — **P2**
+Recorded by the whole-branch review of `concurrency-duplicate-mitigation` (2026-09-15).
+
+Both composite commands now call `plan_merges` (`graph_extract/cli.py:457` and `:540`) to
+carry the report-mode duplicate audit under their `duplicates` key. `plan_merges` runs
+two group-wide aggregations over `:Entity` (`merge_duplicates.py`, `_GROUPS` and `_NEAR`):
+`_GROUPS` collects every member of every exact-name group — bounded by the duplicate
+count, fine — but `_NEAR` (`merge_duplicates.py:134-138`) groups *every* entity by
+`toLower(trim(name))` and returns every name list with more than one member. Its result
+size is bounded only by how many case/whitespace variants the corpus holds, and the
+`near_duplicates_not_merged` list is printed in full into a JSON audit that a timer job
+captures. At 999 entities it is 6 rows; at a million-entity graph it is two scans per
+`cleanup` (the runbook says "after every incremental batch") for a number that only
+changes per source, plus an audit payload of unknown size. Spec §4.8 already made the
+same argument for keeping the count *out* of the worker's per-batch path.
+
+**Fix when it bites:** `cleanup` carries `count_duplicates` (one aggregation, one
+integer) and only `maintenance` carries the full report; cap `_NEAR`'s output (`LIMIT`
+plus a total) so the audit has a bounded size. Both are one-line changes; not done now
+because at pilot scale the cost is milliseconds and the shape of the audit is what the
+runbook documents.
+
+### 37. A `:Entity` with a null `name` would deadlock the merge pass — **P2, latent, 0 live**
+Recorded by the whole-branch review of `concurrency-duplicate-mitigation` (2026-09-15).
+
+`_GROUPS` and `_COUNT` (`merge_duplicates.py:84-88`, `:122-131`) group by `e.name`, and
+Cypher aggregation groups nulls together — so two entities with **no** `name` form a
+duplicate group with `name: null`, are counted in `excess`, and `theme-build` refuses over
+them. `_STEP0` (`merge_duplicates.py:342-344`) then re-matches each member with
+`{uuid:u, group_id:$g, name:$name}`, and a null property never matches an equality, so
+step 0 finds zero members, raises `MergeAborted` for the group, and `--apply` stops. Every
+re-run does the same: the count never drops, the group never merges, `theme-build` keeps
+refusing, and the operator has no way out short of hand-editing the graph. (An *empty
+string* name is fine — `name:""` matches — so this is null only.)
+
+**Exposure.** graphiti always writes a name (`EntityNode.name` is a required field), and
+the live baseline holds 0 null-name entities. This is a latent shape, not an observed
+one. **Fix when it is:** `_GROUPS`/`_COUNT` add `WHERE e.name IS NOT NULL`, and the
+planner reports null-name nodes under their own key instead of treating them as a
+mergeable group.
 
 ---
 
@@ -946,6 +1026,20 @@ populated index range instead of two, so the confusion is structurally impossibl
 than mitigated. (Superseded by the gate, which drops the whole candidate list rather than
 the undated part of it. Same-pair candidates are not "invalidation candidates" in graphiti's
 terms and are unaffected — item 33.)
+
+### 35. `ingest` prints the duplicate count only on the success path — **P3**
+Recorded by the whole-branch review of `concurrency-duplicate-mitigation` (2026-09-15).
+
+Spec §4.8 says the `ingest` CLI "prints the duplicate count at the end of **every**
+run". The code (`graph_extract/cli.py:289-292`) prints it as the last statement of the
+`try` body, after the dedup summary, the timing report and the cost report — so a run
+that raises out of `ingest_source` (a failed article re-raised after the batch, §6)
+prints nothing: the `finally` closes the clients and the exception propagates. Those are
+exactly the runs where the operator most wants the number, because a partial concurrent
+run still created its duplicates. Move the count into the `finally` guarded by its own
+`try` (Neo4j may be the thing that failed), or print it before the cost report and accept
+that it then precedes the exception. Also reconcile the spec sentence to whichever is
+chosen. Cosmetic today: the count is one `cleanup` away.
 
 ## P4 — Roadmap and process
 

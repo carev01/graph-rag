@@ -95,9 +95,17 @@ penalty and splitting new facts across copies. They are separable in *implementa
 (different modules, independently testable, either can ship first) and this spec keeps
 them so; they are not separable in *justification*.
 
-Neither changes behaviour at defaults. `ingest_article_concurrency` stays 1; warm-up is
-inert at concurrency 1 (see §3.6 for why its default is nonetheless non-zero); the merge
-command does nothing destructive without `--apply`. This matches how concurrency shipped.
+Neither changes the *ingest call order* at defaults, and neither writes anything new.
+`ingest_article_concurrency` stays 1; at concurrency 1 warm-up produces the identical
+call and completion order with `W=0` and `W=8` (the §7.1 inertness test pins exactly
+that, on order, not counts; see §3.6 for why the default is nonetheless non-zero); the
+merge command does nothing destructive without `--apply`. This matches how concurrency
+shipped. Two things *do* change at `N=1, W=8`, both deliberate and tested: each article
+of a not-yet-warm source costs one extra Neo4j round-trip (the `_LIVE_ARTICLES` count in
+`warmup.py`) until the source reads warm and is cached; and there is a new failure path
+— on the worker a predicate that raises answers cold and the job proceeds, on the CLI it
+propagates and the article is skipped (§6). Neither alters what gets extracted or
+written.
 
 Quality outranks latency (stated by the user). Where this spec trades speed for exactness
 — the strict warm-up barrier, the transaction-per-group merge, the refusal to run
@@ -222,10 +230,31 @@ src/graph_extract/concurrent_ingest.py
 Semantics, in input order: for each item, if `is_cold` is given and returns true, await
 all launched tasks, then await `worker(item)` directly; otherwise launch `worker(item)` as
 a task under the semaphore. Results come back one per item in input order; an exception
-from `worker` **or from `is_cold`** is returned in the item's slot (a Neo4j outage in the
-predicate fails that item, is logged naming it, and propagates through the existing
-after-the-batch contract — nothing is swallowed). `is_cold=None` is byte-for-byte the
-current helper, and a test proves it (§7).
+from `worker` **or from `is_cold`** is returned in the item's slot. `is_cold=None` is
+byte-for-byte the current helper, and a test proves it (§7).
+
+That is the *helper's* contract. **What a predicate failure means differs by call site,
+deliberately**, because the two predicates the call sites hand the helper differ:
+
+- **`ingest` CLI (`ingest_source`, `ingest_driver.py`)** passes `gate.is_cold_source`
+  through unwrapped. A Neo4j outage in the predicate lands in that article's slot, is
+  logged naming the article, and `ingest_source` re-raises after the batch — the existing
+  after-the-batch contract; nothing is swallowed. A human is watching a paid run; a
+  visible error beats a silent full serialisation.
+- **semantic worker (`run_worker_once`, `graph_sync/semantic_worker.py`)** wraps the
+  predicate: an `Exception` from it is caught *in the worker*, logged at WARNING naming
+  the article, and answered **cold**. Nothing reaches a slot and no job fails on the
+  lookup's account; the group then runs, and if Neo4j really is down its job fails
+  through `_run_job`'s per-job backoff exactly as a blip mid-ingest did before the
+  barrier existed. Left to the helper's default, the exception would sit in the group's
+  slot — its jobs never run and stay `in_progress` for the reaper, every *other* group
+  still runs at full LLM cost, and the slot loop re-raises after the batch, which
+  `run_worker` does not catch: **a one-retry blip would kill the worker process.** A
+  mitigation that ships on by default must not be more fatal than the work it protects.
+  `BaseException` (an outer cancellation) is not caught and propagates.
+
+Do not re-derive the worker wiring from the helper's contract alone: the wrapper is the
+fix, and mutants M15/M16 in `task-3-mutations.json` are what pin it.
 
 ```
 src/graph_extract/warmup.py
@@ -235,15 +264,33 @@ src/graph_extract/warmup.py
         async def is_cold_article(self, article_id: str) -> bool   # article -> source -> is_cold_source
 ```
 
-`threshold == 0` short-circuits to warm without querying. Warm sources are remembered
-for the gate's lifetime (one per run: constructed in `_build_ingest_driver` and
-`_build_worker_deps`, attached to the driver as `ingest.warmup_gate`, the same way
-`timings` is).
+`threshold == 0` short-circuits to warm without querying; at threshold 0 neither call
+site constructs a gate at all, so the fan-out takes the byte-for-byte pre-warm-up path.
+Warm sources are remembered for the gate's lifetime, and the two call sites construct
+their own gates:
 
-- `ingest_source` passes `is_cold=lambda _aid: gate.is_cold_source(source_id)`.
-- `run_worker_once` gains `is_cold` as a keyword argument (default `None`, like
-  `concurrency`); the CLI passes `ingest.warmup_gate.is_cold_article` applied to the
-  group's `article_id`, returning false for groups whose every job is a remove.
+- **`ingest` CLI:** `_build_ingest_driver` (`graph_extract/cli.py`) constructs one
+  `WarmupGate` and attaches it to the driver as `ingest.warmup_gate`, the same way
+  `timings` is. `ingest_source` reads it and passes
+  `is_cold=lambda _aid: gate.is_cold_source(source_id)`. The gate lives for one command.
+- **semantic worker:** `graph_sync.cli.worker` constructs a **fresh** `WarmupGate` over
+  the Neo4j driver `_build_worker_deps` returned and passes `is_cold=gate.is_cold_article`
+  to `run_worker`, which forwards it to `run_worker_once` (a keyword argument, default
+  `None`, like `concurrency`); the worker applies it to the group's `article_id`,
+  returning false for groups whose every job is a remove. The driver's `warmup_gate` is
+  *not* consulted on this path — only `ingest_source` reads it, and the worker calls
+  `ingest_article` — so `_build_worker_deps` does not construct one. This gate lives for
+  the worker **process**: until SIGTERM, potentially days.
+
+That lifetime difference bounds what the warm cache may claim. Within an `ingest` run
+the cached answer is exact: nothing the pipeline does removes an article's live episode
+(`Provenance.link` supersedes an old `HAS_EPISODE` edge in the same statement that writes
+its replacement, so the article stays live). Over a worker's lifetime it is a weaker
+claim: a semantic-layer reset or an out-of-band deletion of `Episodic` nodes while the
+worker is up makes a cached-warm source genuinely cold again, and the gate will not
+notice until the process restarts. Accepted as written — those are operator actions,
+not pipeline behaviour, and the cost is duplicates on a source that was deliberately
+re-extracted, which the merge pass repairs.
 
 ### 3.5 Configuration
 
@@ -260,8 +307,10 @@ believed they configured something. `0` is the explicit "off".
 **The default is 8 — on — and the test in §7.1 that pins identical call order at
 `ingest_article_concurrency = 1` with `W=0` and `W=8` is what makes that default
 defensible.** It is not optional coverage; it is the evidence that shipping the knob on
-changes nothing today. If that test is ever weakened to a count assertion, the default
-loses its justification.
+leaves the ingest *call order* unchanged today — the precise claim, not "changes
+nothing": §2 lists the one extra round-trip per not-yet-warm article and the new
+predicate-failure path, both deliberate and tested. If that test is ever weakened to a
+count assertion, the default loses its justification.
 
 ### 3.6 Why the default is 8 and not 0
 
@@ -323,6 +372,12 @@ uniqueness constraint exists on any graphiti uuid** (only RANGE indexes; `SHOW
 CONSTRAINTS` lists the five structural ones). Both procedures
 `db.create.setNodeVectorProperty` and `db.create.setRelationshipVectorProperty` are
 present on 2026.07.1 Community (`SHOW PROCEDURES`). No APOC.
+
+On the `labels` list property: on Neo4j graphiti never *reads* it — its node query
+returns `labels(n)` from the topology (`node_db_queries.py:289`) and `nodes.py:1061` pops
+the property from the returned map — and the next save rewrites it from the node's
+labels. So the merge keeps the property and the node labels in lockstep (§4.4) as
+hygiene, not correctness: a drift between the two has no reader on Neo4j today.
 
 Two facts about the baseline that decide §4.5: **multiple `RELATES_TO` edges between one
 ordered pair are already normal** (440 pairs have more than one, the maximum is 109
@@ -543,7 +598,21 @@ uv run --extra dev python -m graph_extract.cli merge-duplicates --apply    # des
   enforcing the order merge → theme-build at zero cost is cheaper than regenerating.
   `--allow-duplicates` exists for the operator who has read the report and decided the
   duplicates are immaterial to the communities at hand; it is a deliberate override, not
-  a default. The incremental path is also covered: step 4 flags every community the loser belonged
+  a default. **Blast radius, accepted with eyes open:** the gate refuses on *any* non-zero
+  exact-name count, and the justification above is a concurrency-only one — but
+  graphiti's node dedup is a *bounded* similarity search (`node_operations.py:441-447`,
+  `NODE_DEDUP_CANDIDATE_LIMIT` and `NODE_DEDUP_COSINE_MIN_SCORE`), and the baseline
+  already holds 6 case-variant pairs that sequential ingest failed to unify. At 105k
+  articles a non-zero exact-name count from ordinary *sequential* ingest is plausible,
+  and when it happens the community layer is unbuildable by default until an operator
+  runs a destructive pass in a quiet window. The gate stays as it is — a wrong report
+  layer is worse than a late one — but the operator should expect to run
+  `merge-duplicates --apply` as routine hygiene at scale, not only after concurrent
+  runs. The gate covers the two modes that *build* (incremental and `--full`);
+  `--verify-pending` is ungated, because it detects and generates nothing and the
+  graph's count now cannot tell "staged clean, duplicates arrived later" from "staged
+  fragmented, merged since" — the hazard is fixed at staging time (BACKLOG 34). The
+  incremental path is also covered: step 4 flags every community the loser belonged
   to as `stale`, which `incremental._dirty` already treats as "regenerate", so a merge
   followed by an incremental `theme-build` regenerates exactly the affected communities.
   Without that flag the merge would be invisible to the refresh — `touched_entities`
@@ -629,7 +698,8 @@ The merge pass adds no setting: its only switch is the `--apply` flag, and a
 
 | case | behaviour |
 |---|---|
-| `is_cold` raises for one item (Neo4j unreachable) | that item's slot holds the exception; siblings continue; `ingest_source` re-raises after the batch and the worker's job fails and retries — the existing contracts, unchanged |
+| `is_cold` raises for one item (Neo4j unreachable) — **`ingest` CLI** | that article's slot holds the exception; siblings continue; `ingest_source` logs it naming the article and re-raises after the batch — the existing contract, unchanged. The article is skipped, visibly. (M17 in `task-3-mutations.json` pins that the CLI does *not* swallow it.) |
+| `is_cold` raises for one group (Neo4j unreachable) — **semantic worker** | caught in the worker's predicate wrapper (`semantic_worker.py`), logged at WARNING naming the article, answered **cold**; the exception never reaches a slot and no job fails on the lookup's account. The group runs alone; if Neo4j really is down its job fails through `_run_job`'s per-job backoff and the batch returns normally. The worker process survives. Re-raising instead would leave the group `in_progress`, run every other group at full LLM cost, and propagate out of `run_worker` — a one-retry blip killing the worker (§3.4; M15/M16 in `task-3-mutations.json`). `BaseException` is not caught. |
 | the `Article` node for a worker job does not exist yet | cold (§3.1) |
 | `ingest_warmup_articles < 0` | `ValueError` at settings construction |
 | a merge group fails step 0 (graph changed since plan) | that group's transaction rolls back; the run stops and raises naming the group |
@@ -659,8 +729,10 @@ the minimum list; each test names the mutation(s) that must break it.
 | the predicate is group-scoped: episodes in another `group_id` do not warm a source | drop `group_id` from the Cypher (integration, see 7.3) |
 | a superseded `HAS_EPISODE` does not count | drop the `coalesce(r.superseded,false)=false` filter (integration) |
 | missing `Article` → cold; remove-only group → warm | invert either branch |
-| `is_cold` raising lands in the item's slot, siblings complete, `ingest_source` re-raises after the batch | swallow the exception; raise immediately |
+| `is_cold` raising lands in the item's slot, siblings complete, `ingest_source` re-raises after the batch (`test_a_predicate_failure_propagates_out_of_ingest_source`) | swallow the exception; raise immediately (M17: the CLI's `_source_is_cold` wraps the gate call in the worker's try/except-return-True) |
 | `run_worker_once` runs cold groups alone and warm groups fanned out; results still zip to groups in order | drop the `is_cold` pass-through |
+| worker: a predicate failure answers **cold** and the worker survives — the group waits for the in-flight item to *end*, the job completes, nothing is marked failed, a WARNING names the article (`test_a_predicate_failure_answers_cold_and_the_worker_survives`) | M15: the wrapper re-raises instead of answering cold; M16: the wrapper answers warm (`False`) on failure |
+| worker: predicate failure with Neo4j really down — the ingest fails too, both jobs go to per-job backoff, the batch returns normally instead of raising (`test_a_predicate_failure_with_neo4j_really_down_fails_the_job_through_backoff`) | M15 (re-raise: the batch raises and the worker dies) |
 | at `ingest_article_concurrency=1` the call order is identical with `W=0` and `W=8` | (this is the §3.6 claim; it must be a real assertion on order, not on counts) |
 | config: default 8, `0` accepted, `-1` rejected with `ValueError` | remove the validator |
 

@@ -1,4 +1,5 @@
-"""`theme-build` calls the duplicate guard BEFORE it does any work.
+"""`theme-build` calls the duplicate guard BEFORE it builds anything, and does
+not call it at all for `--verify-pending`.
 
 Hermetic on purpose: `theme-build --allow-duplicates` proceeds into a real
 community build on the strong tier, so no test may ever reach that path with
@@ -52,12 +53,13 @@ def hermetic(monkeypatch):
 
 
 # --- the brief's test, verbatim in its assertions ------------------------------
-# Parametrised over every mode: the guard sits on the COMMAND, so `--full` and
-# `--verify-pending` must be refused the same way as the incremental default.
-# All three runners are stubbed with the same recorder, so whichever one a
-# mutant routed to would still be seen.
+# Parametrised over both BUILD modes: the guard sits on the modes that detect
+# communities and write reports, so `--full` must be refused the same way as
+# the incremental default. `--verify-pending` is deliberately absent here and
+# pinned ungated below. All three runners are stubbed with the same recorder,
+# so whichever one a mutant routed to would still be seen.
 
-@pytest.mark.parametrize("mode", [[], ["--full"], ["--verify-pending"]])
+@pytest.mark.parametrize("mode", [[], ["--full"]])
 def test_theme_build_calls_the_guard_before_doing_any_work(monkeypatch, hermetic, mode):
     """Hermetic: every dependency is stubbed, so no LLM call can happen. Proves
     the guard runs BEFORE the build, which is the whole point -- a guard that
@@ -115,6 +117,40 @@ def test_allow_duplicates_reaches_the_guard_and_the_build_follows_it(
     assert _FakeGraphDatabase.handed_out == [seen["driver"]]
     assert seen["build_driver"] is seen["driver"], "one driver: the guard checked the build's graph"
     assert json.loads(result.stdout) == {"communities_detected": 4}
+
+
+def test_verify_pending_is_not_gated_by_the_duplicate_guard(monkeypatch, hermetic):
+    """`--verify-pending` promotes reports STAGED by an earlier run; it detects
+    and generates nothing. The hazard the guard names is fixed at staging
+    time, and the graph's duplicate count now cannot tell "staged clean,
+    duplicates arrived later" (harmless; a gate would refuse a legitimate
+    recovery) from "staged over a fragmented graph, merged since" (the real
+    hazard; the count is 0, so a gate would wave it through). So the guard is
+    not consulted at all on this path -- not called-and-ignored, not called.
+    A guard that raises is the sharpest probe: if a future edit re-adds the
+    call, the refusal shows up as a non-zero exit and `calls == ["guard"]`."""
+    calls: list[str] = []
+
+    async def _fake_guard(driver, group_id, *, allow):
+        calls.append("guard")
+        raise DuplicateEntitiesError("2 exact-name duplicate entities")
+
+    async def _fake_verify(settings, *, driver):
+        calls.append("verify")
+        return {"reports_promoted": 1}
+
+    async def _fake_build(*a, **k):
+        calls.append("build")
+        return {}
+
+    monkeypatch.setattr(theme_cli, "assert_no_duplicates", _fake_guard)
+    monkeypatch.setattr(theme_cli, "_run_verify_pending", _fake_verify)
+    for runner in ("_run_theme_build_incremental", "_run_theme_build"):
+        monkeypatch.setattr(theme_cli, runner, _fake_build)
+    result = CliRunner().invoke(theme_app, ["theme-build", "--verify-pending"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["verify"], f"--verify-pending must not consult the guard; got {calls}"
+    assert json.loads(result.stdout) == {"reports_promoted": 1}
 
 
 def test_theme_build_help_offers_the_override():

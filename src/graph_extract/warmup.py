@@ -42,10 +42,18 @@ _ARTICLE_SOURCE = "MATCH (a:Article {id:$article_id}) RETURN a.source_id AS sour
 
 
 class WarmupGate:
-    """Per-run cold/warm predicate over sources.
+    """Cold/warm predicate over sources, with a warm cache that lives as long
+    as the gate does.
 
     `Article.source_id` carries a RANGE index (`article_source`), so the count is
     an index seek plus a small expand -- negligible against a ~300 s article.
+
+    The gate's lifetime differs by call site, and so does what the cache
+    claims. On the `ingest` CLI it is one command: constructed in
+    `_build_ingest_driver`, dropped at exit. On the semantic worker
+    (`graph_sync.cli.worker`) it is the worker PROCESS -- until SIGTERM,
+    potentially days -- so a warm answer cached on day one is still trusted on
+    day three. See `is_cold_source` for what could make that stale.
     """
 
     def __init__(self, driver: AsyncDriver, group_id: str, threshold: int) -> None:
@@ -63,9 +71,19 @@ class WarmupGate:
             _LIVE_ARTICLES, source_id=source_id, group_id=self._group_id)
         live = r.records[0]["live"] if r.records else 0
         if live >= self._threshold:
-            # Warmth is monotonic within a run -- nothing removes live episodes
-            # mid-run -- so a warm answer is cached for the run's lifetime. A
-            # cold source is deliberately NOT cached: it is about to become warm.
+            # A warm answer is cached for the gate's lifetime. That is exact for
+            # the ingest CLI (one run; nothing the pipeline does removes live
+            # episodes -- Provenance.link supersedes an old edge in the
+            # same statement that writes its replacement, so the article stays
+            # live). On the worker the gate outlives any single run, and the
+            # claim is weaker: a semantic-layer reset or an out-of-band deletion
+            # of Episodic nodes while the worker is up makes a cached-warm
+            # source genuinely cold again, and this gate will not notice until
+            # the process restarts. Accepted: those are operator actions, not
+            # pipeline behaviour, and the cost is duplicates on a source that
+            # was deliberately re-extracted -- the merge pass repairs those. A
+            # cold source is deliberately NOT cached: it is about to become
+            # warm.
             self._warm.add(source_id)
             return False
         return True

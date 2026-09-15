@@ -426,7 +426,10 @@ def theme_build(
             False, "--verify-pending",
             help="Re-verify only reports staged by an earlier run and promote the ones "
                  "that pass. Recovers from a transient verifier outage without "
-                 "regenerating anything. Wins over --full if both are given."),
+                 "regenerating anything. Wins over --full if both are given. Not "
+                 "gated by the duplicate check: it detects and generates nothing, "
+                 "and the graph's duplicate count NOW says nothing about the graph "
+                 "the staged reports were built over."),
         allow_duplicates: bool = typer.Option(
             False, "--allow-duplicates",
             help="Proceed even though the entity graph holds exact-name duplicate "
@@ -438,33 +441,48 @@ def theme_build(
                  "are immaterial to the communities at hand.")) -> None:
     """Refresh the community-report layer (incremental by default; --full rebuilds all).
 
-    Refuses to run while exact-name duplicate entities exist (see
+    Refuses to BUILD while exact-name duplicate entities exist (see
     --allow-duplicates); the check is one aggregation, no LLM, and runs before
-    any work in every mode.
+    any work in both build modes. `--verify-pending` is not gated (see below).
     """
     async def _main() -> None:
         settings = get_extract_settings()
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
         try:
-            # The guard comes FIRST, before any runner: a guard that ran after
-            # the reports were generated would have saved nothing. Refusal is
-            # a clean non-zero exit carrying the count and the remedy.
-            try:
-                excess = await assert_no_duplicates(
-                    driver, settings.group_id, allow=allow_duplicates)
-            except DuplicateEntitiesError as exc:
-                typer.echo(f"theme-build: refusing to run. {exc}", err=True)
-                raise typer.Exit(code=1)
-            if excess:
-                typer.echo(
-                    f"theme-build: WARNING: proceeding over {excess} exact-name duplicate "
-                    f"entities in group {settings.group_id!r} (--allow-duplicates); the "
-                    "communities and reports below may be split along those duplicates.",
-                    err=True)
             if verify_pending:
+                # Deliberately UNGATED. The hazard the guard names -- communities
+                # detected, and reports written, over a fragmented entity graph
+                # -- is fixed at STAGING time, when the build ran. Promotion
+                # neither detects nor generates: it re-verifies text that
+                # already exists against the facts it already cites. A count of
+                # the graph as it stands NOW cannot tell the two orderings
+                # apart: staged clean, duplicates arrived later (harmless, and a
+                # gate here would refuse a legitimate recovery); staged with
+                # --allow-duplicates over a fragmented graph, then merged
+                # (the real hazard, and a gate here would wave it through,
+                # because the count is 0 by then). Detecting the second case
+                # means recording the count AT staging time alongside the
+                # staged report -- BACKLOG 34, not this guard.
                 res = await _run_verify_pending(settings, driver=driver)
             else:
+                # The guard comes FIRST, before any runner: a guard that ran
+                # after the reports were generated would have saved nothing.
+                # Refusal is a clean non-zero exit carrying the count and the
+                # remedy.
+                try:
+                    excess = await assert_no_duplicates(
+                        driver, settings.group_id, allow=allow_duplicates)
+                except DuplicateEntitiesError as exc:
+                    typer.echo(f"theme-build: refusing to run. {exc}", err=True)
+                    raise typer.Exit(code=1)
+                if excess:
+                    typer.echo(
+                        f"theme-build: WARNING: proceeding over {excess} exact-name "
+                        f"duplicate entities in group {settings.group_id!r} "
+                        "(--allow-duplicates); the communities and reports below may "
+                        "be split along those duplicates.",
+                        err=True)
                 runner = _run_theme_build if full else _run_theme_build_incremental
                 res = await runner(settings, driver=driver)
             typer.echo(json.dumps(res, indent=2, default=str))
