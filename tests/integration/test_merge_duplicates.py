@@ -23,11 +23,13 @@ move BEFORE step 6 refuses (so an auto-commit mutant leaves a visibly
 half-rewired group) and one foreign edge in EACH direction (so a guard that
 only looked outward would miss the incoming one); the other-group test gives
 the other group the SAME uuids and one edge of every shape steps 1-5 match
-(outgoing fact, incoming fact, MENTIONS, IN_COMMUNITY, SAME_AS), so a `MATCH`
-in any of steps 0-7 that dropped `group_id` has something to hit -- steps 1-5
-would move the other group's edge, step 0 would find two nodes per uuid,
-step 6 would meet the other loser's edges, step 7 would stamp the other
-survivor; and the three-member tests seed the production shape, because a
+(outgoing fact, incoming fact, MENTIONS, IN_COMMUNITY, SAME_AS), so every
+`group_id` predicate in steps 0-7 has something to hit -- there are fourteen
+(loser AND survivor side of each of steps 1-5, step 0's re-match, step 6's
+guard and its delete, step 7's survivor), and dropping each one was run as a
+mutant against that test and killed by it (mutation log rounds task-5-fix
+and task-5-fix2; nothing in the claim rests on reasoning about a step that
+was not run); and the three-member tests seed the production shape, because a
 fact between two losers and a label disagreement between two losers do not
 exist at two members.
 """
@@ -665,6 +667,30 @@ async def test_an_empty_survivor_summary_takes_the_losers_and_a_full_one_keeps_i
         {"name": "Kept", "survivor": "k0", "loser": "k1", "summary": "the loser's other words"}]
 
 
+async def test_a_loser_summary_equal_to_the_survivors_final_summary_is_not_audited(neo4j_driver):
+    """`summary_dropped` lists text that would otherwise vanish; a loser whose
+    summary equals what the survivor ENDS UP with loses nothing and must not
+    be listed. Two shapes: `Same`, where the loser repeats the survivor's own
+    summary; and `Echo`, three members with an empty survivor, where the
+    first loser's summary is adopted and the second loser repeats it -- equal
+    to the adopted text, not to the survivor's original (empty) one. An audit
+    that always emitted, or that compared against the survivor's original
+    summary, would list one of them."""
+    await _seed(neo4j_driver, uuid="s0", name="Same", summary="the same words")
+    await _seed(neo4j_driver, uuid="s1", name="Same", summary="the same words",
+                created_at="2026-02-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="x0", name="Echo", summary="")
+    await _seed(neo4j_driver, uuid="x1", name="Echo", summary="the adopted words",
+                created_at="2026-02-01T00:00:00Z")
+    await _seed(neo4j_driver, uuid="x2", name="Echo", summary="the adopted words",
+                created_at="2026-03-01T00:00:00Z")
+    res = await apply_merges(neo4j_driver, GROUP)
+    assert res["totals"]["merged"] == 3
+    assert (await _entity(neo4j_driver, "s0"))["props"]["summary"] == "the same words"
+    assert (await _entity(neo4j_driver, "x0"))["props"]["summary"] == "the adopted words"
+    assert res["summary_dropped"] == []
+
+
 async def test_the_survivor_is_untouched_except_for_the_audit_stamps(neo4j_driver):
     """uuid, name, group_id, created_at, labels (both), summary and
     name_embedding are byte-identical; `merged_from` lists the loser (and
@@ -709,14 +735,20 @@ async def test_the_same_name_in_another_group_is_untouched(neo4j_driver):
     """Invariant #4 scoping: the other group holds the SAME names AND the SAME
     uuids, and its loser carries one edge of every shape steps 1-5 match -- an
     outgoing fact, an incoming fact, a MENTIONS from an episode, an
-    IN_COMMUNITY, a SAME_AS from a structural product -- so a `MATCH` in any
-    step that dropped `group_id` has something to hit: steps 1-5 would move
-    the other group's edge onto this group's survivor, step 0 would find two
-    nodes per uuid and abort, step 6's guard would meet the other loser's
-    edges and abort, its delete would be refused, and step 7 would stamp the
-    other survivor. Every one of those was run as a mutant against this
-    fixture and each is killed. The other group's snapshot (nodes and every
-    edge touching them) must be byte-identical afterwards."""
+    IN_COMMUNITY, a SAME_AS from a structural product -- so every `group_id`
+    predicate in steps 0-7 has something to hit. There are fourteen: the
+    LOSER side and the SURVIVOR side of each of steps 1-5, step 0's re-match,
+    step 6's guard, step 6's delete and step 7's survivor. Dropping each one
+    was run as its own mutant against this fixture and each fails this test
+    (loser side, step 0, step 6, step 7: round task-5-fix; survivor side of
+    steps 1-5: round task-5-fix2 -- the earlier round had measured only the
+    loser side while the docstring claimed every `MATCH`). Why the fixture
+    gives each predicate a target: with the loser unscoped, steps 1-5 have
+    the other group's edge to move; with the survivor unscoped, a second
+    node answers to the survivor's uuid; step 0 finds two nodes per uuid;
+    step 6 meets the other loser's edges; step 7 has the other survivor to
+    stamp. The other group's snapshot (nodes and every edge touching them)
+    must be byte-identical afterwards."""
     await _seed_realistic_group(neo4j_driver)
     for uuid, name in ((_S, "AWS Backup"), (_LOSER, "AWS Backup"), (_X, _X)):
         await _seed(neo4j_driver, uuid=uuid, name=name, group_id="other")

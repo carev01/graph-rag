@@ -845,7 +845,7 @@ _NEAR = (
 )
 ```
 
-`plan_merges` runs the three queries, sorts each group's members by `(created_at, uuid)` to pick the survivor, computes the cosine between member `name_embedding`s in Python (report only — it checks the "same string, same embedder, identical vector" assumption rather than trusting it), and collects `label_conflicts` where members carry differing custom labels and the survivor is not bare `:Entity`. It must not emit `name_embedding` itself into the payload.
+`plan_merges` runs the three queries, sorts each group's members by `(created_at, uuid)` to pick the survivor, computes the cosine between member `name_embedding`s in Python (report only — it checks the "same string, same embedder, identical vector" assumption rather than trusting it), and collects `label_conflicts` where a typed survivor faces a loser label it does not carry, or where a bare survivor's *typed* losers disagree with each other (a bare survivor whose typed losers agree is a promotion, not a conflict, and a bare loser is neither — spec §4.4). It must not emit `name_embedding` itself into the payload.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

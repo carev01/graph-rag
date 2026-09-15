@@ -203,15 +203,27 @@ def _label_decision(survivor_labels: list[str], loser_labels: list[list[str]],
     `label_conflicts` and the apply step's promotion can never disagree:
     returns `(labels to promote, whether the group is a label conflict)`.
 
-    Promotion (graphiti's `_promote_resolved_node` mirror) happens only onto a
-    bare `:Entity` survivor, and only when every TYPED loser carries the same
-    custom labels -- that set is then promoted. A bare loser has nothing to
-    say and never contributes a conflict. Anything else is a disagreement the
-    merge does NOT resolve: it promotes nothing and reports the group. That
-    covers a typed survivor facing a foreign loser label, and two typed losers
-    that disagree with each other -- the union of the two is not what the spec
-    allows, and `graph_cleanup.prune_noise_entities` reads `[0]` of a node's
-    custom labels, so a node with two would be typed by an unspecified pick."""
+    Promotion happens only onto a bare `:Entity` survivor, and only when every
+    TYPED loser carries the same custom labels -- that set is then promoted. A
+    bare loser has nothing to say and never contributes a conflict (graphiti's
+    `_promote_resolved_node` returns the canonical unchanged for a label-less
+    extracted node). Anything else is a disagreement the merge does NOT
+    resolve: it promotes nothing and reports the group. That covers a typed
+    survivor facing a foreign loser label, and two typed losers that disagree
+    with each other.
+
+    At two members this is graphiti's `_promote_resolved_node` rule. At three
+    or more it deliberately is NOT: sequential resolution would let the first
+    typed loser win and drop the second silently; reading the rule per loser
+    would union the two into a node shape graphiti never writes. Promote-
+    nothing is chosen because a bare survivor is what graphiti's own promotion
+    repairs on the next ingest that resolves a typed extraction onto it, while
+    an arbitrary winner is permanent (spec §4.4). The union matters
+    downstream: `theme_builder.cli._fetch_members` (`src/theme_builder/cli.py:43`)
+    reads `[0]` of a node's custom labels as its `type`, so a two-label node
+    would be typed by an unspecified pick in every community report that cites
+    it. (`graph_cleanup.prune_noise_entities` reads the same `[0]`, but
+    `is_noise` never consults its `type` argument, so nothing changes there.)"""
     survivor_custom = _custom_labels(survivor_labels)
     typed = [custom for custom in map(_custom_labels, loser_labels) if custom]
     if survivor_custom:

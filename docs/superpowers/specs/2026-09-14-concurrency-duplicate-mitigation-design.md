@@ -348,10 +348,44 @@ not mirror anything the pipeline would have done.
 |---|---|---|
 | `uuid`, `name`, `group_id`, `created_at` | survivor's, untouched | identity; `created_at` is what `touched_entities` keys on and must stay honest |
 | `name_embedding` | survivor's; loser's dropped | same string through the same embedder → expected identical (one embedding space everywhere, `CLAUDE.md`). The report prints the cosine between the two so this is checked, not trusted. Never copy a vector with plain `SET` — see §4.5 |
-| node labels + `labels` property | survivor's. **Exception:** if the survivor carries no custom label (bare `:Entity`) and the loser does, the loser's custom labels are added to the survivor — both the Neo4j labels and the `labels` list, kept in lockstep | this is exactly graphiti's `_promote_resolved_node` rule, so the merge produces what sequential resolution would have. Any other label disagreement is dropped and reported under `label_conflicts`; `retype` re-derives `:Region` from the gazetteer on the next `cleanup` regardless |
+| node labels + `labels` property | survivor's, with one exception decided over the **whole group at once**, never loser by loser. **Bare survivor** (no custom label): take the custom-label set of every *typed* loser. If those sets are all identical, promote that set onto the survivor — both the Neo4j labels and the `labels` list, kept in lockstep. If two typed losers disagree with each other, promote **nothing** and report the group under `label_conflicts`. **Typed survivor:** never promoted; a loser carrying a custom label the survivor lacks is dropped and reported under `label_conflicts`. A **bare loser has no say** in either case — it neither promotes nor blocks | the rule at three or more members is explained below the table; at two members it reduces to "bare + typed promotes, typed + different typed is a conflict". `retype` re-derives `:Region` from the gazetteer on the next `cleanup` regardless |
 | `summary` | survivor's, unless it is empty and the loser's is not, in which case the loser's | deterministic and loses least. graphiti regenerates an existing node's summary on the next episode that mentions it (`extract_attributes_from_nodes`), so the merged summary self-heals on the next ingest touching the name. The loser's summary text is emitted in the audit so nothing vanishes unseen |
 | other properties (`demoted_from_region`, future custom attributes) | survivor's; loser's extra keys listed in the audit, not copied | no silent overwrite in either direction |
 | `merged_from`, `merged_at` | **added** to the survivor: `merged_from = coalesce(merged_from, []) + [loser.uuid]`, `merged_at = datetime()` | audit trail on the node itself (invariant #5 allows adding properties to graphiti's nodes). Also the hook §4.7 uses |
+
+**The label rule at three or more members — a deliberate divergence from sequential
+resolution, not a reproduction of it.** The production groups are `AWS Backup` ×3,
+`Amazon EC2` ×3, `Azure Backup` ×3, so the three-member reading is the one that runs.
+
+At two members the rule is graphiti's own `_promote_resolved_node`
+(`graphiti_core/utils/maintenance/dedup_helpers.py:170-189`, graphiti-core 0.30.1): a
+typed canonical is returned unchanged (`:175-177`), a label-less extracted node leaves the
+canonical unchanged (`:179-181`), and only bare canonical + typed extracted promotes. That
+last branch is where a bare loser's "no say" comes from — it is graphiti's boundary, not a
+choice made here.
+
+At three or more members there are three candidate rules, and none of them is "what
+sequential resolution would have done" for free:
+
+- **First typed loser wins** is what sequential ingest produces: the second typed
+  extraction meets an already-typed canonical and is dropped at `:175-177`, silently.
+- **Union** is what the two-member exception yields if it is read *per loser* (each typed
+  loser meets a survivor that is still bare *from its own point of view*). It manufactures
+  a node with two custom labels — a shape graphiti never writes (0 of the 999 baseline
+  entities carry more than one custom label), and one that `theme_builder/cli.py:43`
+  reads `[0]` of, i.e. types by an unspecified pick in every community report that cites
+  it. An earlier draft of this row was read that way and implemented that way; this
+  paragraph exists so it is not read that way again.
+- **Promote nothing and report** is the rule specified above.
+
+Promote-nothing is chosen over first-typed-wins because this is a one-shot destructive
+pass: a bare survivor is a state graphiti repairs on its own — the next ingest that resolves
+a typed extraction of the name onto it runs `_promote_resolved_node` again
+(`dedup_helpers.py:238`, `:272`, `node_operations.py:610`) and `EntityNode.save` writes
+the promoted labels back — whereas an arbitrary winner is permanent and, without a
+`label_conflicts` entry, invisible to the operator. The cost is that a disagreeing group
+stays bare until such an ingest happens; the audit names it so nobody has to notice by
+accident.
 
 ### 4.5 Rewiring, in plain Cypher, one transaction per name group
 
@@ -570,8 +604,9 @@ Named so they can be tested for, in rough order of severity:
 6. **Merging across groups, or merging case variants.** Both proven absent.
 7. **Wrong survivor.** Deterministic rule; a test constructs a group whose earliest node
    is neither first by uuid nor highest by degree and asserts it survives.
-8. **Label promotion applied when it should not be** (survivor already typed). Tested
-   both ways.
+8. **Label promotion applied when it should not be** (survivor already typed; or a bare
+   survivor whose typed losers disagree, where the union or the first loser's labels
+   would be promoted). Tested both ways at two members and all three ways at three.
 9. **Losing the loser's summary when the survivor's is empty.** Tested.
 10. **A community that is not flagged stale.** Tested via `IN_COMMUNITY`.
 11. **A partially merged group after a crash.** Transaction per group; a test injects a
@@ -640,7 +675,8 @@ What must be **proven** for a destructive merge — a count is never enough:
 | `vector.similarity.cosine(new.fact_embedding, $old_vector)` within 1e-6 of 1.0 on a testcontainer that has the procedure | the embedding remains scorable | replace the procedure with plain `SET` *and* perturb one element (the perturbation is what makes the test discriminate; a plain-`SET`-only mutant may legitimately pass) |
 | loser deleted; survivor's `uuid`, `name`, `labels` (node and property), `summary`, `name_embedding`, `created_at` byte-identical to before, plus `merged_from`/`merged_at` | survivor untouched except the audit | copy loser summary unconditionally; drop the stamps |
 | survivor = earliest `created_at`, in a group where the earliest is not the smallest uuid and not the highest degree; uuid tie-break with equal `created_at` | deterministic choice | order by uuid; order by degree |
-| label promotion: bare `:Entity` survivor + `:Product` loser → survivor gains `:Product` in both places; `:Tool` survivor + `:Product` loser → unchanged and reported in `label_conflicts` | the `_promote_resolved_node` mirror | apply promotion unconditionally; never |
+| label promotion: bare `:Entity` survivor + `:Product` loser → survivor gains `:Product` in both places; `:Tool` survivor + `:Product` loser → unchanged and reported in `label_conflicts` | the `_promote_resolved_node` mirror (two members) | apply promotion unconditionally; never |
+| three members, bare survivor throughout: `:Product` + `:Product` losers → `:Product` promoted; bare + `:Product` losers → `:Product` promoted (a bare loser has no say); `:Product` + `:Tool` losers → **nothing** promoted, survivor stays bare `:Entity` in both places, group reported in `label_conflicts` by the planner AND `labels_promoted` empty from the merge | §4.4 at 3+ members: agreement promotes, disagreement reports, the union is never manufactured, first-typed-wins is not reproduced | union the losers' labels; promote the first typed loser's labels regardless; count a bare loser as a disagreement |
 | empty survivor summary takes the loser's; non-empty keeps its own; dropped text appears in the audit | §4.4 | invert |
 | two facts `S→X` and `L→X` survive as two edges with distinct uuids and facts | §4.6 | collapse by `MERGE` on the pair |
 | `L→S` and `L→L` facts become self-loops on `S` with their uuids, counted in `self_loops_created` | §4.6 | drop self-loops |
