@@ -111,18 +111,36 @@ async def run_worker_once(
         groups.setdefault(job["article_id"], []).append(job)
     # The warm-up barrier (concurrent_ingest / warmup). `is_cold` is per
     # ARTICLE -- WarmupGate.is_cold_article resolves the article to its source
-    # -- and a group is one article, so it is asked once per group. An
-    # Exception from the predicate (Neo4j unreachable for the lookup) lands in
-    # that group's slot like an escape: logged naming the article, its jobs
-    # left in_progress for the reaper, the first one re-raised after the batch.
+    # -- and a group is one article, so it is asked once per group.
+    #
+    # An Exception from the predicate (Neo4j unreachable for the lookup) is
+    # caught HERE and answered "cold": conservative, i.e. slower, never less
+    # safe. The group then runs and, if Neo4j really is down, its job fails
+    # through `_run_job`'s per-job backoff exactly as a blip mid-ingest did
+    # before the barrier existed. Left to run_concurrently instead, the
+    # exception would land in the group's slot: its jobs would never run
+    # (left in_progress for the reaper), every OTHER group would still run at
+    # full LLM cost -- a predicate failure is not an escape and does not set
+    # `escaped_early` -- and the slot loop below would re-raise it after the
+    # batch, which `run_worker` does not catch. A mitigation that ships on by
+    # default must not turn a one-retry blip into a dead worker process.
+    # BaseException (an outer cancellation) is not caught: it must propagate.
     group_is_cold: Callable[[list], Awaitable[bool]] | None = None
     if is_cold is not None:
         async def _group_is_cold(group: list) -> bool:
             # Tombstoning extracts nothing, so a remove-only group cannot race
-            # over an entity and never needs the barrier.
+            # over an entity and never needs the barrier. `all`, not `any`: a
+            # mixed upsert+remove group for one article DOES extract.
             if all(j["op"] == "remove" for j in group):
                 return False
-            return await is_cold(group[0]["article_id"])
+            article_id = group[0]["article_id"]
+            try:
+                return await is_cold(article_id)
+            except Exception:
+                logger.warning(
+                    "warm-up lookup for article %s failed; treating it as cold",
+                    article_id, exc_info=True)
+                return True
         group_is_cold = _group_is_cold
     results = await run_concurrently(
         list(groups.values()), _run_group, limit=concurrency, is_cold=group_is_cold)

@@ -344,18 +344,26 @@ async def test_run_worker_forwards_is_cold_to_run_worker_once(monkeypatch):
 # "ran first".
 
 
+class _Timed(_Ingest):
+    """String-event log (`start-x`, `end-x`, `remove-x`); `slow` takes long
+    enough that a sibling launched beside it visibly starts before it ends."""
+
+    async def ingest_article(self, article_id):
+        self.log.append(f"start-{article_id}")
+        await asyncio.sleep(0.04 if article_id == "slow" else 0.01)
+        self.log.append(f"end-{article_id}")
+        return IngestArticleResult(article_id=article_id)
+
+    async def tombstone_article_episodes(self, article_id):
+        self.log.append(f"remove-{article_id}")
+        return 1
+
+
 async def test_a_cold_group_runs_alone_and_warm_groups_overlap():
     log: list[str] = []
 
     async def is_cold(article_id: str) -> bool:
         return article_id == "cold"
-
-    class _Timed(_Ingest):
-        async def ingest_article(self, article_id):
-            log.append(f"start-{article_id}")
-            await asyncio.sleep(0.04 if article_id == "slow" else 0.01)
-            log.append(f"end-{article_id}")
-            return IngestArticleResult(article_id=article_id)
 
     store = _Store([_job("j1", "slow"), _job("j2", "cold"), _job("j3", "warm")])
     await run_worker_once(store, _Timed(log), concurrency=4, is_cold=is_cold, **_KW)
@@ -376,3 +384,81 @@ async def test_a_remove_only_group_is_never_cold():
     await run_worker_once(store, _Ingest([]), concurrency=4, is_cold=is_cold, **_KW)
     assert asked == [], "a remove-only group must not consult the predicate"
     assert store.completed == ["j1"]
+
+
+async def test_a_mixed_upsert_and_remove_group_can_be_cold():
+    """`all`, not `any`: a group holding an upsert AND a remove for one article
+    extracts (the upsert runs first), so it must be allowed to be cold. The
+    single-op test above cannot tell `all` from `any` -- on one op they
+    coincide -- so this one puts a warm sibling in flight first: under `any`
+    the mixed group is never asked, launches beside `slow`, and `start-a1`
+    lands before `end-slow`."""
+    log: list[str] = []
+    asked: list[str] = []
+
+    async def is_cold(article_id: str) -> bool:
+        asked.append(article_id)
+        return article_id == "a1"
+
+    store = _Store([_job("j1", "slow"),
+                    _job("j2", "a1", "upsert"), _job("j3", "a1", "remove")])
+    await run_worker_once(store, _Timed(log), concurrency=4, is_cold=is_cold, **_KW)
+    assert asked == ["slow", "a1"], f"the mixed group must consult the predicate; got {asked}"
+    assert log.index("end-slow") < log.index("start-a1"), (
+        f"a cold mixed group must wait for the in-flight sibling; got {log}")
+    assert log[-3:] == ["start-a1", "end-a1", "remove-a1"], log
+    assert sorted(store.completed) == ["j1", "j2", "j3"]
+
+
+# --- A failing predicate must not be more fatal than the work it protects ---
+#
+# Before the barrier, a Neo4j blip during a batch raised inside ingest_article,
+# was caught per job by `_run_job`, went to fail_semantic_job with backoff, and
+# the worker survived. The barrier ships ON by default, and its predicate does a
+# Neo4j round-trip per group: an exception left to run_concurrently would land
+# in the slot, be re-raised after the batch, and kill the worker process. The
+# worker's wrapper answers "cold" instead -- slower, never less safe -- and the
+# job then succeeds or fails exactly as it would have without the barrier.
+
+
+async def test_a_predicate_failure_answers_cold_and_the_worker_survives(caplog):
+    """`a1`'s lookup fails while `slow` is in flight. Cold is the conservative
+    answer, and it is observable: `a1` waits for `slow` to END (an answer of
+    False would launch it alongside). The job completes through the normal
+    path, nothing is marked failed, and a WARNING names the article. Re-raising
+    instead propagates out of run_worker_once, i.e. out of the worker."""
+    log: list[str] = []
+
+    async def is_cold(article_id: str) -> bool:
+        if article_id == "a1":
+            raise ConnectionError("neo4j unreachable")
+        return False
+
+    store = _Store([_job("j1", "slow"), _job("j2", "a1")])
+    with caplog.at_level(logging.WARNING, logger="graph_sync.semantic_worker"):
+        await run_worker_once(store, _Timed(log), concurrency=4, is_cold=is_cold, **_KW)
+    assert sorted(store.completed) == ["j1", "j2"], log
+    assert store.failed == [], "a failed LOOKUP is not a failed job"
+    assert log.index("end-slow") < log.index("start-a1"), (
+        f"a failed lookup must answer cold, not warm; got {log}")
+    named = [r for r in caplog.records
+             if r.levelno == logging.WARNING and "a1" in r.getMessage()]
+    assert named, "the failed lookup must be logged at WARNING naming the article"
+
+
+async def test_a_predicate_failure_with_neo4j_really_down_fails_the_job_through_backoff():
+    """The realistic case: the lookup failed because Neo4j is down, so the
+    ingest fails too. That failure goes where it always went -- the per-job
+    backoff -- and the batch returns normally instead of raising."""
+    class _Down(_Ingest):
+        async def ingest_article(self, article_id):
+            raise ConnectionError("neo4j unreachable")
+
+    async def is_cold(article_id: str) -> bool:
+        raise ConnectionError("neo4j unreachable")
+
+    store = _Store([_job("j1", "a1"), _job("j2", "a2")])
+    n = await run_worker_once(store, _Down([]), concurrency=4, is_cold=is_cold, **_KW)
+    assert n == 2
+    assert sorted(store.failed) == ["j1", "j2"], "both jobs retry through backoff"
+    assert store.completed == []

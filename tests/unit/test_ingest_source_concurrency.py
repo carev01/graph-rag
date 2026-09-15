@@ -269,7 +269,13 @@ async def test_the_first_articles_of_a_cold_source_do_not_overlap():
     wait for it is invisible: the next article's predicate under-counts, calls
     itself cold, and its own pre-launch drain repairs the missing wait -- the
     correct and the broken log coincide. Modelled faithfully, that same mutant
-    lets a2 overlap a still-extracting a1 and the first assertion catches it."""
+    reads the source WARM ONE ARTICLE EARLY: a2, launched and not waited for,
+    links its first episode (n=2) while still extracting; a3's predicate then
+    calls the source warm and a3 launches beside the still-running a2 -- the
+    barrier visibly ends too soon, and the SECOND assertion (`end-a2 <
+    start-a3`) catches it. a1 and a2 still do not overlap under the mutant
+    (a2's own pre-launch drain finishes a1), so the first assertion is not
+    what kills it."""
     log: list[str] = []
     live = {"n": 0}
 
@@ -293,6 +299,28 @@ async def test_the_first_articles_of_a_cold_source_do_not_overlap():
     assert log.index("end-a2") < log.index("start-a3")
     # a3 and a4 are warm: they overlap
     assert log.index("start-a4") < log.index("end-a3")
+
+
+async def test_ingest_source_asks_the_gate_about_the_source_it_is_ingesting():
+    """The gate counts live articles of the source it is GIVEN. Asked about any
+    other id it counts 0, answers cold forever, the whole source serialises and
+    `_warm` never populates -- the barrier silently costing its own benefit,
+    with no failure to notice. The overlap test's gate ignores its argument, so
+    this fake records the id and pins it."""
+    asked: list[str] = []
+
+    class _Gate:
+        async def is_cold_source(self, source_id: str) -> bool:
+            asked.append(source_id)
+            return False
+
+    async def fake_ingest_article(article_id: str):
+        return IngestArticleResult(article_id=article_id)
+
+    driver = _driver_with(fake_ingest_article, concurrency=4, gate=_Gate(), n=3)
+    await driver.ingest_source("s1")
+    assert asked == ["s1", "s1", "s1"], (
+        f"every article must ask about ITS source, s1; got {asked}")
 
 
 async def test_warmup_is_inert_at_concurrency_one():

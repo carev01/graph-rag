@@ -230,9 +230,10 @@ class IngestDriver:
             # cancelling the batch: with no gate, gather creates all the tasks
             # up front, whatever the limit; with a gate, tasks are created up
             # front only BETWEEN cold boundaries (a cold article drains what is
-            # in flight, runs alone, then the fan-out resumes). The one thing
-            # that does abandon the remaining articles is a BaseException
-            # escaping the predicate (an outer cancellation) -- it propagates
+            # in flight, runs alone, then the fan-out resumes). What does
+            # abandon the remaining articles is a BaseException reaching
+            # run_concurrently's loop -- an outer cancellation delivered while
+            # it awaits a drain, or one escaping the predicate: it propagates
             # out of run_concurrently after every launched task has been
             # cancelled and awaited, and never reaches this loop. A plain
             # Exception from the predicate lands in its article's slot and is
