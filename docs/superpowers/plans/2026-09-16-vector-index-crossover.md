@@ -496,12 +496,21 @@ async def ensure_uuid_index(driver) -> None:
 async def wipe(driver, group: str) -> None:
     """Delete one group's fixture in bounded batches.
 
-    CALL {...} IN TRANSACTIONS, not one DETACH DELETE: a million-node delete in a
-    single transaction exhausts the heap, and this runs between every sweep step.
+    Batched, not one DETACH DELETE: a million-node delete in a single transaction
+    exhausts the heap, and this runs between every sweep step.
+
+    NOT `CALL {...} IN TRANSACTIONS`, which is the usual idiom for this: it is
+    illegal inside an explicit transaction, and `driver.execute_query` always
+    opens one. It would fail with "Cannot use CALL { ... } IN TRANSACTIONS in an
+    explicit transaction". A LIMIT loop needs no autocommit session and works the
+    same on either Cypher language version.
     """
-    await driver.execute_query(
-        "MATCH (n:Entity {group_id:$g}) CALL (n) { DETACH DELETE n } "
-        "IN TRANSACTIONS OF 10000 ROWS", g=group)
+    while True:
+        result = await driver.execute_query(
+            "MATCH (n:Entity {group_id:$g}) WITH n LIMIT 10000 "
+            "DETACH DELETE n RETURN count(n) AS n", g=group)
+        if not result.records or result.records[0]["n"] == 0:
+            return
 
 
 async def build_node_fixture(
@@ -970,10 +979,12 @@ def test_the_report_marks_measured_and_projected_rows_apart():
                    recall={10: (0.98, 0.95), 50: (1.0, 1.0), 200: (1.0, 1.0)},
                    insert_bare_ms=4400.0, insert_indexed_ms=7000.0),
     ]
+    # measured_to is 10,000, so the 50,000 row is past where measurement stopped
+    # and must be labelled as a projection.
     out = format_report(steps, provenance="resampled from 3469 real values",
-                        measured_to=50_000)
+                        measured_to=10_000)
     assert "[measured]" in out
-    assert "[inference]" in out, "a projection beyond 50,000 must be labelled"
+    assert "[inference]" in out, "a row beyond the last measured step must be labelled"
     assert "resampled from 3469 real values" in out, "provenance must travel into the report"
     assert "10,000" in out or "10000" in out
 
