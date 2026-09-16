@@ -139,6 +139,25 @@ def fits(
     return estimate + reserve <= free
 
 
+def resample_one(pool: VectorPool, rng: random.Random, noise: float = 0.15) -> list[float]:
+    """One FRESH vector per call, in the pool's distribution.
+
+    The fixture needs a distinct vector per row -- indexing into a fixed pool
+    makes rows byte-identical once the row count passes the pool size, and an
+    HNSW index over duplicated points is not the index the sweep claims to
+    measure. Drawing per row keeps 1M vectors out of memory: each is built,
+    written and discarded.
+
+    Non-fallback pools treat their vectors as SEEDS and jitter around them, so
+    the result keeps real embeddings' cluster structure -- which is also the more
+    faithful corpus model, since facts cluster by topic rather than scattering.
+    """
+    if pool.is_fallback:
+        return _normalise([rng.gauss(0.0, 1.0) for _ in range(len(pool.vectors[0]))])
+    seed = pool.vectors[rng.randrange(len(pool.vectors))]
+    return _normalise([x + rng.gauss(0.0, noise) for x in seed])
+
+
 EDGE_INDEX = "cx_fact_vec"
 NODE_INDEX = "cx_name_vec"
 
@@ -193,11 +212,12 @@ async def wipe(driver, group: str) -> None:
 
 
 async def build_node_fixture(
-    driver, group: str, n_nodes: int, pool: VectorPool, batch: int = 1000
+    driver, group: str, n_nodes: int, pool: VectorPool, batch: int = 1000, *,
+    rng: random.Random,
 ) -> None:
     for start in range(0, n_nodes, batch):
         rows = [
-            {"uuid": f"n{i}", "vec": pool.vectors[i % len(pool.vectors)]}
+            {"uuid": f"n{i}", "vec": resample_one(pool, rng)}
             for i in range(start, min(start + batch, n_nodes))
         ]
         await driver.execute_query(
@@ -207,7 +227,8 @@ async def build_node_fixture(
 
 
 async def build_edge_fixture(
-    driver, group: str, n_edges: int, pool: VectorPool, node_pool: int, batch: int = 1000
+    driver, group: str, n_edges: int, pool: VectorPool, node_pool: int, batch: int = 1000, *,
+    rng: random.Random,
 ) -> None:
     """`n_edges` RELATES_TO edges over a pool of `node_pool` entities.
 
@@ -226,7 +247,7 @@ async def build_edge_fixture(
                 "uuid": f"r{i}",
                 "src": f"e{i % node_pool}",
                 "dst": f"e{(i + 1) % node_pool}",
-                "vec": pool.vectors[i % len(pool.vectors)],
+                "vec": resample_one(pool, rng),
             }
             for i in range(start, min(start + batch, n_edges))
         ]
@@ -239,11 +260,22 @@ async def build_edge_fixture(
             rows=rows, g=group)
 
 
-async def create_index(driver, ddl: str) -> None:
-    """Create and WAIT. A query against a populating index returns fewer rows and
-    would be timed as fast -- the exact way a measurement lies."""
+async def create_index(driver, ddl: str, name: str) -> None:
+    """Create and WAIT, then VERIFY.
+
+    `CALL db.awaitIndexes(600)` returns on timeout without raising -- a build
+    that outruns the timeout in the real sweep would return silently with a
+    non-ONLINE index, and the timing run would measure a partially built index
+    as fast. Checking `SHOW INDEXES` afterwards turns that silent lie into a
+    raised error.
+    """
     await driver.execute_query(ddl)
     await driver.execute_query("CALL db.awaitIndexes(600)")
+    r = await driver.execute_query(
+        "SHOW INDEXES YIELD name, state WHERE name = $n RETURN state", n=name)
+    state = r.records[0]["state"] if r.records else "MISSING"
+    if state != "ONLINE":
+        raise RuntimeError(f"index {name!r} is {state}, not ONLINE after awaitIndexes")
 
 
 async def drop_index(driver, name: str) -> None:
