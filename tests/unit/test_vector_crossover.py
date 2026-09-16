@@ -120,3 +120,54 @@ def test_the_disk_guard_headroom_grows_with_the_step():
     assert fits(1_000_000, free=large + large // 2) is True
     assert fits(1_000_000, free=large + 5 * 1024**3) is False, \
         "the flat floor must not be what decides a large step"
+
+
+def test_the_report_marks_measured_and_projected_rows_apart():
+    """Section 1.2 of the production review marked its own extrapolated rows
+    `[inference]` three orders of magnitude out. A report that presented a
+    projection as a measurement would repeat the habit this project keeps paying
+    for."""
+    from scripts.vector_crossover import StepResult, format_report
+
+    steps = [
+        StepResult(n=10_000, brute_ms=690.0, index_ms=12.0, control_ms=688.0,
+                   recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+                   insert_bare_ms=900.0, insert_indexed_ms=1400.0),
+        StepResult(n=50_000, brute_ms=2810.0, index_ms=14.0, control_ms=2805.0,
+                   recall={10: (0.98, 0.95), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+                   insert_bare_ms=4400.0, insert_indexed_ms=7000.0),
+    ]
+    # measured_to is 10,000, so the 50,000 row is past where measurement stopped
+    # and must be labelled as a projection.
+    out = format_report(steps, provenance="resampled from 3469 real values",
+                        measured_to=10_000)
+    assert "[measured]" in out
+    assert "[inference]" in out, "a row beyond the last measured step must be labelled"
+    assert "resampled from 3469 real values" in out, "provenance must travel into the report"
+    assert "10,000" in out or "10000" in out
+
+
+def test_the_report_leads_with_the_fallback_warning_when_vectors_are_synthetic():
+    """A reader skimming for the headline number must not miss that recall came
+    from i.i.d. vectors."""
+    from scripts.vector_crossover import StepResult, format_report
+
+    steps = [StepResult(n=10_000, brute_ms=690.0, index_ms=12.0, control_ms=688.0,
+                        recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+                        insert_bare_ms=900.0, insert_indexed_ms=1400.0)]
+    out = format_report(steps, provenance="i.i.d. Gaussian -- FALLBACK", measured_to=10_000)
+    assert "FALLBACK" in out.split("\n")[0] or "FALLBACK" in out.split("\n")[1], \
+        "the fallback warning must be at the top, not buried below the table"
+
+
+def test_the_control_column_is_flagged_when_it_diverges():
+    """The control is brute force WITH the index present; it must match brute
+    force without it. A silent divergence would invalidate every latency row, so
+    the report has to shout rather than print two similar numbers."""
+    from scripts.vector_crossover import StepResult, format_report
+
+    steps = [StepResult(n=10_000, brute_ms=690.0, index_ms=12.0, control_ms=120.0,
+                        recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+                        insert_bare_ms=900.0, insert_indexed_ms=1400.0)]
+    out = format_report(steps, provenance="resampled", measured_to=10_000)
+    assert "CONTROL DIVERGED" in out

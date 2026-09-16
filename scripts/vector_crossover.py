@@ -19,6 +19,8 @@ the two procedures. Probed 2026-09-16. The deprecated procedures are what works.
 """
 from __future__ import annotations
 
+import argparse
+import asyncio
 import os
 import random
 import statistics
@@ -414,3 +416,168 @@ async def measure_insert_ms(
     await wipe(driver, scratch)
     await drop_index(driver, EDGE_INDEX)
     return elapsed
+
+
+EDGE_STEPS = (10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000)
+NODE_STEPS = (10_000, 50_000, 100_000, 250_000)
+
+# Brute force is linear in rows and the measured live-graph slope is
+# 0.053 ms/fact with a ~160 ms intercept (production review section 1.2). Rows
+# past the last measured step are projected from THIS run's own fit, not from
+# that constant, and are labelled.
+CONTROL_TOLERANCE = 0.25
+
+
+@dataclass(frozen=True)
+class StepResult:
+    n: int
+    brute_ms: float
+    index_ms: float
+    control_ms: float
+    recall: dict[int, tuple[float, float]]
+    insert_bare_ms: float
+    insert_indexed_ms: float
+
+    @property
+    def control_diverged(self) -> bool:
+        """The control must match brute force. A gap means the timing is
+        measuring cache warmth or a changed plan, not the index."""
+        if self.brute_ms <= 0.0:
+            return False
+        return abs(self.control_ms - self.brute_ms) / self.brute_ms > CONTROL_TOLERANCE
+
+
+def format_report(steps: list[StepResult], provenance: str, measured_to: int) -> str:
+    lines: list[str] = ["# Vector-index crossover", ""]
+    if "FALLBACK" in provenance:
+        lines.insert(1, f"**WARNING: {provenance}**")
+    else:
+        lines.append(f"vectors: {provenance}")
+    diverged = [s for s in steps if s.control_diverged]
+    if diverged:
+        lines.append("")
+        lines.append(
+            "**CONTROL DIVERGED at "
+            + ", ".join(f"{s.n:,}" for s in diverged)
+            + " — brute force changed when the index appeared, so the latency "
+            "rows below cannot be attributed to the index.**")
+    lines += ["", "| rows | brute ms | index ms | control ms | r@10 k=10 | k=50 | k=200 | "
+              "insert bare ms | insert indexed ms | source |",
+              "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    for step in steps:
+        tag = "[measured]" if step.n <= measured_to else "[inference]"
+        lines.append(
+            f"| {step.n:,} | {step.brute_ms:.1f} | {step.index_ms:.1f} | "
+            f"{step.control_ms:.1f} | {step.recall[10][0]:.3f} | "
+            f"{step.recall[50][0]:.3f} | {step.recall[200][0]:.3f} | "
+            f"{step.insert_bare_ms:.0f} | {step.insert_indexed_ms:.0f} | {tag} |")
+    return "\n".join(lines)
+
+
+async def fetch_seed_vectors(limit: int = 3469) -> list[list[float]] | None:
+    """Read real fact embeddings from the live graph, READ-ONLY, as resampling
+    seeds. Returns None if unreachable, which sends `build_pool` down its loud
+    fallback path rather than failing the run."""
+    try:
+        from neo4j import AsyncGraphDatabase, RoutingControl
+
+        from graph_extract.config import get_extract_settings
+    except ImportError:
+        return None
+    try:
+        settings = get_extract_settings()
+        driver = AsyncGraphDatabase.driver(
+            settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
+    except Exception:
+        return None
+    try:
+        result = await driver.execute_query(
+            "MATCH ()-[e:RELATES_TO {group_id:$g}]->() "
+            "WHERE e.fact_embedding IS NOT NULL "
+            "RETURN e.fact_embedding AS v LIMIT $n",
+            g=settings.group_id, n=limit, routing_=RoutingControl.READ)
+        return [list(record["v"]) for record in result.records] or None
+    except Exception:
+        return None
+    finally:
+        await driver.close()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--max-edges", type=int, default=max(EDGE_STEPS))
+    parser.add_argument("--max-nodes", type=int, default=max(NODE_STEPS))
+    parser.add_argument("--probes", type=int, default=20)
+    parser.add_argument("--out", default="docs/superpowers/vector-crossover-2026-09-16.md")
+    args = parser.parse_args()
+    return asyncio.run(_run(args))
+
+
+async def _run(args: argparse.Namespace) -> int:
+    from neo4j import AsyncGraphDatabase
+    from testcontainers.neo4j import Neo4jContainer
+
+    seeds = await fetch_seed_vectors()
+    rng = random.Random(20260916)
+    pool = build_pool(n=10_000, dim=DIM, rng=rng, seeds=seeds)
+    print(f"vectors: {pool.provenance}", flush=True)
+
+    steps: list[StepResult] = []
+    measured_to = 0
+    group = "__crossover__"
+    with Neo4jContainer("neo4j:2026.07.1-community") as neo:
+        driver = AsyncGraphDatabase.driver(
+            neo.get_connection_url(), auth=("neo4j", neo.password))
+        try:
+            await ensure_uuid_index(driver)
+            for n in EDGE_STEPS:
+                if n > args.max_edges:
+                    break
+                free = free_bytes()
+                if not fits(n, free):
+                    print(f"stopping before {n:,}: needs "
+                          f"{estimated_bytes(n) / 1024**3:.1f} GB plus headroom, "
+                          f"{free / 1024**3:.1f} GB free", flush=True)
+                    break
+                print(f"--- {n:,} edges ---", flush=True)
+                await wipe(driver, group)
+                await drop_index(driver, EDGE_INDEX)
+                insert_bare = await measure_insert_ms(
+                    driver, group, min(n, 50_000), pool, node_pool=1_000,
+                    with_index=False)
+                insert_indexed = await measure_insert_ms(
+                    driver, group, min(n, 50_000), pool, node_pool=1_000,
+                    with_index=True)
+                await build_edge_fixture(
+                    driver, group, n, pool, node_pool=max(1_000, n // 50), rng=rng)
+                probe = pool.vectors[rng.randrange(len(pool.vectors))]
+                params = dict(g=group, v=probe, min=-1.0, k=10)
+                brute_ms, _ = await time_query(driver, BRUTE_EDGE, **params)
+                await create_index(driver, edge_index_ddl(EDGE_INDEX, DIM), EDGE_INDEX)
+                index_ms, _ = await time_query(
+                    driver, INDEX_EDGE, idx=EDGE_INDEX, **params)
+                control_ms, _ = await time_query(driver, BRUTE_EDGE, **params)
+                recall = await measure_recall(
+                    driver, group, pool, rng, EDGE_INDEX, BRUTE_EDGE, INDEX_EDGE,
+                    probes=args.probes)
+                steps.append(StepResult(
+                    n=n, brute_ms=brute_ms, index_ms=index_ms, control_ms=control_ms,
+                    recall=recall, insert_bare_ms=insert_bare,
+                    insert_indexed_ms=insert_indexed))
+                measured_to = n
+                print(f"  brute {brute_ms:.1f} ms | index {index_ms:.1f} ms | "
+                      f"control {control_ms:.1f} ms | r@10 "
+                      f"{recall[10][0]:.3f}/{recall[50][0]:.3f}/{recall[200][0]:.3f}",
+                      flush=True)
+                await drop_index(driver, EDGE_INDEX)
+                await wipe(driver, group)
+        finally:
+            await driver.close()
+
+    report = format_report(steps, pool.provenance, measured_to)
+    print("\n" + report)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
