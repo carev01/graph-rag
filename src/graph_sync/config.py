@@ -16,7 +16,14 @@ class Settings(BaseSettings):
     webhook_public_url: str = ""
     poll_interval_seconds: int = 1800
     webhook_debounce_seconds: int = 300
-    semantic_daily_token_budget: int = 5_000_000
+    # Gates the BOOTSTRAP lane only (`run_worker_once`: bootstrap jobs are claimed
+    # while today's tokens are under this; the incremental lane always runs).
+    # At ~200k tokens/article the old 5M default was ~25 articles/day -- roughly
+    # 14 YEARS for the 126k-article corpus, which silently capped every throughput
+    # gain the concurrency work bought. 840M/day is ~4,200 articles/day, a ~30-day
+    # bootstrap, and at the measured ~$0.12/article about $500/day.
+    # It is a throttle, not a cost cap: raise or lower it deliberately.
+    semantic_daily_token_budget: int = 840_000_000
     semantic_max_attempts: int = 5
     semantic_backoff_base_seconds: float = 30.0
     semantic_backoff_cap_seconds: float = 3600.0
