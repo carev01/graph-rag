@@ -137,3 +137,114 @@ def fits(
     estimate = estimated_bytes(n_edges, dim)
     reserve = max(5 * 1024**3, estimate // 2) if headroom_bytes is None else headroom_bytes
     return estimate + reserve <= free
+
+
+EDGE_INDEX = "cx_fact_vec"
+NODE_INDEX = "cx_name_vec"
+
+# Vector-index options are DDL, and Cypher does not accept parameters in an
+# OPTIONS map -- the dimension has to be formatted in. int() is the guard: the
+# value is never caller-controlled in this harness, and it stays un-interpolable
+# if that ever changes.
+def edge_index_ddl(name: str, dim: int) -> str:
+    return (
+        f"CREATE VECTOR INDEX {name} IF NOT EXISTS "
+        "FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) "
+        "OPTIONS {indexConfig: {`vector.dimensions`: "
+        f"{int(dim)}, `vector.similarity_function`: 'cosine'}}}}"
+    )
+
+
+def node_index_ddl(name: str, dim: int) -> str:
+    return (
+        f"CREATE VECTOR INDEX {name} IF NOT EXISTS "
+        "FOR (n:Entity) ON (n.name_embedding) "
+        "OPTIONS {indexConfig: {`vector.dimensions`: "
+        f"{int(dim)}, `vector.similarity_function`: 'cosine'}}}}"
+    )
+
+
+async def ensure_uuid_index(driver) -> None:
+    """Without this the edge builder's MATCH-by-uuid is a label scan per batch,
+    making fixture construction O(n^2) and the 1M step unreachable."""
+    await driver.execute_query(
+        "CREATE INDEX cx_entity_uuid IF NOT EXISTS FOR (n:Entity) ON (n.uuid)")
+    await driver.execute_query("CALL db.awaitIndexes(120)")
+
+
+async def wipe(driver, group: str) -> None:
+    """Delete one group's fixture in bounded batches.
+
+    Batched, not one DETACH DELETE: a million-node delete in a single transaction
+    exhausts the heap, and this runs between every sweep step.
+
+    NOT `CALL {...} IN TRANSACTIONS`, which is the usual idiom for this: it is
+    illegal inside an explicit transaction, and `driver.execute_query` always
+    opens one. It would fail with "Cannot use CALL { ... } IN TRANSACTIONS in an
+    explicit transaction". A LIMIT loop needs no autocommit session and works the
+    same on either Cypher language version.
+    """
+    while True:
+        result = await driver.execute_query(
+            "MATCH (n:Entity {group_id:$g}) WITH n LIMIT 10000 "
+            "DETACH DELETE n RETURN count(n) AS n", g=group)
+        if not result.records or result.records[0]["n"] == 0:
+            return
+
+
+async def build_node_fixture(
+    driver, group: str, n_nodes: int, pool: VectorPool, batch: int = 1000
+) -> None:
+    for start in range(0, n_nodes, batch):
+        rows = [
+            {"uuid": f"n{i}", "vec": pool.vectors[i % len(pool.vectors)]}
+            for i in range(start, min(start + batch, n_nodes))
+        ]
+        await driver.execute_query(
+            "UNWIND $rows AS row "
+            "CREATE (:Entity {uuid: row.uuid, group_id: $g, name_embedding: row.vec})",
+            rows=rows, g=group)
+
+
+async def build_edge_fixture(
+    driver, group: str, n_edges: int, pool: VectorPool, node_pool: int, batch: int = 1000
+) -> None:
+    """`n_edges` RELATES_TO edges over a pool of `node_pool` entities.
+
+    Facts greatly outnumber entities in the real corpus (41.8 facts/article
+    against far fewer entities), so a small node pool with many edges is the
+    faithful shape -- and it keeps the fixture's node count off the critical path.
+    """
+    for start in range(0, node_pool, batch):
+        rows = [{"uuid": f"e{i}"} for i in range(start, min(start + batch, node_pool))]
+        await driver.execute_query(
+            "UNWIND $rows AS row CREATE (:Entity {uuid: row.uuid, group_id: $g})",
+            rows=rows, g=group)
+    for start in range(0, n_edges, batch):
+        rows = [
+            {
+                "uuid": f"r{i}",
+                "src": f"e{i % node_pool}",
+                "dst": f"e{(i + 1) % node_pool}",
+                "vec": pool.vectors[i % len(pool.vectors)],
+            }
+            for i in range(start, min(start + batch, n_edges))
+        ]
+        await driver.execute_query(
+            "UNWIND $rows AS row "
+            "MATCH (a:Entity {uuid: row.src, group_id: $g}), "
+            "      (b:Entity {uuid: row.dst, group_id: $g}) "
+            "CREATE (a)-[:RELATES_TO {uuid: row.uuid, group_id: $g, "
+            "                         fact_embedding: row.vec}]->(b)",
+            rows=rows, g=group)
+
+
+async def create_index(driver, ddl: str) -> None:
+    """Create and WAIT. A query against a populating index returns fewer rows and
+    would be timed as fast -- the exact way a measurement lies."""
+    await driver.execute_query(ddl)
+    await driver.execute_query("CALL db.awaitIndexes(600)")
+
+
+async def drop_index(driver, name: str) -> None:
+    await driver.execute_query(f"DROP INDEX {name} IF EXISTS")
