@@ -172,11 +172,22 @@ extrapolated rows `[inference]`.
 At each N, for 20 query vectors: take brute force's top-10 uuids as ground truth and
 report `|index_top10 ∩ brute_top10| / 10`, plus rank-1 agreement.
 
+**Over-fetch is measured, not assumed.** Recall@10 is reported for index `k` of **10, 50
+and 200** — that is, ask the index for more neighbours than needed and keep the best 10.
+This is the cheapest available recall lever: no reindex, no schema change, one parameter.
+If recall@10 at k=50 is flat in N while k=10 declines, decision D2 dissolves and no
+bounded candidate set is needed. Measuring it costs three queries instead of one.
+
 This is a **trend measurement**. The absolute number belongs to resampled synthetic
 vectors, not to real embeddings at corpus scale. What it can establish, and what nothing
 else available can, is whether recall *degrades as N grows* — the open question that
-matters for whether an ANN-backed dedup path is safe later. A flat curve is evidence; a
-declining one is a reason to design the exact bounded candidate set instead (review D2).
+matters for whether an ANN-backed dedup path is safe later.
+
+Because D2 is deliberately deferred (§13), this section is what has to settle it later.
+The output must therefore support the comparison directly: recall trend per `k`, the
+latency each `k` costs, and the write overhead (§9) that the bounded-shortlist
+alternative would avoid. If those three are in hand, D2 is a reading, not another
+measurement round.
 
 ## 9. Write overhead (B4)
 
@@ -226,10 +237,36 @@ Timing itself is not asserted — a test that pins a latency is a flaky test.
   container's default heap and page cache will be recorded in the output so the numbers
   can be reproduced or dismissed.
 
-## 13. Open questions for the user
+## 13. Decisions taken
 
-1. The sweep stops at 1M edges because of local disk. If the curves are still ambiguous
-   there, extending to 5M needs Docker on the Neo4j host — worth arranging, or accept the
-   projection?
-2. Recall is measured as a trend only. If it declines with N, does that settle D2 toward
-   the exact bounded candidate set, or would you still want ANN with a measured floor?
+**The sweep stops at 1M edges.** 2026-09-16: 1M is enough to ground the decision; revisit
+later if the curves turn out ambiguous. Extending to 5M would need Docker on the Neo4j
+host, which is not arranged and is not a blocker.
+
+**D2 — ANN versus an exact bounded candidate set — is deferred to the numbers.**
+2026-09-16: no position is taken now; it becomes a separate decision once the recall
+trend, the per-`k` latency and the write overhead are measured. This is deliberate, and it
+places a requirement on this slice: §8 and §9 must produce enough to decide D2 by reading
+rather than by measuring again. The known consequence is a possible second design round if
+they do not.
+
+Two things are recorded so the later decision starts from them rather than rediscovering
+them:
+
+- **The choice is not symmetric.** Retrieval (`/search/local`, `/timeline`, DRIFT) exists
+  to match text worded differently from the question, so a lexical or vendor shortlist
+  would defeat it — there is no bounded-candidate option for retrieval, only ANN or the
+  scan. A bounded shortlist is therefore a *dedup-only* mechanism that would sit alongside
+  ANN, not replace it.
+- **Neither option is exact.** ANN approximates the search; a shortlist approximates the
+  candidate pool. The difference is the shape of the error: a shortlist's misses are
+  systematic and permanent, ANN's are occasional and can move between index rebuilds.
+
+## 14. A free recall proxy in production, for later
+
+Independent of this measurement: `merge_duplicates` reports how many exact-name duplicate
+entities an ingest created. That is a direct, zero-cost count of dedup misses on real
+data, available after every run. Whatever D2 decides, that counter is how the decision
+gets checked against reality rather than against a synthetic trend — and it means an
+ANN-backed dedup path can be adopted provisionally and audited, instead of having to be
+proven safe in advance.
