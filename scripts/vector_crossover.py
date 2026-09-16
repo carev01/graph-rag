@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import os
 import random
+import statistics
+import time
 from dataclasses import dataclass
 
 DIM = 768
@@ -280,3 +282,56 @@ async def create_index(driver, ddl: str, name: str) -> None:
 
 async def drop_index(driver, name: str) -> None:
     await driver.execute_query(f"DROP INDEX {name} IF EXISTS")
+
+
+# graphiti's actual shape, matching `profile-vector-index.py` and
+# `graph_queries.py`. The DISTINCT and the endpoint bindings are kept even though
+# they are not the cost (reproduced standalone at 263 ms, BACKLOG 8-orig) --
+# measuring a query graphiti does not run would measure nothing.
+BRUTE_EDGE = """
+MATCH (n:Entity)-[e:RELATES_TO {group_id:$g}]->(m:Entity)
+WITH DISTINCT e, n, m, vector.similarity.cosine(e.fact_embedding, $v) AS score
+WHERE score > $min
+RETURN e.uuid AS uuid, score ORDER BY score DESC LIMIT $k
+"""
+
+# The deprecated procedure, deliberately. SEARCH is what 2026.07.1's deprecation
+# notice names, but SEARCH is not valid Cypher on this server under either
+# language version (probed 2026-09-16) -- the server deprecates a procedure in
+# favour of a clause it does not ship.
+INDEX_EDGE = """
+CALL db.index.vector.queryRelationships($idx, $k, $v) YIELD relationship AS e, score
+WHERE e.group_id = $g AND score > $min
+RETURN e.uuid AS uuid, score ORDER BY score DESC
+"""
+
+BRUTE_NODE = """
+MATCH (n:Entity {group_id:$g})
+WITH n, vector.similarity.cosine(n.name_embedding, $v) AS score
+WHERE score > $min
+RETURN n.uuid AS uuid, score ORDER BY score DESC LIMIT $k
+"""
+
+INDEX_NODE = """
+CALL db.index.vector.queryNodes($idx, $k, $v) YIELD node AS n, score
+WHERE n.group_id = $g AND score > $min
+RETURN n.uuid AS uuid, score ORDER BY score DESC
+"""
+
+
+async def time_query(driver, cypher: str, runs: int = 5, **params) -> tuple[float, list[str]]:
+    """Median wall time in ms over `runs`, plus the uuids the last run returned.
+
+    One warm-up run is executed and DISCARDED. Without it the first measurement
+    at each step pays page-cache misses the later ones do not, which reads as the
+    index winning when it is really just second.
+    """
+    await driver.execute_query(cypher, **params)
+    times: list[float] = []
+    uuids: list[str] = []
+    for _ in range(runs):
+        started = time.perf_counter()
+        result = await driver.execute_query(cypher, **params)
+        times.append((time.perf_counter() - started) * 1000.0)
+        uuids = [record["uuid"] for record in result.records]
+    return statistics.median(times), uuids
