@@ -67,7 +67,8 @@ def _cheap_classify_client(settings: ExtractSettings) -> tuple[AsyncOpenAI | Non
     # sending `reasoning` would ENABLE it -- at max_tokens=8 every reply then comes
     # back content=None. See config.py and the 2026-09-11 hardening report.
     client = bounded_llm_client(settings.cheap_llm_base_url, settings.cheap_llm_api_key,
-                                reasoning_effort="", timeout=20.0, max_retries=1)
+                                reasoning_effort="", timeout=20.0, max_retries=1,
+                                tier="router-classify", capture_path=settings.llm_capture_path)
     return client, settings.cheap_llm_model
 
 

@@ -3,9 +3,9 @@ def test_build_cheap_graphiti_uses_cheap_model(monkeypatch):
     from graph_extract.config import ExtractSettings
 
     seen = {}
-    monkeypatch.setattr(gc, "build_graphiti", lambda cfg: seen.update(
+    monkeypatch.setattr(gc, "build_graphiti", lambda cfg, *, tier="strong": seen.update(
         model=cfg.llm_model, base=cfg.llm_base_url, key=cfg.llm_api_key,
-        mode=cfg.llm_client_mode) or "G")
+        mode=cfg.llm_client_mode, tier=tier) or "G")
 
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                         neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
@@ -14,7 +14,7 @@ def test_build_cheap_graphiti_uses_cheap_model(monkeypatch):
     assert out == "G"
     assert seen == {"model": "inclusionai/ling-2.6-flash",
                     "base": "https://openrouter.ai/api/v1",
-                    "key": "or-key", "mode": "generic_json_schema"}
+                    "key": "or-key", "mode": "generic_json_schema", "tier": "cheap"}
 
 
 def test_extraction_tier_holds_fields():

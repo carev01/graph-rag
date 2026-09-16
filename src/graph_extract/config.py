@@ -139,6 +139,13 @@ class ExtractSettings(BaseSettings):
     ingest_warmup_articles: int = 8
     llm_frequency_penalty: float = 0.0
     llm_presence_penalty: float = 0.0
+    # Opt-in JSONL capture of every LLM call's full prompt/response (design:
+    # 2026-09-16 extraction fine-tune dataset, Option B). Empty = OFF, and off
+    # must be free: instrument() only opens/writes a file when this is set. See
+    # graph_extract.usage.instrument / capture_llm_call. Never commit a path
+    # under version control, and never point it at anything that syncs off-box
+    # without review -- captured records include full request/response text.
+    llm_capture_path: str = ""
     judge_base_url: str = ""
     judge_model: str = ""
     judge_api_key: str = ""  # if empty, the judge reuses llm_api_key (fallback path)
