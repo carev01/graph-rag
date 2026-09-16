@@ -123,9 +123,23 @@ restores it with a Postgres advisory lock held for the duration of each cold art
 
 That lock is also a floor: 280 sources × `INGEST_WARMUP_ARTICLES` articles run strictly
 one at a time globally (~8 days at W=8), which dominates total time past roughly 32-way
-effective parallelism. Lowering W for later sources is the untested lever — once a hub
-exists in the graph, a later source resolves to it rather than re-creating it — and
-`dispatch_sim.py` can evaluate that without spending anything.
+effective parallelism. The floor scales with **source count, not article count**, so it
+does not amortise as the corpus grows.
+
+**Decaying W for later sources does not work**, though it looks like it should. Warm-up
+seeds a source's *own* novel entities; a second source of the same product finds them
+already present, but a new product's concepts are new however many sources came before.
+Most products are single-sourced and most of the rest have fewer than five, so there are
+few later sources to decay for — the benefit is confined to the handful of multi-source
+products. (A generic-vocabulary layer *is* shared even across vendors — the two pilot
+sources are different vendors and still shared 54 entities carrying 27.9% of risk weight:
+`Backup vault`, `recovery point`, `retention policy`. But the largest per-source hubs are
+product-specific and those dominate.)
+
+The lever is therefore **W itself**, not a decay schedule. `risk_curve.py` puts the first
+4 articles of a source at 71.3% of its risk weight against 79.5% at 8, so W=4 halves the
+floor for an 8-point protection loss. `dispatch_sim.py` can evaluate that trade without
+spending anything.
 
 ## Roadmap
 
