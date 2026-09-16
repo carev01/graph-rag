@@ -335,3 +335,73 @@ async def time_query(driver, cypher: str, runs: int = 5, **params) -> tuple[floa
         times.append((time.perf_counter() - started) * 1000.0)
         uuids = [record["uuid"] for record in result.records]
     return statistics.median(times), uuids
+
+
+# Ask the index for more than the caller keeps. One parameter, no reindex, no
+# schema change -- and if recall@10 holds flat at 50 while it declines at 10,
+# decision D2 dissolves and no bounded candidate set is needed.
+FETCH_DEPTHS = (10, 50, 200)
+
+
+async def measure_recall(
+    driver,
+    group: str,
+    pool: VectorPool,
+    rng: random.Random,
+    idx: str,
+    brute_cypher: str,
+    index_cypher: str,
+    probes: int = 20,
+) -> dict[int, tuple[float, float]]:
+    """recall@10 and rank-1 agreement per fetch depth, against brute-force truth.
+
+    Probe vectors are drawn from the fixture's own pool, so they sit in the same
+    distribution as the data. Probing with vectors from elsewhere would measure
+    recall on queries no real caller makes.
+    """
+    out: dict[int, tuple[float, float]] = {}
+    probe_vectors = [pool.vectors[rng.randrange(len(pool.vectors))] for _ in range(probes)]
+    truth: list[list[str]] = []
+    for vector in probe_vectors:
+        _, brute = await time_query(
+            driver, brute_cypher, runs=1, g=group, v=vector, min=-1.0, k=10)
+        truth.append(brute)
+    for depth in FETCH_DEPTHS:
+        recalls: list[float] = []
+        rank1: list[float] = []
+        for vector, brute in zip(probe_vectors, truth):
+            _, indexed = await time_query(
+                driver, index_cypher, runs=1, g=group, v=vector, min=-1.0, k=depth,
+                idx=idx)
+            recalls.append(recall_at_10(brute, indexed))
+            rank1.append(1.0 if rank1_agrees(brute, indexed) else 0.0)
+        out[depth] = (statistics.fmean(recalls), statistics.fmean(rank1))
+    return out
+
+
+async def measure_insert_ms(
+    driver,
+    group: str,
+    n: int,
+    pool: VectorPool,
+    node_pool: int,
+    with_index: bool,
+    dim: int = DIM,
+) -> float:
+    """Wall time in ms to insert `n` edges, with or without the vector index.
+
+    Builds into a scratch group and removes it, so the caller's fixture is
+    untouched and successive calls do not accumulate.
+    """
+    scratch = f"{group}__insert_probe__"
+    await wipe(driver, scratch)
+    await drop_index(driver, EDGE_INDEX)
+    if with_index:
+        await create_index(driver, edge_index_ddl(EDGE_INDEX, dim), EDGE_INDEX)
+    started = time.perf_counter()
+    await build_edge_fixture(driver, scratch, n, pool, node_pool=node_pool,
+                             rng=random.Random(2026))
+    elapsed = (time.perf_counter() - started) * 1000.0
+    await wipe(driver, scratch)
+    await drop_index(driver, EDGE_INDEX)
+    return elapsed

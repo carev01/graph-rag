@@ -15,6 +15,7 @@ import pytest
 from scripts.vector_crossover import (
     BRUTE_EDGE,
     EDGE_INDEX,
+    FETCH_DEPTHS,
     INDEX_EDGE,
     build_edge_fixture,
     build_pool,
@@ -22,6 +23,8 @@ from scripts.vector_crossover import (
     drop_index,
     edge_index_ddl,
     ensure_uuid_index,
+    measure_insert_ms,
+    measure_recall,
     recall_at_10,
     time_query,
     wipe,
@@ -172,3 +175,48 @@ async def test_the_index_query_agrees_with_brute_force_on_a_small_fixture(extrac
         f"brute={brute} index={indexed}")
     await drop_index(extract_driver, EDGE_INDEX)
     await wipe(extract_driver, GROUP)
+
+
+async def test_recall_is_reported_for_every_fetch_depth(extract_driver):
+    """Over-fetching -- ask for 50, keep the best 10 -- is the cheapest recall
+    lever there is, and whether it holds recall flat is what decides D2. A run
+    that reported only k=10 could not answer that."""
+    await wipe(extract_driver, GROUP)
+    await ensure_uuid_index(extract_driver)
+    await drop_index(extract_driver, EDGE_INDEX)
+    pool = build_pool(n=400, dim=DIM, rng=random.Random(6), seeds=None)
+    await build_edge_fixture(extract_driver, GROUP, 400, pool, node_pool=40, batch=100,
+                             rng=random.Random(104))
+    await create_index(extract_driver, edge_index_ddl(EDGE_INDEX, DIM), EDGE_INDEX)
+
+    out = await measure_recall(
+        extract_driver, GROUP, pool, random.Random(7), EDGE_INDEX,
+        BRUTE_EDGE, INDEX_EDGE, probes=3)
+
+    assert set(out) == set(FETCH_DEPTHS)
+    for depth, (recall, rank1) in out.items():
+        assert 0.0 <= recall <= 1.0, f"depth {depth} recall out of range: {recall}"
+        assert 0.0 <= rank1 <= 1.0
+    assert out[200][0] >= out[10][0] - 1e-9, (
+        "asking the index for MORE candidates cannot lower recall@10; "
+        "if it did, the harness is scoring the wrong slice")
+    await drop_index(extract_driver, EDGE_INDEX)
+    await wipe(extract_driver, GROUP)
+
+
+async def test_write_overhead_is_measured_with_and_without_the_index(extract_driver):
+    """The number that got the 2026-09-11 index dropped -- 'it would add write
+    overhead to every fact insert on the path we are trying to speed up' -- and
+    which has never actually been measured."""
+    pool = build_pool(n=200, dim=DIM, rng=random.Random(8), seeds=None)
+    await ensure_uuid_index(extract_driver)
+
+    bare = await measure_insert_ms(
+        extract_driver, GROUP, 200, pool, node_pool=20, with_index=False, dim=DIM)
+    indexed = await measure_insert_ms(
+        extract_driver, GROUP, 200, pool, node_pool=20, with_index=True, dim=DIM)
+
+    assert bare > 0.0 and indexed > 0.0
+    r = await extract_driver.execute_query(
+        "MATCH ()-[e:RELATES_TO {group_id:$g}]->() RETURN count(e) AS n", g=GROUP)
+    assert r.records[0]["n"] == 0, "measure_insert_ms must leave no fixture behind"
