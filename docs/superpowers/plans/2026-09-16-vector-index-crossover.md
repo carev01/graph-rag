@@ -423,7 +423,8 @@ async def test_the_fixture_builds_the_requested_number_of_edges(extract_driver):
     await wipe(extract_driver, GROUP)
     await ensure_uuid_index(extract_driver)
     pool = build_pool(n=200, dim=DIM, rng=random.Random(0), seeds=None)
-    await build_edge_fixture(extract_driver, GROUP, 200, pool, node_pool=20, batch=50)
+    await build_edge_fixture(extract_driver, GROUP, 200, pool, node_pool=20, batch=50,
+                             rng=random.Random(100))
 
     r = await extract_driver.execute_query(
         "MATCH ()-[e:RELATES_TO {group_id:$g}]->() RETURN count(e) AS n", g=GROUP)
@@ -441,7 +442,8 @@ async def test_the_vector_index_comes_online_before_it_is_measured(extract_drive
     await wipe(extract_driver, GROUP)
     await ensure_uuid_index(extract_driver)
     pool = build_pool(n=300, dim=DIM, rng=random.Random(1), seeds=None)
-    await build_edge_fixture(extract_driver, GROUP, 300, pool, node_pool=30, batch=100)
+    await build_edge_fixture(extract_driver, GROUP, 300, pool, node_pool=30, batch=100,
+                             rng=random.Random(101))
     await create_index(extract_driver, edge_index_ddl(EDGE_INDEX, DIM))
 
     r = await extract_driver.execute_query(
@@ -617,7 +619,8 @@ async def test_the_index_does_not_change_graphitis_own_query(extract_driver):
     await ensure_uuid_index(extract_driver)
     await drop_index(extract_driver, EDGE_INDEX)
     pool = build_pool(n=300, dim=DIM, rng=random.Random(2), seeds=None)
-    await build_edge_fixture(extract_driver, GROUP, 300, pool, node_pool=30, batch=100)
+    await build_edge_fixture(extract_driver, GROUP, 300, pool, node_pool=30, batch=100,
+                             rng=random.Random(102))
 
     probe = build_pool(n=1, dim=DIM, rng=random.Random(99), seeds=None).vectors[0]
     params = dict(g=GROUP, v=probe, min=-1.0, k=10)
@@ -674,7 +677,8 @@ async def test_the_index_query_agrees_with_brute_force_on_a_small_fixture(extrac
     await ensure_uuid_index(extract_driver)
     await drop_index(extract_driver, EDGE_INDEX)
     pool = build_pool(n=100, dim=DIM, rng=random.Random(4), seeds=None)
-    await build_edge_fixture(extract_driver, GROUP, 100, pool, node_pool=10, batch=50)
+    await build_edge_fixture(extract_driver, GROUP, 100, pool, node_pool=10, batch=50,
+                             rng=random.Random(103))
     await create_index(extract_driver, edge_index_ddl(EDGE_INDEX, DIM))
 
     probe = build_pool(n=1, dim=DIM, rng=random.Random(5), seeds=None).vectors[0]
@@ -812,7 +816,8 @@ async def test_recall_is_reported_for_every_fetch_depth(extract_driver):
     await ensure_uuid_index(extract_driver)
     await drop_index(extract_driver, EDGE_INDEX)
     pool = build_pool(n=400, dim=DIM, rng=random.Random(6), seeds=None)
-    await build_edge_fixture(extract_driver, GROUP, 400, pool, node_pool=40, batch=100)
+    await build_edge_fixture(extract_driver, GROUP, 400, pool, node_pool=40, batch=100,
+                             rng=random.Random(104))
     await create_index(extract_driver, edge_index_ddl(EDGE_INDEX, DIM))
 
     out = await measure_recall(
@@ -922,7 +927,8 @@ async def measure_insert_ms(
     if with_index:
         await create_index(driver, edge_index_ddl(EDGE_INDEX, dim))
     started = time.perf_counter()
-    await build_edge_fixture(driver, scratch, n, pool, node_pool=node_pool)
+    await build_edge_fixture(driver, scratch, n, pool, node_pool=node_pool,
+                             rng=random.Random(2026))
     elapsed = (time.perf_counter() - started) * 1000.0
     await wipe(driver, scratch)
     await drop_index(driver, EDGE_INDEX)
@@ -1156,7 +1162,7 @@ async def _run(args) -> int:
                     driver, group, min(n, 50_000), pool, node_pool=1_000,
                     with_index=True)
                 await build_edge_fixture(
-                    driver, group, n, pool, node_pool=max(1_000, n // 50))
+                    driver, group, n, pool, node_pool=max(1_000, n // 50), rng=rng)
                 probe = pool.vectors[rng.randrange(len(pool.vectors))]
                 params = dict(g=group, v=probe, min=-1.0, k=10)
                 brute_ms, _ = await time_query(driver, BRUTE_EDGE, **params)
