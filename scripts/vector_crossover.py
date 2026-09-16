@@ -119,12 +119,21 @@ def free_bytes(path: str = "/var/lib/docker") -> int:
 def fits(
     n_edges: int,
     free: int,
-    headroom_bytes: int = 5 * 1024**3,
+    headroom_bytes: int | None = None,
     dim: int = DIM,
 ) -> bool:
     """Whether a step fits with room for the HNSW index and transaction logs.
 
+    The headroom SCALES: Neo4j's vector index keeps its own copy of the vectors
+    for reranking on top of the navigation graph, so the space it needs grows
+    with the data rather than sitting at some constant. A flat reserve would
+    shrink to nothing in relative terms exactly as the steps got large enough to
+    matter. The 5 GiB floor covers transaction logs on the small steps, where
+    half the store estimate is less than the logs will be.
+
     The headroom is not politeness: filling the root filesystem mid-sweep takes
     the Docker daemon down with it.
     """
-    return estimated_bytes(n_edges, dim) + headroom_bytes <= free
+    estimate = estimated_bytes(n_edges, dim)
+    reserve = max(5 * 1024**3, estimate // 2) if headroom_bytes is None else headroom_bytes
+    return estimate + reserve <= free

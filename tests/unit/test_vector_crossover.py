@@ -105,3 +105,18 @@ def test_the_disk_guard_refuses_a_step_that_would_not_fit():
     assert fits(1_000_000, free=one_million + 6 * 1024**3) is True
     assert fits(1_000_000, free=one_million) is False, "no headroom left for the index"
     assert fits(10_000, free=20 * 1024**3) is True
+
+
+def test_the_disk_guard_headroom_grows_with_the_step():
+    """A flat reserve would shrink to nothing in relative terms exactly as the
+    steps got big enough for the index to matter."""
+    small = estimated_bytes(10_000)
+    large = estimated_bytes(1_000_000)
+    # small steps sit on the 5 GiB floor
+    assert fits(10_000, free=small + 5 * 1024**3) is True
+    assert fits(10_000, free=small + 4 * 1024**3) is False
+    # large steps reserve half their own estimate, which exceeds the floor
+    assert large // 2 > 5 * 1024**3, "the 1M step must be past the floor for this to test anything"
+    assert fits(1_000_000, free=large + large // 2) is True
+    assert fits(1_000_000, free=large + 5 * 1024**3) is False, \
+        "the flat floor must not be what decides a large step"
