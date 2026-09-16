@@ -217,6 +217,11 @@ async def test_write_overhead_is_measured_with_and_without_the_index(extract_dri
         extract_driver, GROUP, 200, pool, node_pool=20, with_index=True, dim=DIM)
 
     assert bare > 0.0 and indexed > 0.0
+    # The scratch group, NOT GROUP: measure_insert_ms never writes to GROUP, so
+    # asserting on GROUP passes whether or not cleanup happened. The sweep calls
+    # this at every step, so leaked rows would accumulate and every later step's
+    # latency would silently include earlier steps' data.
     r = await extract_driver.execute_query(
-        "MATCH ()-[e:RELATES_TO {group_id:$g}]->() RETURN count(e) AS n", g=GROUP)
-    assert r.records[0]["n"] == 0, "measure_insert_ms must leave no fixture behind"
+        "MATCH ()-[e:RELATES_TO {group_id:$g}]->() RETURN count(e) AS n",
+        g=f"{GROUP}__insert_probe__")
+    assert r.records[0]["n"] == 0, "measure_insert_ms left rows in its scratch group"

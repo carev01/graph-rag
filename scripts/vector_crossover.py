@@ -391,11 +391,20 @@ async def measure_insert_ms(
     """Wall time in ms to insert `n` edges, with or without the vector index.
 
     Builds into a scratch group and removes it, so the caller's fixture is
-    untouched and successive calls do not accumulate.
+    untouched and successive calls do not accumulate. Owns EDGE_INDEX for its
+    duration and refuses to run if one already exists.
     """
     scratch = f"{group}__insert_probe__"
     await wipe(driver, scratch)
-    await drop_index(driver, EDGE_INDEX)
+    # This function owns EDGE_INDEX for its duration and drops it on the way out.
+    # Refuse rather than destroy one a caller built: a silently vanished index
+    # would be timed as a scan and read as the index being worthless.
+    existing = await driver.execute_query(
+        "SHOW INDEXES YIELD name WHERE name = $n RETURN count(*) AS n", n=EDGE_INDEX)
+    if existing.records[0]["n"]:
+        raise RuntimeError(
+            f"{EDGE_INDEX} already exists; measure_insert_ms would destroy it. "
+            f"Drop it before measuring insert cost.")
     if with_index:
         await create_index(driver, edge_index_ddl(EDGE_INDEX, dim), EDGE_INDEX)
     started = time.perf_counter()
