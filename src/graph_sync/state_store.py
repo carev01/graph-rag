@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sync_cursor (
@@ -32,6 +38,9 @@ ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz N
 CREATE TABLE IF NOT EXISTS token_ledger (day date PRIMARY KEY, tokens bigint NOT NULL DEFAULT 0);
 """
 _LOCK_KEY = 911_222_333
+# Distinct from _LOCK_KEY: that one elects a single poller and is taken with
+# try-once semantics; this one is contended and held for a whole article.
+_WARMUP_LOCK_KEY = 911_222_334
 
 
 class StateStore:
@@ -196,6 +205,64 @@ class StateStore:
         pool = await self._get_pool()
         return await pool.fetchval(
             "SELECT COALESCE((SELECT tokens FROM token_ledger WHERE day=current_date), 0)")
+
+    @asynccontextmanager
+    async def warmup_lock(self, *, timeout: float, poll: float = 5.0):
+        """Serialise warm-up articles across worker PROCESSES. Yields True if held.
+
+        `run_concurrently`'s barrier only serialises cold articles within ONE
+        process. That is enough for a single worker, and it is also -- by
+        accident rather than design -- what protects cross-source hub entities:
+        while any source is warming up, nothing else runs anywhere.
+
+        Scale to N workers and that protection disappears exactly where it costs
+        most. Measured on the 999-entity baseline: entities appearing in the
+        warm-up window of two or more sources carry 20.7% of all duplicate risk
+        weight, and they are the biggest hubs in the graph (`Azure Backup` k=55,
+        `Backup vault` k=33, `AWS Backup` k=30) -- the cross-vendor entities
+        design invariant #4 exists to keep unified. This lock restores the
+        single-process guarantee across processes.
+
+        Held for the whole article, so ~5 minutes. The lock is session-scoped, so
+        a worker that dies releases it when its connection drops -- no reaper is
+        needed for the crash case.
+
+        Two things release it, deliberately: the explicit unlock below, and
+        asyncpg's pool reset, which runs `pg_advisory_unlock_all()` when the
+        connection goes back to the pool (`asyncpg/connection.py:1748`). The
+        second means removing the first would not break any test -- so do not
+        read the tests as proof this line is load-bearing. It is defence in
+        depth against a future change that stops using a pooled connection, and
+        the `if held` guard only avoids a Postgres warning for unlocking a lock
+        we never took.
+
+        On timeout it logs and yields False rather than blocking forever: a
+        wedged holder must not stall a multi-week bootstrap. That trades the
+        guarantee for progress, so it is loud, and the duplicates it admits are
+        exact-name ones `merge_duplicates` can still clean.
+        """
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            deadline = time.monotonic() + timeout
+            held = False
+            while True:
+                held = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1)", _WARMUP_LOCK_KEY)
+                if held or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(poll)
+            if not held:
+                logger.warning(
+                    "warm-up lock not acquired after %.0fs; proceeding WITHOUT it. "
+                    "Another worker is holding it for longer than one article "
+                    "should take. Cross-source hub entities may be duplicated "
+                    "until merge-duplicates runs.", timeout)
+            try:
+                yield held
+            finally:
+                if held:
+                    await conn.execute(
+                        "SELECT pg_advisory_unlock($1)", _WARMUP_LOCK_KEY)
 
     async def try_lock(self) -> bool:
         if self._lock_conn is None:

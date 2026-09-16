@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     semantic_backoff_base_seconds: float = 30.0
     semantic_backoff_cap_seconds: float = 3600.0
     semantic_reaper_lease_seconds: float = 1800.0
+    # Serialise warm-up (cold) articles across worker PROCESSES, so scaling out
+    # to N workers keeps the cross-source hub protection a single worker gets
+    # from the in-process barrier. ON by default: with one worker it costs one
+    # Postgres round-trip per cold article against ~5 minutes of LLM work, and
+    # defaulting it off would make scaling out silently lose the guarantee.
+    semantic_global_warmup_lock: bool = True
+    semantic_warmup_lock_timeout_seconds: float = 1800.0
 
 @lru_cache
 def get_settings() -> Settings:

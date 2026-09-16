@@ -103,3 +103,60 @@ def test_worker_command_passes_a_warmup_predicate_iff_the_threshold_is_positive(
     assert gate._threshold == threshold, "the knob must reach the gate, not a hard-coded 8"
     assert gate._group_id == "g-wiring"
     assert gate._driver is neo4j_driver, "the gate counts on the neo4j driver, not the store"
+
+
+class _Store(_Closable):
+    """Records how the cli asks for the warm-up lock."""
+
+    def __init__(self):
+        self.warmup_lock_calls: list[float] = []
+
+    def warmup_lock(self, *, timeout: float):
+        self.warmup_lock_calls.append(timeout)
+        return object()
+
+
+@pytest.mark.parametrize(
+    "warmup,enabled,expect_lock",
+    [(5, True, True),      # on: the multi-worker bootstrap case
+     (5, False, False),    # explicitly disabled
+     (0, True, False)],    # no warm-up -> no cold articles to serialise
+)
+def test_worker_command_wires_the_global_warmup_lock(monkeypatch, warmup, enabled,
+                                                     expect_lock):
+    """The knob must reach `run_worker`, not merely exist. A lock that is
+    configured, constructed and never passed is the inert-knob defect this
+    project has now shipped twice; asserting on `Settings` alone would not catch
+    it, so this calls the factory the cli built and checks it reaches the store
+    with the configured timeout (1234.0, never the 1800.0 default)."""
+    received: dict = {}
+    store = _Store()
+
+    async def _deps(settings):
+        return store, _Ingest(), _Closable(), _Closable(), _Closable()
+
+    async def _fake_run_worker(store_, ingest, **kw):
+        received.update(kw)
+
+    monkeypatch.setattr(cli, "get_settings",
+                        lambda: _sync_settings().model_copy(update={
+                            "semantic_global_warmup_lock": enabled,
+                            "semantic_warmup_lock_timeout_seconds": 1234.0}))
+    monkeypatch.setattr(cli, "get_extract_settings",
+                        lambda: _extract_settings(ingest_warmup_articles=warmup))
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+
+    cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    assert "cold_lock" in received, f"run_worker must receive cold_lock; got {received}"
+    cold_lock = received["cold_lock"]
+    if not expect_lock:
+        assert cold_lock is None
+        assert store.warmup_lock_calls == []
+        return
+    assert cold_lock is not None
+    cold_lock()
+    assert store.warmup_lock_calls == [1234.0], (
+        f"the factory must call the STORE's warmup_lock with the configured "
+        f"timeout; got {store.warmup_lock_calls}")

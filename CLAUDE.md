@@ -100,6 +100,33 @@ existed to measure never engaged.*
 
 Full bootstrap is ~260M content tokens → ~0.8–1.5B LLM tokens through Graphiti's multi-call extraction pipeline. Use the cheap model tier for extraction, phase the bootstrap vendor-by-vendor in priority order, and meter the `add_episode` work queue against a daily token budget (incremental updates preempt bootstrap backfill). Phase 1 gates full-corpus rollout on a measured cost/quality benchmark over ~200 articles.
 
+## Scaling ingestion for the bootstrap
+
+Two independent axes. Both are live; neither has been exercised at scale.
+
+- **Within a process:** `INGEST_ARTICLE_CONCURRENCY` fans out over articles
+  (`run_concurrently`). Measured 2.24x at c=4 with warm-up; `scripts/dispatch_sim.py --sweep`
+  projects the rest for free, and shows the speedup saturating around c=12–16 *on the
+  pilot's two sources*.
+- **Across processes:** run N `graph-sync semantic-worker` processes. `claim_semantic_jobs`
+  uses `FOR UPDATE SKIP LOCKED`, so they claim disjointly, and only `sync_core`'s poller
+  is single-flight (`try_lock`) — the worker deliberately is not.
+
+**The warm-up barrier is the catch.** `run_concurrently` serialises cold articles only
+*within* one process, which on a single worker also happens to protect cross-source hub
+entities: while any source warms up, nothing runs anywhere. Scale out and that protection
+silently disappears — measured on the baseline, entities appearing in the warm-up window
+of 2+ sources carry **20.7% of all duplicate risk weight**, and they are the graph's
+biggest hubs (`Azure Backup` k=55, `Backup vault` k=33), i.e. exactly the cross-vendor
+entities invariant #4 exists to unify. `SEMANTIC_GLOBAL_WARMUP_LOCK` (default **on**)
+restores it with a Postgres advisory lock held for the duration of each cold article.
+
+That lock is also a floor: 280 sources × `INGEST_WARMUP_ARTICLES` articles run strictly
+one at a time globally (~8 days at W=8), which dominates total time past roughly 32-way
+effective parallelism. Lowering W for later sources is the untested lever — once a hub
+exists in the graph, a later source resolves to it rather than re-creating it — and
+`dispatch_sim.py` can evaluate that without spending anything.
+
 ## Roadmap
 
 Implementation is phased 0→6 (foundations → ingestion MVP on 2–3 vendors → retrieval core → community layer → DRIFT+router → Copilot exposure → scale-out). See `graphrag-docextractor-plan.md` §12. Six decisions are meant to be locked before Phase 1 (graph DB, models, vendor priority, refresh cadence, exposure route, ontology v1 sign-off) — §13.

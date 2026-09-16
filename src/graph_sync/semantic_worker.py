@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 
 from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
@@ -22,6 +23,7 @@ async def run_worker_once(
     backoff_base: float, backoff_cap: float, lease: float,
     concurrency: int = 1,
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
+    cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
 ) -> int:
     # Everything the ingest driver measures is per-article and was being DISCARDED
     # here: `ingest_article` returns dedup counters, the reference-time basis and
@@ -86,13 +88,28 @@ async def run_worker_once(
     # race.
     escaped_early = False
 
+    # Articles the predicate called cold, so `_run_group` can hold the global
+    # warm-up lock for exactly those. `run_concurrently` evaluates `is_cold`
+    # before it launches the item's task, so the verdict is always recorded by
+    # the time the task runs.
+    cold_ids: set[str] = set()
+
     async def _run_group(group) -> None:
         nonlocal escaped_early
         if escaped_early:
             return
         try:
-            for job in group:
-                await _run_job(job)
+            async with AsyncExitStack() as stack:
+                if cold_lock is not None and group[0]["article_id"] in cold_ids:
+                    # Serialised across worker PROCESSES, not just within this
+                    # one (StateStore.warmup_lock). A failure to take the lock is
+                    # Postgres being down, which is the same broken-infrastructure
+                    # case `_run_job`'s escape handles: it sets escaped_early and
+                    # the batch stops rather than ingesting at full LLM cost with
+                    # nowhere to record completion.
+                    await stack.enter_async_context(cold_lock())
+                for job in group:
+                    await _run_job(job)
         except BaseException:
             escaped_early = True
             raise
@@ -135,12 +152,15 @@ async def run_worker_once(
                 return False
             article_id = group[0]["article_id"]
             try:
-                return await is_cold(article_id)
+                verdict = await is_cold(article_id)
             except Exception:
                 logger.warning(
                     "warm-up lookup for article %s failed; treating it as cold",
                     article_id, exc_info=True)
-                return True
+                verdict = True
+            if verdict:
+                cold_ids.add(article_id)
+            return verdict
         group_is_cold = _group_is_cold
     results = await run_concurrently(
         list(groups.values()), _run_group, limit=concurrency, is_cold=group_is_cold)
@@ -188,6 +208,7 @@ async def run_worker(
     store, ingest, *, batch: int, poll_seconds: float, stop_event: asyncio.Event,
     budget: int, max_attempts: int, backoff_base: float, backoff_cap: float,
     lease: float, max_batches: int | None = None, concurrency: int = 1,
+    cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
@@ -205,7 +226,7 @@ async def run_worker(
         n = await run_worker_once(
             store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
             backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
-            concurrency=concurrency, is_cold=is_cold)
+            concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock)
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

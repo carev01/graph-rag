@@ -240,6 +240,16 @@ def worker(
                 lease=settings.semantic_reaper_lease_seconds,
                 concurrency=extract.ingest_article_concurrency,
                 is_cold=is_cold,
+                # Cold articles are serialised across worker PROCESSES, so
+                # scaling out to N workers keeps the cross-source hub protection
+                # a single worker gets for free from the in-process barrier.
+                # Pointless without a predicate: with no warm-up there are no
+                # cold articles to serialise.
+                cold_lock=(
+                    (lambda: store.warmup_lock(
+                        timeout=settings.semantic_warmup_lock_timeout_seconds))
+                    if is_cold is not None and settings.semantic_global_warmup_lock
+                    else None),
             )
         finally:
             await store.close()
