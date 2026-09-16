@@ -82,6 +82,7 @@ The delta feed is gap-free and idempotent, but only if the consumer follows thes
 - **Gate on `content_hash`** (SHA-256 of served markdown, stored on `:Article`) to skip unchanged replays. Note: VLM image-enrichment runs surface as `updated` deltas with a changed hash and *should* be reprocessed.
 - **Always pull with your own stored cursor**, never the webhook's `watermark` (informational only) — a missed webhook self-heals on the next pull.
 - Tombstones can arrive with `run_id: null` (out-of-band vendor/product/source deletion) in batches of thousands — handle gracefully.
+- **The structural stream is consumed in stream order; only semantic dispatch may be reordered.** `sync_core.bootstrap` advances `last_id`/`bootstrap_after`, which mean *"every id up to here is applied"* — a guarantee that holds only because the stream is consumed sequentially and each semantic job is enqueued before the watermark moves. Reorder or parallelise that loop and a crash-resume silently skips every lower id already passed over. Semantic dispatch carries no such hazard: progress there is a *completed set* (`semantic_jobs.status` per article, plus the per-chunk `HAS_EPISODE` gate), never a high-water mark, so `ingest_source` reorders its fan-out deliberately (`ingest_driver.spread_siblings`) to keep sibling articles apart. Keep the two straight: the boundary is what makes one safe and the other not.
 
 ## Cost awareness
 

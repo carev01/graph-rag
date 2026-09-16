@@ -28,8 +28,24 @@ an entity in k articles scales with k-1 and, per source in `sort_order`, the
 first 8 articles carry 79.5% of that weight (documentation sources open with
 overview pages naming the product and its core concepts).
 
-The duplicate figures above are measured; the barrier's effect on them is a
-PREDICTION (~30 down to ~6) that the design spec's section 9 tests with a paid run.
+Section 9 has since measured that barrier (2026-09-15, same 83 articles, N=4,
+W=8): 30 duplicates down to 16, not the predicted ~6 -- and the shortfall is a
+different POPULATION, not a weaker effect. The hub class the barrier targets was
+eliminated outright: no residual duplicate spans more than 2 articles. All 16
+came from two pairs of articles ADJACENT in `sort_order` -- sibling pages sharing
+a table of names that appear nowhere else. No value of `ingest_warmup_articles`
+reaches that class, because the entity is absent from the graph before either
+article starts, so there is nothing for a warm article to resolve against.
+
+That second class is handled by dispatch ORDER rather than by this barrier:
+`ingest_driver.spread_siblings` keeps the warm-up prefix in `sort_order` and
+dispatches the remainder by ascending id, which decorrelates position from
+content. The two mechanisms are complementary and neither reaches the other's
+population. What survives both is cleaned by `merge_duplicates`, which took this
+run's residual to zero.
+
+See `docs/superpowers/ab-warmup-2026-09-15.md` for the run and
+`docs/proposals/2026-09-15-dispatch-order-spreading.md` for the ordering analysis.
 """
 from __future__ import annotations
 

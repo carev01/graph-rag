@@ -23,6 +23,37 @@ logger = logging.getLogger(__name__)
 CRAWL_FALLBACK = "crawl-fallback"
 
 
+def spread_siblings(ids: list[str], warmup: int) -> list[str]:
+    """Dispatch order: keep the warm-up prefix, spread the rest by ascending id.
+
+    `list_article_ids` returns `sort_order` -- table-of-contents order, which puts
+    sibling pages next to each other. Siblings share entities that appear nowhere
+    else in the corpus (a region-availability table repeated across an
+    Overview/Manage pair, say). At concurrency > 1 adjacent siblings therefore
+    resolve the same never-before-seen names at the same time, and each creates its
+    own node: the warm-up barrier cannot help, because the entity is absent from the
+    graph before *either* article starts.
+
+    Measured on the 83-article pilot at N=4, W=8: 16 duplicate entities, 15 of them
+    from two adjacent pairs (`docs/superpowers/ab-warmup-2026-09-15.md`). An offline
+    replay calibrated against that run puts the spread order at ~1-2
+    (`docs/proposals/2026-09-15-dispatch-order-spreading.md` section 3.3).
+
+    Ascending article id decorrelates dispatch position from content. It is also the
+    order the delta feed already hands the worker's bootstrap lane, so the CLI and
+    the bootstrap now dispatch alike -- which matters mainly because it stops a
+    pilot over-reporting this duplicate class by ~10x against what the bootstrap
+    will actually produce.
+
+    The first `warmup` ids keep `sort_order`: the barrier runs them sequentially, so
+    they cannot collide with each other, and that is the set the A/B measured.
+
+    Reordering the SEMANTIC fan-out is safe; reordering the structural stream is
+    not. See `CLAUDE.md` -- "Sync correctness rules".
+    """
+    return ids[:warmup] + sorted(ids[warmup:])
+
+
 @dataclass
 class IngestArticleResult:
     article_id: str
@@ -196,6 +227,8 @@ class IngestDriver:
     async def ingest_source(self, source_id: str, limit: int | None = None) -> IngestResult:
         ids = await self.list_article_ids(source_id)
         if limit is not None:
+            # Truncate BEFORE spreading, so `--limit N` keeps meaning "the first N
+            # articles of the source" and not "N arbitrary ones".
             ids = ids[:limit]
         out = IngestResult()
         is_cold: Callable[[str], Awaitable[bool]] | None = None
@@ -208,6 +241,10 @@ class IngestDriver:
                 # as the graph stands when asked -- not "that many finished".
                 return await gate.is_cold_source(source_id)
             is_cold = _source_is_cold
+        # Only the barrier creates a warm-up prefix worth preserving. With no gate
+        # there is no sequential phase, so every article is spread.
+        ids = spread_siblings(
+            ids, warmup=self._s.ingest_warmup_articles if gate is not None else 0)
         results = await run_concurrently(
             ids, self.ingest_article,
             limit=self._s.ingest_article_concurrency, is_cold=is_cold)

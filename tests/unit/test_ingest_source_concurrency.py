@@ -5,12 +5,17 @@ heavily and graphiti resolves entities against the graph as it currently stands.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
 from graph_extract.config import ExtractSettings
 from graph_extract.dedup_guard import DedupIndexGuard, DedupIndexStats
-from graph_extract.ingest_driver import IngestArticleResult, IngestDriver
+from graph_extract.ingest_driver import (
+    IngestArticleResult,
+    IngestDriver,
+    spread_siblings,
+)
 
 
 def _settings(**kw) -> ExtractSettings:
@@ -384,3 +389,139 @@ async def test_a_predicate_failure_propagates_out_of_ingest_source():
     assert sorted(done) == ["a1", "a3", "a4"], (
         f"siblings still run; the article whose lookup failed must NOT be "
         f"silently ingested as cold; got {done}")
+
+
+# --- dispatch order ---------------------------------------------------------
+#
+# `list_article_ids` returns `sort_order` -- table-of-contents order, which puts
+# sibling pages adjacent. Siblings share entities that exist nowhere else, so at
+# concurrency > 1 they create duplicate nodes that the warm-up barrier cannot
+# prevent (the entity is absent from the graph before either article starts).
+# `spread_siblings` keeps the warm-up prefix in `sort_order` and dispatches the
+# remainder by ascending id.
+#
+# The ids below are chosen so `sort_order` and ascending order DISAGREE, and so
+# that the prefix is not already the lexicographic head: with W=2, "keep the
+# prefix" gives [z1, y2, a4, b5, c6, m3] while "just sort everything" gives
+# [a4, b5, c6, m3, y2, z1]. Ids that happened to be sorted would let both pass.
+
+_SORT_ORDER = ["z1", "y2", "m3", "a4", "b5", "c6"]
+
+
+def _driver_over(ids, *, gate, warmup=2, concurrency=4, ingest_article=None):
+    """A driver whose source lists `ids` in that (sort_order) order."""
+    drv = IngestDriver.__new__(IngestDriver)
+    drv._s = _settings(ingest_article_concurrency=concurrency,
+                       ingest_warmup_articles=warmup)
+    drv.warmup_gate = gate
+
+    async def _list(source_id, *a, **k):
+        return list(ids)
+
+    async def _default_ingest(article_id: str):
+        return IngestArticleResult(article_id=article_id)
+
+    drv.list_article_ids = _list
+    drv.ingest_article = ingest_article or _default_ingest
+    return drv
+
+
+class _AlwaysWarm:
+    """Present, so the warm-up prefix is preserved, but never cold -- the barrier
+    stays out of the way so these tests observe ordering alone."""
+
+    async def is_cold_source(self, source_id: str) -> bool:
+        return False
+
+
+async def _dispatch_order(ids, *, gate, warmup=2, limit=None):
+    seen: list[str] = []
+
+    async def _record(article_id: str):
+        seen.append(article_id)
+        return IngestArticleResult(article_id=article_id)
+
+    drv = _driver_over(ids, gate=gate, warmup=warmup, concurrency=1,
+                       ingest_article=_record)
+    await drv.ingest_source("s1", limit=limit)
+    return seen
+
+
+async def test_the_warmup_prefix_keeps_sort_order_and_the_rest_is_spread():
+    order = await _dispatch_order(_SORT_ORDER, gate=_AlwaysWarm(), warmup=2)
+    assert order == ["z1", "y2", "a4", "b5", "c6", "m3"], (
+        "expected the first 2 in sort_order then the remainder by ascending id")
+
+
+async def test_without_a_gate_there_is_no_prefix_to_preserve():
+    """No gate means no sequential phase, so nothing needs its sort_order
+    position and every article is spread."""
+    order = await _dispatch_order(_SORT_ORDER, gate=None, warmup=2)
+    assert order == ["a4", "b5", "c6", "m3", "y2", "z1"]
+
+
+async def test_limit_truncates_before_spreading():
+    """`--limit N` must keep meaning "the first N articles of the source". Under
+    spread-then-truncate the SET changes, not just the order: b5 would be
+    ingested and m3 would not."""
+    order = await _dispatch_order(_SORT_ORDER, gate=_AlwaysWarm(), warmup=2, limit=4)
+    assert order == ["z1", "y2", "a4", "m3"]
+    assert "b5" not in order and "c6" not in order
+
+
+async def test_the_barrier_still_runs_the_sort_order_head_sequentially():
+    """The point of the prefix: the articles the barrier serialises are still the
+    top of the table of contents, not whichever ids happen to sort first."""
+    log: list[str] = []
+    live = {"n": 0}
+
+    class _Gate:
+        async def is_cold_source(self, source_id: str) -> bool:
+            await asyncio.sleep(0)
+            return live["n"] < 2
+
+    async def _work(article_id: str):
+        log.append(f"start-{article_id}")
+        live["n"] += 1
+        await asyncio.sleep(0.02)
+        log.append(f"end-{article_id}")
+        return IngestArticleResult(article_id=article_id)
+
+    drv = _driver_over(_SORT_ORDER, gate=_Gate(), warmup=2, concurrency=4,
+                       ingest_article=_work)
+    await drv.ingest_source("s1")
+
+    assert log[:4] == ["start-z1", "end-z1", "start-y2", "end-y2"], (
+        f"the sort_order head must be the serialised warm-up set; got {log[:4]}")
+
+
+async def test_results_are_attributed_to_the_reordered_ids(caplog):
+    """`ingest_source` zips ids against results POSITIONALLY. Reordering the
+    dispatch list while zipping against the pre-spread list misattributes every
+    result to whichever article held that slot before the reorder.
+
+    Asserted on the LOGGED id, not on the exception: the raised error is the same
+    object either way, so `pytest.raises(match="boom-m3")` passes under the
+    mutant. Here m3 is dispatched last (slot 5); the unspread list has c6 in
+    slot 5, so the misattributed log names c6 -- an article that in fact
+    succeeded."""
+    async def _work(article_id: str):
+        if article_id == "m3":
+            raise RuntimeError("boom-m3")
+        return IngestArticleResult(article_id=article_id)
+
+    drv = _driver_over(_SORT_ORDER, gate=_AlwaysWarm(), warmup=2, concurrency=1,
+                       ingest_article=_work)
+    with caplog.at_level(logging.ERROR, logger="graph_extract.ingest_driver"):
+        with pytest.raises(RuntimeError, match="boom-m3"):
+            await drv.ingest_source("s1")
+
+    blamed = [r.getMessage() for r in caplog.records if "failed during" in r.getMessage()]
+    assert blamed == ["article m3 failed during ingest_source"], (
+        f"the failure must be blamed on the article that actually raised; got {blamed}")
+
+
+def test_spread_siblings_handles_a_prefix_longer_than_the_source():
+    """W larger than the source leaves the order untouched rather than raising."""
+    assert spread_siblings(["z1", "a4"], warmup=99) == ["z1", "a4"]
+    assert spread_siblings([], warmup=8) == []
