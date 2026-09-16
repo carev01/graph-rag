@@ -435,8 +435,12 @@ class StepResult:
     index_ms: float
     control_ms: float
     recall: dict[int, tuple[float, float]]
-    insert_bare_ms: float
-    insert_indexed_ms: float
+    # Write overhead stays edge-only (spec section 9 is about fact inserts). Node
+    # rows carry None here so the report renders a dash, never a zero.
+    insert_bare_ms: float | None
+    insert_indexed_ms: float | None
+    insert_rows: int | None = None
+    kind: str = "edge"
 
     @property
     def control_diverged(self) -> bool:
@@ -447,7 +451,31 @@ class StepResult:
         return abs(self.control_ms - self.brute_ms) / self.brute_ms > CONTROL_TOLERANCE
 
 
-def format_report(steps: list[StepResult], provenance: str, measured_to: int) -> str:
+KIND_HEADINGS = {
+    "edge": "Edges (RELATES_TO.fact_embedding)",
+    "node": "Nodes (Entity.name_embedding)",
+}
+
+
+def _ms_per_1k(ms: float | None, rows: int | None) -> str:
+    """ms per 1,000 inserts, spec section 9's required unit -- raw ms would
+    compare a fixed row count against a growing-N curve on the same line."""
+    if ms is None or not rows:
+        return "—"
+    return f"{ms / rows * 1000:.1f}"
+
+
+def _overhead_pct(bare_ms: float | None, indexed_ms: float | None) -> str:
+    """Index write overhead as a percentage of the un-indexed insert, per spec
+    section 9 -- computed from the two insert figures, never from raw ms."""
+    if bare_ms is None or indexed_ms is None or bare_ms == 0.0:
+        return "—"
+    return f"{(indexed_ms - bare_ms) / bare_ms * 100:.1f}"
+
+
+def format_report(
+    steps: list[StepResult], provenance: str, measured_to: dict[str, int],
+) -> str:
     lines: list[str] = ["# Vector-index crossover", ""]
     if "FALLBACK" in provenance:
         lines.insert(1, f"**WARNING: {provenance}**")
@@ -458,19 +486,31 @@ def format_report(steps: list[StepResult], provenance: str, measured_to: int) ->
         lines.append("")
         lines.append(
             "**CONTROL DIVERGED at "
-            + ", ".join(f"{s.n:,}" for s in diverged)
+            + ", ".join(f"{s.n:,} ({s.kind})" for s in diverged)
             + " — brute force changed when the index appeared, so the latency "
             "rows below cannot be attributed to the index.**")
-    lines += ["", "| rows | brute ms | index ms | control ms | r@10 k=10 | k=50 | k=200 | "
-              "insert bare ms | insert indexed ms | source |",
-              "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+
+    by_kind: dict[str, list[StepResult]] = {}
     for step in steps:
-        tag = "[measured]" if step.n <= measured_to else "[inference]"
-        lines.append(
-            f"| {step.n:,} | {step.brute_ms:.1f} | {step.index_ms:.1f} | "
-            f"{step.control_ms:.1f} | {step.recall[10][0]:.3f} | "
-            f"{step.recall[50][0]:.3f} | {step.recall[200][0]:.3f} | "
-            f"{step.insert_bare_ms:.0f} | {step.insert_indexed_ms:.0f} | {tag} |")
+        by_kind.setdefault(step.kind, []).append(step)
+
+    for kind, kind_steps in by_kind.items():
+        lines += ["", f"## {KIND_HEADINGS.get(kind, kind)}", ""]
+        lines += [
+            "| rows | brute ms | index ms | control ms | r@10 k=10 | k=50 | k=200 | "
+            "insert bare ms/1k | insert +idx ms/1k | index write overhead % | source |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+        kind_measured_to = measured_to.get(kind, 0)
+        for step in kind_steps:
+            tag = "[measured]" if step.n <= kind_measured_to else "[inference]"
+            lines.append(
+                f"| {step.n:,} | {step.brute_ms:.1f} | {step.index_ms:.1f} | "
+                f"{step.control_ms:.1f} | {step.recall[10][0]:.3f} | "
+                f"{step.recall[50][0]:.3f} | {step.recall[200][0]:.3f} | "
+                f"{_ms_per_1k(step.insert_bare_ms, step.insert_rows)} | "
+                f"{_ms_per_1k(step.insert_indexed_ms, step.insert_rows)} | "
+                f"{_overhead_pct(step.insert_bare_ms, step.insert_indexed_ms)} | {tag} |")
     return "\n".join(lines)
 
 
@@ -503,6 +543,89 @@ async def fetch_seed_vectors(limit: int = 3469) -> list[list[float]] | None:
         await driver.close()
 
 
+async def _build_edges(driver, group: str, n: int, pool: VectorPool, rng: random.Random) -> None:
+    """Adapts `build_edge_fixture` to `_sweep`'s `build` shape. Node pool grows
+    with N (facts greatly outnumber entities in the real corpus)."""
+    await build_edge_fixture(driver, group, n, pool, node_pool=max(1_000, n // 50), rng=rng)
+
+
+async def _build_nodes(driver, group: str, n: int, pool: VectorPool, rng: random.Random) -> None:
+    await build_node_fixture(driver, group, n, pool, rng=rng)
+
+
+async def _sweep(
+    driver,
+    group: str,
+    kind: str,
+    steps: tuple[int, ...],
+    max_n: int,
+    pool: VectorPool,
+    rng: random.Random,
+    probes: int,
+    brute_cypher: str,
+    index_cypher: str,
+    index_name: str,
+    ddl,
+    build,
+    measure_inserts: bool,
+) -> tuple[list[StepResult], int]:
+    """One kind's sweep (edges or nodes), shared so the two sweeps do not
+    duplicate the per-step body.
+
+    Timing order per step is load-bearing: brute, THEN create the index, THEN
+    index, THEN brute again as `control_ms` -- the second brute run is the guard
+    against reporting page-cache warmth as the index's win. `drop_index` runs
+    before every `measure_insert_ms` call because that function now raises if
+    its index already exists.
+    """
+    results: list[StepResult] = []
+    measured_to = 0
+    for n in steps:
+        if n > max_n:
+            break
+        free = free_bytes()
+        if not fits(n, free):
+            print(f"stopping before {n:,} {kind}s: needs "
+                  f"{estimated_bytes(n) / 1024**3:.1f} GB plus headroom, "
+                  f"{free / 1024**3:.1f} GB free", flush=True)
+            break
+        print(f"--- {n:,} {kind}s ---", flush=True)
+        await wipe(driver, group)
+        await drop_index(driver, index_name)
+
+        insert_bare: float | None = None
+        insert_indexed: float | None = None
+        insert_rows: int | None = None
+        if measure_inserts:
+            insert_rows = min(n, 50_000)
+            insert_bare = await measure_insert_ms(
+                driver, group, insert_rows, pool, node_pool=1_000, with_index=False)
+            insert_indexed = await measure_insert_ms(
+                driver, group, insert_rows, pool, node_pool=1_000, with_index=True)
+
+        await build(driver, group, n, pool, rng)
+        probe = pool.vectors[rng.randrange(len(pool.vectors))]
+        params = dict(g=group, v=probe, min=-1.0, k=10)
+        brute_ms, _ = await time_query(driver, brute_cypher, **params)
+        await create_index(driver, ddl(index_name, DIM), index_name)
+        index_ms, _ = await time_query(driver, index_cypher, idx=index_name, **params)
+        control_ms, _ = await time_query(driver, brute_cypher, **params)
+        recall = await measure_recall(
+            driver, group, pool, rng, index_name, brute_cypher, index_cypher, probes=probes)
+        results.append(StepResult(
+            n=n, kind=kind, brute_ms=brute_ms, index_ms=index_ms, control_ms=control_ms,
+            recall=recall, insert_bare_ms=insert_bare, insert_indexed_ms=insert_indexed,
+            insert_rows=insert_rows))
+        measured_to = n
+        print(f"  brute {brute_ms:.1f} ms | index {index_ms:.1f} ms | "
+              f"control {control_ms:.1f} ms | r@10 "
+              f"{recall[10][0]:.3f}/{recall[50][0]:.3f}/{recall[200][0]:.3f}",
+              flush=True)
+        await drop_index(driver, index_name)
+        await wipe(driver, group)
+    return results, measured_to
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-edges", type=int, default=max(EDGE_STEPS))
@@ -522,59 +645,26 @@ async def _run(args: argparse.Namespace) -> int:
     pool = build_pool(n=10_000, dim=DIM, rng=rng, seeds=seeds)
     print(f"vectors: {pool.provenance}", flush=True)
 
-    steps: list[StepResult] = []
-    measured_to = 0
     group = "__crossover__"
     with Neo4jContainer("neo4j:2026.07.1-community") as neo:
         driver = AsyncGraphDatabase.driver(
             neo.get_connection_url(), auth=("neo4j", neo.password))
         try:
             await ensure_uuid_index(driver)
-            for n in EDGE_STEPS:
-                if n > args.max_edges:
-                    break
-                free = free_bytes()
-                if not fits(n, free):
-                    print(f"stopping before {n:,}: needs "
-                          f"{estimated_bytes(n) / 1024**3:.1f} GB plus headroom, "
-                          f"{free / 1024**3:.1f} GB free", flush=True)
-                    break
-                print(f"--- {n:,} edges ---", flush=True)
-                await wipe(driver, group)
-                await drop_index(driver, EDGE_INDEX)
-                insert_bare = await measure_insert_ms(
-                    driver, group, min(n, 50_000), pool, node_pool=1_000,
-                    with_index=False)
-                insert_indexed = await measure_insert_ms(
-                    driver, group, min(n, 50_000), pool, node_pool=1_000,
-                    with_index=True)
-                await build_edge_fixture(
-                    driver, group, n, pool, node_pool=max(1_000, n // 50), rng=rng)
-                probe = pool.vectors[rng.randrange(len(pool.vectors))]
-                params = dict(g=group, v=probe, min=-1.0, k=10)
-                brute_ms, _ = await time_query(driver, BRUTE_EDGE, **params)
-                await create_index(driver, edge_index_ddl(EDGE_INDEX, DIM), EDGE_INDEX)
-                index_ms, _ = await time_query(
-                    driver, INDEX_EDGE, idx=EDGE_INDEX, **params)
-                control_ms, _ = await time_query(driver, BRUTE_EDGE, **params)
-                recall = await measure_recall(
-                    driver, group, pool, rng, EDGE_INDEX, BRUTE_EDGE, INDEX_EDGE,
-                    probes=args.probes)
-                steps.append(StepResult(
-                    n=n, brute_ms=brute_ms, index_ms=index_ms, control_ms=control_ms,
-                    recall=recall, insert_bare_ms=insert_bare,
-                    insert_indexed_ms=insert_indexed))
-                measured_to = n
-                print(f"  brute {brute_ms:.1f} ms | index {index_ms:.1f} ms | "
-                      f"control {control_ms:.1f} ms | r@10 "
-                      f"{recall[10][0]:.3f}/{recall[50][0]:.3f}/{recall[200][0]:.3f}",
-                      flush=True)
-                await drop_index(driver, EDGE_INDEX)
-                await wipe(driver, group)
+            edge_steps, edge_measured_to = await _sweep(
+                driver, group, "edge", EDGE_STEPS, args.max_edges, pool, rng, args.probes,
+                BRUTE_EDGE, INDEX_EDGE, EDGE_INDEX, edge_index_ddl, _build_edges,
+                measure_inserts=True)
+            node_steps, node_measured_to = await _sweep(
+                driver, group, "node", NODE_STEPS, args.max_nodes, pool, rng, args.probes,
+                BRUTE_NODE, INDEX_NODE, NODE_INDEX, node_index_ddl, _build_nodes,
+                measure_inserts=False)
         finally:
             await driver.close()
 
-    report = format_report(steps, pool.provenance, measured_to)
+    report = format_report(
+        edge_steps + node_steps, pool.provenance,
+        {"edge": edge_measured_to, "node": node_measured_to})
     print("\n" + report)
     return 0
 

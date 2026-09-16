@@ -132,15 +132,15 @@ def test_the_report_marks_measured_and_projected_rows_apart():
     steps = [
         StepResult(n=10_000, brute_ms=690.0, index_ms=12.0, control_ms=688.0,
                    recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
-                   insert_bare_ms=900.0, insert_indexed_ms=1400.0),
+                   insert_bare_ms=900.0, insert_indexed_ms=1400.0, insert_rows=10_000),
         StepResult(n=50_000, brute_ms=2810.0, index_ms=14.0, control_ms=2805.0,
                    recall={10: (0.98, 0.95), 50: (1.0, 1.0), 200: (1.0, 1.0)},
-                   insert_bare_ms=4400.0, insert_indexed_ms=7000.0),
+                   insert_bare_ms=4400.0, insert_indexed_ms=7000.0, insert_rows=50_000),
     ]
     # measured_to is 10,000, so the 50,000 row is past where measurement stopped
     # and must be labelled as a projection.
     out = format_report(steps, provenance="resampled from 3469 real values",
-                        measured_to=10_000)
+                        measured_to={"edge": 10_000})
     assert "[measured]" in out
     assert "[inference]" in out, "a row beyond the last measured step must be labelled"
     assert "resampled from 3469 real values" in out, "provenance must travel into the report"
@@ -154,8 +154,9 @@ def test_the_report_leads_with_the_fallback_warning_when_vectors_are_synthetic()
 
     steps = [StepResult(n=10_000, brute_ms=690.0, index_ms=12.0, control_ms=688.0,
                         recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
-                        insert_bare_ms=900.0, insert_indexed_ms=1400.0)]
-    out = format_report(steps, provenance="i.i.d. Gaussian -- FALLBACK", measured_to=10_000)
+                        insert_bare_ms=900.0, insert_indexed_ms=1400.0, insert_rows=10_000)]
+    out = format_report(steps, provenance="i.i.d. Gaussian -- FALLBACK",
+                        measured_to={"edge": 10_000})
     assert "FALLBACK" in out.split("\n")[0] or "FALLBACK" in out.split("\n")[1], \
         "the fallback warning must be at the top, not buried below the table"
 
@@ -168,6 +169,52 @@ def test_the_control_column_is_flagged_when_it_diverges():
 
     steps = [StepResult(n=10_000, brute_ms=690.0, index_ms=12.0, control_ms=120.0,
                         recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
-                        insert_bare_ms=900.0, insert_indexed_ms=1400.0)]
-    out = format_report(steps, provenance="resampled", measured_to=10_000)
+                        insert_bare_ms=900.0, insert_indexed_ms=1400.0, insert_rows=10_000)]
+    out = format_report(steps, provenance="resampled", measured_to={"edge": 10_000})
     assert "CONTROL DIVERGED" in out
+
+
+def test_node_rows_render_dashes_for_insert_columns_while_edge_rows_show_numbers():
+    """Write overhead stays edge-only (spec section 9 is about fact inserts).
+    Node rows carry None for the insert figures, and the report must render a
+    dash for them -- a reader must not mistake a blank cell for a zero cost."""
+    from scripts.vector_crossover import StepResult, format_report
+
+    edge_step = StepResult(
+        n=10_000, kind="edge", brute_ms=690.0, index_ms=12.0, control_ms=688.0,
+        recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+        insert_bare_ms=900.0, insert_indexed_ms=1400.0, insert_rows=10_000)
+    node_step = StepResult(
+        n=10_000, kind="node", brute_ms=90.0, index_ms=5.0, control_ms=88.0,
+        recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+        insert_bare_ms=None, insert_indexed_ms=None, insert_rows=None)
+
+    out = format_report(
+        [edge_step, node_step], provenance="resampled",
+        measured_to={"edge": 10_000, "node": 10_000})
+
+    edges_section, nodes_section = out.split("## Nodes")
+    edge_row = next(line for line in edges_section.splitlines() if line.startswith("| 10,000"))
+    node_row = next(line for line in nodes_section.splitlines() if line.startswith("| 10,000"))
+
+    assert "—" not in edge_row, f"edge row must show numeric insert figures: {edge_row}"
+    assert node_row.count("—") == 3, (
+        f"node row must render — for all three insert columns: {node_row}")
+
+
+def test_insert_overhead_percentage_is_computed_from_ms_per_1k_not_raw_ms():
+    """Spec section 9: ms per 1,000 inserts and overhead as a percentage of the
+    un-indexed insert -- computed from those two figures, not from raw ms."""
+    from scripts.vector_crossover import StepResult, format_report
+
+    step = StepResult(
+        n=50_000, kind="edge", brute_ms=1000.0, index_ms=50.0, control_ms=990.0,
+        recall={10: (1.0, 1.0), 50: (1.0, 1.0), 200: (1.0, 1.0)},
+        insert_bare_ms=1000.0, insert_indexed_ms=1500.0, insert_rows=50_000)
+
+    out = format_report([step], provenance="resampled", measured_to={"edge": 50_000})
+
+    row = next(line for line in out.splitlines() if line.startswith("| 50,000"))
+    assert "20.0" in row, f"bare ms/1k should be 20.0: {row}"
+    assert "30.0" in row, f"indexed ms/1k should be 30.0: {row}"
+    assert "50.0" in row, f"overhead should be 50.0%: {row}"
