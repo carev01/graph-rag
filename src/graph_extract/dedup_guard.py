@@ -47,6 +47,7 @@ from typing import Any
 from graphiti_core.prompts.models import Message
 
 from graph_extract.llm_timing import PromptTimings
+from graph_extract.usage import CURRENT_PROMPT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -208,54 +209,62 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
 
     async def generate_response(messages: list[Message], *args: Any, **kwargs: Any) -> Any:
         name = kwargs.get("prompt_name") or "unknown"
-        if name != DEDUP_PROMPT_NAME:
-            return await _timed(orig, name, messages, *args, **kwargs)
-        stats = guard.stats()
-        stats.calls += 1
-        counts = parse_candidate_counts(messages)
-        if counts is None:
-            stats.parse_failures += 1
-            logger.warning("dedup prompt not parseable (graphiti prompt format changed?); "
-                           "index check skipped for this call")
-            return await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
-        n, m = counts
-        # graphiti's clients append schema/language text to the messages IN PLACE;
-        # keep a pristine copy so the fallback sees the prompt as authored.
-        pristine = [Message(role=msg.role, content=msg.content) for msg in messages]
-        response = await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
-        verdict = _classify(response, n, m)
-        if verdict is not None:
-            # Recorded BEFORE the clean-path return: a same-pair contradiction is
-            # an in-range index, so the call it arrives on is usually "clean" and
-            # would never reach the counters below.
-            stats.contradicted_same_pair += len(verdict.contradicted_same_pair)
-        if verdict is None or verdict.clean:
+        # Published for the duration of this call so usage.py's capture (several
+        # calls deeper, at the raw chat.completions.create layer) can tag its record
+        # with the prompt that produced it -- see CURRENT_PROMPT_NAME in usage.py for
+        # why this must be a ContextVar reset in a finally, not a module global.
+        token = CURRENT_PROMPT_NAME.set(name)
+        try:
+            if name != DEDUP_PROMPT_NAME:
+                return await _timed(orig, name, messages, *args, **kwargs)
+            stats = guard.stats()
+            stats.calls += 1
+            counts = parse_candidate_counts(messages)
+            if counts is None:
+                stats.parse_failures += 1
+                logger.warning("dedup prompt not parseable (graphiti prompt format changed?); "
+                               "index check skipped for this call")
+                return await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
+            n, m = counts
+            # graphiti's clients append schema/language text to the messages IN PLACE;
+            # keep a pristine copy so the fallback sees the prompt as authored.
+            pristine = [Message(role=msg.role, content=msg.content) for msg in messages]
+            response = await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
+            verdict = _classify(response, n, m)
+            if verdict is not None:
+                # Recorded BEFORE the clean-path return: a same-pair contradiction is
+                # an in-range index, so the call it arrives on is usually "clean" and
+                # would never reach the counters below.
+                stats.contradicted_same_pair += len(verdict.contradicted_same_pair)
+            if verdict is None or verdict.clean:
+                return response
+            stats.invalid_calls += 1
+            stats.dup_in_invalidation_range += len(verdict.dup_in_range)
+            stats.dup_beyond_range += len(verdict.dup_beyond)
+            stats.contradicted_beyond_range += len(verdict.contradicted_beyond)
+            retry_clean: bool | None = None
+            if guard.fallback is not None:
+                stats.retried += 1
+                # Not wrapped in try/except on purpose: a dead fallback tier must fail the
+                # episode loudly, like any other LLM error in the pipeline.
+                response = await _timed(guard.fallback.generate_response,
+                                        f"{DEDUP_PROMPT_NAME}:retry", pristine, *args, **kwargs)
+                v2 = _classify(response, n, m)
+                retry_clean = v2 is not None and v2.clean
+                if retry_clean:
+                    stats.retry_clean += 1
+                else:
+                    stats.retry_dirty += 1
+            logger.warning(
+                "dedup indices out of range: duplicate_facts=%s contradicted_facts=%s "
+                "related=%d existing=%d (invalidation idx %d-%d) in_invalidation_range=%d "
+                "beyond=%d retried=%s retry_clean=%s",
+                verdict.invalid_duplicates, verdict.contradicted_beyond, n, m, n, n + m - 1,
+                len(verdict.dup_in_range), len(verdict.dup_beyond) + len(verdict.contradicted_beyond),
+                guard.fallback is not None, retry_clean)
             return response
-        stats.invalid_calls += 1
-        stats.dup_in_invalidation_range += len(verdict.dup_in_range)
-        stats.dup_beyond_range += len(verdict.dup_beyond)
-        stats.contradicted_beyond_range += len(verdict.contradicted_beyond)
-        retry_clean: bool | None = None
-        if guard.fallback is not None:
-            stats.retried += 1
-            # Not wrapped in try/except on purpose: a dead fallback tier must fail the
-            # episode loudly, like any other LLM error in the pipeline.
-            response = await _timed(guard.fallback.generate_response,
-                                    f"{DEDUP_PROMPT_NAME}:retry", pristine, *args, **kwargs)
-            v2 = _classify(response, n, m)
-            retry_clean = v2 is not None and v2.clean
-            if retry_clean:
-                stats.retry_clean += 1
-            else:
-                stats.retry_dirty += 1
-        logger.warning(
-            "dedup indices out of range: duplicate_facts=%s contradicted_facts=%s "
-            "related=%d existing=%d (invalidation idx %d-%d) in_invalidation_range=%d "
-            "beyond=%d retried=%s retry_clean=%s",
-            verdict.invalid_duplicates, verdict.contradicted_beyond, n, m, n, n + m - 1,
-            len(verdict.dup_in_range), len(verdict.dup_beyond) + len(verdict.contradicted_beyond),
-            guard.fallback is not None, retry_clean)
-        return response
+        finally:
+            CURRENT_PROMPT_NAME.reset(token)
 
     client.generate_response = generate_response
     return guard

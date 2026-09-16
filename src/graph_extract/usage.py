@@ -45,6 +45,22 @@ def reset_tally() -> None:
 CURRENT_USAGE_TALLY: ContextVar[UsageTally | None] = ContextVar(
     "CURRENT_USAGE_TALLY", default=None)
 
+# The graphiti prompt name (e.g. "extract_edges.edge", "dedupe_edges.resolve_edge")
+# in scope for the LLM call `instrument()` is currently capturing. Lives here (not
+# dedup_guard.py, which is the only place that ever sets it) so dedup_guard can
+# import it without creating an import cycle -- dedup_guard already imports
+# nothing from usage.py, and usage.py imports nothing from dedup_guard.
+#
+# A ContextVar, not a module global, for the same reason as CURRENT_USAGE_TALLY /
+# CURRENT_DEDUP_STATS: ingest runs several articles concurrently, each issuing many
+# in-flight LLM calls on one event loop, and asyncio only copies context per task --
+# a global set-before/read-after would let one call's name leak onto a concurrent
+# sibling's capture record. Call sites that never go through graphiti's LLM client
+# (the global-search map step, the router classifier) never set this, so their
+# records carry "" -- deliberately distinct from dedup_guard's "unknown" fallback,
+# which means a graphiti call arrived with no prompt_name at all (a regression).
+CURRENT_PROMPT_NAME: ContextVar[str] = ContextVar("CURRENT_PROMPT_NAME", default="")
+
 
 def record(kind: str, *, prompt: int, completion: int, cached: int = 0) -> None:
     """Dual write: the global tally always, plus the open scope when there is one."""
@@ -144,6 +160,14 @@ def capture_llm_call(path: str, *, call_id: str, tier: str, model: str, api: str
                      kwargs: dict, resp: object) -> None:
     """Append one JSONL record of a full prompt/response pair.
 
+    `prompt_name` is read from CURRENT_PROMPT_NAME, not passed in: only
+    dedup_guard's `generate_response` wrapper ever sets it (to graphiti's
+    `prompt_name` kwarg, e.g. "extract_edges.edge"), for the duration of the one
+    call that reaches this layer beneath it. Call sites that never route through
+    graphiti's LLM client (global-search map, router classifier) never set it, so
+    their records get "" -- not "unknown", which is reserved for a graphiti call
+    that arrived with no prompt_name at all (a regression, see dedup_guard.py).
+
     Not called directly from production code except via `instrument`'s
     try/except wrapper -- a serialisation failure here must never break the
     LLM call it observed.
@@ -163,6 +187,7 @@ def capture_llm_call(path: str, *, call_id: str, tier: str, model: str, api: str
         "call_id": call_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tier": tier,
+        "prompt_name": CURRENT_PROMPT_NAME.get(),
         "model": model or getattr(resp, "model", None),
         "api": api,
         **_request_payload(kwargs),
