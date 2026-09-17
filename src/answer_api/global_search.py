@@ -183,8 +183,8 @@ def _map_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
     key = settings.map_llm_api_key or settings.judge_api_key or "not-needed"
     if not base or not model:
         raise ValueError("No map model configured. Set map_llm_* or judge_* (GLM-5.2).")
-    return bounded_llm_client(base, key,
-                              reasoning_effort=settings.map_reasoning_effort), model
+    return bounded_llm_client(base, key, reasoning_effort=settings.map_reasoning_effort,
+                              tier="map", capture_path=settings.llm_capture_path), model
 
 
 def _extract_json(raw: str) -> dict | None:

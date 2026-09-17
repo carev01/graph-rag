@@ -140,7 +140,7 @@ def _bound_index_arrays(client: AsyncOpenAI, max_items: int) -> AsyncOpenAI:
 def _is_azure(base_url: str) -> bool:
     return "azure.com" in base_url or "cognitiveservices" in base_url
 
-def _llm_client(s: ExtractSettings):
+def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
     cfg = _llm_config(s)
     # Explicit timeout + retries: a cloud endpoint can drop a connection
     # (observed: an OpenRouter socket stuck in CLOSE_WAIT hung the whole run).
@@ -150,11 +150,13 @@ def _llm_client(s: ExtractSettings):
         # base_url is the resource endpoint (host); the SDK builds /openai/...
         raw = instrument(AsyncAzureOpenAI(
             azure_endpoint=s.llm_base_url, api_key=s.llm_api_key,
-            api_version=s.llm_api_version, timeout=90.0, max_retries=4))
+            api_version=s.llm_api_version, timeout=90.0, max_retries=4),
+            tier=tier, capture_path=s.llm_capture_path)
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
     raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
-                                 timeout=90.0, max_retries=4))
+                                 timeout=90.0, max_retries=4),
+                     tier=tier, capture_path=s.llm_capture_path)
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
     # Only wrap when configured: 0.0/0.0 leaves the proven gpt-5-mini path untouched
@@ -201,7 +203,7 @@ def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI
     return client
 
 
-def build_graphiti(s: ExtractSettings) -> Graphiti:
+def build_graphiti(s: ExtractSettings, *, tier: str = "strong") -> Graphiti:
     # Candidate searches shipped fact_embedding (768 floats x 20 candidates,
     # twice per extracted fact) only for graphiti to pop it on arrival -- 2.8x on
     # the query that dominates ingestion. Idempotent; safe to call per build.
@@ -224,7 +226,7 @@ def build_graphiti(s: ExtractSettings) -> Graphiti:
     # CRITICAL: pass an explicit LOCAL reranker so Graphiti does not build its
     # default OpenAIRerankerClient() pointed at api.openai.com.
     reranker = OpenAIRerankerClient(config=_llm_config(s))
-    llm = _llm_client(s)
+    llm = _llm_client(s, tier=tier)
     g = Graphiti(s.neo4j_uri, s.neo4j_user, s.neo4j_password,
                  llm_client=llm, embedder=embedder,
                  cross_encoder=reranker, max_coroutines=s.max_coroutines)
@@ -259,7 +261,7 @@ def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
         llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode))
     # The reranker built by build_graphiti is harmless here: it is not invoked
     # during add_episode (the cheap client is used for ingestion only).
-    return build_graphiti(cheap)
+    return build_graphiti(cheap, tier="cheap")
 
 def build_embedder(s: ExtractSettings) -> OpenAIEmbedder:
     """The single shared embedder (TEI/Jina) used everywhere — extracted so the
