@@ -1,38 +1,4 @@
 {
-  "dedupe_edges.resolve_edge": {
-    "type": "json_schema",
-    "json_schema": {
-      "name": "EdgeDuplicate",
-      "schema": {
-        "properties": {
-          "duplicate_facts": {
-            "description": "List of idx values of duplicate facts (only from EXISTING FACTS range). Empty list if none.",
-            "items": {
-              "type": "integer"
-            },
-            "title": "Duplicate Facts",
-            "type": "array",
-            "maxItems": 25
-          },
-          "contradicted_facts": {
-            "description": "List of idx values of contradicted facts (from full idx range). Empty list if none.",
-            "items": {
-              "type": "integer"
-            },
-            "title": "Contradicted Facts",
-            "type": "array",
-            "maxItems": 25
-          }
-        },
-        "required": [
-          "duplicate_facts",
-          "contradicted_facts"
-        ],
-        "title": "EdgeDuplicate",
-        "type": "object"
-      }
-    }
-  },
   "extract_edges.edge": {
     "type": "json_schema",
     "json_schema": {
@@ -124,6 +90,85 @@
       }
     }
   },
+  "dedupe_edges.resolve_edge": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "EdgeDuplicate",
+      "schema": {
+        "properties": {
+          "duplicate_facts": {
+            "description": "List of idx values of duplicate facts (only from EXISTING FACTS range). Empty list if none.",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Duplicate Facts",
+            "type": "array",
+            "maxItems": 25
+          },
+          "contradicted_facts": {
+            "description": "List of idx values of contradicted facts (from full idx range). Empty list if none.",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Contradicted Facts",
+            "type": "array",
+            "maxItems": 25
+          }
+        },
+        "required": [
+          "duplicate_facts",
+          "contradicted_facts"
+        ],
+        "title": "EdgeDuplicate",
+        "type": "object"
+      }
+    }
+  },
+  "extract_nodes.extract_summaries_batch": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "SummarizedEntities",
+      "schema": {
+        "$defs": {
+          "SummarizedEntity": {
+            "properties": {
+              "name": {
+                "description": "Name of the entity being summarized",
+                "title": "Name",
+                "type": "string"
+              },
+              "summary": {
+                "description": "Updated summary for the entity",
+                "title": "Summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "summary"
+            ],
+            "title": "SummarizedEntity",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "summaries": {
+            "description": "List of entity summaries. Only include entities that need summary updates.",
+            "items": {
+              "$ref": "#/$defs/SummarizedEntity"
+            },
+            "title": "Summaries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "summaries"
+        ],
+        "title": "SummarizedEntities",
+        "type": "object"
+      }
+    }
+  },
   "extract_nodes.extract_text": {
     "type": "json_schema",
     "json_schema": {
@@ -174,51 +219,6 @@
           "extracted_entities"
         ],
         "title": "ExtractedEntities",
-        "type": "object"
-      }
-    }
-  },
-  "extract_nodes.extract_summaries_batch": {
-    "type": "json_schema",
-    "json_schema": {
-      "name": "SummarizedEntities",
-      "schema": {
-        "$defs": {
-          "SummarizedEntity": {
-            "properties": {
-              "name": {
-                "description": "Name of the entity being summarized",
-                "title": "Name",
-                "type": "string"
-              },
-              "summary": {
-                "description": "Updated summary for the entity",
-                "title": "Summary",
-                "type": "string"
-              }
-            },
-            "required": [
-              "name",
-              "summary"
-            ],
-            "title": "SummarizedEntity",
-            "type": "object"
-          }
-        },
-        "properties": {
-          "summaries": {
-            "description": "List of entity summaries. Only include entities that need summary updates.",
-            "items": {
-              "$ref": "#/$defs/SummarizedEntity"
-            },
-            "title": "Summaries",
-            "type": "array"
-          }
-        },
-        "required": [
-          "summaries"
-        ],
-        "title": "SummarizedEntities",
         "type": "object"
       }
     }

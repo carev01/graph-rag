@@ -48,15 +48,38 @@ graphiti merges a duplicate it keeps the EXISTING text and discards the newly
 extracted paraphrase (edge_operations.py resolve path), so the string the model
 actually produced is gone. `--report` prints exactly what is missing.
 
+CAPTURED PAIRS (--from-capture)
+------------------------------
+Since this module was written, `usage.capture_llm_call` landed and an authorised
+capture run recorded what `upstage/solar-pro4` ACTUALLY emitted on the same 83
+pilot articles. `--from-capture PATH` builds from those real pairs instead of
+reconstructing targets from the graph. It fixes the two holes the graph-derived
+build cannot fill -- `dedupe_nodes` had no positives at all, and `resolve_edge`
+positives were synthetic -- at the price of two new problems, both solved here
+rather than papered over:
+
+  * the capture carries no article_id, so attribution is recovered offline
+    (`CaptureAttributor`) and anything not attributable to exactly ONE article is
+    dropped rather than assigned, because the split is by article;
+  * the capture carries the model's MISTAKES, so every completion is validated
+    (`validate_capture`) against its schema and against the semantic constraints
+    a schema cannot express, and failures are dropped rather than repaired.
+
+The graph-derived path is unchanged and still the only source for prompts the
+capture missed, and a useful cross-check against it.
+
 Usage
 -----
     uv run --extra dev python scripts/build_extraction_dataset.py --out data/ft
     uv run --extra dev python scripts/build_extraction_dataset.py --limit 20 \
         --out docs/proposals/samples --sample-only
+    uv run --extra dev python scripts/build_extraction_dataset.py \
+        --from-capture /path/to/llm-capture.jsonl --out data/ft-captured --upsample
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import hashlib
 import json
@@ -64,7 +87,7 @@ import logging
 import random
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,8 +120,10 @@ from graphiti_core.utils.maintenance.node_operations import (
 )
 from graphiti_core.utils.text_utils import MAX_SUMMARY_CHARS
 from neo4j import AsyncGraphDatabase
+from pydantic import ValidationError
 
 from graph_extract.config import get_extract_settings
+from graph_extract.dedup_guard import parse_candidate_counts
 from graph_extract.ontology import (
     CHEAP_TIER_SALIENCE,
     EDGE_TYPE_MAP,
@@ -220,8 +245,15 @@ RETURN e.uuid AS ep, n.uuid AS ent
 """
 
 
-async def load_graph(uri: str, user: str, password: str, group_id: str) -> Graph:
-    """Pull the whole pilot slice into memory. READ access mode, no writes."""
+async def load_graph(uri: str, user: str, password: str, group_id: str, *,
+                     with_embeddings: bool = True) -> Graph:
+    """Pull the whole pilot slice into memory. READ access mode, no writes.
+
+    `with_embeddings=False` drops `name_embedding` / `fact_embedding` from the
+    result set. Only the graph-derived build needs them (they reconstruct
+    graphiti's dedup candidate ranking); the capture path matches on text alone,
+    and the vectors are ~3.5M floats -- by far the largest thing on the wire.
+    """
     g = Graph()
     driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
     try:
@@ -235,14 +267,18 @@ async def load_graph(uri: str, user: str, password: str, group_id: str) -> Graph
                     article_id=r["article_id"] or "",
                     chunk_index=r["chunk_index"] if r["chunk_index"] is not None else -1,
                 )
-            res = await s.run(_LOAD_ENTITIES, g=group_id)
+            entities_query = (_LOAD_ENTITIES if with_embeddings
+                              else _LOAD_ENTITIES.replace("n.name_embedding", "null"))
+            facts_query = (_LOAD_FACTS if with_embeddings
+                           else _LOAD_FACTS.replace("r.fact_embedding", "null"))
+            res = await s.run(entities_query, g=group_id)
             async for r in res:
                 g.entities[r["uuid"]] = Entity(
                     uuid=r["uuid"], name=r["name"], labels=list(r["labels"]),
                     summary=r["summary"], created_at=r["created_at"],
                     embedding=list(r["emb"] or []),
                 )
-            res = await s.run(_LOAD_FACTS, g=group_id)
+            res = await s.run(facts_query, g=group_id)
             async for r in res:
                 g.facts[r["uuid"]] = Fact(
                     uuid=r["uuid"], name=r["name"], fact=r["fact"], source_uuid=r["src"],
@@ -282,11 +318,20 @@ class PromptRenderer:
             structured_output_mode="json_schema",
         )
 
+    def clean(self, text: str) -> str:
+        """graphiti's own `_clean_input`, reached through a real client instance.
+
+        Also used by the capture path: a captured prompt has already been through
+        `_clean_input`, so matching its episode block back to the raw
+        `Episodic.content` has to clean the graph side too or the comparison is
+        between a cleaned string and an uncleaned one.
+        """
+        return self._client._clean_input(text)
+
     def render(self, messages: list[Message]) -> list[dict[str, str]]:
         msgs = [Message(role=m.role, content=m.content) for m in messages]
         msgs[0].content += get_extraction_language_instruction(self._group_id)
-        return [{"role": m.role, "content": self._client._clean_input(m.content)}
-                for m in msgs]
+        return [{"role": m.role, "content": self.clean(m.content)} for m in msgs]
 
 
 def response_schema(prompt_name: str) -> dict[str, Any]:
@@ -788,6 +833,565 @@ def _as_node(e: Entity) -> EntityNode:
 
 
 # --------------------------------------------------------------------------- #
+# captured pairs (--from-capture)
+# --------------------------------------------------------------------------- #
+# What `usage.capture_llm_call` writes per LLM call: call_id, timestamp, tier,
+# prompt_name, model, api, messages|input, response_format, completion,
+# finish_reason and token counts (usage.py:147-186). These are what
+# `upstage/solar-pro4` ACTUALLY emitted, which is the one thing the graph cannot
+# reconstruct -- graphiti keeps the surviving text on a merge and discards the
+# model's paraphrase, so every dedup POSITIVE is absent from the graph-derived
+# build (see the module docstring and the proposal's §2).
+#
+# Two problems have to be solved before a captured pair may be used:
+#
+#   1. ATTRIBUTION. A capture record carries no article_id and no episode_uuid,
+#      and the split is by ARTICLE on purpose (episodes of one article share
+#      entities and near-identical prose). A record that cannot be attributed is
+#      DROPPED, never assigned: putting it on the wrong side of the boundary is
+#      exactly the leakage the article split exists to prevent.
+#   2. VALIDATION. A captured completion is the model's real output INCLUDING
+#      its mistakes. Training a replacement on a wrong answer teaches the
+#      replacement to reproduce it. Every completion is therefore checked against
+#      its response model AND against the semantic constraints a JSON schema
+#      cannot express, and a record failing either is dropped -- never repaired.
+
+# chat.completions says "stop"; the Responses API's nearest equivalent is the
+# status "completed" (usage.py:_finish_reason, :140-144). Anything else -- most
+# importantly "length" -- is a truncated reply and a broken training target.
+CAPTURE_TERMINAL = frozenset({"stop", "completed"})
+
+# The tag pair that wraps `episode_content` in each prompt, which is what makes a
+# captured record traceable back to an `:Episodic` node and hence to an article.
+# extract_text uses <TEXT> (prompts/extract_nodes.py:311-313); edge uses the
+# underscored <CURRENT_MESSAGE> (prompts/extract_edges.py:119-121); dedupe_nodes
+# uses the spaced <CURRENT MESSAGE> (prompts/dedupe_nodes.py:131-133).
+# extract_summaries_batch is the odd one out: it renders previous_episodes and
+# the episode content as two JSON values inside one <MESSAGES> block
+# (prompts/extract_nodes.py:521-525), so the content is the JSON-decoded last
+# line rather than a raw slice.
+CAPTURE_EPISODE_TAGS: dict[str, tuple[str, str]] = {
+    "extract_nodes.extract_text": ("<TEXT>", "</TEXT>"),
+    "extract_edges.edge": ("<CURRENT_MESSAGE>", "</CURRENT_MESSAGE>"),
+    "dedupe_nodes.nodes": ("<CURRENT MESSAGE>", "</CURRENT MESSAGE>"),
+}
+
+
+def _tagged_block(text: str, open_tag: str, close_tag: str) -> str | None:
+    """The text strictly between `open_tag` and the first following `close_tag`.
+
+    Deliberately does NOT strip: pass the tags with their surrounding newlines
+    (`"<TEXT>\\n"`, `"\\n</TEXT>"`) and the slice is the interpolated value
+    byte-for-byte. Stripping newlines here silently breaks episode matching --
+    chunk content routinely ENDS in a blank line, and the template renders
+    `<TEXT>\\n{content}\\n</TEXT>`, so a trailing `\\n` inside the slice is part
+    of the content, not part of the delimiter.
+    """
+    start = text.find(open_tag)
+    if start < 0:
+        return None
+    start += len(open_tag)
+    end = text.find(close_tag, start)
+    if end < 0:
+        return None
+    return text[start:end]
+
+
+def capture_messages(rec: dict) -> list[dict[str, str]] | None:
+    """The prompt as it went on the wire.
+
+    chat.completions records carry `messages`; Responses-API records carry
+    `input` (usage.py:_request_payload, :119-131). Both are a role/content list.
+    """
+    msgs = rec.get("messages") or rec.get("input")
+    if not isinstance(msgs, list) or len(msgs) < 2:
+        return None
+    if not all(isinstance(m, dict) and "role" in m and "content" in m for m in msgs):
+        return None
+    return [{"role": str(m["role"]), "content": str(m["content"])} for m in msgs]
+
+
+def capture_episode_content(prompt_name: str, user: str) -> str | None:
+    """The `episode_content` the prompt embedded, verbatim, or None."""
+    tags = CAPTURE_EPISODE_TAGS.get(prompt_name)
+    if tags is not None:
+        return _tagged_block(user, f"{tags[0]}\n", f"\n{tags[1]}")
+    if prompt_name != "extract_nodes.extract_summaries_batch":
+        return None
+    block = _tagged_block(user, "<MESSAGES>\n", "\n</MESSAGES>")
+    if block is None:
+        return None
+    tail = block.rsplit("\n", 1)[-1]
+    try:
+        value = json.loads(tail)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+@dataclass
+class Attribution:
+    """Where a captured record came from, and how that was established."""
+    article_id: str
+    episode_uuid: str | None
+    route: str
+
+
+class CaptureAttributor:
+    """Recovers article attribution for captured records, offline.
+
+    Four of the five prompts embed `episode_content` verbatim, so they match an
+    `:Episodic` node by content and inherit its article through
+    `(:Article)-[:HAS_EPISODE]->`. Measured on this capture: 655 contents, 655
+    distinct, no two episodes share content, so the match is 1:1.
+
+    `dedupe_edges.resolve_edge` carries no episode content at all -- only the
+    NEW FACT text. It is attributed by joining that text back to the
+    `extract_edges.edge` COMPLETION that emitted it, which is itself attributed
+    by episode content. The join is capture-internal on purpose: the graph's
+    `RELATES_TO.fact` only holds facts that SURVIVED dedup, so a graph join
+    would systematically fail on exactly the merged-away positives that make the
+    capture worth having. The graph is kept as a fallback anyway.
+
+    When one fact text was emitted from several episodes the episode is
+    ambiguous; if those episodes are all in ONE article that is still enough for
+    an article-level split, and the record is kept with `episode_uuid = None`.
+    If they span articles the record is DROPPED. Timestamp locality is not used
+    as a tie-breaker: ingest runs articles concurrently, and the capture shows
+    1,500 article runs across 83 articles in timestamp order (~18 context
+    switches per article), so "nearest in time" would be a guess, not a
+    measurement.
+    """
+
+    def __init__(self, graph: Graph, renderer: PromptRenderer) -> None:
+        self._renderer = renderer
+        self._episode_by_content: dict[str, str] = {}
+        collisions = 0
+        for ep in graph.episodes.values():
+            key = renderer.clean(ep.content)
+            if key in self._episode_by_content:
+                collisions += 1
+            self._episode_by_content[key] = ep.uuid
+        self.content_collisions = collisions
+        self._episodes = graph.episodes
+        # Kept SEPARATE, and consulted capture-first, never unioned. A surviving
+        # RELATES_TO edge lists every episode that supports it after merging --
+        # which for a fact seen in several articles spans articles, and would
+        # turn a cleanly attributable record into a cross-article drop. The
+        # capture index answers the question actually being asked ("which
+        # episode's edge extraction emitted this exact string?"); the graph is
+        # only a fallback for facts no captured edge completion yielded.
+        self._capture_facts: dict[str, set[str]] = defaultdict(set)
+        self._graph_facts: dict[str, set[str]] = defaultdict(set)
+        for fact in graph.facts.values():
+            if fact.fact:
+                self._graph_facts[renderer.clean(fact.fact).strip()].update(
+                    e for e in fact.episodes if e in graph.episodes)
+
+    def learn_from_edge_completion(self, episode_uuid: str, completion: str) -> None:
+        """Index every fact an attributed `extract_edges.edge` reply emitted."""
+        try:
+            payload = json.loads(completion)
+        except json.JSONDecodeError:
+            return
+        for edge in payload.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            fact = edge.get("fact")
+            if isinstance(fact, str) and fact.strip():
+                self._capture_facts[self._renderer.clean(fact).strip()].add(episode_uuid)
+
+    def episode_for_content(self, content: str) -> str | None:
+        """The `:Episodic` whose content the prompt embedded, or None."""
+        return self._episode_by_content.get(content)
+
+    def _from_episodes(self, episodes: set[str], route: str) -> Attribution | None:
+        articles = {self._episodes[e].article_id for e in episodes
+                    if e in self._episodes and self._episodes[e].article_id}
+        if len(articles) != 1:
+            return None
+        article = articles.pop()
+        only = next(iter(episodes)) if len(episodes) == 1 else None
+        return Attribution(article_id=article, episode_uuid=only, route=route)
+
+    def attribute(self, prompt_name: str, user: str) -> tuple[Attribution | None, str]:
+        """(attribution, reason). `reason` is the drop reason when it is None."""
+        if prompt_name != "dedupe_edges.resolve_edge":
+            content = capture_episode_content(prompt_name, user)
+            if content is None:
+                return None, "no_episode_block"
+            uuid = self.episode_for_content(content)
+            if uuid is None:
+                return None, "episode_content_not_in_graph"
+            got = self._from_episodes({uuid}, "episode_content")
+            return (got, "") if got else (None, "episode_has_no_article")
+        fact = _tagged_block(user, "<NEW FACT>\n", "\n</NEW FACT>")
+        if fact is None:
+            return None, "no_new_fact_block"
+        key = fact.strip()
+        episodes = self._capture_facts.get(key)
+        route = "new_fact_via_capture"
+        if not episodes:
+            episodes = self._graph_facts.get(key)
+            route = "new_fact_via_graph"
+        if not episodes:
+            return None, "new_fact_not_matched"
+        got = self._from_episodes(episodes, route)
+        return (got, "") if got else (None, "new_fact_spans_articles")
+
+
+def _int_indices(values: object) -> list[int]:
+    return [v for v in (values or []) if isinstance(v, int) and not isinstance(v, bool)]
+
+
+def validate_capture(prompt_name: str, messages: list[dict[str, str]], obj: Any,
+                     *, allow_overlong_summaries: bool) -> list[str]:
+    """The checks a JSON schema cannot express. Returns the defects found.
+
+    Every one names a real rejection site in graphiti 0.30.1 or in this
+    project's own guard, so a "defect" here is a wrong answer the pipeline
+    already had to cope with -- not a stylistic preference:
+
+    * index arrays outside the range THAT prompt offered. The range is a
+      property of the prompt, not of the schema, so `maxItems` cannot express it
+      and a grammar cannot enforce it (`dedup_guard.py:32-36`). For
+      `resolve_edge` the range is recovered with this project's own
+      `parse_candidate_counts`, which is deliberately coupled to graphiti's
+      prompt text. For `episode_indices` the range is the number of episodes in
+      the call, and graphiti only adds its "Episode Attribution" instruction
+      when there is more than one (`node_operations.py:104-112`,
+      `edge_operations.py:170-181`), so the instruction's absence means exactly
+      one episode and index 0 is the only legal value.
+    * endpoint names outside the ENTITIES list the prompt supplied, and
+      self-edges: graphiti drops both edges outright
+      (`edge_operations.py:218-239`).
+    * summaries for an entity the prompt did not list
+      (`node_operations.py:997-1005`).
+    * a summary over MAX_SUMMARY_CHARS, which the prompt states as a hard
+      constraint ("Each summary must be under 1000 characters",
+      `prompts/extract_nodes.py:517`). graphiti silently repairs this with
+      `truncate_at_sentence` (`node_operations.py:999`), which is why the graph
+      looks healthy while the model overruns -- see `--allow-overlong-summaries`
+      if you would rather keep those targets than lose the split.
+    """
+    user = messages[1]["content"]
+    bad: list[str] = []
+    if prompt_name == "dedupe_edges.resolve_edge":
+        counts = parse_candidate_counts(
+            [Message(role=m["role"], content=m["content"]) for m in messages])
+        if counts is None:
+            return ["candidate_range_unparseable"]
+        n_dup, n_inval = counts
+        if any(i < 0 or i >= n_dup for i in obj.duplicate_facts):
+            bad.append("duplicate_index_out_of_range")
+        if any(i < 0 or i >= n_dup + n_inval for i in obj.contradicted_facts):
+            bad.append("contradicted_index_out_of_range")
+        return bad
+    if prompt_name == "dedupe_nodes.nodes":
+        entities = _capture_json_block(user, "<ENTITIES>")
+        candidates = _capture_json_block(user, "<EXISTING ENTITIES>") or []
+        if entities is None:
+            return ["prompt_entities_unparseable"]
+        expected = {e["id"] for e in entities}
+        candidate_ids = {c["candidate_id"] for c in candidates}
+        got = [r.id for r in obj.entity_resolutions]
+        # graphiti warns on all three of these and then silently drops or
+        # mis-handles the affected resolutions (node_operations.py:573-600).
+        if set(got) - expected:
+            bad.append("resolution_id_out_of_range")
+        if expected - set(got):
+            bad.append("resolution_id_missing")
+        if len(got) != len(set(got)):
+            bad.append("resolution_id_duplicated")
+        if any(r.duplicate_candidate_id != -1 and r.duplicate_candidate_id not in candidate_ids
+               for r in obj.entity_resolutions):
+            bad.append("candidate_id_out_of_range")
+        return bad
+    n_episodes = 1 if "**Episode Attribution**" not in user else 0
+    if prompt_name == "extract_nodes.extract_text":
+        types = _capture_python_block(user, "<ENTITY TYPES>")
+        if types is None:
+            return ["prompt_entity_types_unparseable"]
+        for entity in obj.extracted_entities:
+            if not entity.name.strip():
+                bad.append("empty_entity_name")
+            if not 0 <= entity.entity_type_id < len(types):
+                bad.append("entity_type_id_out_of_range")
+            if n_episodes and any(i < 0 or i >= n_episodes
+                                  for i in _int_indices(entity.episode_indices)):
+                bad.append("episode_index_out_of_range")
+        return sorted(set(bad))
+    if prompt_name == "extract_edges.edge":
+        nodes = _capture_json_block(user, "<ENTITIES>")
+        if nodes is None:
+            return ["prompt_entities_unparseable"]
+        names = {n["name"] for n in nodes}
+        for edge in obj.edges:
+            if edge.source_entity_name not in names or edge.target_entity_name not in names:
+                bad.append("entity_name_not_in_list")
+            elif edge.source_entity_name == edge.target_entity_name:
+                bad.append("self_edge")
+            if not edge.fact.strip():
+                bad.append("empty_fact")
+            if n_episodes and any(i < 0 or i >= n_episodes
+                                  for i in _int_indices(edge.episode_indices)):
+                bad.append("episode_index_out_of_range")
+        return sorted(set(bad))
+    if prompt_name == "extract_nodes.extract_summaries_batch":
+        entities = _capture_json_block(user, "<ENTITIES>")
+        if entities is None:
+            return ["prompt_entities_unparseable"]
+        names = {e["name"].lower() for e in entities}
+        for summary in obj.summaries:
+            if summary.name.lower() not in names:
+                bad.append("summary_for_unknown_entity")
+            if not allow_overlong_summaries and len(summary.summary) > MAX_SUMMARY_CHARS:
+                bad.append("summary_over_max_chars")
+        return sorted(set(bad))
+    return bad
+
+
+def _capture_json_block(user: str, tag: str) -> list[dict] | None:
+    """A `to_prompt_json` block, decoded. graphiti renders these with json.dumps."""
+    block = _tagged_block(user, f"{tag}\n", f"\n</{tag[1:]}")
+    if block is None:
+        return None
+    try:
+        value = json.loads(block)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, list) else None
+
+
+def _capture_python_block(user: str, tag: str) -> list | None:
+    """`extract_text` interpolates `context['entity_types']` with str(), not
+    json.dumps (prompts/extract_nodes.py:307-309), so the block is a Python
+    literal. `literal_eval` is the safe reader for that; json.loads cannot read
+    single-quoted keys."""
+    block = _tagged_block(user, f"{tag}\n", f"\n</{tag[1:]}")
+    if block is None:
+        return None
+    try:
+        value = ast.literal_eval(block)
+    except (ValueError, SyntaxError):
+        return None
+    return value if isinstance(value, list) else None
+
+
+CAPTURE_FIDELITY = [
+    "provenance=captured: this is the string upstage/solar-pro4 actually emitted "
+    "for this exact prompt, recovered by usage.capture_llm_call. No part of the "
+    "prompt or the target is reconstructed.",
+    "the completion passed its RESPONSE_MODELS schema AND the semantic checks in "
+    "validate_capture (prompt-relative index ranges, endpoint names drawn from "
+    "the ENTITIES list, a terminal finish_reason). Completions that failed were "
+    "dropped, never repaired.",
+]
+
+
+def build_from_capture(path: Path, graph: Graph, renderer: PromptRenderer, *,
+                       wanted: set[str], tiers: set[str],
+                       allow_overlong_summaries: bool,
+                       raw_targets: bool) -> tuple[list[dict], dict]:
+    """Turn a capture JSONL into dataset records. No network, no LLM, no writes."""
+    raw: list[dict] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                raw.append(json.loads(line))
+    attributor = CaptureAttributor(graph, renderer)
+
+    # Pass 1: attribute the edge prompts and index the facts their completions
+    # emitted, so pass 2 can attribute resolve_edge through them. Done over ALL
+    # tiers regardless of `tiers`: a resolve_edge call on a cheap-tier article
+    # still needs whichever edge call produced its NEW FACT, and restricting the
+    # index would lose attributions for no reason.
+    for rec in raw:
+        if rec.get("prompt_name") != "extract_edges.edge":
+            continue
+        messages = capture_messages(rec)
+        completion = rec.get("completion")
+        if not messages or not isinstance(completion, str):
+            continue
+        content = capture_episode_content("extract_edges.edge", messages[1]["content"])
+        uuid = attributor.episode_for_content(content) if content else None
+        if uuid:
+            attributor.learn_from_edge_completion(uuid, completion)
+
+    stats: dict[str, dict[str, Any]] = {}
+    for name in TARGET_MIX:
+        stats[name] = {"seen": 0, "in_scope": 0, "attributed": 0,
+                       "attribution_drops": Counter(), "rejections": Counter(),
+                       "rejected": 0, "kept": 0, "routes": Counter(), "exposed": 0}
+    out: list[dict] = []
+    skipped_tier: Counter = Counter()
+    unknown_prompt = 0
+
+    for rec in raw:
+        name = rec.get("prompt_name") or ""
+        if name not in RESPONSE_MODELS:
+            unknown_prompt += 1
+            continue
+        stats[name]["seen"] += 1
+        if rec.get("tier") not in tiers:
+            skipped_tier[name] += 1
+            continue
+        if name not in wanted:
+            continue
+        stats[name]["in_scope"] += 1
+        messages = capture_messages(rec)
+        if messages is None:
+            stats[name]["rejections"]["no_messages"] += 1
+            stats[name]["rejected"] += 1
+            continue
+
+        # --- attribution first: an unattributable record cannot be split ---
+        attribution, reason = attributor.attribute(name, messages[1]["content"])
+        if attribution is None:
+            stats[name]["attribution_drops"][reason] += 1
+            continue
+        stats[name]["attributed"] += 1
+        stats[name]["routes"][attribution.route] += 1
+
+        # --- then validation: do not distil the model's defects ---
+        # A 0% rejection rate is only a measurement if the check could have
+        # fired. `exposed` counts the records where it could: a reply that
+        # emits no index at all cannot emit an out-of-range one, so a split
+        # made entirely of empty answers would report a perfect score while
+        # measuring nothing. Reported alongside the rate.
+        stats[name]["exposed"] += _capture_exposure(name, rec)
+        defects = _capture_defects(rec, name, messages,
+                                   allow_overlong_summaries=allow_overlong_summaries)
+        if defects[0]:
+            stats[name]["rejections"][defects[0]] += 1
+            stats[name]["rejected"] += 1
+            continue
+        obj = defects[1]
+        assistant = (rec["completion"] if raw_targets
+                     else target(obj.model_dump(mode="json")))
+        episode = graph.episodes.get(attribution.episode_uuid or "")
+        record = {
+            "prompt_name": name,
+            "response_schema": RESPONSE_MODELS[name].__name__,
+            "messages": [*messages, {"role": "assistant", "content": assistant}],
+            "meta": {
+                "provenance": "captured",
+                "fidelity": list(CAPTURE_FIDELITY),
+                "episode_uuid": attribution.episode_uuid,
+                "article_id": attribution.article_id,
+                "chunk_index": episode.chunk_index if episode else None,
+                "attribution_route": attribution.route,
+                "capture_call_id": rec.get("call_id"),
+                "capture_tier": rec.get("tier"),
+                "capture_model": rec.get("model"),
+                "capture_finish_reason": rec.get("finish_reason"),
+                "target_normalised": not raw_targets,
+            },
+        }
+        stats[name]["kept"] += 1
+        out.append(record)
+
+    report = {"records": len(raw), "unknown_prompt": unknown_prompt,
+              "skipped_tier": skipped_tier, "stats": stats,
+              "content_collisions": attributor.content_collisions}
+    return out, report
+
+
+def _capture_exposure(name: str, rec: dict) -> int:
+    """1 when this record's completion is one the semantic check can fail on.
+
+    Only meaningful for the index-picking prompts, where an empty answer is
+    trivially in range. Anything unparseable counts as exposed -- it is a
+    failure of a different kind, not an absence of one.
+    """
+    completion = rec.get("completion")
+    if not isinstance(completion, str):
+        return 1
+    try:
+        payload = json.loads(completion)
+    except json.JSONDecodeError:
+        return 1
+    if not isinstance(payload, dict):
+        return 1
+    if name == "dedupe_edges.resolve_edge":
+        emitted = _int_indices(payload.get("duplicate_facts")) + _int_indices(
+            payload.get("contradicted_facts"))
+        return 1 if emitted else 0
+    if name == "dedupe_nodes.nodes":
+        resolutions = payload.get("entity_resolutions") or []
+        return 1 if isinstance(resolutions, list) and resolutions else 0
+    return 1
+
+
+def _capture_defects(rec: dict, name: str, messages: list[dict[str, str]], *,
+                     allow_overlong_summaries: bool) -> tuple[str, Any]:
+    """('', parsed_model) when the completion is usable, else (reason, None)."""
+    if rec.get("finish_reason") not in CAPTURE_TERMINAL:
+        return "truncated_or_nonterminal", None
+    completion = rec.get("completion")
+    if not isinstance(completion, str) or not completion.strip():
+        return "empty_completion", None
+    try:
+        payload = json.loads(completion)
+    except json.JSONDecodeError:
+        return "unparseable_json", None
+    if not isinstance(payload, dict):
+        return "unparseable_json", None
+    try:
+        obj = RESPONSE_MODELS[name](**payload)
+    except ValidationError:
+        return "schema_invalid", None
+    defects = validate_capture(name, messages, obj,
+                              allow_overlong_summaries=allow_overlong_summaries)
+    if defects:
+        return "+".join(defects), None
+    return "", obj
+
+
+def _print_capture_report(report: dict) -> None:
+    stats = report["stats"]
+    logger.info("\n--- captured pairs: attribution (article-level) ---")
+    logger.info("  %-40s %8s %8s %11s", "prompt", "in scope", "attrib", "rate")
+    for name in TARGET_MIX:
+        s = stats[name]
+        if not s["in_scope"]:
+            continue
+        logger.info("  %-40s %8d %8d %10.1f%%", name, s["in_scope"], s["attributed"],
+                    100 * s["attributed"] / s["in_scope"])
+        for reason, count in sorted(s["attribution_drops"].items()):
+            logger.info("      dropped %-42s %5d", reason, count)
+        for route, count in sorted(s["routes"].items()):
+            logger.info("      via     %-42s %5d", route, count)
+    logger.info("\n--- captured pairs: completion validation (of the attributed) ---")
+    logger.info("  %-40s %8s %8s %11s %9s", "prompt", "checked", "rejected", "rate",
+                "exposed")
+    for name in TARGET_MIX:
+        s = stats[name]
+        if not s["attributed"]:
+            continue
+        checked = s["attributed"]
+        logger.info("  %-40s %8d %8d %10.1f%% %9d", name, checked, s["rejected"],
+                    100 * s["rejected"] / checked, s["exposed"])
+        for reason, count in sorted(s["rejections"].items(), key=lambda kv: -kv[1]):
+            logger.info("      %-50s %5d", reason, count)
+    logger.info("  'exposed' = records whose answer was non-empty, i.e. records the")
+    logger.info("  semantic check COULD have rejected. A 0.0%% rate over 0 exposed")
+    logger.info("  records measures nothing.")
+    kept = sum(s["kept"] for s in stats.values())
+    logger.info("\n  %d capture records in the file -> %d usable examples",
+                report["records"], kept)
+    if report["skipped_tier"]:
+        logger.info("  skipped by --capture-tier: %s",
+                    ", ".join(f"{k}={v}" for k, v in sorted(report["skipped_tier"].items())))
+    if report["content_collisions"]:
+        logger.warning("  %d episodes share content with another episode -- their "
+                       "captured records are attributed to whichever was seen last",
+                       report["content_collisions"])
+    logger.info("")
+
+
+# --------------------------------------------------------------------------- #
 # split, weighting, output
 # --------------------------------------------------------------------------- #
 # The fine-tune replaces solar-pro4 COMPLETELY, so the mix tracks the measured
@@ -967,6 +1571,39 @@ async def main() -> int:
                    help="which tier's extraction instructions to render")
     p.add_argument("--no-synthetic-positives", action="store_true",
                    help="omit the synthetic_alias_positive resolve_edge records")
+    p.add_argument("--from-capture", type=Path, default=None,
+                   help="build from a usage.capture_llm_call JSONL of REAL (prompt, "
+                        "completion) pairs instead of reconstructing from the graph. "
+                        "The graph is still read (read-only) to recover article "
+                        "attribution. Records that cannot be attributed to exactly one "
+                        "article, or whose completion fails schema or semantic "
+                        "validation, are DROPPED -- never repaired, never guessed.")
+    p.add_argument("--capture-tier", choices=("cheap", "strong", "both"), default="cheap",
+                   help="which captured tier to train on (--from-capture only). Default "
+                        "cheap: the fine-tune replaces the CHEAP tier, and the strong "
+                        "tier renders extraction prompts WITHOUT CHEAP_TIER_SALIENCE "
+                        "(cli.py:117), so its records are a different prompt "
+                        "distribution from the one the replacement will be served.")
+    p.add_argument("--raw-targets", action="store_true",
+                   help="keep each captured completion's exact bytes as the target "
+                        "(--from-capture only). Default re-serialises the VALIDATED "
+                        "response_model compactly, which changes no field value -- only "
+                        "whitespace, key order and materialised defaults -- and stops "
+                        "the model learning solar-pro4's inconsistent pretty/compact "
+                        "mix as if it were signal.")
+    p.add_argument("--allow-overlong-summaries", action="store_true",
+                   help="keep extract_summaries_batch completions that break the "
+                        "prompt's own 'under %d characters' constraint. Off by default: "
+                        "graphiti repairs them with truncate_at_sentence, so the defect "
+                        "is invisible downstream and would be distilled silently."
+                        % MAX_SUMMARY_CHARS)
+    p.add_argument("--mix", action="store_true",
+                   help="down-sample to TARGET_MIX by EXAMPLE count before splitting. "
+                        "Always on for the graph-derived build (its supply is "
+                        "effectively unbounded); off by default for --from-capture, "
+                        "where captured pairs are scarce and discarding them to hit a "
+                        "TOKEN-share target that --upsample and meta.loss_weight already "
+                        "hit would throw away real data for nothing.")
     p.add_argument("--loss-basis", choices=("full", "completion"), default="full",
                    help="compute meta.loss_weight over full-record tokens (matches "
                         "training on full sequences, no completion-only loss mask) or "
@@ -989,7 +1626,8 @@ async def main() -> int:
     rng = random.Random(args.seed)
 
     logger.info("loading %s (read-only) ...", s.neo4j_uri.split("@")[-1])
-    graph = await load_graph(s.neo4j_uri, s.neo4j_user, s.neo4j_password, s.group_id)
+    graph = await load_graph(s.neo4j_uri, s.neo4j_user, s.neo4j_password, s.group_id,
+                             with_embeddings=args.from_capture is None)
     logger.info("loaded: %d episodes, %d entities, %d facts",
                 len(graph.episodes), len(graph.entities), len(graph.facts))
     if not graph.episodes:
@@ -998,35 +1636,52 @@ async def main() -> int:
 
     instructions = EXTRACTION_INSTRUCTIONS + (
         CHEAP_TIER_SALIENCE if args.tier == "cheap" else "")
-    builder = Builder(graph=graph, renderer=PromptRenderer(s.group_id),
-                      instructions=instructions, rng=rng)
-
+    renderer = PromptRenderer(s.group_id)
     wanted = set(args.prompts.split(","))
     records: list[dict] = []
-    for ep in graph.episodes_in_order():
-        if "extract_nodes.extract_text" in wanted:
-            r = builder.extract_text(ep)
-            if r:
-                records.append(r)
-        if "extract_edges.edge" in wanted:
-            r = builder.edge(ep)
-            if r:
-                records.append(r)
-        if "extract_nodes.extract_summaries_batch" in wanted:
-            records.extend(builder.summaries_batch(ep))
-        if "dedupe_nodes.nodes" in wanted:
-            r = builder.dedupe_nodes(ep)
-            if r:
-                records.append(r)
-    if "dedupe_edges.resolve_edge" in wanted:
-        records.extend(builder.resolve_edge_negatives())
-        if not args.no_synthetic_positives:
-            records.extend(builder.resolve_edge_alias_positives())
 
-    if args.report:
-        _print_report(records)
+    if args.from_capture is not None:
+        tiers = ({"cheap", "strong"} if args.capture_tier == "both"
+                 else {args.capture_tier})
+        records, capture_report = build_from_capture(
+            args.from_capture, graph, renderer, wanted=wanted, tiers=tiers,
+            allow_overlong_summaries=args.allow_overlong_summaries,
+            raw_targets=args.raw_targets)
+        if args.report:
+            _print_capture_report(capture_report)
+        if not records:
+            logger.error("no usable captured records -- nothing to build")
+            return 1
+    else:
+        builder = Builder(graph=graph, renderer=renderer,
+                          instructions=instructions, rng=rng)
+        for ep in graph.episodes_in_order():
+            if "extract_nodes.extract_text" in wanted:
+                r = builder.extract_text(ep)
+                if r:
+                    records.append(r)
+            if "extract_edges.edge" in wanted:
+                r = builder.edge(ep)
+                if r:
+                    records.append(r)
+            if "extract_nodes.extract_summaries_batch" in wanted:
+                records.extend(builder.summaries_batch(ep))
+            if "dedupe_nodes.nodes" in wanted:
+                r = builder.dedupe_nodes(ep)
+                if r:
+                    records.append(r)
+        if "dedupe_edges.resolve_edge" in wanted:
+            records.extend(builder.resolve_edge_negatives())
+            if not args.no_synthetic_positives:
+                records.extend(builder.resolve_edge_alias_positives())
+        if args.report:
+            _print_report(records)
 
-    selected = apply_mix(records, rng, args.limit)
+    if args.mix or args.from_capture is None:
+        selected = apply_mix(records, rng, args.limit)
+    else:
+        selected = list(records)
+        rng.shuffle(selected)
     weights = assign_loss_weights(selected, basis=args.loss_basis)
     if args.report:
         _print_mix(selected, weights)
@@ -1037,9 +1692,11 @@ async def main() -> int:
 
     if args.sample_only:
         path = args.out / "sample.jsonl"
-        _write(path, selected[:args.limit or 20])
-        logger.info("wrote %d sample records -> %s", min(len(selected), args.limit or 20),
-                    path)
+        sample = selected[:args.limit or 20]
+        _write(path, sample)
+        digest = args.out / "sample-digest.md"
+        digest.write_text(_digest(sample, args), encoding="utf-8")
+        logger.info("wrote %d sample records -> %s (+ %s)", len(sample), path, digest)
         return 0
 
     train, val = [], []
@@ -1063,6 +1720,69 @@ def _write(path: Path, records: list[dict]) -> None:
     with path.open("w", encoding="utf-8") as fh:
         for r in records:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+DIGEST_TRUNCATE = 1800
+
+
+def _elide(text: str) -> str:
+    if len(text) <= DIGEST_TRUNCATE:
+        return text
+    return f"{text[:DIGEST_TRUNCATE]}\n  [...{len(text) - DIGEST_TRUNCATE} more chars...]"
+
+
+def _digest(records: list[dict], args: argparse.Namespace) -> str:
+    """A readable rendering of the sample, written next to sample.jsonl.
+
+    The JSONL is the deliverable and is verbatim; this is a REVIEW AID, so long
+    bodies are truncated. It is generated by the same command that writes the
+    sample so the two can never drift apart -- the previous digest claimed it
+    was, but nothing in this script produced it.
+    """
+    cmd = ["uv run --extra dev python scripts/build_extraction_dataset.py \\"]
+    if args.from_capture is not None:
+        cmd.append(f"    --from-capture {args.from_capture} \\")
+    cmd.append(f"    --out {args.out} --limit {args.limit or 20} --sample-only"
+               + (" --mix" if args.mix else ""))
+    lines = [
+        "# Sample records — readable digest",
+        f"Generated from `{args.out / 'sample.jsonl'}` ({len(records)} records). This "
+        "file is a",
+        "REVIEW AID: long bodies are truncated. The JSONL is the actual deliverable",
+        "and is verbatim.",
+        "",
+        "Rebuild both with:",
+        "",
+        "```",
+        *cmd,
+        "```",
+        "",
+    ]
+    for rec in records:
+        meta = rec["meta"]
+        lines += [
+            "---",
+            "",
+            f"## `{rec['prompt_name']}`",
+            f"* provenance: **{meta['provenance']}**",
+            f"* loss_weight: `{meta.get('loss_weight')}` (basis "
+            f"`{meta.get('loss_basis')}`)  |  response_schema: `{rec['response_schema']}`",
+            f"* article `{meta.get('article_id')}` chunk `{meta.get('chunk_index')}` "
+            f"episode `{meta.get('episode_uuid')}`",
+        ]
+        if meta.get("capture_model"):
+            lines.append(
+                f"* captured from `{meta['capture_model']}` ({meta.get('capture_tier')} "
+                f"tier), finish_reason `{meta.get('capture_finish_reason')}`, "
+                f"attribution route `{meta.get('attribution_route')}`, "
+                f"target_normalised `{meta.get('target_normalised')}`")
+        lines += [f"* fidelity: {f}" for f in meta.get("fidelity", [])]
+        lines.append("")
+        for msg in rec["messages"]:
+            label = "assistant (target)" if msg["role"] == "assistant" else msg["role"]
+            fence = "json" if msg["role"] == "assistant" else ""
+            lines += [f"**{label}**", "", f"```{fence}", _elide(msg["content"]), "```", ""]
+    return "\n".join(lines) + "\n"
 
 
 def _print_report(records: list[dict]) -> None:

@@ -11,3 +11,9 @@ build/
 
 # Eval run output: the answers a router-eval run scored (large, regenerated per run).
 docs/superpowers/router-eval-raw.json
+
+# Fine-tuning datasets built by scripts/build_extraction_dataset.py. Tens of MiB of
+# vendor documentation verbatim (episode content is embedded in every prompt), and
+# this repo is PUBLIC. Regenerate with the builder; never commit. The 20-record
+# sample under docs/proposals/samples/ is the only part that is committed.
+data/
