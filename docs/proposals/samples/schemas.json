@@ -1,0 +1,277 @@
+{
+  "dedupe_edges.resolve_edge": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "EdgeDuplicate",
+      "schema": {
+        "properties": {
+          "duplicate_facts": {
+            "description": "List of idx values of duplicate facts (only from EXISTING FACTS range). Empty list if none.",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Duplicate Facts",
+            "type": "array",
+            "maxItems": 25
+          },
+          "contradicted_facts": {
+            "description": "List of idx values of contradicted facts (from full idx range). Empty list if none.",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Contradicted Facts",
+            "type": "array",
+            "maxItems": 25
+          }
+        },
+        "required": [
+          "duplicate_facts",
+          "contradicted_facts"
+        ],
+        "title": "EdgeDuplicate",
+        "type": "object"
+      }
+    }
+  },
+  "extract_edges.edge": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "ExtractedEdges",
+      "schema": {
+        "$defs": {
+          "Edge": {
+            "properties": {
+              "source_entity_name": {
+                "description": "The name of the source entity from the ENTITIES list",
+                "title": "Source Entity Name",
+                "type": "string"
+              },
+              "target_entity_name": {
+                "description": "The name of the target entity from the ENTITIES list",
+                "title": "Target Entity Name",
+                "type": "string"
+              },
+              "relation_type": {
+                "description": "The type of relationship between the entities, in SCREAMING_SNAKE_CASE (e.g., WORKS_AT, LIVES_IN, IS_FRIENDS_WITH)",
+                "title": "Relation Type",
+                "type": "string"
+              },
+              "fact": {
+                "description": "A natural language description of the relationship between the entities, paraphrased from the source text",
+                "title": "Fact",
+                "type": "string"
+              },
+              "valid_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The date and time when the relationship described by the edge fact became true or was established. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.SSSSSSZ)",
+                "title": "Valid At"
+              },
+              "invalid_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The date and time when the relationship described by the edge fact stopped being true or ended. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.SSSSSSZ)",
+                "title": "Invalid At"
+              },
+              "episode_indices": {
+                "description": "List of episode numbers (0-indexed) that this fact was derived from. When processing a single episode, this should be [0].",
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Episode Indices",
+                "type": "array",
+                "maxItems": 25
+              }
+            },
+            "required": [
+              "source_entity_name",
+              "target_entity_name",
+              "relation_type",
+              "fact"
+            ],
+            "title": "Edge",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/$defs/Edge"
+            },
+            "title": "Edges",
+            "type": "array"
+          }
+        },
+        "required": [
+          "edges"
+        ],
+        "title": "ExtractedEdges",
+        "type": "object"
+      }
+    }
+  },
+  "extract_nodes.extract_text": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "ExtractedEntities",
+      "schema": {
+        "$defs": {
+          "ExtractedEntity": {
+            "properties": {
+              "name": {
+                "description": "Name of the extracted entity",
+                "title": "Name",
+                "type": "string"
+              },
+              "entity_type_id": {
+                "description": "ID of the classified entity type. Must be one of the provided entity_type_id integers.",
+                "title": "Entity Type Id",
+                "type": "integer"
+              },
+              "episode_indices": {
+                "description": "List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].",
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Episode Indices",
+                "type": "array",
+                "maxItems": 25
+              }
+            },
+            "required": [
+              "name",
+              "entity_type_id"
+            ],
+            "title": "ExtractedEntity",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "extracted_entities": {
+            "description": "List of extracted entities",
+            "items": {
+              "$ref": "#/$defs/ExtractedEntity"
+            },
+            "title": "Extracted Entities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "extracted_entities"
+        ],
+        "title": "ExtractedEntities",
+        "type": "object"
+      }
+    }
+  },
+  "extract_nodes.extract_summaries_batch": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "SummarizedEntities",
+      "schema": {
+        "$defs": {
+          "SummarizedEntity": {
+            "properties": {
+              "name": {
+                "description": "Name of the entity being summarized",
+                "title": "Name",
+                "type": "string"
+              },
+              "summary": {
+                "description": "Updated summary for the entity",
+                "title": "Summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "summary"
+            ],
+            "title": "SummarizedEntity",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "summaries": {
+            "description": "List of entity summaries. Only include entities that need summary updates.",
+            "items": {
+              "$ref": "#/$defs/SummarizedEntity"
+            },
+            "title": "Summaries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "summaries"
+        ],
+        "title": "SummarizedEntities",
+        "type": "object"
+      }
+    }
+  },
+  "dedupe_nodes.nodes": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "NodeResolutions",
+      "schema": {
+        "$defs": {
+          "NodeDuplicate": {
+            "properties": {
+              "id": {
+                "description": "integer id of the entity",
+                "title": "Id",
+                "type": "integer"
+              },
+              "name": {
+                "description": "Name of the entity. Should be the most complete and descriptive name of the entity. Do not include any JSON formatting in the Entity name such as {}.",
+                "title": "Name",
+                "type": "string"
+              },
+              "duplicate_candidate_id": {
+                "description": "candidate_id of the matching EXISTING ENTITY, or -1 if no duplicate exists.",
+                "title": "Duplicate Candidate Id",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "duplicate_candidate_id"
+            ],
+            "title": "NodeDuplicate",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "entity_resolutions": {
+            "description": "List of resolved nodes",
+            "items": {
+              "$ref": "#/$defs/NodeDuplicate"
+            },
+            "title": "Entity Resolutions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "entity_resolutions"
+        ],
+        "title": "NodeResolutions",
+        "type": "object"
+      }
+    }
+  }
+}
