@@ -63,7 +63,58 @@ rather than papered over:
     dropped rather than assigned, because the split is by article;
   * the capture carries the model's MISTAKES, so every completion is validated
     (`validate_capture`) against its schema and against the semantic constraints
-    a schema cannot express, and failures are dropped rather than repaired.
+    a schema cannot express.
+
+REPAIR POLICY (`repair_capture`, `--no-repair` to disable)
+---------------------------------------------------------
+This fine-tune REPLACES solar-pro4; it does not clone it. So where the correct
+answer is DERIVABLE, the target is corrected rather than discarded -- a derived
+correction is a verified correct answer, and a better one than the model's.
+Where the correct answer would have to be GENERATED, nothing is invented and the
+record is dropped. That line is the whole of the policy:
+
+  repaired (derivable)                       dropped (needs generation)
+  --------------------------------------     ----------------------------------
+  `episode_indices` outside the prompt's     a summary over MAX_SUMMARY_CHARS:
+  range -> `[0]`. Exactly one episode is     the correct answer is a SHORTER
+  ever in scope (see below), and the         summary, which only a model can
+  schema's own default is `[0]`.             write. `truncate_at_sentence` is
+                                             what graphiti applies downstream,
+  an endpoint name absent from ENTITIES,     but truncation as a TARGET teaches
+  or a self-edge -> omit that edge.          "write long, then stop abruptly",
+  `edge_operations.py:218-239` rejects       which is a different defect, not a
+  both outright, so the corpus lost them     fix.
+  either way.
+
+Repair is PER ITEM inside a completion, never per record: one bad edge costs
+that edge, not the rest of the record's work. Every repaired record carries
+`meta.repaired` -- one entry per change, naming the defect class and the specific
+item -- because a corrected target that does not say so is indistinguishable
+from an observed one, and per-example auditability is this dataset's whole value.
+`meta.provenance` stays `captured` (the PROMPT is still exactly what went on the
+wire) and `meta.fidelity` says the target was corrected.
+
+THE SINGLE-EPISODE CLAIM, verified four ways
+--------------------------------------------
+`episode_indices` is repairable to `[0]` only because exactly one episode is ever
+in scope. That is not assumed here:
+
+  1. `ingest_driver.py:188-196` calls `add_text_episode` once per chunk.
+  2. `graphiti.add_episode` (graphiti.py:1099-1111) constructs ONE `EpisodicNode`
+     and passes it singular to `extract_nodes` / `_extract_and_resolve_edges`,
+     which both do `episodes = episode if isinstance(episode, list) else
+     [episode]` -- so `len(episodes) == 1`.
+  3. graphiti emits its "**Episode Attribution**" instruction only when
+     `len(episodes) > 1` (`edge_operations.py:170-181`,
+     `node_operations.py:104-112`). It appears in ZERO of the 4,743 captured
+     prompts.
+  4. The `Edge.episode_indices` / `ExtractedEntity.episode_indices` fields
+     default to `[0]` and their own descriptions say "When processing a single
+     episode, this should be [0]".
+
+The provenance consequence was checked on the live graph and recorded in
+`docs/proposals/2026-09-15-bulk-ingest-assessment.md` (addendum 2026-09-17):
+0 unattributed facts, 0 dangling references.
 
 The graph-derived path is unchanged and still the only source for prompts the
 capture missed, and a useful cross-check against it.
@@ -852,9 +903,14 @@ def _as_node(e: Entity) -> EntityNode:
 #      exactly the leakage the article split exists to prevent.
 #   2. VALIDATION. A captured completion is the model's real output INCLUDING
 #      its mistakes. Training a replacement on a wrong answer teaches the
-#      replacement to reproduce it. Every completion is therefore checked against
-#      its response model AND against the semantic constraints a JSON schema
-#      cannot express, and a record failing either is dropped -- never repaired.
+#      replacement to reproduce it, and this fine-tune REPLACES solar-pro4 rather
+#      than cloning it. Every completion is therefore checked against its response
+#      model AND against the semantic constraints a JSON schema cannot express;
+#      what happens next is `repair_capture`'s decision (see REPAIR POLICY in the
+#      module docstring). Defects whose correct answer is DERIVABLE are corrected
+#      per item; defects that would need an answer GENERATED are dropped. Every
+#      correction is recorded in `meta.repaired`, and every repaired target is
+#      re-validated through the same checker before it may ship.
 
 # chat.completions says "stop"; the Responses API's nearest equivalent is the
 # status "completed" (usage.py:_finish_reason, :140-144). Anything else -- most
@@ -1073,6 +1129,12 @@ def validate_capture(prompt_name: str, messages: list[dict[str, str]], obj: Any,
       `truncate_at_sentence` (`node_operations.py:999`), which is why the graph
       looks healthy while the model overruns -- see `--allow-overlong-summaries`
       if you would rather keep those targets than lose the split.
+
+    This is the checker only. What happens to a defect it finds is
+    `repair_capture`'s decision: the derivable ones are corrected per item, the
+    rest are dropped. Both share the predicates below (`_bad_indices`,
+    `_n_episodes_in_prompt`) on purpose -- repair that fired on a different
+    condition from rejection could leave the defect it claimed to fix.
     """
     user = messages[1]["content"]
     bad: list[str] = []
@@ -1107,7 +1169,7 @@ def validate_capture(prompt_name: str, messages: list[dict[str, str]], obj: Any,
                for r in obj.entity_resolutions):
             bad.append("candidate_id_out_of_range")
         return bad
-    n_episodes = 1 if "**Episode Attribution**" not in user else 0
+    n_episodes = _n_episodes_in_prompt(user)
     if prompt_name == "extract_nodes.extract_text":
         types = _capture_python_block(user, "<ENTITY TYPES>")
         if types is None:
@@ -1117,8 +1179,7 @@ def validate_capture(prompt_name: str, messages: list[dict[str, str]], obj: Any,
                 bad.append("empty_entity_name")
             if not 0 <= entity.entity_type_id < len(types):
                 bad.append("entity_type_id_out_of_range")
-            if n_episodes and any(i < 0 or i >= n_episodes
-                                  for i in _int_indices(entity.episode_indices)):
+            if _bad_indices(entity.episode_indices, n_episodes):
                 bad.append("episode_index_out_of_range")
         return sorted(set(bad))
     if prompt_name == "extract_edges.edge":
@@ -1133,8 +1194,7 @@ def validate_capture(prompt_name: str, messages: list[dict[str, str]], obj: Any,
                 bad.append("self_edge")
             if not edge.fact.strip():
                 bad.append("empty_fact")
-            if n_episodes and any(i < 0 or i >= n_episodes
-                                  for i in _int_indices(edge.episode_indices)):
+            if _bad_indices(edge.episode_indices, n_episodes):
                 bad.append("episode_index_out_of_range")
         return sorted(set(bad))
     if prompt_name == "extract_nodes.extract_summaries_batch":
@@ -1178,21 +1238,169 @@ def _capture_python_block(user: str, tag: str) -> list | None:
     return value if isinstance(value, list) else None
 
 
+def _n_episodes_in_prompt(user: str) -> int:
+    """How many episodes the call had in scope, read off the prompt itself.
+
+    graphiti renders its "**Episode Attribution**" instruction if and ONLY if
+    `len(episodes) > 1` (edge_operations.py:170-181, node_operations.py:104-112),
+    so its absence proves exactly one episode was in scope and index 0 is the
+    only legal value. Returns 0 when the count cannot be established, which
+    disables both the check and the repair rather than guessing.
+    """
+    return 1 if "**Episode Attribution**" not in user else 0
+
+
+def _bad_indices(values: object, n_episodes: int) -> list[int]:
+    """The out-of-range entries, using the SAME predicate `validate_capture` uses.
+
+    Sharing the predicate is what makes "0 residual defects" a guarantee rather
+    than a hope: repair fires on exactly the condition the validator rejects on.
+    """
+    if not n_episodes:
+        return []
+    return [i for i in _int_indices(values) if i < 0 or i >= n_episodes]
+
+
+def _edge_label(i: int, edge: Any) -> str:
+    return (f"edges[{i}] {edge.source_entity_name!r} -{edge.relation_type}-> "
+            f"{edge.target_entity_name!r}")
+
+
+def repair_capture(prompt_name: str, messages: list[dict[str, str]], obj: Any,
+                   ) -> tuple[Any | None, list[dict[str, str]], str]:
+    """Correct the derivable defects in a validated completion, per ITEM.
+
+    Returns `(obj, repairs, "")` on success -- `obj` mutated in place -- or
+    `(None, repairs, reason)` when the record cannot be corrected without
+    inventing content. See the module docstring for the policy; the short version
+    is that a DERIVABLE correction is a verified correct answer and a GENERATED
+    one is not, so only the first kind happens here.
+
+    Each entry in `repairs` names the defect class and the specific item, so
+    `meta.repaired` is auditable per example rather than per record.
+    """
+    user = messages[1]["content"]
+    n_episodes = _n_episodes_in_prompt(user)
+    repairs: list[dict[str, str]] = []
+
+    if prompt_name == "extract_nodes.extract_text":
+        for i, entity in enumerate(obj.extracted_entities):
+            bad = _bad_indices(entity.episode_indices, n_episodes)
+            if not bad:
+                continue
+            repairs.append({
+                "defect": "episode_index_out_of_range",
+                "item": f"extracted_entities[{i}] {entity.name!r}",
+                "action": f"episode_indices {list(entity.episode_indices)} -> [0]",
+            })
+            entity.episode_indices = [0]
+        return obj, repairs, ""
+
+    if prompt_name != "extract_edges.edge":
+        # dedupe_edges.resolve_edge, dedupe_nodes.nodes and
+        # extract_nodes.extract_summaries_batch have no derivable repair. The
+        # first two show zero defects in this capture; the third's only defect is
+        # an over-long summary, whose correct answer is a SHORTER summary -- it
+        # can be generated but not derived, so it is deliberately not repaired.
+        return None, repairs, "no_derivable_repair"
+
+    nodes = _capture_json_block(user, "<ENTITIES>")
+    if nodes is None:
+        return None, repairs, "prompt_entities_unparseable"
+    names = {n["name"] for n in nodes}
+    kept: list[Any] = []
+    for i, edge in enumerate(obj.edges):
+        if edge.source_entity_name not in names or edge.target_entity_name not in names:
+            # extract_edges.py:146-147 tells the model names not in the list cause
+            # the edge to be rejected, and edge_operations.py:218-239 does reject
+            # it. The corpus lost this fact either way; omitting it is what the
+            # pipeline did.
+            repairs.append({
+                "defect": "entity_name_not_in_list",
+                "item": _edge_label(i, edge),
+                "action": "omitted from edges",
+            })
+            continue
+        if edge.source_entity_name == edge.target_entity_name:
+            repairs.append({
+                "defect": "self_edge",
+                "item": _edge_label(i, edge),
+                "action": "omitted from edges",
+            })
+            continue
+        if not edge.fact.strip():
+            # An empty fact needs a fact WRITTEN, not derived. Not observed in
+            # this capture; guarded so a future capture cannot slip past.
+            return None, repairs, "empty_fact_not_repairable"
+        bad = _bad_indices(edge.episode_indices, n_episodes)
+        if bad:
+            repairs.append({
+                "defect": "episode_index_out_of_range",
+                "item": _edge_label(i, edge),
+                "action": f"episode_indices {list(edge.episode_indices)} -> [0]",
+            })
+            edge.episode_indices = [0]
+        kept.append(edge)
+
+    if obj.edges and not kept:
+        # Every edge was removed. Whether `[]` is the CORRECT answer or merely an
+        # empty one depends on the prompt, and the prompt settles it:
+        #
+        #   <= 1 distinct entity offered -> no valid edge can exist at all (any
+        #   edge is necessarily a self-edge, which graphiti rejects), so `[]` is
+        #   the only correct answer and is kept.
+        #
+        #   >= 2 entities offered -> a valid edge WAS expressible and the model
+        #   failed to name one. The correct answer is a different, non-empty set
+        #   of edges, which would have to be generated. Dropped.
+        #
+        # Measured on this capture: 29 of the 40 emptied records offered <= 1
+        # entity, so most of this class is provably correct rather than merely
+        # convenient.
+        if len(names) > 1:
+            return None, repairs, "repair_emptied_edges"
+        repairs.append({
+            "defect": "all_edges_invalid",
+            "item": f"<ENTITIES> offered {len(names)} distinct name(s)",
+            "action": "edges -> [] (no valid edge is expressible with <2 entities)",
+        })
+    obj.edges = kept
+    return obj, repairs, ""
+
+
 CAPTURE_FIDELITY = [
     "provenance=captured: this is the string upstage/solar-pro4 actually emitted "
     "for this exact prompt, recovered by usage.capture_llm_call. No part of the "
-    "prompt or the target is reconstructed.",
+    "prompt is reconstructed.",
     "the completion passed its RESPONSE_MODELS schema AND the semantic checks in "
     "validate_capture (prompt-relative index ranges, endpoint names drawn from "
-    "the ENTITIES list, a terminal finish_reason). Completions that failed were "
-    "dropped, never repaired.",
+    "the ENTITIES list, a terminal finish_reason).",
 ]
+
+# Replaces CAPTURE_FIDELITY[1] when meta.repaired is non-empty. The prompt is
+# still exactly what went on the wire -- which is why provenance stays
+# `captured` -- but the TARGET is no longer purely what the model emitted, and a
+# reader must see that next to the example, not only in the proposal.
+REPAIRED_FIDELITY = (
+    "TARGET CORRECTED: this completion failed validate_capture and was repaired "
+    "per item to the DERIVABLE correct answer -- see meta.repaired for the defect "
+    "class and the specific item changed. The prompt is untouched and is still "
+    "byte-exact wire traffic; the target is no longer purely what the model "
+    "emitted. It was re-validated after repair with zero residual defects."
+)
+
+
+def _capture_fidelity(repairs: list[dict[str, str]]) -> list[str]:
+    notes = list(CAPTURE_FIDELITY)
+    if repairs:
+        notes[1] = REPAIRED_FIDELITY
+    return notes
 
 
 def build_from_capture(path: Path, graph: Graph, renderer: PromptRenderer, *,
                        wanted: set[str], tiers: set[str],
                        allow_overlong_summaries: bool,
-                       raw_targets: bool) -> tuple[list[dict], dict]:
+                       raw_targets: bool, repair: bool = True) -> tuple[list[dict], dict]:
     """Turn a capture JSONL into dataset records. No network, no LLM, no writes."""
     raw: list[dict] = []
     with path.open(encoding="utf-8") as fh:
@@ -1223,7 +1431,9 @@ def build_from_capture(path: Path, graph: Graph, renderer: PromptRenderer, *,
     for name in TARGET_MIX:
         stats[name] = {"seen": 0, "in_scope": 0, "attributed": 0,
                        "attribution_drops": Counter(), "rejections": Counter(),
-                       "rejected": 0, "kept": 0, "routes": Counter(), "exposed": 0}
+                       "rejected": 0, "kept": 0, "routes": Counter(), "exposed": 0,
+                       "defective": 0, "repaired_records": 0, "repaired_items": Counter(),
+                       "residual": Counter()}
     out: list[dict] = []
     skipped_tier: Counter = Counter()
     unknown_prompt = 0
@@ -1261,15 +1471,52 @@ def build_from_capture(path: Path, graph: Graph, renderer: PromptRenderer, *,
         # made entirely of empty answers would report a perfect score while
         # measuring nothing. Reported alongside the rate.
         stats[name]["exposed"] += _capture_exposure(name, rec)
-        defects = _capture_defects(rec, name, messages,
-                                   allow_overlong_summaries=allow_overlong_summaries)
-        if defects[0]:
-            stats[name]["rejections"][defects[0]] += 1
+        reason, obj = _capture_parse(rec, name)
+        if reason:
+            stats[name]["rejections"][reason] += 1
             stats[name]["rejected"] += 1
             continue
-        obj = defects[1]
-        assistant = (rec["completion"] if raw_targets
-                     else target(obj.model_dump(mode="json")))
+
+        # --- then repair: correct what is derivable, drop what is not ---
+        defects = validate_capture(name, messages, obj,
+                                   allow_overlong_summaries=allow_overlong_summaries)
+        repairs: list[dict[str, str]] = []
+        if defects:
+            stats[name]["defective"] += 1
+            if not repair:
+                stats[name]["rejections"]["+".join(defects)] += 1
+                stats[name]["rejected"] += 1
+                continue
+            obj, repairs, drop = repair_capture(name, messages, obj)
+            if obj is None:
+                stats[name]["rejections"][f"{'+'.join(defects)} [{drop}]"] += 1
+                stats[name]["rejected"] += 1
+                continue
+            # A repair that leaves the thing it repaired is worse than no
+            # repair, so the corrected object is put back through the SAME
+            # validator. This should be unreachable; if it fires, the repair and
+            # the check have drifted apart and the record is dropped loudly
+            # rather than shipped as a silently-still-broken target.
+            residual = validate_capture(name, messages, obj,
+                                        allow_overlong_summaries=allow_overlong_summaries)
+            if residual:
+                logger.error("REPAIR BUG: %s left %s unrepaired on call_id=%s",
+                             name, "+".join(residual), rec.get("call_id"))
+                stats[name]["residual"]["+".join(residual)] += 1
+                stats[name]["rejections"][f"residual:{'+'.join(residual)}"] += 1
+                stats[name]["rejected"] += 1
+                continue
+            stats[name]["repaired_records"] += 1
+            for entry in repairs:
+                stats[name]["repaired_items"][entry["defect"]] += 1
+
+        # `--raw-targets` keeps the completion's exact bytes -- but a REPAIRED
+        # record's exact bytes are the defect this build exists to remove, so a
+        # repaired target is always serialised from the corrected object. The
+        # per-record `target_normalised` says which happened.
+        normalised = not raw_targets or bool(repairs)
+        assistant = (target(obj.model_dump(mode="json")) if normalised
+                     else rec["completion"])
         episode = graph.episodes.get(attribution.episode_uuid or "")
         record = {
             "prompt_name": name,
@@ -1277,7 +1524,11 @@ def build_from_capture(path: Path, graph: Graph, renderer: PromptRenderer, *,
             "messages": [*messages, {"role": "assistant", "content": assistant}],
             "meta": {
                 "provenance": "captured",
-                "fidelity": list(CAPTURE_FIDELITY),
+                "fidelity": _capture_fidelity(repairs),
+                # Always present, `[]` when nothing changed, so "this target was
+                # corrected" is machine-checkable and never inferred from a
+                # missing key.
+                "repaired": repairs,
                 "episode_uuid": attribution.episode_uuid,
                 "article_id": attribution.article_id,
                 "chunk_index": episode.chunk_index if episode else None,
@@ -1286,14 +1537,14 @@ def build_from_capture(path: Path, graph: Graph, renderer: PromptRenderer, *,
                 "capture_tier": rec.get("tier"),
                 "capture_model": rec.get("model"),
                 "capture_finish_reason": rec.get("finish_reason"),
-                "target_normalised": not raw_targets,
+                "target_normalised": normalised,
             },
         }
         stats[name]["kept"] += 1
         out.append(record)
 
     report = {"records": len(raw), "unknown_prompt": unknown_prompt,
-              "skipped_tier": skipped_tier, "stats": stats,
+              "skipped_tier": skipped_tier, "stats": stats, "repair": repair,
               "content_collisions": attributor.content_collisions}
     return out, report
 
@@ -1324,9 +1575,15 @@ def _capture_exposure(name: str, rec: dict) -> int:
     return 1
 
 
-def _capture_defects(rec: dict, name: str, messages: list[dict[str, str]], *,
-                     allow_overlong_summaries: bool) -> tuple[str, Any]:
-    """('', parsed_model) when the completion is usable, else (reason, None)."""
+def _capture_parse(rec: dict, name: str) -> tuple[str, Any]:
+    """('', parsed_model) when the completion is well-formed, else (reason, None).
+
+    The SYNTACTIC gate only -- terminal finish_reason, parseable JSON, valid
+    against its `RESPONSE_MODELS` entry. None of these is repairable: a truncated
+    or unparseable reply has no derivable correct answer, only a generated one.
+    Semantic defects are handled downstream by `validate_capture` +
+    `repair_capture`, which need the parsed object this returns.
+    """
     if rec.get("finish_reason") not in CAPTURE_TERMINAL:
         return "truncated_or_nonterminal", None
     completion = rec.get("completion")
@@ -1342,11 +1599,44 @@ def _capture_defects(rec: dict, name: str, messages: list[dict[str, str]], *,
         obj = RESPONSE_MODELS[name](**payload)
     except ValidationError:
         return "schema_invalid", None
-    defects = validate_capture(name, messages, obj,
-                              allow_overlong_summaries=allow_overlong_summaries)
-    if defects:
-        return "+".join(defects), None
     return "", obj
+
+
+def _print_repair_report(report: dict) -> None:
+    """Per prompt: records repaired, ITEMS repaired within them, records still dropped.
+
+    The item count is the load-bearing one. Repair is per item, so "43 records
+    repaired" understates the work and "253 edges omitted" is what actually
+    changed -- and the gap between them is exactly the data the drop-only build
+    threw away to fix one bad edge.
+    """
+    stats = report["stats"]
+    if not report.get("repair"):
+        logger.info("\n--- repair: DISABLED (--no-repair): drop-only, "
+                    "every defective record discarded ---")
+        return
+    logger.info("\n--- repair (per ITEM, not per record) ---")
+    logger.info("  %-40s %9s %9s %9s %9s", "prompt", "defectiv", "repaired", "items",
+                "dropped")
+    for name in TARGET_MIX:
+        s = stats[name]
+        if not s["defective"]:
+            continue
+        dropped = s["defective"] - s["repaired_records"]
+        logger.info("  %-40s %9d %9d %9d %9d", name, s["defective"],
+                    s["repaired_records"], sum(s["repaired_items"].values()), dropped)
+        for defect, count in sorted(s["repaired_items"].items(), key=lambda kv: -kv[1]):
+            logger.info("      fixed   %-42s %5d", defect, count)
+        if s["residual"]:
+            logger.error("      RESIDUAL DEFECTS AFTER REPAIR -- this is a bug:")
+            for defect, count in sorted(s["residual"].items()):
+                logger.error("      residual %-41s %5d", defect, count)
+    residual_total = sum(sum(s["residual"].values()) for s in stats.values())
+    if residual_total:
+        logger.error("  %d records still carried a defect after repair.", residual_total)
+    else:
+        logger.info("  0 residual defects: every repaired target was re-validated")
+        logger.info("  through the same checker that rejected it, and passed.")
 
 
 def _print_capture_report(report: dict) -> None:
@@ -1378,6 +1668,7 @@ def _print_capture_report(report: dict) -> None:
     logger.info("  'exposed' = records whose answer was non-empty, i.e. records the")
     logger.info("  semantic check COULD have rejected. A 0.0%% rate over 0 exposed")
     logger.info("  records measures nothing.")
+    _print_repair_report(report)
     kept = sum(s["kept"] for s in stats.values())
     logger.info("\n  %d capture records in the file -> %d usable examples",
                 report["records"], kept)
@@ -1576,14 +1867,22 @@ async def main() -> int:
                         "completion) pairs instead of reconstructing from the graph. "
                         "The graph is still read (read-only) to recover article "
                         "attribution. Records that cannot be attributed to exactly one "
-                        "article, or whose completion fails schema or semantic "
-                        "validation, are DROPPED -- never repaired, never guessed.")
+                        "article are DROPPED, never guessed. A completion that fails "
+                        "validation is repaired PER ITEM where the correct answer is "
+                        "derivable and dropped where it would have to be generated "
+                        "(see --no-repair and the module docstring).")
     p.add_argument("--capture-tier", choices=("cheap", "strong", "both"), default="cheap",
                    help="which captured tier to train on (--from-capture only). Default "
                         "cheap: the fine-tune replaces the CHEAP tier, and the strong "
                         "tier renders extraction prompts WITHOUT CHEAP_TIER_SALIENCE "
                         "(cli.py:117), so its records are a different prompt "
                         "distribution from the one the replacement will be served.")
+    p.add_argument("--no-repair", action="store_true",
+                   help="drop every record with a semantic defect instead of correcting "
+                        "the derivable ones (--from-capture only). This is the old "
+                        "drop-only behaviour, kept so the two builds can be compared: "
+                        "repair-on keeps the rest of a record's work when one edge is "
+                        "bad, where drop-only loses the whole record.")
     p.add_argument("--raw-targets", action="store_true",
                    help="keep each captured completion's exact bytes as the target "
                         "(--from-capture only). Default re-serialises the VALIDATED "
@@ -1646,7 +1945,7 @@ async def main() -> int:
         records, capture_report = build_from_capture(
             args.from_capture, graph, renderer, wanted=wanted, tiers=tiers,
             allow_overlong_summaries=args.allow_overlong_summaries,
-            raw_targets=args.raw_targets)
+            raw_targets=args.raw_targets, repair=not args.no_repair)
         if args.report:
             _print_capture_report(capture_report)
         if not records:
@@ -1678,7 +1977,14 @@ async def main() -> int:
             _print_report(records)
 
     if args.mix or args.from_capture is None:
-        selected = apply_mix(records, rng, args.limit)
+        # In sample-only mode, mix to a POOL ~20x the sample size rather than
+        # straight down to --limit. Capping at --limit here leaves
+        # `_stratified_sample` nothing to choose from, so the committed sample
+        # would show whichever repaired records the shuffle happened to land on
+        # -- which on the first run was 2 of the 4 repair classes, missing the
+        # two that encode an actual policy judgement.
+        cap = (args.limit or 20) * SAMPLE_POOL_FACTOR if args.sample_only else args.limit
+        selected = apply_mix(records, rng, cap)
     else:
         selected = list(records)
         rng.shuffle(selected)
@@ -1692,7 +1998,7 @@ async def main() -> int:
 
     if args.sample_only:
         path = args.out / "sample.jsonl"
-        sample = selected[:args.limit or 20]
+        sample = _stratified_sample(selected, args.limit or 20)
         _write(path, sample)
         digest = args.out / "sample-digest.md"
         digest.write_text(_digest(sample, args), encoding="utf-8")
@@ -1722,6 +2028,44 @@ def _write(path: Path, records: list[dict]) -> None:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+SAMPLE_REPAIRED_QUOTA = 6
+SAMPLE_POOL_FACTOR = 20
+
+
+def _stratified_sample(selected: list[dict], limit: int) -> list[dict]:
+    """The first `limit` records, but guaranteeing the repaired ones are visible.
+
+    Repaired records are ~3% of the build, so a uniform draw of 20 would show a
+    reviewer none of them -- and the committed sample exists precisely so the
+    repair policy can be inspected per example rather than taken on trust. Up to
+    `SAMPLE_REPAIRED_QUOTA` slots go to repaired records, with the defect classes
+    spread across them, and the rest is the ordinary shuffled draw.
+
+    This makes the sample deliberately NON-representative of the repair rate, so
+    the digest header says so. Rate claims come from the build report, never
+    from counting this file.
+    """
+    repaired = [r for r in selected if r["meta"].get("repaired")]
+    if not repaired:
+        return selected[:limit]
+    picked: list[dict] = []
+    seen_defects: set[str] = set()
+    # One pass preferring unseen defect classes, so the sample covers the
+    # policy rather than showing the same defect six times.
+    for r in repaired:
+        classes = {e["defect"] for e in r["meta"]["repaired"]}
+        if len(picked) < SAMPLE_REPAIRED_QUOTA and classes - seen_defects:
+            picked.append(r)
+            seen_defects |= classes
+    for r in repaired:
+        if len(picked) >= min(SAMPLE_REPAIRED_QUOTA, limit) or r in picked:
+            continue
+        picked.append(r)
+    ids = {id(r) for r in picked}
+    rest = [r for r in selected if id(r) not in ids]
+    return (picked + rest)[:limit]
+
+
 DIGEST_TRUNCATE = 1800
 
 
@@ -1744,6 +2088,7 @@ def _digest(records: list[dict], args: argparse.Namespace) -> str:
         cmd.append(f"    --from-capture {args.from_capture} \\")
     cmd.append(f"    --out {args.out} --limit {args.limit or 20} --sample-only"
                + (" --mix" if args.mix else ""))
+    n_repaired = sum(1 for r in records if r["meta"].get("repaired"))
     lines = [
         "# Sample records — readable digest",
         f"Generated from `{args.out / 'sample.jsonl'}` ({len(records)} records). This "
@@ -1751,6 +2096,21 @@ def _digest(records: list[dict], args: argparse.Namespace) -> str:
         "REVIEW AID: long bodies are truncated. The JSONL is the actual deliverable",
         "and is verbatim.",
         "",
+    ]
+    if n_repaired:
+        lines += [
+            f"**{n_repaired} of these {len(records)} records have a REPAIRED target** "
+            "(`meta.repaired`).",
+            "That is deliberate over-representation: repaired records are ~3% of the "
+            "build, so a",
+            "uniform draw of 20 would show none, and the point of the sample is that the "
+            "repair",
+            "policy can be inspected per example. **Do not read a repair rate off this "
+            "file** —",
+            "the build report is where the rates live.",
+            "",
+        ]
+    lines += [
         "Rebuild both with:",
         "",
         "```",
@@ -1776,6 +2136,12 @@ def _digest(records: list[dict], args: argparse.Namespace) -> str:
                 f"tier), finish_reason `{meta.get('capture_finish_reason')}`, "
                 f"attribution route `{meta.get('attribution_route')}`, "
                 f"target_normalised `{meta.get('target_normalised')}`")
+        if meta.get("repaired"):
+            lines.append(f"* **TARGET REPAIRED** ({len(meta['repaired'])} item(s)):")
+            lines += [f"    * `{r['defect']}` on {r['item']} — {r['action']}"
+                      for r in meta["repaired"]]
+        elif "repaired" in meta:
+            lines.append("* repaired: none — target is exactly what the model emitted")
         lines += [f"* fidelity: {f}" for f in meta.get("fidelity", [])]
         lines.append("")
         for msg in rec["messages"]:

@@ -3,6 +3,12 @@ Generated from `docs/proposals/samples/sample.jsonl` (20 records). This file is 
 REVIEW AID: long bodies are truncated. The JSONL is the actual deliverable
 and is verbatim.
 
+**6 of these 20 records have a REPAIRED target** (`meta.repaired`).
+That is deliberate over-representation: repaired records are ~3% of the build, so a
+uniform draw of 20 would show none, and the point of the sample is that the repair
+policy can be inspected per example. **Do not read a repair rate off this file** —
+the build report is where the rates live.
+
 Rebuild both with:
 
 ```
@@ -15,11 +21,13 @@ uv run --extra dev python scripts/build_extraction_dataset.py \
 
 ## `extract_edges.edge`
 * provenance: **captured**
-* loss_weight: `0.3129` (basis `full`)  |  response_schema: `ExtractedEdges`
-* article `49d019c4-ceb8-4a0a-b908-cd35602cab20` chunk `3` episode `3ca31b5c-6b61-4610-a81e-2834b080af67`
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `d0098594-34ad-46bc-a581-7ec06a7117ac` chunk `2` episode `c31ea5cb-fb49-496a-a44f-0774d1b9377a`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* **TARGET REPAIRED** (1 item(s)):
+    * `entity_name_not_in_list` on edges[6] 'Backup center' -IntegratesWith-> 'Azure Business Continuity Center' — omitted from edges
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: TARGET CORRECTED: this completion failed validate_capture and was repaired per item to the DERIVABLE correct answer -- see meta.repaired for the defect class and the specific item changed. The prompt is untouched and is still byte-exact wire traffic; the target is no longer purely what the model emitted. It was re-validated after repair with zero residual defects.
 
 **system**
 
@@ -36,26 +44,33 @@ Any extracted information should be returned in the same language as it was writ
 ```
 
 <PREVIOUS_MESSAGES>
-[{"content": "[Cross-account backup › Cross-account backup]\n\n\n###### Limit destination accounts using account numbers and vault names\n\nWhen attached to an AWS Organizations root, OU, or individual account, this policy limits\n copies originating from that root, OU, or account to only two destination accounts. The\n permission `\"backup:CopyFromBackupVault\"` controls how a recovery point in\n the backup vault behaves, and, in this case, the destinations where you can copy that\n recovery point to. The source vault will only permit copies to the first destination\n account (112233445566\\) if one or more destination backup vault names begin with\n `cab-`. The source vault will only permit copies to the second destination\n account (123456789012\\) if the destination is the single backup vault named\n `fort-knox`.\n", "timestamp": "2026-06-25T23:20:45.858260+00:00"}, {"content": "[Cross-account backup › Cross-account backup]\n\nJSON\n\n```\n\n{\n  \"Version\":\"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"DenyCopyFromBackupVault\",\n      \"Effect\": \"Deny\",\n      \"Action\": \"backup:CopyFromBackupVault\",\n      \"Resource\": \"arn:aws:ec2:*:*:snapshot/*\",\n      \"Condition\": {\n        \"ForAllValues:ArnNotLike\": {\n          \"backup:CopyTargets\": [\n            \"arn:aws:backup:*:112233445566:backup-vault:cab-*\",\n            \"arn:aws:backup:us-east-1:123456789012:backup-vault:fort-knox\"\n          ]\n        }\n      }\n    }\n  ]\n}\n\n```\n\n\n###### Limit destination accounts using organizational units in AWS Organizations\n\nWhen attached to an AWS Organizations root or OU that contains your source account, or when\n attached to your source account, the following policy limits the destination accounts to\n those
-  [...23626 more chars...]
+[{"content": "[Delete › Delete]\nYou're prompted to enter a security personal identification number (PIN), which you must generate manually:\n\n\t1. Sign in to the Azure portal.\n\t2. Go to **Recovery Services vault** \\> **Settings** \\> **Properties**.\n\t3. Under **Security PIN**, select **Generate**. Copy this PIN. The PIN is valid for only five minutes.\n4. In the management console, paste the PIN, and then select **OK**.\n\n![Screenshot that shows generating a security PIN.](/media/3e86238a-0b5a-4f2e-b384-c73ce87bbaf5/de4e51d88c51.png)\n\n> **Figure:** Screenshot of the 'Stop a Scheduled Backup' dialog in the Schedule Backup Wizard, showing a prompt to enter a Security PIN to complete the operation. The PIN field is filled with masked characters, and the 'Finish' button is highlighted.\n5. On the **Modify Backup Progress** page, the following message appears: **Deleted backup data will be retained for 14 days. After that time, backup data will be permanently deleted.**\n\n![Screenshot that shows deleting the backup infrastructure.](/media/3e86238a-0b5a-4f2e-b384-c73ce87bbaf5/102056509c08.png)\n\n> **Figure:** Screenshot of the 'Modify Backup Progress' screen in the Schedule Backup Wizard, showing the successful stop of the backup schedule for Files and Folders. The status indicates deleted backup data will be retained for 14 days before permanent deletion.\n\nAfter you delete the on\\-premises backup items, follow the next steps from the portal.\n\n### Delete backup items from the MABS or DPM management console\n\nIf you deleted or lost the source machine without stopping the backup, the next scheduled backup fails. The old recovery point expires according to the policy, but the last single recovery point is always retained until you stop the 
+  [...32724 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "Amazon S3", "relation_type": "Supports", "fact": "AWS Backup supports backing up Amazon S3 data.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Restore ACLs", "relation_type": "Provides", "fact": "AWS Backup provides a Restore ACLs setting to choose whether ACLs are part of the restore.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Restore ACLs", "target_entity_name": "Amazon S3", "relation_type": "AppliesTo", "fact": "The Restore ACLs setting applies to restoring Amazon S3 data.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "object tags", "relation_type": "Provides", "fact": "AWS Backup automatically restores object tags if they were included in the original backup.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon S3", "relation_type": "Limits", "fact": "AWS Backup cannot restore ACLs for an Amazon S3 bucket if the backup was created with the BackupACLs option disabled.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon S3", "relation_type": "Limits", "fact": "AWS Backup restores only the latest version of Amazon S3 objects by default.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon S3", "relation_type": "Provides", "fact": "AWS Backup provides the choice to restore additional or all versions of Amazon S3 objects.", "valid_at": null, "invalid_at": null, "episod
-  [...911 more chars...]
+{"edges": [{"source_entity_name": "Backup center", "target_entity_name": "Azure Backup", "relation_type": "Operates", "fact": "Backup center governs the Azure Backup estate and is used to manage backup compliance and protectable datasources.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Policies for Backup", "target_entity_name": "Azure Backup", "relation_type": "Provides", "fact": "Azure Policies for Backup provides Azure Policy definitions for backup that can be assigned to subscriptions and resource groups.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Policy definitions for backup", "target_entity_name": "Azure Backup", "relation_type": "Provides", "fact": "Azure Policy definitions for backup are available for assignment to subscriptions and resource groups to govern backup compliance.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Backup Compliance", "target_entity_name": "Azure Backup", "relation_type": "Provides", "fact": "Backup Compliance helps view the compliance of resources according to the various built-in policies assigned to the Azure environment.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Protectable Datasources", "target_entity_name": "Azure Backup", "relation_type": "Provides", "fact": "Protectable Datasources allows viewing all datasources that haven't been configured for backup and lets you configure backup for a resource by right-clicking the grid item and selecting Backup.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Virtual Machines", "target_entity_name": "Azure Backup", "relation_type": "Supports", "fact": "Azure 
+  [...212 more chars...]
 ```
 
 ---
 
 ## `extract_edges.edge`
 * provenance: **captured**
-* loss_weight: `0.3129` (basis `full`)  |  response_schema: `ExtractedEdges`
-* article `e845095d-d22b-47c1-90e2-c60629331d66` chunk `3` episode `c67fc735-3f4a-4575-aead-29e149f3424c`
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `d4d25628-1f6e-42ea-a5c5-e66b2e1bf2f8` chunk `9` episode `8b88c448-b02f-4822-ba7c-d12660446a81`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* **TARGET REPAIRED** (6 item(s)):
+    * `episode_index_out_of_range` on edges[0] 'AWS Backup' -Supports-> 'Amazon RDS' — episode_indices [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[1] 'AWS Backup' -Supports-> 'Aurora' — episode_indices [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[2] 'AWS Backup' -Limits-> 'Amazon RDS' — episode_indices [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[3] 'AWS Backup CLI' -Operates-> 'AWS Backup' — episode_indices [24] -> [0]
+    * `episode_index_out_of_range` on edges[4] 'AWS Backup' -Provides-> 'Amazon RDS' — episode_indices [24] -> [0]
+    * `episode_index_out_of_range` on edges[5] 'Amazon RDS' -AvailableIn-> 'Amazon RDS User Guide' — episode_indices [24] -> [0]
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: TARGET CORRECTED: this completion failed validate_capture and was repaired per item to the DERIVABLE correct answer -- see meta.repaired for the defect class and the specific item changed. The prompt is untouched and is still byte-exact wire traffic; the target is no longer purely what the model emitted. It was re-validated after repair with zero residual defects.
 
 **system**
 
@@ -72,26 +87,185 @@ Any extracted information should be returned in the same language as it was writ
 ```
 
 <PREVIOUS_MESSAGES>
-[{"content": "[Azure Backup documentation › Azure Backup documentation]\n\nBack up with Microsoft Azure Recovery Services (MARS) agent\n-----------------------------------------------------------\n\n### Concept\n\n* [Back up Windows machines with the Azure Backup MARS agent](backup-windows-with-mars-agent)\n* [Manage MARS Agent backups by using the Azure Backup service](backup-azure-manage-mars)\n* [Cross Region Restore support for MARS agent (preview)](about-restore-microsoft-azure-recovery-services#cross-region-restore-for-mars)\n* [MARS agent support matrix](backup-support-matrix-mars-agent)\n* [FAQ \\- MARS agent](backup-azure-file-folder-backup-faq)\n\n### How\\-To Guide\n\n* [Offline backup for MARS with customer\\-owned disks](backup-azure-backup-import-export)\n\n\nBack up with Microsoft Azure Backup Server (MABS) and DPM\n---------------------------------------------------------\n\n### Concept\n\n* [MABS protection matrix](backup-mabs-protection-matrix)\n* [MABS / DPM support matrix](backup-support-matrix-mabs-dpm)\n* [FAQ \\- MABS and DPM](backup-azure-dpm-azure-server-faq)\n* [Install and upgrade MABS](backup-azure-microsoft-azure-backup)", "timestamp": "2026-06-25T23:42:01.248767+00:00"}, {"content": "[Azure Backup documentation › Azure Backup documentation]\n\n\n### How\\-To Guide\n\n* [Offline backup using Azure Data Box](offline-backup-azure-data-box)\n* [Manage backup to Azure for DPM servers via PowerShell](backup-dpm-automation)\n* [Offline backup using Azure Data Box for DPM and MABS](offline-backup-azure-data-box-dpm-mabs)\n* [Manage telemetry settings in MABS](manage-telemetry)\n* [Back up an Exchange server with DPM](backup-azure-backup-exchange-server)\n", "timestamp": "2026-06-25T23:42:01.248767+00:00"}, {"content": "[Azure B
-  [...26411 more chars...]
+[{"content": "[Assign resources with AWS CLI › Assign resources with AWS CLI]\n\n###### Example: Select all FSx file systems, the Aurora cluster \"my\\-aurora\\-cluster\", and all resources tagged with \"backup\":\"true\", except for resources tagged with \"stage\":\"test\"\n\n```\n{\n  \"BackupSelection\":{\n    \"Resources\":[\n      \"arn:aws:fsx:*\",\n      \"arn:aws:rds:*:*:cluster:my-aurora-cluster\"\n    ],\n    \"ListOfTags\":[\n      {\n        \"ConditionType\":\"StringEquals\",\n        \"ConditionKey\":\"backup\",\n        \"ConditionValue\":\"true\"\n      }\n    ],\n    \"Conditions\":{\n      \"StringNotEquals\":[\n        {\n          \"ConditionKey\":\"aws:ResourceTag/stage\",\n          \"ConditionValue\":\"test\"\n        }\n      ]\n    }\n  }\n}\n```\n\n\n###### Example: Select all resources tagged with tag \"backup\":\"true\" except for EBS volumes tagged with \"stage\":\"test\"\n\nUse two CLI commands to create two selections to select this group of resources. The\n first selection applies to all resources except for EBS volumes. The second selection\n applies to EBS volumes.\n\n\n```\n{\n  \"BackupSelection\":{\n    \"Resources\":[\n      \"*\"\n    ],\n    \"NotResources\":[\n      \"arn:aws:ec2:*:*:volume/*\"\n    ],\n    \"Conditions\":{\n      \"StringEquals\":[\n        {\n          \"ConditionKey\":\"aws:ResourceTag/backup\",\n          \"ConditionValue\":\"true\"\n        }\n      ]\n    }\n  }\n}\n```\n\n\n```\n{\n  \"BackupSelection\":{\n    \"Resources\":[\n      \"arn:aws:ec2:*:*:volume/*\"\n    ],\n    \"Conditions\":{\n      \"StringEquals\":[\n        {\n          \"ConditionKey\":\"aws:ResourceTag/backup\",\n          \"ConditionValue\":\"true\"\n        }\n      ],\n      \"StringNotEquals\":[\n        {\n    
+  [...27440 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "Full backup", "relation_type": "Provides", "fact": "Azure Backup uses full backups, which contain the entire data source and take more network bandwidth than differential or incremental backups, for initial backups.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Differential backup", "relation_type": "Limits", "fact": "Azure Backup does not use differential backups, which store blocks changed since the initial full backup and are inefficient because unchanged data blocks between later backups are transferred and stored.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Incremental backup", "relation_type": "Provides", "fact": "Azure Backup uses incremental backups, which store only the blocks of data that changed since the previous backup and offer high storage and network efficiency without needing to supplement with full backups, in all backups to Azure.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Incremental backup", "target_entity_name": "DPM", "relation_type": "AppliesTo", "fact": "Incremental backups are used by DPM for disk backups.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Incremental backup", "target_entity_name": "MABS", "relation_type": "AppliesTo", "fact": "Incremental backups are used by MABS for disk backups.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Incremental backup", "target_entity_name": "SQL Server", "relation_type": "Limits", "fact": "Incremental backups are not used for SQL Server backu
-  [...68 more chars...]
+{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "Amazon RDS", "relation_type": "Supports", "fact": "AWS Backup supports continuous backups and point-in-time recovery for Amazon RDS instances and Aurora that are supported by the native Amazon RDS service.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Aurora", "relation_type": "Supports", "fact": "AWS Backup supports continuous backups and point-in-time recovery for Aurora that is supported by the native Amazon RDS service.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon RDS", "relation_type": "Limits", "fact": "AWS Backup does not support continuous backups or point-in-time recovery for Amazon RDS Multi-AZ clusters.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup CLI", "target_entity_name": "AWS Backup", "relation_type": "Operates", "fact": "AWS Backup CLI can be used to restore RDS and Aurora databases to a point in time using metadata parameters.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon RDS", "relation_type": "Provides", "fact": "AWS Backup provides point-in-time restore capability for Amazon RDS databases.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Amazon RDS", "target_entity_name": "Amazon RDS User Guide", "relation_type": "AvailableIn", "fact": "Amazon RDS User Guide contains instructions for restoring a DB Instance to a specified time.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `ea2a35ad-6628-414d-bb83-0fac5a4d6882` chunk `3` episode `963dd5af-fbca-438c-a046-6b60eabad5e8`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* **TARGET REPAIRED** (2 item(s)):
+    * `self_edge` on edges[0] 'Azure Backup' -Provides-> 'Azure Backup' — omitted from edges
+    * `all_edges_invalid` on <ENTITIES> offered 1 distinct name(s) — edges -> [] (no valid edge is expressible with <2 entities)
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: TARGET CORRECTED: this completion failed validate_capture and was repaired per item to the DERIVABLE correct answer -- see meta.repaired for the defect class and the specific item changed. The prompt is untouched and is still byte-exact wire traffic; the target is no longer purely what the model emitted. It was re-validated after repair with zero residual defects.
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Review security posture › Review security posture]\nTutorial: Review security posture\n=================================\n\nThis tutorial describes how to review and modify the security level for protected items in Resiliency in Azure.\n\nImportant\n\nAzure Business Continuity Center is now Resiliency in Azure, a unified platform for Zone Resiliency, High Availability, Backup \\& Disaster Recovery, and Ransomware Protection. offers integrated experiences to ensure ongoing resilience of your applications. To try out the Zonal feature in Resiliency, fill out [this enrollment form](https://forms.office.com/pages/responsepage.aspx?id=v4j5cvGGr0GRqy180BHbR9NW9IkjD2RCnDQwsmIfABFUNU5MWUVaN1FWWDYxMFY1VTNBM1FPVDM3OC4u&route=shorturl).\n\nAzure Backup provides security features at the vault level to safeguard the backup data stored in it. The vault security measures encompass the settings associated with the Azure Backup solution for the vault and apply to the protected data sources contained within the vault.\n\nResiliency in Azure allows you to view the security level for each protected item from the security posture view.\n\nView security level\n-------------------\n\nTo view the security level for protected items, follow these steps:\n\n1. On **Resiliency**, go to **Security \\+ Threat management** \\> **Security posture**.\n\n![Screenshot shows the security posture selection.](/media/d386db8d-41e7-4d5e-bdcb-d933eb2c7c9d/f31226d6ef15.png)\n\n> **Figure:** Screenshot of the 'Security posture' page in the Resiliency section of a Microsoft Azure service, showing the navigation menu with 'Security posture' highlighted and the main content area displaying security level details for Azure managed Active resources.", "timestamp": "2026-07-14T21:59
+  [...19312 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": []}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `bf5b97e5-55ca-4136-9bbc-1dcf7da6221d` chunk `13` episode `6719affc-ab3f-400c-bac9-245e867af00f`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* **TARGET REPAIRED** (4 item(s)):
+    * `episode_index_out_of_range` on edges[0] 'Azure Backup' -Supports-> 'Azure Database for PostgreSQL servers' — episode_indices [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[1] 'Azure Backup' -AvailableIn-> 'Secondary Region' — episode_indices [18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[2] 'Azure Backup' -Provides-> 'cross-region copy' — episode_indices [18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[3] 'cross-region copy' -AppliesTo-> 'Azure Database for PostgreSQL servers' — episode_indices [18, 19, 20, 21, 22, 23, 24] -> [0]
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: TARGET CORRECTED: this completion failed validate_capture and was repaired per item to the DERIVABLE correct answer -- see meta.repaired for the defect class and the specific item changed. The prompt is untouched and is still byte-exact wire traffic; the target is no longer purely what the model emitted. It was re-validated after repair with zero residual defects.
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Manage › Manage]\n\nOptimize backup and recovery with Resiliency Copilot\n----------------------------------------------------\n\nResiliency Copilot introduces new capabilities in the Backup vaults pane, enabling you to configure/manage a secure, resilient backup and recovery environment:\n\n* [Increase security level](../resiliency/tutorial-manage-data-using-copilot#increase-security-level-of-recovery-service-vault-and-backup-vault) to strengthen protection for backup data and disaster recovery operations.\n* [Analyze job failures](../resiliency/tutorial-manage-data-using-copilot#analyze-job-failures-for-recovery-service-vault-and-backup-vault) to gain insights into failures for precise analysis and faster resolution.\n* [Configure protection for unprotected resources](../resiliency/tutorial-manage-data-using-copilot#configure-protection-for-resources-in-recovery-services-vault-and-backup-vault).\n* [Delete a vault](../resiliency/tutorial-manage-data-using-copilot#delete-recovery-services-vault-and-backup-vault-using-copilot).\n* [Troubleshoot common errors efficiently](../resiliency/tutorial-manage-data-using-copilot#troubleshoot-error-codes-for-recovery-service-vaults-and-backup-vaults).\n\nLearn more about [managing the Business Continuity and Disaster Recovery estate using Copilot (preview)](../resiliency/tutorial-manage-data-using-copilot).\n\nMove a Backup vault across Azure subscriptions/resource groups\n--------------------------------------------------------------\n\nThis section explains how to move a Backup vault (configured for Azure Backup) across Azure subscriptions and resource groups using the Azure portal.\n\nNote\n\nYou can also move Backup vaults to a different resource group or subscription using [PowerShell](/en-
+  [...24325 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "Azure Database for PostgreSQL servers", "relation_type": "Supports", "fact": "Azure Backup supports Azure Database for PostgreSQL servers.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Secondary Region", "relation_type": "AvailableIn", "fact": "Azure Backup enables Cross Region Restore to a Secondary Region for Azure Database for PostgreSQL servers.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "cross-region copy", "relation_type": "Provides", "fact": "Azure Backup provides cross-region copy capability through Cross Region Restore for Azure Database for PostgreSQL servers.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "cross-region copy", "target_entity_name": "Azure Database for PostgreSQL servers", "relation_type": "AppliesTo", "fact": "Cross Region Restore (cross-region copy) applies to Azure Database for PostgreSQL servers.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `78e2b9e5-bf0c-4e76-8b83-fc54e76f52cd` chunk `3` episode `8198b3e1-1465-4c8d-872f-0cda562e4cbb`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* **TARGET REPAIRED** (5 item(s)):
+    * `episode_index_out_of_range` on edges[0] 'AWS Backup' -Provides-> 'cross-Region backup' — episode_indices [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] -> [0]
+    * `episode_index_out_of_range` on edges[1] 'AWS Backup' -Requires-> 'retention period' — episode_indices [25] -> [0]
+    * `episode_index_out_of_range` on edges[2] 'AWS Backup' -Requires-> 'IAM role' — episode_indices [25] -> [0]
+    * `episode_index_out_of_range` on edges[3] 'cross-Region backup' -Limits-> 'Transition to cold storage' — episode_indices [23] -> [0]
+    * `episode_index_out_of_range` on edges[4] 'AWS Backup' -Limits-> 'cross-Region backup' — episode_indices [22] -> [0]
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: TARGET CORRECTED: this completion failed validate_capture and was repaired per item to the DERIVABLE correct answer -- see meta.repaired for the defect class and the specific item changed. The prompt is untouched and is still byte-exact wire traffic; the target is no longer purely what the model emitted. It was re-validated after repair with zero residual defects.
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Continuous backups and PITR › Continuous backups and PITR]\n\n**Backup coverage during transition:**\n\n* Snapshot backups provide protection while waiting for maintenance window\n* Continuous recovery points become available when the backup job runs after PITR is enabled\n* No gap in backup protection occurs during the transition period\n* Recovery granularity may be limited to snapshot intervals until PITR is fully active\n\nNote: [Stopping the RDS instance](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html) will remove pending changes. PITR configuration changes will be requeued by the next backup job and applied during a subsequent maintenance window.\n\n**Copies of Amazon RDS continuous backups:**\n\n* **Creating copies of Amazon RDS continuous backups**\n — You can't create copies of Amazon RDS continuous backups because AWS Backup for Amazon RDS\n does not allow copying transaction logs. Instead, AWS Backup creates a snapshot and copies\n it with the frequency specified in the backup plan.\n", "timestamp": "2026-08-17T23:53:18.361640+00:00"}, {"content": "[Continuous backups and PITR › Continuous backups and PITR]\n\n**Restores:** You can perform a point\\-in\\-time restore using either\n AWS Backup or Amazon RDS. For AWS Backup console instructions, see [Restoring an Amazon RDS Database](https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-rds.html).\n For Amazon RDS instructions, see [Restoring a DB Instance to a specified\n time](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html) in the *Amazon RDS User Guide*.\n\n###### Tip\n\nA multi AZ (availability zone) database instance set to `Always On`\n should not have a backup retention set to zero. If errors occur, use AW
+  [...24280 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "cross-Region backup", "relation_type": "Provides", "fact": "AWS Backup provides cross-Region backup, allowing backups to be copied to multiple AWS Regions on demand or automatically as part of a scheduled backup plan.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "retention period", "relation_type": "Requires", "fact": "AWS Backup requires the retention period for a cross-Region copy to be greater than 90 days beyond the Transition to cold storage value.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "IAM role", "relation_type": "Requires", "fact": "AWS Backup requires an IAM role to create a cross-Region copy; the role must have AWS Backup listed as a trusted entity. If Default is chosen and the default role is absent, one is created with correct permissions.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "cross-Region backup", "target_entity_name": "Transition to cold storage", "relation_type": "Limits", "fact": "Cross-Region backup copies transitioned to cold storage must be stored there for a minimum of 90 days, and this value cannot be changed after transition.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "cross-Region backup", "relation_type": "Limits", "fact": "AWS Backup does not support cross-Region copies for storage in cold tiers.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `a6481417-ece0-481d-a73e-c4279e5eec5f` chunk `9` episode `6a4c36fa-7dd9-4db9-9ab0-9361b38d3a81`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* **TARGET REPAIRED** (3 item(s)):
+    * `entity_name_not_in_list` on edges[7] 'Azure Backup' -Provides-> 'Security Alerts and Reports' — omitted from edges
+    * `entity_name_not_in_list` on edges[16] 'Azure Policies' -Provides-> 'Private endpoints' — omitted from edges
+    * `entity_name_not_in_list` on edges[17] 'Security Alerts and Reports' -Operates-> 'Azure Monitor' — omitted from edges
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: TARGET CORRECTED: this completion failed validate_capture and was repaired per item to the DERIVABLE correct answer -- see meta.repaired for the defect class and the specific item changed. The prompt is untouched and is still byte-exact wire traffic; the target is no longer purely what the model emitted. It was re-validated after repair with zero residual defects.
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Azure Backup architecture › Azure Backup architecture]\n\nData isolation with Azure Backup\n--------------------------------\n\nWith Azure Backup, the vaulted backup data is stored in Microsoft\\-managed Azure subscription and tenant. External users or guests have no direct access to this backup storage or its contents, ensuring the isolation of backup data from the production environment where the data source resides.\n\nIn Azure, all communications and data in transit is securely transferred with *HTTPS* and *TLS 1\\.2\\+* protocols. This data remains on the Azure backbone network ensuring reliable and efficient data transmission. The backup data at rest is encrypted by default using *Microsoft\\-managed keys*. You can also bring your own keys for encryption if you require greater control over the data. To enhance protection, you can use [immutability](backup-azure-immutable-vault-concept), which prevents data from being altered or deleted before its retention period. Azure Backup gives you diverse options such as [soft delete](backup-azure-enhanced-soft-delete-about), stop backup and delete data or retain data if you need to stop backups at any time. To protect critical operations, you can add [Multi\\-User Authorization (MUA)](multi-user-authorization-concept) that adds additional layer of protection by using an Azure resource called Azure Resource Guard.\n\nThis robust approach ensures that even in a compromised environment, existing backups cannot be tampered with or deleted by unauthorized users.\n\nLearn more about vaulted backup for the following datasources:\n\n* [Azure Files](azure-file-share-backup-overview?tabs=vault-standard#architecture-for-azure-files-backup)\n* [Azure Blob](blob-backup-overview?tabs=vaulted-backup#how
+  [...41322 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "Azure virtual machines", "relation_type": "Supports", "fact": "Azure Backup supports restoring Azure virtual machines by creating new VMs or restoring disks from Azure Backup restore points to any permitted subscription.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "cross-subscription restore", "target_entity_name": "Azure virtual machines", "relation_type": "AppliesTo", "fact": "Cross-subscription restore applies to Azure virtual machines, allowing restoration of VMs or disks from Azure Backup restore points to any permitted subscription.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "cross-subscription restore", "target_entity_name": "Multi-user authorization", "relation_type": "Requires", "fact": "Cross-subscription restore actions should be classified as critical operations under Multi-user authorization (MUA) to ensure security admins can access and restore backup data.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "cross-subscription restore", "target_entity_name": "Recovery Services vault", "relation_type": "AvailableIn", "fact": "Cross-subscription restore can be enabled in a Recovery Services vault.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "cross-subscription restore", "target_entity_name": "Backup vault", "relation_type": "AvailableIn", "fact": "Cross-subscription restore can be enabled in a Backup vault.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Business continuity and disaster recovery security posture", "relation_type": "Provides",
+  [...3543 more chars...]
 ```
 
 ---
 
 ## `extract_nodes.extract_summaries_batch`
 * provenance: **captured**
-* loss_weight: `0.4523` (basis `full`)  |  response_schema: `SummarizedEntities`
-* article `8f869443-b48d-4a45-a9fb-7d0df772e632` chunk `4` episode `d021840b-a077-4787-8d76-af53e5a69d07`
+* loss_weight: `0.9842` (basis `full`)  |  response_schema: `SummarizedEntities`
+* article `49d019c4-ceb8-4a0a-b908-cd35602cab20` chunk `6` episode `177f06c6-8134-4b63-af7b-9e06a03f3d4a`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
@@ -128,80 +302,26 @@ Guidelines:
         
 
 <MESSAGES>
-[{"content": "[Manage › Manage]\nEnable Immutable vault\n----------------------\n\nYou can enable i
-  [...18887 more chars...]
+[{"content": "[Cross-account backup › Cross-account backup]\nCreating backup copies across AWS acco
+  [...18366 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"summaries": [{"name": "SQL Server Management Studio", "summary": "SQL Server Management Studio is used to recover backup files restored via the 'Restore as files' option into a database on any machine where the files are present."}]}
-```
-
----
-
-## `extract_nodes.extract_summaries_batch`
-* provenance: **captured**
-* loss_weight: `0.4523` (basis `full`)  |  response_schema: `SummarizedEntities`
-* article `49d019c4-ceb8-4a0a-b908-cd35602cab20` chunk `2` episode `cba7cafe-27e2-45e8-9608-8af2d3d19a7a`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are a helpful assistant that generates concise entity summaries from provided context.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-Given the MESSAGES and a list of ENTITIES, generate an updated summary for each entity that needs one.
-Each summary must be under 1000 characters.
-
-Guidelines:
-        1. Output only factual content. Never explain what you're doing, why, or mention limitations or constraints.
-        2. Only use the provided messages, entity, and entity context to set attribute values.
-        3. Keep the summary information-dense and entity-specific. STATE FACTS DIRECTLY IN UNDER 1000 CHARACTERS.
-        4. Preserve all materially relevant names, roles, places, dates, counts, and temporal qualifiers that are explicitly supported.
-        5. Prefer compact factual sentences over vague thematic phrasing or meta-language.
-        6. When the durable fact is the content of what was said, state the content directly instead of narrating that it was said.
-        7. Use communication verbs only when the act of speaking, asking, sharing, presenting, announcing, or telling is itself the important fact.
-        8. Never use filler verbs like "mentioned", "described", "stated", "reported", "noted", "discussed", "referenced", or "indicated" unless the communication act itself is the fact.
-        9. Include temporal anchors when the messages provide them and they help ground the fact.
-        10. Begin with the entity name or a direct fact, not with "A", "An", "The", or "This is" unless that wording is part of the entity name.
-
-        Example summary:
-        BAD: "The context shows John ordered pizza. Due to length constraints, other details are omitted from this summary."
-        GOOD: "John ordered pepperoni pizza from Mario's at 7:30 PM and had it delivered to the office."
-        
-
-<MESSAGES>
-[{"content": "[Cross-account backup › Cross-account backup]\n\n###### Limit destination accounts us
-  [...14060 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"summaries": [{"name": "AWS KMS encryption", "summary": "AWS KMS encryption is used to encrypt backups in destination accounts for cross-account backup operations. For resources fully managed by AWS Backup, either a customer managed key or the AWS Backup managed key (aws/backup) can be used for the destination vault. For all other resource types, a customer managed key is required because AWS managed key policies are immutable and cannot be shared cross-account. The destination vault cannot be the default vault because the default vault is encrypted with a key that cannot be shared with other accounts. Cross-Region copy AWS KMS encryption is not available for Amazon S3 resources; instead, a different encryption type must be used for a restore job. The original encryption method cannot be used to restore a recovery point copied from another Region. AWS Backup re-encrypts cross-account copies using the encryption key of the destination vault."}]}
+{"summaries": [{"name": "SSE-KMS", "summary": "SSE-KMS is an encryption type option for restoring objects in S3 buckets via AWS Backup. During restore, users can choose AWS Key Management Service key (SSE-KMS) and select an AWS managed key (aws/s3), choose from existing AWS KMS keys, or enter an AWS KMS key ARN. When using SSE-KMS, the KMSKey metadata parameter must be specified to indicate the SSE-KMS key to use. Cross-Region copy AWS KMS encryption is not available for Amazon S3 resources; a different encryption type must be used for restore jobs involving cross-Region copies. These encryption settings apply only to objects in the S3 bucket, not to the bucket itself."}]}
 ```
 
 ---
 
 ## `dedupe_edges.resolve_edge`
 * provenance: **captured**
-* loss_weight: `2.9471` (basis `full`)  |  response_schema: `EdgeDuplicate`
-* article `f8bd3e5d-ae81-417b-8dae-84875c95ff7b` chunk `9` episode `3a69019c-e907-47d8-868f-067d292aeb81`
+* loss_weight: `2.5234` (basis `full`)  |  response_schema: `EdgeDuplicate`
+* article `56af70d3-1433-410b-b5f5-cb164cbacd89` chunk `3` episode `b470f595-a261-482e-9b09-18fcc50db8b6`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
@@ -225,7 +345,7 @@ IMPORTANT constraints:
 - The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
 
 <EXISTING FACTS>
-[{'idx': 0, 'fact': 'Backup center supports viewing backup policies for Azure Virtual Machine.'}, {'idx': 1, 'fact': 'Backup center allows triggering on-demand backups and restores for Azure Virtual Machines backup instances.'}, {'idx': 2, 'fact': 'Backup center provides a summarized view of backup instances for Azure Virtual Machines.'}, {'idx': 3, 'fact': 'Backup center allows stopping backup for Azure Virtual Machines backup instances.'}, {'idx': 4, 'fact': 'Backup center supports viewing datasources not configured for backup for Azure Virtual Machine.'}, {'idx': 5, 'fact': 'Backup center provides the capability to view Azure Monitor alerts at scale for Azure Virtual Machine.'}, {'idx': 6, 'fact': 'Backup center provides the capability to view Azure Backup metrics and write metric alert rules for Azure VM.'}, {'idx': 7, 'fact': "Backup center's Backup jobs screen shows a list of completed backup operations for Azure Virtual Machines."}, {'idx': 8, 'fact': 'Backup center shows active alerts for Azure Virtual machines on the Overview screen.'}, {'idx': 9, 'fact': 'Backup center can monitor a maximum of 1000 subscriptions and 1000 vaults across tenants for Azure Virtual Machine monitoring scenarios.'}]
+[{'idx': 0, 'fact': 'Azure Backup uses Resource Guard for multiuser authorization (MUA) to ensure critical operations are performed only with applicable authorization.'}]
 </EXISTING FACTS>
 
 <FACT INVALIDATION CANDIDATES>
@@ -233,281 +353,7 @@ IMPORTANT constraints:
 </FACT INVALIDATION CANDIDATES>
 
 <NEW FACT>
-Backup Ce
-  [...1531 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"duplicate_facts": [], "contradicted_facts": []}
-```
-
----
-
-## `extract_edges.edge`
-* provenance: **captured**
-* loss_weight: `0.3129` (basis `full`)  |  response_schema: `ExtractedEdges`
-* article `f8bd3e5d-ae81-417b-8dae-84875c95ff7b` chunk `8` episode `ac5d788a-d0ad-456f-8013-10e7a41c3953`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-<PREVIOUS_MESSAGES>
-[{"content": "[Create a vault › Create a vault]\n\n2. On **Vaults**, select **\\+Vault**.\n\n[\n\n![Screenshot showing **+Vault** options.](/media/f7237de0-fae1-4216-a42f-06d35fe46aa9/a1f7e50ccf96.png)\n\n> **Figure:** Screenshot of the Vaults page in the Resiliency section of Azure portal, showing a list of recovery and backup vaults with columns for vault name, subscription, resource group, location, type, redundancy, security level, and cross-region replication. The '+ Vault' button is highlighted, indicating the option to create a new vault.\n\n](media/backup-vaults/create-vault.png#lightbox)\n", "timestamp": "2026-07-14T22:06:43.199911+00:00"}, {"content": "[Create a vault › Create a vault]\n3. On **Start: Create Vault**, select the type of vault you want to create. You have two options:\n\n\t* [Recovery Services vaults](../backup/backup-azure-recovery-services-vault-overview) to hold backup data for various Azure services such as IaaS virtual machines (Linux or Windows) and SQL Server in Azure Virtual Machines (VMs). Recovery Services vaults support System Center Data protection Manager (DPM), Windows Server, Azure Backup Server, and replication data for Azure Site Recovery.\n\t* [Backup vaults](../backup/backup-vault-overview) to hold backup data for various Azure services, such Azure Database for PostgreSQL servers and newer workloads that Azure Backup supports.\n\t\n\t[\n\n![Screenshot showing different vault options.](/media/f7237de0-fae1-4216-a42f-06d35fe46aa9/758c37afb3be.png)\n\n> **Figure:** Screenshot of the 'Create Vault' screen showing two vault type options: 'Recovery Services vault' and 'Backup vault', each with a list of supported data sources. The 'Recovery Services vault' option is selected.\n\n](media/backup-vaults/select-vaul
-  [...25068 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"edges": [{"source_entity_name": "Backup center", "target_entity_name": "Azure Backup", "relation_type": "Operates", "fact": "Backup center operates Azure Backup, allowing users to monitor and manage backups and disaster recovery.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Backup center", "target_entity_name": "Recovery Services vault", "relation_type": "Operates", "fact": "Backup center allows viewing a list of Recovery Services vaults that the user has access to.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Backup center", "target_entity_name": "Backup vault", "relation_type": "Operates", "fact": "Backup center allows viewing a list of Backup vaults that the user has access to.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
-```
-
----
-
-## `dedupe_nodes.nodes`
-* provenance: **captured**
-* loss_weight: `0.3066` (basis `full`)  |  response_schema: `NodeResolutions`
-* article `f1932f08-72a5-4be0-aff5-0e4bcbac1990` chunk `2` episode `ba7f7cb4-fc18-470f-b478-1971ca054b2a`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are an entity deduplication assistant. NEVER fabricate entity names or mark distinct entities as duplicates.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-<PREVIOUS MESSAGES>
-[{"content": "[What is AWS Backup? › What is AWS Backup?]\n\n### Backup activity monitoring\n\nAWS Backup provides a dashboard that makes it simple to audit backup and restore activity\n across AWS services. With just a few clicks on the AWS Backup console, you can view the status\n of recent backup jobs. You can also restore jobs across AWS services to ensure that your\n AWS resources are properly protected.\n\nAWS Backup integrates with Amazon CloudWatch and Amazon EventBridge. CloudWatch allows you to track metrics and create\n alarms. EventBridge allows you to view and monitor AWS Backup events. For more information, see [Monitoring AWS Backup\n events using EventBridge](https://docs.aws.amazon.com/aws-backup/latest/devguide/eventbridge.html) and [Monitoring AWS Backup metrics with\n CloudWatch](https://docs.aws.amazon.com/aws-backup/latest/devguide/cloudwatch.html).\n\nAWS Backup integrates with AWS CloudTrail. CloudTrail gives you a consolidated view of backup activity\n logs that make it quick and easy to audit how your resources are backed up. AWS Backup also\n integrates with Amazon Simple Notification Service (Amazon SNS), providing you with backup activity notifications, such as\n when a backup succeeds or a restore has been initiated. For more information, see [Logging AWS Backup API calls with CloudTrail](https://docs.aws.amazon.com/aws-backup/latest/devguide/logging-using-cloudtrail.html) and [Amazon SNS and AWS Backup events](https://docs.aws.amazon.com/aws-backup/latest/devguide/backup-notifications.html#backup-notifications-section).\n", "timestamp": "2026-06-25T23:20:34.561897+00:00"}, {"content": "[What is AWS Backup? › What is AWS Backup?]\n\n### Secure your data in backup vaults\n\nThe content of each AWS Backup backup is immuta
-  [...25123 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"entity_resolutions": [{"id": 0, "name": "AWS Identity and Access Management", "duplicate_candidate_id": -1}, {"id": 1, "name": "AWS account root user", "duplicate_candidate_id": -1}, {"id": 2, "name": "administrator", "duplicate_candidate_id": -1}]}
-```
-
----
-
-## `extract_nodes.extract_summaries_batch`
-* provenance: **captured**
-* loss_weight: `0.4523` (basis `full`)  |  response_schema: `SummarizedEntities`
-* article `67a20d54-b82e-49a0-b6b8-2a9a8beb86e2` chunk `0` episode `e08899f0-026e-477b-93af-514e22b6fbdb`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are a helpful assistant that generates concise entity summaries from provided context.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-Given the MESSAGES and a list of ENTITIES, generate an updated summary for each entity that needs one.
-Each summary must be under 1000 characters.
-
-Guidelines:
-        1. Output only factual content. Never explain what you're doing, why, or mention limitations or constraints.
-        2. Only use the provided messages, entity, and entity context to set attribute values.
-        3. Keep the summary information-dense and entity-specific. STATE FACTS DIRECTLY IN UNDER 1000 CHARACTERS.
-        4. Preserve all materially relevant names, roles, places, dates, counts, and temporal qualifiers that are explicitly supported.
-        5. Prefer compact factual sentences over vague thematic phrasing or meta-language.
-        6. When the durable fact is the content of what was said, state the content directly instead of narrating that it was said.
-        7. Use communication verbs only when the act of speaking, asking, sharing, presenting, announcing, or telling is itself the important fact.
-        8. Never use filler verbs like "mentioned", "described", "stated", "reported", "noted", "discussed", "referenced", or "indicated" unless the communication act itself is the fact.
-        9. Include temporal anchors when the messages provide them and they help ground the fact.
-        10. Begin with the entity name or a direct fact, not with "A", "An", "The", or "This is" unless that wording is part of the entity name.
-
-        Example summary:
-        BAD: "The context shows John ordered pizza. Due to length constraints, other details are omitted from this summary."
-        GOOD: "John ordered pepperoni pizza from Mario's at 7:30 PM and had it delivered to the office."
-        
-
-<MESSAGES>
-[{"content": "[Manage vault operations › Manage vault operations]\n\n4. To look for specific vaults
-  [...11749 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"summaries": [{"name": "Enhanced tier", "summary": "Migration from Enhanced to Standard tier is not allowed when reconfiguring backup for data sources in an alternate vault."}, {"name": "Standard tier", "summary": "Migration from Enhanced to Standard tier is not allowed when reconfiguring backup for data sources in an alternate vault."}, {"name": "re-registration", "summary": "Re-registration is the process of reconfiguring backup for data sources in Resiliency by switching to an alternate Recovery Services vault. It allows suspending backup in one vault and reconfiguring in another without losing existing recovery points. The feature is available for all datasources supported in Recovery Services vault, but is not supported for SQL Always On Availability Groups (AG) and SAP HANA System Replication (HSR). Recovery Services vault does not allow active multi-protection. The alternate vault has no limitations on redundancy, security settings, or policy retention, including for immutable vaults."}]}
-```
-
----
-
-## `dedupe_edges.resolve_edge`
-* provenance: **captured**
-* loss_weight: `2.9471` (basis `full`)  |  response_schema: `EdgeDuplicate`
-* article `1cde879f-5152-4b0e-a9e8-9d4e762ee9ed` chunk `2` episode `5beeb3e9-73aa-40ce-9ea3-9f76e4687451`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are a fact deduplication assistant. NEVER mark facts with key differences as duplicates.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-NEVER mark facts as duplicates if they have key differences, particularly around numeric values, dates, or key qualifiers.
-
-IMPORTANT constraints:
-- duplicate_facts: ONLY idx values from EXISTING FACTS (NEVER include FACT INVALIDATION CANDIDATES)
-- contradicted_facts: idx values from EITHER list (EXISTING FACTS or FACT INVALIDATION CANDIDATES)
-- The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
-
-<EXISTING FACTS>
-[{'idx': 0, 'fact': 'Soft delete retains deleted backup data for a configurable period of up to 180 days (default 14 days) in Recovery Services vaults.'}, {'idx': 1, 'fact': 'Soft Delete applies to Recovery Services vault.'}, {'idx': 2, 'fact': 'Soft delete is enforced by default for Recovery Services vaults and is in public preview across all public regions.'}]
-</EXISTING FACTS>
-
-<FACT INVALIDATION CANDIDATES>
-[]
-</FACT INVALIDATION CANDIDATES>
-
-<NEW FACT>
-Soft delete applies to Recovery Services vaults, allowing them to be moved into a soft-deleted state and recovered within the configured retention period.
-</NEW FACT>
-
-You will receive TWO lists of facts with CONTINUOUS idx numbering across both lists.
-EXISTING FACTS are indexed first, followed by FACT INVALIDATION CANDIDATES.
-
-1. DUPLICATE DETECTION:
-   - If the NEW FACT represents identical factual information as any fact in EXISTING FACTS, return those idx values in duplicate_facts.
-   - If no duplicates, return an empty list for duplicate_facts.
-
-2. CONTRADICTION DETECTION:
-   - Determine which facts the NEW FACT contradicts from either list.
-   - A fact from EXISTING FACTS can be both a duplicate AND contradicted (e.g., semantically the same but the new fact updates/supersedes it).
-   - Return all contradicted idx values in contradicted_facts.
-   - 
-  [...741 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"duplicate_facts": [1], "contradicted_facts": []}
-```
-
----
-
-## `extract_edges.edge`
-* provenance: **captured**
-* loss_weight: `0.3129` (basis `full`)  |  response_schema: `ExtractedEdges`
-* article `e0545ce0-40cb-49be-99c8-55b6b387fdf2` chunk `4` episode `05ee8ccd-984f-408c-bdbd-88dc7dbf5c6c`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-<PREVIOUS_MESSAGES>
-[{"content": "[Support Matrices › Support Matrices]\n\n| Reporting | View historical data of your Backup and Site Recovery estate in Reports | **Azure Backup**:  \\- Azure Files  \\- Azure Virtual Machine  \\- SAP HANA in Azure VM  \\- SQL in Azure VM  \\- Azure Disk  \\- Azure Database for PostgreSQL Server  \\- Azure Blob  \\- Azure Backup Agent  \\- Azure Backup Server  \\- Data Protection Manager (DPM)  **Azure Site Recovery**:  \\- Azure to Azure disaster recovery  \\- VMware and Physical to Azure disaster recovery | [Shows data based on the LA workspace retention](tutorial-reporting-for-data-insights#view-reports-in-the-resiliency-in-azure). |", "timestamp": "2026-06-26T00:28:43.493367+00:00"}, {"content": "[Support Matrices › Support Matrices]\n\n| Security | View security level | Only for the Azure Backup supported datasources given in [this section](#supported-solutions-and-datasources), and vaults. |  |\n| Governance | View resources not configured for protection. | **Azure Backup**:  \\- Azure VM backup  \\- Azure Storage account (with no file or blobs protected)  \\- Azure Managed Disks backup  \\- Azure Database for PostgreSQL Server backup  \\- Azure Kubernetes services  **Azure Site Recovery**:  \\- Azure to Azure disaster recovery |  |\n| Governance | View all protected items across solutions. | All solutions and datasource types as given in [this section](#supported-solutions-and-datasources). | Same as previous. |\n| Governance | View and assign built\\-in and custom Azure Policies under category Azure Backup and Azure Site Recovery. | N/A | N/A |\n\n| Manage | View all protection policies – backup policies for Azure Backup and Replication policies for Azure Site Recovery. | All solutions and datasource types given in [this section
-  [...24412 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "PostgreSQL", "relation_type": "Supports", "fact": "Azure Backup supports PostgreSQL backups protected in Backup vaults.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Cross Region Restore", "relation_type": "Provides", "fact": "Azure Backup provides Cross Region Restore to access and perform restores from secondary region recovery points even when no outage occurs in the primary region.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "PostgreSQL", "relation_type": "AppliesTo", "fact": "Cross Region Restore applies to PostgreSQL backups protected in Backup vaults.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "Geo-redundant Storage", "relation_type": "Requires", "fact": "Cross Region Restore requires Geo-redundant Storage (GRS) to replicate backups to an additional Azure paired region.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "RA-GRS", "relation_type": "Requires", "fact": "Backup vaults enabled with Cross Region Restore are automatically charged at RA-GRS rates for the PostgreSQL backups stored in the vault.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "Backup vaults", "relation_type": "AppliesTo", "fact": "Cross Region Restore is available for Backup vaults enabled with Geo-redundant Storage.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
-```
-
----
-
-## `dedupe_edges.resolve_edge`
-* provenance: **captured**
-* loss_weight: `2.9471` (basis `full`)  |  response_schema: `EdgeDuplicate`
-* article `dad69d7c-189b-4d53-8d70-40697eae685a` chunk `7` episode `b225d102-cf44-421f-8aff-7c34c0b737f1`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are a fact deduplication assistant. NEVER mark facts with key differences as duplicates.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-NEVER mark facts as duplicates if they have key differences, particularly around numeric values, dates, or key qualifiers.
-
-IMPORTANT constraints:
-- duplicate_facts: ONLY idx values from EXISTING FACTS (NEVER include FACT INVALIDATION CANDIDATES)
-- contradicted_facts: idx values from EITHER list (EXISTING FACTS or FACT INVALIDATION CANDIDATES)
-- The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
-
-<EXISTING FACTS>
-[{'idx': 0, 'fact': 'AWS Backup Vault Lock is an optional feature of a backup vault in AWS Backup.'}, {'idx': 1, 'fact': 'AWS Backup Vault Lock is a feature of AWS Backup that is available at no additional charge, with standard AWS Backup storage charges applying to backups stored in a locked vault.'}]
-</EXISTING FACTS>
-
-<FACT INVALIDATION CANDIDATES>
-[]
-</FACT INVALIDATION CANDIDATES>
-
-<NEW FACT>
-A vault locked in compliance mode cannot be deleted once the cooling-off period (grace time) expires if any recovery points are in the vault.
+Azure Backup uses Resource Guard to enforce Multi-User Authorization for critical operations.
 </NEW FACT>
 
 You will receive TWO lists of facts with CONTINUOUS idx numbering across both lists.
@@ -523,30 +369,34 @@ EXISTING FACTS are indexed first, followed by FACT INVALIDATION CANDIDATES.
    - Return all contradicted idx values in contradicted_facts.
    - If no contradictions, return an empty list for contradicted_facts.
 
-<EXAMP
-  [...667 more chars...]
+<EXAMPLE>
+EXISTING FACT: idx=0, "Alice joined Acme Corp in 2020"
+NEW FACT: "Alice joined Acme Corp in 2020"
+Result: duplicate_facts=[0], contradicted_facts=[] (identical factual informati
+  [...486 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"duplicate_facts": [], "contradicted_facts": []}
+{"duplicate_facts": [0], "contradicted_facts": []}
 ```
 
 ---
 
-## `extract_nodes.extract_text`
+## `extract_edges.edge`
 * provenance: **captured**
-* loss_weight: `0.5506` (basis `full`)  |  response_schema: `ExtractedEntities`
-* article `4139d961-e9e8-4d05-9edb-658bb1d2f694` chunk `0` episode `19bcd9ec-85b7-42b4-8cc8-4c09af5de395`
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `82ed2eb9-24a3-4322-bccb-958dd88c0f31` chunk `1` episode `adb1dc0c-cda2-443a-9156-698b2d79fe11`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
 ```
-You are an entity extraction specialist for unstructured text. NEVER extract abstract concepts, feelings, or generic words.
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
 Do not escape unicode characters.
 
 
@@ -557,48 +407,28 @@ Any extracted information should be returned in the same language as it was writ
 
 ```
 
-NEVER extract:
-- Pronouns (you, me, he, she, they, it, them, him, her, we, us, this, that, those)
-- Abstract concepts (joy, balance, growth, resilience, passion, motivation)
-- Generic common nouns or bare object words (day, life, people, work, stuff, things, food, time,
-  tickets, supplies, clothes, keys, gear)
-- Generic media/content nouns unless uniquely identified in the node name itself (photo, pic, picture,
-  image, video, post, story)
-- Generic event/activity nouns unless uniquely identified in the node name itself (event, game, meeting,
-  class, workshop, competition)
-- Broad institutional nouns unless explicitly named or uniquely qualified (government, school, company,
-  team, office)
-- Ambiguous bare nouns whose meaning depends on sentence context rather than the node name itself
-- Sentence fragments or clauses as entity names
-- Bare relational or kinship terms (dad, mom, sister, brother, spouse, friend, boss, pet, dog,
-  cat) unless qualified with a possessor (e.g., "Nisha's dad" is acceptable, "dad" alone is not)
-- Bare generic objects that cannot be meaningfully qualified with a possessor, brand, or
-  distinguishing detail (e.g., NEVER extract "supplies" from "I picked up some supplies")
-
-Extract entities from the TEXT that are **explicitly mentioned**.
-For each entity, classify it using the ENTITY TYPES above.
-Only extract entities specific enough to be uniquely identifiable — ask: "Could this have its own Wikipedia article or database entry?"
-
-<ENTITY TYPES>
-[{'entity_type_id': 0, 'entity_type_name': 'Entity', 'entity_type_description': 'A specific, identifiable entity that does not fit any of the other listed types. Must still be a concrete, meaningful thing — specific enough to be uniquely identifiable. GOOD: a named entity not covered by the other type
-  [...11999 more chars...]
+<PREVIOUS_MESSAGES>
+[{"content": "[Continuous backups and PITR › Continuous backups and PITR]\n\n###### Metadata parameters for RDS PITR restore\n\nThe following metadata parameters are supported for RDS and Aurora PITR restores:\n\n* **DBInstanceIdentifier** (RDS) or **DBClusterIdentifier** (Aurora) \\- Required. The name for the restored database.\n* **Engine** \\- Required. The database engine (e.g., mysql, postgres, aurora\\-mysql, aurora\\-postgresql).\n* **UseLatestRestorableTime** \\- Optional. Set to \"true\" to restore to the latest restorable time, or \"false\" to specify a RestoreTime.\n* **RestoreTime** \\- Optional. The date and time to restore to (ISO 8601 format). Required if UseLatestRestorableTime is \"false\".\n\n\n###### Copy tags to restored resource\n\nUse the `--copy-source-tags-to-restored-resource` flag to copy tags from the source database to the restored database. This ensures tag\\-based access controls and cost allocation tags are preserved.\n\n\nFor complete details on RDS PITR restore parameters, see:\n\n* [RestoreDBInstanceToPointInTime](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceToPointInTime.html) in the Amazon RDS API Reference\n* [RestoreDBClusterToPointInTime](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBClusterToPointInTime.html) in the Amazon RDS API Reference\n\n", "timestamp": "2026-08-17T23:53:18.361640+00:00"}, {"content": "[Continuous backups and PITR › Continuous backups and PITR]\n### Aurora\n\nTo enable continuous backup of your Aurora resources, see the steps in the first\n section of this page.\n\nThe procedure to restore an Aurora cluster to a point in time is a [variation of\n the steps to restore a snapshot of an aurora cluster](https://docs.aws.amazon.com/a
+  [...25087 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"extracted_entities": [{"name": "Azure Copilot", "entity_type_id": 3, "episode_indices": [0]}, {"name": "Resiliency in Azure", "entity_type_id": 2, "episode_indices": [0]}, {"name": "Azure Business Continuity Center", "entity_type_id": 2, "episode_indices": [0]}, {"name": "Azure", "entity_type_id": 6, "episode_indices": [0]}, {"name": "Zone Resiliency", "entity_type_id": 5, "episode_indices": [0]}, {"name": "High Availability", "entity_type_id": 5, "episode_indices": [0]}, {"name": "Backup & Disaster Recovery", "entity_type_id": 5, "episode_indices": [0]}, {"name": "Ransomware Protection", "entity_type_id": 5, "episode_indices": [0]}, {"name": "Protection management", "entity_type_id": 5, "episode_indices": [0]}, {"name": "Ransomware protection", "entity_type_id": 5, "episode_indices": [0]}, {"name": "Monitoring and reporting", "entity_type_id": 5, "episode_indices": [0]}, {"name": "Azure Site Recovery", "entity_type_id": 2, "episode_indices": [0]}, {"name": "Recovery Points", "entity_type_id": 5, "episode_indices": [0]}]}
+{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "Amazon EC2", "relation_type": "Supports", "fact": "AWS Backup restores Amazon EC2 instances by creating an AMI, an instance, the Amazon EBS root volume, Amazon EBS data volumes, and Amazon EBS snapshots.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon EC2", "relation_type": "Limits", "fact": "AWS Backup configures the restored Amazon EC2 instance to use the same key pair that the protected resource used originally and does not allow specifying a different key pair during the restore process.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Amazon EC2", "relation_type": "Limits", "fact": "AWS Backup does not back up and restore user-data that is used while launching an Amazon EC2 instance.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "instance profile", "relation_type": "Limits", "fact": "When configuring the restored Amazon EC2 instance, AWS Backup allows choosing between using the same instance profile that the protected resource used originally or launching without an instance profile to prevent privilege escalations.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "IAM role", "relation_type": "Requires", "fact": "If AWS Backup uses the original instance profile for the restored Amazon EC2 instance, it must be granted the iam:PassRole permission for the IAM role associated with the instance profile.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Am
+  [...262 more chars...]
 ```
 
 ---
 
 ## `dedupe_edges.resolve_edge`
 * provenance: **captured**
-* loss_weight: `2.9471` (basis `full`)  |  response_schema: `EdgeDuplicate`
-* article `a0e14280-837e-4e23-a930-9119e7692e94` chunk `9` episode `57e34cc9-0a9c-4bac-b60d-99d291c71e5a`
+* loss_weight: `2.5234` (basis `full`)  |  response_schema: `EdgeDuplicate`
+* article `49d019c4-ceb8-4a0a-b908-cd35602cab20` chunk `5` episode `34957b29-9467-46dd-b1cf-16e0b2a5f29e`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
@@ -622,154 +452,27 @@ IMPORTANT constraints:
 - The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
 
 <EXISTING FACTS>
-[{'idx': 0, 'fact': 'Azure Backup backs up Azure VMs by installing an extension to the Azure VM agent that runs on the machine.'}, {'idx': 1, 'fact': 'Azure Backup supports enabling backup of Azure VMs.'}, {'idx': 2, 'fact': 'Azure Backup supports backup of Azure VMs without requiring internet connectivity.'}, {'idx': 3, 'fact': 'Azure Backup backs up Azure VMs with data in transit remaining on the Azure backbone network without needing to access the virtual network.'}, {'idx': 4, 'fact': 'Azure Backup supports backup and restore of managed Azure VMs that have their OS/data disks encrypted with ADE, with or without the Microsoft Entra app.'}, {'idx': 5, 'fact': 'Azure Backup supports backup and restore of managed Azure VMs that have OS/data disks encrypted with Azure Disk Encryption (ADE).'}, {'idx': 6, 'fact': 'Azure Backup supports backup and restore of managed Azure VMs encrypted with Azure Disk Encryption (ADE) and key encryption keys (KEKs).'}, {'idx': 7, 'fact': 'Azure Backup backs up Azure VMs, and backup or restore failures for a VM appear as datasource alerts.'}, {'idx': 8, 'fact': 'Azure Backup can restore SQL Server databases that are running on Azure VMs.'}, {'idx': 9, 'fact': 'Restoring a SQL Server database to an alternate location requires Contributor (write) access to the new target VM.'}]
-<
-  [...1735 more chars...]
+[{'idx': 0, 'fact': 'AWS Backup restore of Amazon S3 objects does not delete objects (without delete markers) from a bucket during a restore'}, {'idx': 1, 'fact': 'AWS Backup restore of Amazon S3 objects does not perform a destructive restore to the original bucket'}, {'idx': 2, 'fact': 'AWS Backup provides the capability to restore all objects in an Amazon S3 bucket or specific objects.'}, {'idx': 3, 'fact': 'AWS Backup restore of Amazon S3 objects with public ACLs is not restored if Block Public Access is enabled on the destination bucket'}, {'idx': 4, 'fact': 'AWS Backup provides the capability to restore Amazon S3 data to an existing or new bucket.'}, {'idx': 5, 'fact': 'AWS Backup provides the ability to restore up to the 10 latest versions of Amazon S3 objects using the AWS Backup console.'}, {'idx': 6, 'fact': 'AWS Backup restore of Amazon S3 objects is skipped if the destination bucket has an object with the same name or version ID'}, {'idx': 7, 'fact': 'AWS Backup restores only the latest version of Amazon S3 objects by default.'}, {'idx': 8, 'fact': 'AWS Backup restore of Amazon S3 data requires the destination bucket to have versioning turned on'}, {'idx': 9, 'fact': 'AWS Backup cannot restore ACLs for an Amazon S3 bucket if the backup was created with the BackupACLs option disabled.'}]
+</EXISTIN
+  [...1643 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"duplicate_facts": [], "contradicted_facts": []}
-```
-
----
-
-## `extract_nodes.extract_text`
-* provenance: **captured**
-* loss_weight: `0.5506` (basis `full`)  |  response_schema: `ExtractedEntities`
-* article `c57950e3-10c0-4815-88b7-f90a2de994c1` chunk `3` episode `224252db-2748-4157-93f8-d8cb75f33d40`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are an entity extraction specialist for unstructured text. NEVER extract abstract concepts, feelings, or generic words.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-NEVER extract:
-- Pronouns (you, me, he, she, they, it, them, him, her, we, us, this, that, those)
-- Abstract concepts (joy, balance, growth, resilience, passion, motivation)
-- Generic common nouns or bare object words (day, life, people, work, stuff, things, food, time,
-  tickets, supplies, clothes, keys, gear)
-- Generic media/content nouns unless uniquely identified in the node name itself (photo, pic, picture,
-  image, video, post, story)
-- Generic event/activity nouns unless uniquely identified in the node name itself (event, game, meeting,
-  class, workshop, competition)
-- Broad institutional nouns unless explicitly named or uniquely qualified (government, school, company,
-  team, office)
-- Ambiguous bare nouns whose meaning depends on sentence context rather than the node name itself
-- Sentence fragments or clauses as entity names
-- Bare relational or kinship terms (dad, mom, sister, brother, spouse, friend, boss, pet, dog,
-  cat) unless qualified with a possessor (e.g., "Nisha's dad" is acceptable, "dad" alone is not)
-- Bare generic objects that cannot be meaningfully qualified with a possessor, brand, or
-  distinguishing detail (e.g., NEVER extract "supplies" from "I picked up some supplies")
-
-Extract entities from the TEXT that are **explicitly mentioned**.
-For each entity, classify it using the ENTITY TYPES above.
-Only extract entities specific enough to be uniquely identifiable — ask: "Could this have its own Wikipedia article or database entry?"
-
-<ENTITY TYPES>
-[{'entity_type_id': 0, 'entity_type_name': 'Entity', 'entity_type_description': 'A specific, identifiable entity that does not fit any of the other listed types. Must still be a concrete, meaningful thing — specific enough to be uniquely identifiable. GOOD: a named entity not covered by the other type
-  [...12564 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"extracted_entities": [{"name": "Azure Backup", "entity_type_id": 2, "episode_indices": [0]}, {"name": "Azure Import/Export service", "entity_type_id": 2, "episode_indices": [0]}, {"name": "Azure Monitor", "entity_type_id": 3, "episode_indices": [0]}, {"name": "Azure", "entity_type_id": 6, "episode_indices": [0]}, {"name": "Recovery Services vault", "entity_type_id": 2, "episode_indices": [0]}, {"name": "Azure IaaS VMs", "entity_type_id": 4, "episode_indices": [0]}, {"name": "application-consistent backups", "entity_type_id": 5, "episode_indices": [0]}, {"name": "immutability", "entity_type_id": 5, "episode_indices": [0]}, {"name": "cross-region copy", "entity_type_id": 5, "episode_indices": [0]}, {"name": "instant restore", "entity_type_id": 5, "episode_indices": [0]}, {"name": "synthetic full backup", "entity_type_id": 5, "episode_indices": [0]}, {"name": "changed block tracking", "entity_type_id": 5, "episode_indices": [0]}, {"name": "retention policy", "entity_type_id": 7, "episode_indices": [0]}, {"name": "recovery point", "entity_type_id": 7, "episode_indices": [0]}, {"name": "RPO", "entity_type_id": 7, "episode_indices": [0]}, {"name": "RTO", "entity_type_id": 7, "episode_indices": [0]}, {"name": "3-2-1 rule", "entity_type_id": 7, "episode_indices": [0]}, {"name": "storage classes/tiers", "entity_type_id": 7, "episode_indices": [0]}, {"name": "S3 Standard", "entity_type_id": 7, "episode_indices": [0]}, {"name": "S3 Glacier", "entity_type_id": 7, "episode_indices": [0]}, {"name": "Azure Archive tier", "entity_type_id": 7, "episode_indices": [0]}, {"name": "LRS", "entity_type_id": 7, "episode_indices": [0]}, {"name": "ZRS", "entity_type_id": 7, "episode_indices": [0]}, {"name": "SEC 17a-4", "entity_type_id": 7, "episode_indices": [0]}, {"name": "GDPR", "entity_typ
-  [...35 more chars...]
-```
-
----
-
-## `dedupe_nodes.nodes`
-* provenance: **captured**
-* loss_weight: `0.3066` (basis `full`)  |  response_schema: `NodeResolutions`
-* article `6d5aa2c9-7dff-430a-997e-86448604c7d2` chunk `19` episode `5443fd84-7dff-4600-9e84-672154e9bae8`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are an entity deduplication assistant. NEVER fabricate entity names or mark distinct entities as duplicates.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-<PREVIOUS MESSAGES>
-[{"content": "[Configure Multi-user authorization using Resource Guard › Configure Multi-user authorization using Resource Guard]\n\n\n### Set up approvers for activating Backup MUA Operator role\n\nBy default, the above setup may not have an approver (and an approval flow requirement) configured in PIM. To ensure that approvers have the **Backup MUA Operator** role for request approval, the Security admin must follow these steps:\n\nNote\n\nIf this isn't configured, any requests will be automatically approved without going through the security admins or a designated approver’s review. More details on this can be found [here](../active-directory/privileged-identity-management/pim-resource-roles-configure-role-settings)\n\n1. In Microsoft Entra PIM, select **Azure Resources** on the left navigation bar and select your Resource Guard.\n2. Go to **Settings** and then go to the **Backup MUA Operator** role.\n\n![Screenshot showing how to add contributor.](/media/6d5aa2c9-7dff-430a-997e-86448604c7d2/ef44aeaa178c.png)\n\n> **Figure:** Screenshot of the 'Roles' page in a management interface, showing a list of available roles such as Contributor, Owner, and Reader, with columns for Role, Modified, and Last updated. The 'Settings' menu item is selected in the left navigation.\n3. Select **Edit** to add the reviewers who must review and approve the activation request for the **Backup MUA Operator** role in case you find that Approvers show None or display incorrect approver(s).\n4. On the **Activation** tab, select **Require approval to activate** and add the approver(s) who need to approve each request.\n5. Select security options, such as multifactor authentication (MFA), Mandating ticket to activate **Backup MUA Operator** role.\n6. Select the appropriate
-  [...34498 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"entity_resolutions": [{"id": 0, "name": "Contributor role", "duplicate_candidate_id": 12}, {"id": 1, "name": "Backup admin", "duplicate_candidate_id": 15}]}
-```
-
----
-
-## `extract_edges.edge`
-* provenance: **captured**
-* loss_weight: `0.3129` (basis `full`)  |  response_schema: `ExtractedEdges`
-* article `82ed2eb9-24a3-4322-bccb-958dd88c0f31` chunk `2` episode `0e0dbe61-b552-4921-9a05-716f15529870`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
-
-**system**
-
-```
-You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
-Do not escape unicode characters.
-
-
-Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
-```
-
-**user**
-
-```
-
-<PREVIOUS_MESSAGES>
-[{"content": "[Continuous backups and PITR › Continuous backups and PITR]\n### Aurora\n\nTo enable continuous backup of your Aurora resources, see the steps in the first\n section of this page.\n\nThe procedure to restore an Aurora cluster to a point in time is a [variation of\n the steps to restore a snapshot of an aurora cluster](https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-aur.html).\n\nWhen you conduct a point in time restore, the console displays a **restore\n time** section. See  *Restoring a continuous backup* further\n down on this page in [Working with Continuous backups](https://docs.aws.amazon.com/aws-backup/latest/devguide/point-in-time-recovery.html#point-in-time-recovery-working-with).\n\n###### Important\n\nAurora continuous backups are supported in vaults protected by AWS Backup Vault Lock,\n and the vault's minimum and maximum retention settings are enforced on the recovery\n point. However, Aurora continuous backups do not support the logically air\\-gapped vault\n feature. To use a logically air\\-gapped vault with Aurora, use periodic snapshot backups\n instead.\n\nThe recovery point objective (RPO) for Aurora continuous backups is typically less\n than 5 minutes, as Aurora copies data to Amazon S3 continuously in the background. Use the\n `LatestRestorableTime` value to determine the most recent point to which you\n can restore.\n\n**Retention periods and backup windows:** When you enable\n or change continuous backup settings for an Aurora cluster, AWS Backup calls\n [`ModifyDBCluster`](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_ModifyDBCluster.html) to apply those changes. This can modify the\n cluster's `PreferredBackupWindow`. If you have other configuration updates\n pending the next m
-  [...24650 more chars...]
-```
-
-**assistant (target)**
-
-```json
-{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "Amazon EC2", "relation_type": "Supports", "fact": "AWS Backup supports restoring Amazon EC2 instances, during which all Amazon EC2 quotas and configuration restrictions apply.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "AWS Backup Vault Lock", "relation_type": "Provides", "fact": "AWS Backup provides AWS Backup Vault Lock, and if the vault containing Amazon EC2 recovery points has a vault lock, additional security considerations apply.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "Active Directory", "relation_type": "Limits", "fact": "AWS Backup does not automatically join restored Amazon EC2 instances to an Active Directory domain; if the original instance was domain-joined, you must rejoin the restored instance manually or by using automation.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "AWS Lambda", "relation_type": "IntegratesWith", "fact": "AWS Backup can trigger an AWS Lambda function in response to the restore job completed event to rejoin a restored Amazon EC2 instance to an Active Directory domain.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+{"duplicate_facts": [0], "contradicted_facts": []}
 ```
 
 ---
 
 ## `extract_nodes.extract_summaries_batch`
 * provenance: **captured**
-* loss_weight: `0.4523` (basis `full`)  |  response_schema: `SummarizedEntities`
-* article `c57950e3-10c0-4815-88b7-f90a2de994c1` chunk `3` episode `224252db-2748-4157-93f8-d8cb75f33d40`
+* loss_weight: `0.9842` (basis `full`)  |  response_schema: `SummarizedEntities`
+* article `1f433037-fd50-482c-b6c5-9f9c4480d2f2` chunk `10` episode `53b2cb0f-b75f-4bae-b7cc-c734a21c62be`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
@@ -806,25 +509,206 @@ Guidelines:
         
 
 <MESSAGES>
-[{"content": "[Azure Backup documentation › Azure Backup documentation]\n\nManage at scale\n-------
-  [...21340 more chars...]
+[{"content": "[FAQ- Recovery Services vault › FAQ- Recovery Services vault]\nAzure Backup \\- Frequ
+  [...15619 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"summaries": [{"name": "storage classes/tiers", "summary": "Azure Backup supports long-term retention using the Archive tier. AWS Backup supports tiering backups to cold storage for DynamoDB, with advanced features including cross-Region and cross-account copying and cost allocation tags available to customers onboarding after November 2021. AWS Backup cold storage tiering reduces costs while retaining backups. Azure Backup uses a pay-as-you-use model with automatic storage management and no cost for on-premises storage devices."}, {"name": "recovery point", "summary": "Azure Backup stores recovery points in Recovery Services vaults and Backup vaults, which are online-storage entities in Azure holding backup copies and recovery points. Recovery points are managed with built-in recovery point management. Azure Backup provides application-consistent backups, meaning a recovery point contains all required data to restore the backup copy without additional fixes, reducing restoration time. Vaults allow monitoring of backed-up items including Azure VMs and on-premises machines."}, {"name": "retention policy", "summary": "Azure Backup supports short-term and long-term data retention using Recovery Services vaults. Long-term retention using the Archive tier is available for Azure Virtual Machines. AWS Backup allows creating scheduled backups using backup plans and storing backups in backup vaults. For Amazon FSx file systems, AWS Backup provides unlimited retention options and the ability to create scheduled backups as frequently as every hour. AWS Backup retains backups even after the source file system is deleted, protecting against accidental or malicious deletion."}]}
+{"summaries": [{"name": "Volume", "summary": "Volume is a data source in Azure Backup. Its size is determined by the amount of data being backed up from a single volume of the VM being backed up."}, {"name": "Exchange", "summary": "Exchange is a data source in Azure Backup. Its size is determined by the sum of all Exchange databases in an Exchange server being backed up."}, {"name": "BMR", "summary": "BMR (or BMR/System state) is a data source in Azure Backup. Its size is determined by each individual copy of BMR or system state of the machine being backed up."}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `dad69d7c-189b-4d53-8d70-40697eae685a` chunk `5` episode `d0d4b44f-d559-45c8-802e-218ef528e30e`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Backup vaults › Backup vaults]\nBackup vaults\n=============\n\nIn AWS Backup, a *backup vault* is a container that stores and organizes your\n backups.\n\n\nWhen creating a backup vault, you must specify the AWS Key Management Service (AWS KMS) encryption key that\n encrypts some of the backups placed in this vault\n. Encryption for other backups is managed by\n their source AWS services.\n For more information about encryption, see the chart in [Encryption for backups\n in AWS](https://docs.aws.amazon.com/aws-backup/latest/devguide/encryption.html).\n\n\nThe following sections provide an overview of how to manage your backup vaults in AWS Backup.\n\n\n###### Topics\n\n* [Backup vault creation and deletion](./create-a-vault.html)\n* [Logically air\\-gapped vault](./logicallyairgappedvault.html)\n* [Vault access policies](./create-a-vault-access-policy.html)\n* [AWS Backup Vault Lock](./vault-lock.html)\n", "timestamp": "2026-06-25T23:20:38.079166+00:00"}, {"content": "[Backup vault creation and deletion › Backup vault creation and deletion]\nBackup vault creation and deletion\n==================================\n\nYou must create at least one vault before creating a backup plan or starting a backup\n job.\n\nWhen you first use the **Backup Vaults** page of the AWS Backup console in an\n AWS Region, the console automatically creates a default vault for the Region.\n\n###### Note\n\nIf a Default vault exists in a Region, AWS Backup periodically identifies orphaned AMIs \\- \n AMIs created by AWS Backup that are no longer associated with a recovery point \\- and places them \n as expired recovery points in the Default vault. You can then delete these expired recovery \n points from the Default vault, which also deletes the associated AM
+  [...29902 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "AWS Backup Vault Lock", "relation_type": "Provides", "fact": "AWS Backup provides AWS Backup Vault Lock as an optional feature of a backup vault.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup Vault Lock", "target_entity_name": "us-east-1", "relation_type": "AvailableIn", "fact": "AWS Backup Vault Lock is available in the us-east-1 region.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "DescribeBackupVault", "target_entity_name": "AWS Backup", "relation_type": "Operates", "fact": "DescribeBackupVault operates on AWS Backup to review AWS Backup Vault Lock configuration details.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "ListBackupVaults", "target_entity_name": "AWS Backup", "relation_type": "Operates", "fact": "ListBackupVaults operates on AWS Backup to review AWS Backup Vault Lock configuration details.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+```
+
+---
+
+## `dedupe_nodes.nodes`
+* provenance: **captured**
+* loss_weight: `0.3004` (basis `full`)  |  response_schema: `NodeResolutions`
+* article `424b1222-b049-4e5a-82b3-cd5735f60f79` chunk `3` episode `e9f26ba1-64b9-4654-bde6-4ce735cb2617`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
+
+**system**
+
+```
+You are an entity deduplication assistant. NEVER fabricate entity names or mark distinct entities as duplicates.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS MESSAGES>
+[{"content": "[FAQ- Recovery Services vault › FAQ- Recovery Services vault]\n\n### Are there size limits for data backup?\n\nSizes limits are as follows:\n\n| OS/machine | Size limit of data source |\n| --- | --- |\n| Windows 8 or later | 54,400 GB |\n| Windows 7 | 1700 GB |\n| Windows Server 2012 or later | 54,400 GB |\n| Windows Server 2008, Windows Server 2008 R2 | 1700 GB |\n| Azure VM | See the [support matrix for Azure VM backup](backup-support-matrix-iaas#vm-storage-support) |\n\nNote\n\nWindows Server 2008, 2008 R2, 2012 and 2012 R2 have reached End of Support (EOS). Review your usage and plan OS upgrades and migrations accordingly. For more information, see End of support for:\n\n* [Windows Server 2008 and Windows Server 2008 R2](/en-us/troubleshoot/windows-server/windows-server-eos-faq/end-of-support-windows-server-2008-2008r2)\n* [Windows Server 2012](/en-us/windows/release-health/status-windows-server-2012)\n* [Windows Server 2012 R2](/en-us/windows/release-health/status-windows-8.1-and-windows-server-2012-r2)\n\n[Perform in\\-place upgrade to Windows Server 2016, 2019, 2022, or 2025](/en-us/azure/virtual-machines/windows-in-place-upgrade#perform-in-place-upgrade-to-windows-server-2016-2019-2022-or-2025).\n", "timestamp": "2026-07-14T22:02:42.343231+00:00"}, {"content": "[FAQ- Recovery Services vault › FAQ- Recovery Services vault]\n\n### How is the data source size determined?\n\nThe following table explains how each data source size is determined.\n\n| **Data source** | **Details** |\n| --- | --- |\n| Volume | The amount of data being backed up from single volume VM being backed up. |\n| SQL Server database | Size of single database size being backed up. |\n| SharePoint | Sum of the content and configuration databases within a SharePoi
+  [...22776 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"entity_resolutions": [{"id": 0, "name": "Azure immutable vault", "duplicate_candidate_id": 14}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `e2f3ee74-04f0-4d6f-9925-83dc0b43b193` chunk `0` episode `e8710215-a884-4391-9e21-d1be93640fea`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Monitor jobs › Monitor jobs]\n\n[\n\n![Screenshot showing the Jobs homepage.](/media/ea2a35ad-6628-414d-bb83-0fac5a4d6882/5d1a431ee514.png)\n\n> **Figure:** Screenshot of the Jobs homepage in Azure Backup, showing a list of backup operations with their status (In progress, Completed), item names, vaults, start times, and durations. The interface includes filters for solution, data source type, subscription, and time range, with summary counts for job outcomes.\n\n](media/tutorial-monitor-operate/job-homepage.png#lightbox)\n\n3. To change the scope for **Jobs** view from the scope\\-picker, select **Change** corresponding to **Currently showing: Protected items job details of Azure managed resources**.\n", "timestamp": "2026-07-14T21:59:26.617768+00:00"}, {"content": "[Monitor jobs › Monitor jobs]\n\n[\n\n![Screenshot showing the scope picker option.](/media/ea2a35ad-6628-414d-bb83-0fac5a4d6882/bbefc643686e.png)\n\n> **Figure:** Screenshot of the Azure Backup Jobs page showing the 'Change scope' dialog. The dialog allows selection of job source ('Protected items' or 'Other') and resource scope ('Azure' or 'Non-Azure'). The main page displays job details filtered to 'Protected items' for Azure managed resources.\n\n](media/tutorial-monitor-operate/scope-picker.png#lightbox)\n\n4. On the **Change scope** blade, select the following options as required, and then select **Update**.", "timestamp": "2026-07-14T21:59:26.617768+00:00"}, {"content": "[Monitor jobs › Monitor jobs]\n\n\n\t* **Resource managed by**:\n\t\t+ **Azure resource:** Resources that are under the direct management and control of Azure. Azure resources are provisioned, configured, and monitored through Azure's services and tools. They're fully integrated into the Azure ecos
+  [...32479 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "Cross Region Restore", "relation_type": "Provides", "fact": "Azure Backup provides the Cross Region Restore capability.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "Azure database for PostgreSQL", "relation_type": "AppliesTo", "fact": "Cross Region Restore applies to Azure database for PostgreSQL.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "Azure VM", "relation_type": "AppliesTo", "fact": "Cross Region Restore applies to SQL databases hosted on Azure VMs.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "Azure paired region", "relation_type": "AvailableIn", "fact": "Cross Region Restore allows restoring data in a secondary Azure paired region.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Geo-redundant Storage", "relation_type": "Limits", "fact": "A Geo-redundant Storage (GRS) vault with Cross Region Restore enabled cannot be changed to Zone-redundant Storage (ZRS) or Locally redundant Storage (LRS) after protection starts for the first time.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Cross Region Restore", "target_entity_name": "Recovery Point Objective", "relation_type": "Limits", "fact": "The secondary region Recovery Point Objective (RPO) for Cross Region Restore is currently 36 hours.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `a6481417-ece0-481d-a73e-c4279e5eec5f` chunk `8` episode `d685258e-4cde-45f2-ab23-64631a067da3`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Azure Backup architecture › Azure Backup architecture]\n### Back up and restore Azure VMs with premium storage\n\nYou can back up Azure VMs by using premium storage with Azure Backup:\n\n* During the process of backing up VMs with premium storage, the Backup service creates a temporary staging location, named *AzureBackup\\-*, in the storage account. The size of the staging location equals the size of the recovery point snapshot.\n* Make sure that the premium storage account has adequate free space to accommodate the temporary staging location. For more information, see [Scalability targets for premium page blob storage accounts](../storage/blobs/scalability-targets-premium-page-blobs). Don't modify the staging location.\n* After the backup job finishes, the staging location is deleted.\n* The price of storage used for the staging location is consistent with [premium storage pricing](/en-us/azure/virtual-machines/disks-types#billing).\n\nWhen you restore Azure VMs by using premium storage, you can restore them to premium or standard storage. Typically, you would restore them to premium storage. But if you need only a subset of files from the VM, it might be cost effective to restore them to standard storage.\n\n### Back up and restore managed disks\n\nYou can back up Azure VMs with managed disks:\n\n* You back up VMs with managed disks in the same way that you do any other Azure VM. You can back up the VM directly from the virtual machine settings, or you can enable backup for VMs in the Recovery Services vault.\n* You can back up VMs on managed disks through RestorePoint collections built on top of managed disks.\n* Azure Backup also supports backing up VMs with managed disks that were encrypted by using Azure Disk Encryption.\n\nWhe
+  [...38547 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "Azure Advisor", "relation_type": "IntegratesWith", "fact": "Azure Backup integrates with Azure Advisor, which recommends configuration of backup-related security for production environments.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Microsoft Defender for Cloud", "relation_type": "IntegratesWith", "fact": "Azure Backup integrates with Microsoft Defender for Cloud, which recommends configuration of backup-related security for production environments.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Recovery Services vaults", "relation_type": "Provides", "fact": "Azure Backup provides storage redundancy types that can be found in Recovery Services vaults.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Backup vault", "relation_type": "Provides", "fact": "Azure Backup provides storage redundancy types that can be found in Backup vault.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
+```
+
+---
+
+## `extract_edges.edge`
+* provenance: **captured**
+* loss_weight: `0.2551` (basis `full`)  |  response_schema: `ExtractedEdges`
+* article `554ebdbf-e818-43e8-9d1d-55fbd28a983b` chunk `3` episode `322d7280-a60f-43bc-a789-476932d7afa5`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
+
+**system**
+
+```
+You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+<PREVIOUS_MESSAGES>
+[{"content": "[Getting started › Getting started]\n\nOpt\\-in choices apply to the specific account and AWS Region. When an account uses AWS Backup\n (creates a backup vault or backup plan) in a Region, the account automatically is opted into\n all resource types supported by AWS Backup in the Region at that time. Supported services added to\n that Region at a later date will not be automatically included in a backup plan. You can\n choose to opt into those resource types once they become supported.\n\nAs AWS Backup supports more and more AWS services and third\\-party applications, you might\n need to revisit this step to opt in to those newly\\-supported resources.\n\nAWS Backup does not govern or manage backups taken in AWS environments other than \n AWS Backup.\n\n\n###### Note\n\nFor more information on how service opt\\-ins work for management and delegated administrator accounts, see [Managing AWS Backup resources across multiple AWS accounts](./manage-cross-account.html).\n\n\n###### To opt in to use AWS Backup to protect all supported resource types\n\n1. Sign in to the AWS Management Console, and open the AWS Backup console at <https://console.aws.amazon.com/backup>.\n2. In the left navigation pane, choose **Settings**.\n3. Under **Service opt\\-in**, choose **Configure\n resources**.\n4. Opt in to all AWS Backup\\-supported **Resources** by moving all the toggles\n to the right.\n5. Choose **Confirm**.\n", "timestamp": "2026-06-25T23:20:36.805845+00:00"}, {"content": "[Backup plans › Backup plans]\nBackup plans\n============\n\nIn AWS Backup, a *backup plan* is a policy expression that defines when and\n how you want to back up your AWS resources, such as Amazon DynamoDB tables or Amazon Elastic File System (Amazon EFS) file\n systems.\n 
+  [...26607 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"edges": [{"source_entity_name": "AWS Backup", "target_entity_name": "retention policy", "relation_type": "Provides", "fact": "AWS Backup retains the backup under the rule with the longer retention period when start windows of different rules overlap.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "start window", "relation_type": "Provides", "fact": "During the start window, the backup job status remains in CREATED status until it has successfully begun or until the start window time has run out.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "AWS Backup", "target_entity_name": "start window", "relation_type": "Provides", "fact": "If within the start window time AWS Backup receives an error that allows the job to be retried, AWS Backup will automatically retry to begin the job at least every 10 minutes until the backup successfully begins or until the job status changes to EXPIRED.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}]}
 ```
 
 ---
 
 ## `dedupe_edges.resolve_edge`
 * provenance: **captured**
-* loss_weight: `2.9471` (basis `full`)  |  response_schema: `EdgeDuplicate`
-* article `67a20d54-b82e-49a0-b6b8-2a9a8beb86e2` chunk `4` episode `a45c6d30-bcf0-4568-8c73-04cc4745ee3b`
+* loss_weight: `2.5234` (basis `full`)  |  response_schema: `EdgeDuplicate`
+* article `a6481417-ece0-481d-a73e-c4279e5eec5f` chunk `0` episode `4a404847-ef55-4bc9-8036-99a5513ae5b8`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
@@ -848,7 +732,7 @@ IMPORTANT constraints:
 - The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
 
 <EXISTING FACTS>
-[{'idx': 0, 'fact': 'Azure Backup supports backing up Azure Files to a storage account.'}, {'idx': 1, 'fact': 'Azure Backup supports vaulted backup for Azure Files.'}, {'idx': 2, 'fact': 'Azure Backup supports Azure Files backup.'}, {'idx': 3, 'fact': 'Azure Backup supports reporting for Azure Files.'}, {'idx': 4, 'fact': 'Azure Backup supports file recovery for Azure Files.'}, {'idx': 5, 'fact': 'Azure Backup supports viewing backup and site recovery jobs and metrics for Azure Files workloads (monitoring and metrics).'}, {'idx': 6, 'fact': 'Azure Backup supports auditing and enforcing Azure Files backup with Azure Policy.'}, {'idx': 7, 'fact': 'Azure Backup supports Azure Storage account (with no file or blobs protected) for governance view of resources not configured for protection.'}]
+[{'idx': 0, 'fact': 'Azure Backup provides multiuser authorization (MUA) for authorizing critical protected operations using Azure Active Directory Privileged Identity Management.'}, {'idx': 1, 'fact': 'Azure Backup provides Multi-user authorization (MUA), which adds an additional layer of protection to critical operations on Recovery Services vaults and Backup vaults using Resource Guard.'}, {'idx': 2, 'fact': 'Azure Backup provides Multi-user authorization (MUA) as a security feature for Recovery Service vaults and Backup vaults.'}]
 </EXISTING FACTS>
 
 <FACT INVALIDATION CANDIDATES>
@@ -856,7 +740,7 @@ IMPORTANT constraints:
 </FACT INVALIDATION CANDIDATES>
 
 <NEW FACT>
-Azure Backup supports Azure files as a Mercury workload.
+Azure Backup includes multiuser authorization.
 </NEW FACT>
 
 You will receive TWO lists of facts with CONTINUOUS idx numbering across both lists.
@@ -864,25 +748,88 @@ EXISTING FACTS are indexed first, followed by FACT INVALIDATION CANDIDATES.
 
 1. DUPLICATE DETECTION:
    - If the NEW FACT represents identical factual information as any fact in EXISTING FACTS, return those idx values in duplicate_facts.
-   - If no duplicates, return an empty 
-  [...1077 more chars...]
+   - If no duplicates, return an empty list for duplicate_facts.
+
+2. CONTRADICTION DETECTION:
+   - Determine which facts the NEW FACT contradicts from either list.
+   - A fact from EXISTING FACTS can be both a duplicate AND contradicted (e.g., semantically the same but the new fact updates/supersedes it).
+
+  [...809 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"duplicate_facts": [], "contradicted_facts": []}
+{"duplicate_facts": [0, 1, 2], "contradicted_facts": []}
+```
+
+---
+
+## `dedupe_edges.resolve_edge`
+* provenance: **captured**
+* loss_weight: `2.5234` (basis `full`)  |  response_schema: `EdgeDuplicate`
+* article `e845095d-d22b-47c1-90e2-c60629331d66` chunk `7` episode `71f60bb1-2b2a-4ce3-9cfb-d22ce57b59b8`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
+
+**system**
+
+```
+You are a fact deduplication assistant. NEVER mark facts with key differences as duplicates.
+Do not escape unicode characters.
+
+
+Any extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.
+```
+
+**user**
+
+```
+
+NEVER mark facts as duplicates if they have key differences, particularly around numeric values, dates, or key qualifiers.
+
+IMPORTANT constraints:
+- duplicate_facts: ONLY idx values from EXISTING FACTS (NEVER include FACT INVALIDATION CANDIDATES)
+- contradicted_facts: idx values from EITHER list (EXISTING FACTS or FACT INVALIDATION CANDIDATES)
+- The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
+
+<EXISTING FACTS>
+[{'idx': 0, 'fact': 'Azure Backup limits Incremental backup for SAP HANA databases to at most one per day, and both differential and incremental backups cannot be scheduled on a database (only one delta backup type can be scheduled), and a full backup and a differential backup cannot be configured on the same day.'}, {'idx': 1, 'fact': 'Azure Backup uses incremental backups, which store only the blocks of data that changed since the previous backup and offer high storage and network efficiency without needing to supplement with full backups, in all backups to Azure.'}, {'idx': 2, 'fact': "Azure Backup provides Incremental backup for SAP HANA databases, which is based on the most recent previous full/differential/incremental-data backup and captures only the data that's changed since that previous data backup."}, {'idx': 3, 'fact': "Azure Backup's incremental backups mark and transfer only the blocks that changed since the previous backup in each subsequent month."}]
+</EXISTING FACTS>
+
+<FACT INVALIDATION CANDIDATES>
+[]
+</FACT INVALIDATION CANDIDATES>
+
+<NEW FACT>
+Azure Backup provides Incremental Backup as a backup type.
+</NEW FACT>
+
+You will receive TWO lists of facts with CONTINUOUS idx numbering across both lists.
+EXISTING FACTS are indexed first, followed by FACT INVALIDATION CANDIDATES.
+
+1. DUPLICATE DET
+  [...1261 more chars...]
+```
+
+**assistant (target)**
+
+```json
+{"duplicate_facts": [0, 1, 2], "contradicted_facts": []}
 ```
 
 ---
 
 ## `extract_nodes.extract_text`
 * provenance: **captured**
-* loss_weight: `0.5506` (basis `full`)  |  response_schema: `ExtractedEntities`
-* article `5d7d817e-7045-41c1-8b36-faa94a5b2c40` chunk `3` episode `2a193c0a-47fb-402e-b3dc-a02c7427e165`
+* loss_weight: `0.5655` (basis `full`)  |  response_schema: `ExtractedEntities`
+* article `17fb9911-e0c1-47eb-8055-694293196941` chunk `1` episode `7480c5a9-cc52-4899-b44c-41fdc5608b5f`
 * captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
@@ -922,29 +869,30 @@ Only extract entities specific enough to be uniquely identifiable — ask: "Coul
 
 <ENTITY TYPES>
 [{'entity_type_id': 0, 'entity_type_name': 'Entity', 'entity_type_description': 'A specific, identifiable entity that does not fit any of the other listed types. Must still be a concrete, meaningful thing — specific enough to be uniquely identifiable. GOOD: a named entity not covered by the other type
-  [...12063 more chars...]
+  [...11887 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"extracted_entities": [{"name": "AWS Backup", "entity_type_id": 2, "episode_indices": [0]}, {"name": "AWS Organizations", "entity_type_id": 1, "episode_indices": [0]}, {"name": "AWS Backup console", "entity_type_id": 3, "episode_indices": [0]}, {"name": "UpdateGlobalSettings API", "entity_type_id": 3, "episode_indices": [0]}, {"name": "Amazon EC2", "entity_type_id": 4, "episode_indices": [0]}, {"name": "EC2 Allowed AMIs", "entity_type_id": 7, "episode_indices": [0]}, {"name": "backup:CopyIntoBackupVault", "entity_type_id": 9, "episode_indices": [0]}]}
+{"extracted_entities": [{"name": "AWS Backup", "entity_type_id": 2, "episode_indices": []}, {"name": "CloudFormation", "entity_type_id": 1, "episode_indices": []}, {"name": "AWS::Backup::BackupVault", "entity_type_id": 3, "episode_indices": []}, {"name": "AWS::Backup::BackupPlan", "entity_type_id": 3, "episode_indices": []}, {"name": "Amazon RDS", "entity_type_id": 4, "episode_indices": []}, {"name": "Amazon Aurora", "entity_type_id": 4, "episode_indices": []}, {"name": "Amazon Neptune", "entity_type_id": 4, "episode_indices": []}, {"name": "Amazon DocumentDB", "entity_type_id": 4, "episode_indices": []}]}
 ```
 
 ---
 
-## `extract_edges.edge`
+## `dedupe_edges.resolve_edge`
 * provenance: **captured**
-* loss_weight: `0.3129` (basis `full`)  |  response_schema: `ExtractedEdges`
-* article `a6481417-ece0-481d-a73e-c4279e5eec5f` chunk `1` episode `c7a2e028-d018-45ac-a5da-8273a93d002b`
-* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `episode_content`, target_normalised `True`
-* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt or the target is reconstructed.
-* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason). Completions that failed were dropped, never repaired.
+* loss_weight: `2.5234` (basis `full`)  |  response_schema: `EdgeDuplicate`
+* article `186a0012-43f6-499d-b271-d44f4372331e` chunk `None` episode `None`
+* captured from `upstage/solar-pro4` (cheap tier), finish_reason `stop`, attribution route `new_fact_via_capture`, target_normalised `True`
+* repaired: none — target is exactly what the model emitted
+* fidelity: provenance=captured: this is the string upstage/solar-pro4 actually emitted for this exact prompt, recovered by usage.capture_llm_call. No part of the prompt is reconstructed.
+* fidelity: the completion passed its RESPONSE_MODELS schema AND the semantic checks in validate_capture (prompt-relative index ranges, endpoint names drawn from the ENTITIES list, a terminal finish_reason).
 
 **system**
 
 ```
-You are an expert fact extractor that extracts fact triples from text. 1. Extracted fact triples should also be extracted with relevant date information. 2. The CURRENT_MESSAGE may contain multiple episodes, each with its own timestamp. Use each episode's timestamp to resolve temporal references within that episode. REFERENCE_TIME is a fallback for when no per-episode timestamp is available.
+You are a fact deduplication assistant. NEVER mark facts with key differences as duplicates.
 Do not escape unicode characters.
 
 
@@ -955,15 +903,50 @@ Any extracted information should be returned in the same language as it was writ
 
 ```
 
-<PREVIOUS_MESSAGES>
-[{"content": "[Azure Backup architecture › Azure Backup architecture]\n\nBackup features\n---------------\n\nThe following table summarizes the supported features for the different types of backup:\n\n| **Feature** | **Direct Backup of Files and Folders (using MARS Agent)** | **Azure VM Backup** | **Machines or apps with DPM/MABS** |\n| --- | --- | --- | --- |\n| Back up to vault | Yes | Yes | Yes |\n| Back up to DPM/MABS disk, then to Azure |  |  | Yes |\n| Compress data sent for backup | Yes | No compression is used when transferring data. Storage is inflated slightly, but restoration is faster. | Yes |\n| Run incremental backup | Yes | Yes | Yes |\n| Back up deduplicated disks |  |  | Partially For DPM/MABS servers deployed on\\-premises only. |\n\n![Table key](/media/e845095d-d22b-47c1-90e2-c60629331d66/610e32670998.png)\n\n", "timestamp": "2026-07-14T21:54:55.336092+00:00"}, {"content": "[Azure Backup architecture › Azure Backup architecture]\nBackup policy essentials\n------------------------\n\n* A backup policy is created per vault.\n* A backup policy can be created for the backup of following workloads: Azure VMs, SQL in Azure VMs, SAP HANA in Azure VMs and Azure file shares. The policy for files and folder backup using the MARS agent is specified in the MARS console.\n\t+ Azure File Share\n* A policy can be assigned to many resources. An Azure VM backup policy can be used to protect many Azure VMs.\n* A policy consists of two components\n\t+ Schedule: When to take the backup\n\t+ Retention: For how long each backup should be retained.\n* Schedule can be defined as \"daily\" or \"weekly\" with a specific point of time.\n* Retention can be defined for \"daily\", \"weekly\", \"monthly\", \"yearly\" backup points.\n\t+ \"weekly\" refers to a b
-  [...31537 more chars...]
+NEVER mark facts as duplicates if they have key differences, particularly around numeric values, dates, or key qualifiers.
+
+IMPORTANT constraints:
+- duplicate_facts: ONLY idx values from EXISTING FACTS (NEVER include FACT INVALIDATION CANDIDATES)
+- contradicted_facts: idx values from EITHER list (EXISTING FACTS or FACT INVALIDATION CANDIDATES)
+- The idx values are continuous across both lists (INVALIDATION CANDIDATES start where EXISTING FACTS end)
+
+<EXISTING FACTS>
+[{'idx': 0, 'fact': 'Backup center supports SAP HANA on Azure VM backup.'}, {'idx': 1, 'fact': 'Backup center supports executing cross-region restore jobs for SAP HANA in Azure VM.'}]
+</EXISTING FACTS>
+
+<FACT INVALIDATION CANDIDATES>
+[]
+</FACT INVALIDATION CANDIDATES>
+
+<NEW FACT>
+Backup center supports SAP HANA in Azure VM backup.
+</NEW FACT>
+
+You will receive TWO lists of facts with CONTINUOUS idx numbering across both lists.
+EXISTING FACTS are indexed first, followed by FACT INVALIDATION CANDIDATES.
+
+1. DUPLICATE DETECTION:
+   - If the NEW FACT represents identical factual information as any fact in EXISTING FACTS, return those idx values in duplicate_facts.
+   - If no duplicates, return an empty list for duplicate_facts.
+
+2. CONTRADICTION DETECTION:
+   - Determine which facts the NEW FACT contradicts from either list.
+   - A fact from EXISTING FACTS can be both a duplicate AND contradicted (e.g., semantically the same but the new fact updates/supersedes it).
+   - Return all contradicted idx values in contradicted_facts.
+   - If no contradictions, return an empty list for contradicted_facts.
+
+<EXAMPLE>
+EXISTING FACT: idx=0, "Alice joined Acme Corp in 2020"
+NEW FACT: "Alice joined Acme Corp in 2020"
+Result: duplicate_facts=[0], contradicted_facts=[] (identical factual information)
+
+EXISTING FACT: idx=1, "A
+  [...457 more chars...]
 ```
 
 **assistant (target)**
 
 ```json
-{"edges": [{"source_entity_name": "Azure Backup", "target_entity_name": "Multifactor authentication (MFA)", "relation_type": "Provides", "fact": "Azure Backup provides Multifactor authentication (MFA), which adds an extra layer of security by requiring more verification during sign-in to reduce the risk of unauthorized access.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Azure role-based access control (Azure RBAC)", "relation_type": "Provides", "fact": "Azure Backup provides Azure role-based access control (Azure RBAC), which lets you define who can access Azure resources, what actions they can perform, and the scope of that access to enforce least-privilege permissions.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Azure Backup", "target_entity_name": "Multiuser authorization (MUA)", "relation_type": "Provides", "fact": "Azure Backup provides Multiuser authorization (MUA), which adds an extra layer of protection for critical operations on Recovery Services vaults and Backup vaults by requiring explicit approval from a security administrator.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Multiuser authorization (MUA)", "target_entity_name": "Recovery Services vaults", "relation_type": "AppliesTo", "fact": "Multiuser authorization (MUA) adds an extra layer of protection for critical operations on Recovery Services vaults.", "valid_at": null, "invalid_at": null, "episode_indices": [0]}, {"source_entity_name": "Multiuser authorization (MUA)", "target_entity_name": "Backup vaults", "relation_type": "AppliesTo", "fact": "Multiuser authorization (MUA) adds an extra layer of protection for critical operations o
-  [...82 more chars...]
+{"duplicate_facts": [0, 1], "contradicted_facts": []}
 ```
 
