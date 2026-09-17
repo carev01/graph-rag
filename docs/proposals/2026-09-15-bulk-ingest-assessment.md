@@ -427,3 +427,33 @@ step 0 risks a future `saga` experiment writing `HAS_EPISODE` edges our sweep ca
 3. Is a fifth graphiti extension (one-range in-batch dedup, §10 step 1) within the
    "pin and patch by name, never fork" budget, or is that the point at which the patch
    surface is too large?
+
+
+---
+
+## Addendum 2026-09-17: a third reason, found while auditing the capture run
+
+The captured pairs show **17.9% of cheap-tier edges (788 of 4,409) carry an
+`episode_indices` value that does not exist** — `[0,1,…,24]` exactly 358 times, the
+ascending-run pathology stopped at 24 by `maxItems: 25`. So `maxItems` fixed the
+truncation, not the indices.
+
+**Today this is inert, and the reason is exactly the thing bulk would change.**
+`ingest_driver.py:188-196` calls `add_text_episode` once per chunk, and graphiti does
+`episodes = episode if isinstance(episode, list) else [episode]`, so `len(episodes) == 1`
+at extraction time. In `edge_operations.py:290-297`, index 0 is then the only valid index
+and the empty-result fallback is "all episodes" — which is that same single episode. Every
+possible `episode_indices` value therefore converges on the same correct attribution.
+Verified on the live graph: **0 facts unattributed, 4,822 episode references, 0 dangling.**
+
+`add_episode_bulk` batches many episodes into one call. With `len(episodes)` in the tens,
+`[0,1,…,24]` would attribute a fact to up to 25 episodes, most of which never contained
+it — and the fallback would attribute an unindexable fact to the *entire batch*. That is
+silent, unfalsifiable provenance corruption: citations pointing at articles that never
+said the thing, indistinguishable afterwards from correct attribution. It is the exact
+class design invariant #2 exists to prevent.
+
+So bulk would have to fix the model's index behaviour first, on the same prompts that
+produce a 17.9% error rate today. This joins the longer race window and
+`dedupe_edges_bulk`'s revival of two-range invalidation as reasons the recommendation
+stands.
