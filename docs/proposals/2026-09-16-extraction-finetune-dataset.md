@@ -1517,3 +1517,42 @@ live graph was re-read afterwards and is untouched: 999 / 655 / 3,590 / 0 supers
 4. **`graphiti_client._bound_index_arrays:96-98` still says "three such fields"**
    where there are four (§4's incidental finding, still unfixed — this task does not
    touch `src/`). Its "Observed twice" note could also now carry a rate.
+
+
+---
+
+## Addendum 2026-09-17: the summaries question, settled by measurement
+
+§6a offered three options for `extract_summaries_batch`, whose targets were 88%
+rejected for exceeding `MAX_SUMMARY_CHARS`. A controlled probe settles it, and the
+answer is none of the three.
+
+**The prompt fix does not work.** The diagnosis looked sound: `extract_summaries_batch`
+gives a bare character budget, while its sibling `extract_summary`
+(`prompts/extract_nodes.py:623`) pairs the same limit with *"Write 2-6 dense sentences in
+third person."* Patching the batch prompt to match, then replaying the SAME 25 captured
+prompts through both variants against the cheap tier:
+
+| arm | calls | summaries | over 1,000 chars | median | max |
+|---|---:|---:|---:|---:|---:|
+| original | 25 | 29 | **68.97%** | 1,979 | 11,079 |
+| patched | 25 | 29 | **68.97%** | 1,706 | 18,322 |
+
+Identical compliance. The median improved 14%, the max got 65% worse. The original arm's
+68.97% matches the full capture's 69.2%, so 25 prompts is representative, and both arms
+hit the same 5 call errors. 50 calls, well under $1. **The patch was not shipped.**
+
+**Because the limit was never the model's job.** `node_operations.py:1000` applies
+`truncate_at_sentence(summarized_entity.summary, MAX_SUMMARY_CHARS)` to every summary.
+The limit is advisory in the prompt and enforced by post-processing. No model respects it
+— solar-pro4 69.2%, gpt-5-mini 52.9%, patched solar-pro4 68.97% — and the pipeline has
+always coped.
+
+**So rejecting those 213 targets was over-strict.** They are not wrong answers; they are
+the pipeline's normal, tolerated output. Rebuilt with `--allow-overlong-summaries`:
+`extract_summaries_batch` goes from **19 distinct examples to 189**, and every prompt
+lands within ~4 points of `TARGET_MIX` (most within 2). A model trained on these behaves
+exactly as production does today, and graphiti truncates its output identically.
+
+The `--allow-overlong-summaries` build is now the shipped one. The stricter build remains
+available for comparison.
