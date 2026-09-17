@@ -196,10 +196,21 @@ async def ensure_uuid_index(driver) -> None:
 
 
 async def wipe(driver, group: str) -> None:
-    """Delete one group's fixture in bounded batches.
+    """Delete one group's fixture in bounded batches: EDGES first, then nodes.
 
     Batched, not one DETACH DELETE: a million-node delete in a single transaction
     exhausts the heap, and this runs between every sweep step.
+
+    **Edges first, and that ordering is the whole point.** Batching by node count
+    bounds the wrong quantity -- transaction memory is driven by the EDGES a
+    batch touches, and this fixture deliberately holds far more edges than nodes
+    (`node_pool = max(1000, n // 50)`, the faithful corpus shape). At the 250k
+    step that is 5,000 nodes carrying 250,000 edges, so a single `LIMIT 10000`
+    node batch is the entire graph. That is exactly how the 2026-09-17 sweep died:
+    `MemoryPoolOutOfMemoryError`, 2.7 GiB transaction limit, in cleanup AFTER all
+    four edge steps had been measured. Deleting relationships under their own
+    limit first keeps every transaction bounded by a quantity that is actually
+    capped.
 
     NOT `CALL {...} IN TRANSACTIONS`, which is the usual idiom for this: it is
     illegal inside an explicit transaction, and `driver.execute_query` always
@@ -207,6 +218,12 @@ async def wipe(driver, group: str) -> None:
     explicit transaction". A LIMIT loop needs no autocommit session and works the
     same on either Cypher language version.
     """
+    while True:
+        result = await driver.execute_query(
+            "MATCH (:Entity {group_id:$g})-[e:RELATES_TO]->() WITH e LIMIT 20000 "
+            "DELETE e RETURN count(e) AS n", g=group)
+        if not result.records or result.records[0]["n"] == 0:
+            break
     while True:
         result = await driver.execute_query(
             "MATCH (n:Entity {group_id:$g}) WITH n LIMIT 10000 "
