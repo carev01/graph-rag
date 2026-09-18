@@ -1827,6 +1827,38 @@ def upsample_train(train: list[dict], max_repeat: int, basis: str = "full") -> l
     return out
 
 
+def drop_overlong(records: list[dict], max_tokens: int,
+                  chars_per_token: float) -> tuple[list[dict], dict[str, int]]:
+    """Drop records whose prompt cannot fit the trainer's `max_seq_length`.
+
+    An example longer than the context window is not merely wasted -- it is
+    TRUNCATED, and truncation cuts the END of the prompt, which is where
+    `extract_edges.edge` keeps its ENTITIES list and the "use only names from
+    this list" rule. Training on those teaches the model to invent entity names,
+    and nothing in the loss curve shows it. Dropping is the honest alternative.
+
+    `chars_per_token` defaults to 3.0, NOT the 4.0 the builder's own weighting
+    uses. That asymmetry is deliberate: weighting only needs a consistent
+    yardstick, while this decides whether an example silently mutilates. These
+    prompts are JSON-dense, where punctuation tokenizes closer to 3 chars, and
+    being optimistic here fails in the direction that hides itself. Measured on
+    the 2026-09-17 build: at 12,288 tokens the optimistic count drops 18 rows and
+    the conservative one 237 (1.8%).
+
+    Filters TRAIN and VAL alike -- a val example the model cannot read is not a
+    held-out measurement, it is a truncated one.
+    """
+    kept: list[dict] = []
+    dropped: dict[str, int] = {}
+    for r in records:
+        chars = sum(len(m["content"]) for m in r["messages"])
+        if chars / chars_per_token > max_tokens:
+            dropped[r["prompt_name"]] = dropped.get(r["prompt_name"], 0) + 1
+            continue
+        kept.append(r)
+    return kept, dropped
+
+
 def apply_mix(records: list[dict], rng: random.Random,
               limit: int | None) -> list[dict]:
     by_name: dict[str, list[dict]] = defaultdict(list)
@@ -1908,6 +1940,14 @@ async def main() -> int:
                         "training on full sequences, no completion-only loss mask) or "
                         "completion-only tokens (matches completion-masked SFT); "
                         "default full")
+    p.add_argument("--max-prompt-tokens", type=int, default=None,
+                   help="drop records whose prompt exceeds this many tokens, so no "
+                        "example is silently truncated by the trainer's "
+                        "max_seq_length. Set it to the SAME value you pass Unsloth.")
+    p.add_argument("--chars-per-token", type=float, default=3.0,
+                   help="estimator for --max-prompt-tokens. Default 3.0 is "
+                        "deliberately conservative: these prompts are JSON-dense and "
+                        "an optimistic count fails by truncating silently.")
     p.add_argument("--upsample", action="store_true",
                    help="emit each TRAIN record round(loss_weight) times (min 1, capped "
                         "at --max-repeat) instead of relying on meta.loss_weight at train "
@@ -1988,6 +2028,15 @@ async def main() -> int:
     else:
         selected = list(records)
         rng.shuffle(selected)
+    if args.max_prompt_tokens:
+        before = len(selected)
+        selected, dropped = drop_overlong(
+            selected, args.max_prompt_tokens, args.chars_per_token)
+        logger.info("--- dropped %d of %d records over %d tokens (%.1f chars/token) ---",
+                    before - len(selected), before, args.max_prompt_tokens,
+                    args.chars_per_token)
+        for name, n in sorted(dropped.items(), key=lambda kv: -kv[1]):
+            logger.info("    %-45s %5d", name, n)
     weights = assign_loss_weights(selected, basis=args.loss_basis)
     if args.report:
         _print_mix(selected, weights)
