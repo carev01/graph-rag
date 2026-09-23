@@ -16,9 +16,18 @@ Spec: docs/superpowers/specs/2026-09-23-vector-index-search-design.md
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Mapping
+from types import ModuleType
 from typing import Any
+
+from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
+from graphiti_core.nodes import EntityNode, get_entity_node_from_record
+from graphiti_core.search import search as _g_search
+from graphiti_core.search import search_utils
+from graphiti_core.utils.maintenance import node_operations
+from neo4j.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -163,3 +172,172 @@ async def ensure_vector_indexes(driver, embed_dim: int) -> None:
 async def drop_vector_indexes(driver) -> None:
     for name in (EDGE_INDEX, NODE_INDEX):
         await driver.execute_query(f"DROP INDEX {name} IF EXISTS")
+
+
+# ---------------------------------------------------------------- routing ----
+
+# Captured ONCE, from the defining module, before anything is patched. These
+# are what `enabled=False` restores and what bounded calls delegate to.
+_ORIG_EDGE = search_utils.edge_similarity_search
+_ORIG_NODE = search_utils.node_similarity_search
+_EDGE_SIG = inspect.signature(_ORIG_EDGE)
+_NODE_SIG = inspect.signature(_ORIG_NODE)
+
+_MISSING_INDEX = "no such vector schema index"
+_fetch_k = 200
+_warned: set[str] = set()
+_stats: dict[str, dict[str, int]] = {
+    kind: {"routed": 0, "delegated_bounded": 0, "fell_back": 0} for kind in ("edge", "node")
+}
+
+
+def stats_snapshot() -> dict[str, dict[str, int]]:
+    return {kind: dict(counts) for kind, counts in _stats.items()}
+
+
+def reset_stats() -> None:
+    for counts in _stats.values():
+        for key in counts:
+            counts[key] = 0
+
+
+def stats_summary() -> str:
+    return " | ".join(
+        f"{kind} routed={c['routed']} delegated_bounded={c['delegated_bounded']} "
+        f"fell_back={c['fell_back']}" for kind, c in _stats.items())
+
+
+def _is_unbounded(search_filter: Any) -> bool:
+    """Every filter field None. Iterates the model's DECLARED fields, so a field a
+    future graphiti adds counts as a filter and delegates instead of being
+    silently dropped."""
+    if search_filter is None:
+        return True
+    return all(getattr(search_filter, name) is None
+               for name in type(search_filter).model_fields)
+
+
+def _is_missing_index(exc: ClientError) -> bool:
+    return _MISSING_INDEX in f"{exc.message} {exc}"
+
+
+def _warn_once(index: str) -> None:
+    if index not in _warned:
+        _warned.add(index)
+        logger.warning(
+            "vector index %s is missing; similarity search is falling back to "
+            "graphiti's full scan (correct but slow). Restart a process that runs "
+            "ensure_vector_indexes, or `%s`.", index, REBUILD_HINT)
+
+
+def _group_clause(var: str, group_ids: list[str] | None) -> str:
+    return f"{var}.group_id IN $group_ids AND " if group_ids is not None else ""
+
+
+async def index_edge_similarity_search(*args: Any, **kwargs: Any) -> list[EntityEdge]:
+    """Drop-in for graphiti's `edge_similarity_search` (same signature)."""
+    a = _EDGE_SIG.bind(*args, **kwargs)
+    a.apply_defaults()
+    p = a.arguments
+    if not (p["source_node_uuid"] is None and p["target_node_uuid"] is None
+            and _is_unbounded(p["search_filter"])):
+        _stats["edge"]["delegated_bounded"] += 1
+        return await _ORIG_EDGE(*args, **kwargs)
+    driver, limit = p["driver"], p["limit"]
+    query = (
+        "CALL db.index.vector.queryRelationships($index_name, $fetch_k, $search_vector) "
+        "YIELD relationship AS e, score "
+        f"WHERE {_group_clause('e', p['group_ids'])}score > $min_score "
+        "MATCH (n:Entity)-[e]->(m:Entity) "
+        "WITH e, n, m, score "
+        # Resolved at CALL time, so lean_edge_search's patch of this name applies.
+        "RETURN " + search_utils.get_entity_edge_return_query(driver.provider)
+        + " ORDER BY score DESC LIMIT $limit")
+    try:
+        records, _, _ = await driver.execute_query(
+            query, index_name=EDGE_INDEX, fetch_k=max(_fetch_k, int(limit)),
+            search_vector=p["search_vector"], group_ids=p["group_ids"],
+            min_score=p["min_score"], limit=int(limit), routing_="r")
+    except ClientError as exc:
+        if not _is_missing_index(exc):
+            raise
+        _warn_once(EDGE_INDEX)
+        _stats["edge"]["fell_back"] += 1
+        return await _ORIG_EDGE(*args, **kwargs)
+    _stats["edge"]["routed"] += 1
+    return [get_entity_edge_from_record(r, driver.provider) for r in records]
+
+
+async def index_node_similarity_search(*args: Any, **kwargs: Any) -> list[EntityNode]:
+    """Drop-in for graphiti's `node_similarity_search` (same signature)."""
+    a = _NODE_SIG.bind(*args, **kwargs)
+    a.apply_defaults()
+    p = a.arguments
+    if not _is_unbounded(p["search_filter"]):
+        _stats["node"]["delegated_bounded"] += 1
+        return await _ORIG_NODE(*args, **kwargs)
+    driver, limit = p["driver"], p["limit"]
+    query = (
+        "CALL db.index.vector.queryNodes($index_name, $fetch_k, $search_vector) "
+        "YIELD node AS n, score "
+        f"WHERE {_group_clause('n', p['group_ids'])}score > $min_score "
+        "WITH n, score "
+        "RETURN " + search_utils.get_entity_node_return_query(driver.provider)
+        + " ORDER BY score DESC LIMIT $limit")
+    try:
+        records, _, _ = await driver.execute_query(
+            query, index_name=NODE_INDEX, fetch_k=max(_fetch_k, int(limit)),
+            search_vector=p["search_vector"], group_ids=p["group_ids"],
+            min_score=p["min_score"], limit=int(limit), routing_="r")
+    except ClientError as exc:
+        if not _is_missing_index(exc):
+            raise
+        _warn_once(NODE_INDEX)
+        _stats["node"]["fell_back"] += 1
+        return await _ORIG_NODE(*args, **kwargs)
+    _stats["node"]["routed"] += 1
+    return [get_entity_node_from_record(r, driver.provider) for r in records]
+
+
+# Every module that imported the functions BY NAME. Patching the defining
+# module alone would be invisible to these.
+_TARGETS: list[tuple[ModuleType, str, str]] = [
+    (_g_search, "edge_similarity_search", "edge"),
+    (_g_search, "node_similarity_search", "node"),
+    (search_utils, "node_similarity_search", "node"),  # hybrid_node_search
+    (node_operations, "node_similarity_search", "node"),  # node dedup
+]
+
+
+def _pair(kind: str) -> tuple[Any, Any]:
+    if kind == "edge":
+        return _ORIG_EDGE, index_edge_similarity_search
+    return _ORIG_NODE, index_node_similarity_search
+
+
+def install_vector_search(*, enabled: bool, fetch_k: int) -> bool:
+    """Route unbounded similarity searches to the vector indexes (enabled) or
+    restore graphiti's originals exactly (disabled). Idempotent.
+
+    Validates ALL targets before patching ANY: each must currently be graphiti's
+    original or this module's wrapper. A graphiti upgrade that moves or re-wraps
+    one fails loudly here rather than leaving a silent full-scan path."""
+    global _fetch_k
+    if fetch_k < 1:
+        raise ValueError(f"vector_search_fetch_k must be >= 1, got {fetch_k}")
+    for module, name, kind in _TARGETS:
+        current = getattr(module, name, None)
+        original, wrapper = _pair(kind)
+        if current is not original and current is not wrapper:
+            raise RuntimeError(
+                f"{module.__name__}.{name} is neither graphiti's original nor "
+                "graph_extract.vector_search's wrapper; refusing to patch")
+    _fetch_k = fetch_k
+    for module, name, kind in _TARGETS:
+        original, wrapper = _pair(kind)
+        setattr(module, name, wrapper if enabled else original)
+    return enabled
+
+
+def is_vector_search_installed() -> bool:
+    return all(getattr(module, name) is _pair(kind)[1] for module, name, kind in _TARGETS)

@@ -2,7 +2,22 @@
 Hermetic: no LLM, no embedder endpoint, never the .env graph."""
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
+from typing import Any
+
 import pytest
+import pytest_asyncio
+from graphiti_core import Graphiti
+from graphiti_core.cross_encoder.client import CrossEncoderClient
+from graphiti_core.embedder.client import EmbedderClient
+from graphiti_core.llm_client.client import LLMClient
+from graphiti_core.nodes import EntityNode
+from graphiti_core.search import search as g_search
+from graphiti_core.search import search_utils
+from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
+from graphiti_core.search.search_filters import SearchFilters
+from graphiti_core.utils.maintenance import node_operations
 
 from graph_extract import vector_search as vs
 
@@ -67,3 +82,135 @@ async def test_drop_removes_both(extract_driver):
     await vs.ensure_vector_indexes(extract_driver, DIM)
     await vs.drop_vector_indexes(extract_driver)
     assert await vs.index_status(extract_driver) == {}
+
+
+G = "vs-test"
+
+
+def _unit(i: int) -> list[float]:
+    """Planted vectors: angle i*5 degrees in the first two dims, so cosine to
+    _unit(0) strictly decreases with i -- a known exact ranking."""
+    a = math.radians(i * 5)
+    return [math.cos(a), math.sin(a)] + [0.0] * (DIM - 2)
+
+
+class _FixedEmbedder(EmbedderClient):
+    async def create(self, input_data: str | list[str] | Iterable[int]
+                     | Iterable[Iterable[int]]) -> list[float]:
+        return _unit(0)
+
+    async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
+        return [_unit(0) for _ in input_data_list]
+
+
+class _NoLLM(LLMClient):
+    async def _generate_response(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("the LLM must not be reached")
+
+
+class _NoReranker(CrossEncoderClient):
+    async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
+        raise AssertionError("the reranker must not be reached by an RRF search")
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def hermetic_graphiti(extract_neo4j):
+    uri, user, password = extract_neo4j
+    g = Graphiti(uri, user, password, llm_client=_NoLLM(config=None),
+                 embedder=_FixedEmbedder(), cross_encoder=_NoReranker())
+    await g.build_indices_and_constraints()
+    yield g
+    await g.close()
+
+
+@pytest.fixture
+def routed():
+    vs.install_vector_search(enabled=True, fetch_k=200)
+    vs.reset_stats()
+    yield
+    vs.install_vector_search(enabled=False, fetch_k=200)
+
+
+async def _seed(driver, n: int = 12) -> None:
+    await driver.execute_query("MATCH (n) DETACH DELETE n")
+    await driver.execute_query(
+        "UNWIND range(0, $n - 1) AS i "
+        "CREATE (:Entity {uuid: 'n' + i, group_id: $g, name: 'entity ' + i, "
+        "  name_embedding: $vecs[i], summary: '', created_at: datetime()})",
+        n=n, g=G, vecs=[_unit(i) for i in range(n)])
+    await driver.execute_query(
+        "UNWIND range(0, $n - 2) AS i "
+        "MATCH (a:Entity {uuid: 'n' + i}), (b:Entity {uuid: 'n' + (i + 1)}) "
+        "CREATE (a)-[:RELATES_TO {uuid: 'f' + i, group_id: $g, name: 'REL', "
+        "  fact: 'fact ' + i, fact_embedding: $vecs[i], episodes: [], "
+        "  created_at: datetime()}]->(b)",
+        n=n, g=G, vecs=[_unit(i) for i in range(n)])
+
+
+async def test_index_path_matches_the_exact_scan_on_a_planted_ranking(
+        hermetic_graphiti, extract_driver):
+    await _seed(extract_driver)
+    await _drop_all_vector_indexes(extract_driver)
+    await vs.ensure_vector_indexes(extract_driver, DIM)
+    d = hermetic_graphiti.driver
+    exact_e = await vs._ORIG_EDGE(d, _unit(0), None, None, SearchFilters(), [G], 5, 0.6)
+    index_e = await vs.index_edge_similarity_search(
+        d, _unit(0), None, None, SearchFilters(), [G], 5, 0.6)
+    assert [e.uuid for e in index_e] == [e.uuid for e in exact_e] == [
+        "f0", "f1", "f2", "f3", "f4"]
+    exact_n = await vs._ORIG_NODE(d, _unit(0), SearchFilters(), [G], 5, 0.6)
+    index_n = await vs.index_node_similarity_search(d, _unit(0), SearchFilters(), [G], 5, 0.6)
+    assert [n.uuid for n in index_n] == [n.uuid for n in exact_n] == [
+        "n0", "n1", "n2", "n3", "n4"]
+    # the lean projection still applies on the index path: no embedding shipped
+    assert all(e.fact_embedding is None for e in index_e)
+
+
+async def test_other_groups_are_filtered_out(hermetic_graphiti, extract_driver):
+    await _seed(extract_driver)
+    await vs.ensure_vector_indexes(extract_driver, DIM)
+    out = await vs.index_node_similarity_search(
+        hermetic_graphiti.driver, _unit(0), SearchFilters(), ["another-group"], 5, 0.6)
+    assert out == []
+
+
+async def test_retrieval_and_node_dedup_both_route_through_the_real_call_paths(
+        hermetic_graphiti, extract_driver, routed):
+    await _seed(extract_driver)
+    await vs.ensure_vector_indexes(extract_driver, DIM)
+    results = await hermetic_graphiti._search(
+        "entity 0", EDGE_HYBRID_SEARCH_RRF, group_ids=[G])
+    assert results.edges, "retrieval found nothing"
+    assert vs.stats_snapshot()["edge"]["routed"] >= 1
+    extracted = EntityNode(name="entity 0", group_id=G, labels=["Entity"], summary="")
+    candidates = await node_operations._semantic_candidate_search(
+        hermetic_graphiti.clients, [extracted])
+    assert candidates[0], "node dedup found no candidates"
+    assert candidates[0][0].uuid == "n0"
+    assert vs.stats_snapshot()["node"]["routed"] >= 1
+
+
+async def test_same_pair_dedup_stays_on_the_exact_scan(
+        hermetic_graphiti, extract_driver, routed):
+    await _seed(extract_driver)
+    await vs.ensure_vector_indexes(extract_driver, DIM)
+    await search_utils.edge_similarity_search(
+        hermetic_graphiti.driver, _unit(0), None, None,
+        SearchFilters(edge_uuids=["f0", "f1"]), [G], 5, 0.6)
+    await g_search.edge_similarity_search(
+        hermetic_graphiti.driver, _unit(0), None, None,
+        SearchFilters(edge_uuids=["f0", "f1"]), [G], 5, 0.6)
+    assert vs.stats_snapshot()["edge"]["delegated_bounded"] == 1
+    assert vs.stats_snapshot()["edge"]["routed"] == 0
+
+
+async def test_a_missing_index_falls_back_to_identical_results(
+        hermetic_graphiti, extract_driver):
+    await _seed(extract_driver)
+    await vs.drop_vector_indexes(extract_driver)
+    vs.reset_stats()
+    d = hermetic_graphiti.driver
+    out = await vs.index_node_similarity_search(d, _unit(0), SearchFilters(), [G], 5, 0.6)
+    exact = await vs._ORIG_NODE(d, _unit(0), SearchFilters(), [G], 5, 0.6)
+    assert [n.uuid for n in out] == [n.uuid for n in exact]
+    assert vs.stats_snapshot()["node"]["fell_back"] == 1
