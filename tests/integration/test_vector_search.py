@@ -214,3 +214,50 @@ async def test_a_missing_index_falls_back_to_identical_results(
     exact = await vs._ORIG_NODE(d, _unit(0), SearchFilters(), [G], 5, 0.6)
     assert [n.uuid for n in out] == [n.uuid for n in exact]
     assert vs.stats_snapshot()["node"]["fell_back"] == 1
+
+
+# Enough 768-dim vectors that building the tuned index takes minutes on the
+# testcontainer (120k took ~150 s), so it is reliably still POPULATING when
+# queried right after CREATE. Vectors are generated server-side: seeding stays
+# a few seconds.
+_POPULATING_ROWS = 100_000
+_POPULATING_DIM = 768
+
+
+async def test_a_populating_index_is_reported_not_refused_and_searches_fall_back(
+        hermetic_graphiti, extract_driver, caplog):
+    await extract_driver.execute_query("MATCH (n) DETACH DELETE n")
+    await _drop_all_vector_indexes(extract_driver)
+    await extract_driver.execute_query(
+        "UNWIND range(0, $n - 1) AS i "
+        "CREATE (:Entity {uuid: 'p' + i, group_id: 'populating', name: 'p' + i, "
+        "  summary: '', created_at: datetime(), "
+        "  name_embedding: [x IN range(1, $dim) | rand() - 0.5]})",
+        n=_POPULATING_ROWS, dim=_POPULATING_DIM)
+    try:
+        with caplog.at_level("WARNING", logger=vs.logger.name):
+            await vs.ensure_vector_indexes(extract_driver, _POPULATING_DIM, wait_seconds=0)
+        status = await vs.index_status(extract_driver)
+        assert status[vs.NODE_INDEX]["state"] == "POPULATING", status
+        assert any(vs.NODE_INDEX in r.getMessage() and "POPULATING" in r.getMessage()
+                   for r in caplog.records), "no POPULATING warning"
+
+        vs.reset_stats()
+        await vs.index_node_similarity_search(
+            hermetic_graphiti.driver, [1.0] + [0.0] * (_POPULATING_DIM - 1),
+            SearchFilters(), ["populating"], 5, 0.0)
+        # Neo4j blocked ~30 s waiting for the index, then refused; the wrapper
+        # recognised that and served the exact scan.
+        assert vs.stats_snapshot()["node"] == {
+            "routed": 0, "delegated_bounded": 0, "fell_back": 1}
+        status = await vs.index_status(extract_driver)
+        assert status[vs.NODE_INDEX]["state"] == "POPULATING", \
+            "index came ONLINE during the query: seed more rows"
+    finally:
+        await vs.drop_vector_indexes(extract_driver)
+        deleted = 1
+        while deleted:
+            r = await extract_driver.execute_query(
+                "MATCH (n:Entity {group_id: 'populating'}) WITH n LIMIT 20000 "
+                "DETACH DELETE n RETURN count(*) AS c")
+            deleted = r.records[0]["c"]

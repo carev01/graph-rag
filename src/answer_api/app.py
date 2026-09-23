@@ -51,7 +51,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # serving: a mismatch refuses to start rather than serving full scans.
     if settings.vector_search_enabled:
         try:
-            await ensure_vector_indexes(graphiti.driver, settings.embed_dim)
+            await ensure_vector_indexes(
+                graphiti.driver, settings.embed_dim,
+                wait_seconds=settings.vector_index_startup_wait_seconds)
         except Exception:
             await graphiti.close()
             await driver.close()

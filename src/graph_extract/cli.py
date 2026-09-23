@@ -94,7 +94,8 @@ async def _build_ingest_driver(
         )
         await init_indices(
             graphiti,
-            embed_dim=settings.embed_dim if settings.vector_search_enabled else None)
+            embed_dim=settings.embed_dim if settings.vector_search_enabled else None,
+            vector_index_wait_seconds=settings.vector_index_startup_wait_seconds)
         provenance = Provenance(driver)
         strong_tier = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS,
                                      settings.max_chunk_tokens)
@@ -612,13 +613,17 @@ def vector_index(
                                  help="drop and recreate both vector indexes"),
     yes: bool = typer.Option(False, "--yes", help="confirm --rebuild"),
 ) -> None:
-    """Show the vector indexes against the expected config, or rebuild them.
+    """Show each vector index's state, populationPercent and config mismatches,
+    or rebuild them.
 
-    Rebuild drops both; similarity searches fall back to graphiti's full scan
-    until the new indexes are ONLINE -- hours at corpus scale."""
+    Rebuild drops both, recreates them and waits up to an hour for them, then
+    reports the final state. Until an index is ONLINE -- hours at corpus scale
+    -- each similarity search waits ~30 s on it in Neo4j, then falls back to
+    graphiti's exact scan."""
     if rebuild and not yes:
-        typer.echo("--rebuild drops both vector indexes; searches fall back to full "
-                   "scans until they are rebuilt. Re-run with --yes to confirm.")
+        typer.echo("--rebuild drops both vector indexes; until they are ONLINE again "
+                   "each similarity search waits ~30 s, then falls back to a full "
+                   "scan. Re-run with --yes to confirm.")
         raise typer.Exit(code=2)
 
     async def _run() -> None:
@@ -628,7 +633,9 @@ def vector_index(
         try:
             if rebuild:
                 await vector_search.drop_vector_indexes(driver)
-                await vector_search.ensure_vector_indexes(driver, settings.embed_dim)
+                await vector_search.ensure_vector_indexes(
+                    driver, settings.embed_dim,
+                    wait_seconds=vector_search.REBUILD_WAIT_SECONDS)
             status = await vector_search.index_status(driver)
             want = vector_search.expected_config(settings.embed_dim)
             _dump({name: {**st, "mismatches": vector_search.config_mismatches(

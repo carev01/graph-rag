@@ -113,7 +113,7 @@ def _stub_deps(monkeypatch):
     monkeypatch.setattr(app_mod, "build_graphiti", lambda settings: FakeGraphiti())
     monkeypatch.setattr(app_mod, "_build_driver", _fake_build_driver)
 
-    async def _fake_ensure_vector_indexes(driver, embed_dim):
+    async def _fake_ensure_vector_indexes(driver, embed_dim, **_kwargs):
         return None
 
     monkeypatch.setattr(app_mod, "ensure_vector_indexes", _fake_ensure_vector_indexes)
@@ -141,6 +141,26 @@ async def test_health():
             resp = await c.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+async def test_lifespan_waits_for_vector_indexes_with_the_startup_budget(monkeypatch):
+    from graph_extract.config import ExtractSettings
+
+    settings = ExtractSettings(
+        _env_file=None, neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+        docext_base_url="http://x", docext_read_key="k", embed_dim=8,
+        vector_search_enabled=True, vector_index_startup_wait_seconds=7.5)
+    monkeypatch.setattr(app_mod, "get_extract_settings", lambda: settings)
+    calls: list[tuple[int, dict]] = []
+
+    async def _ensure(driver, embed_dim, **kwargs):
+        calls.append((embed_dim, kwargs))
+
+    monkeypatch.setattr(app_mod, "ensure_vector_indexes", _ensure)
+    app = app_mod.create_app()
+    async with app.router.lifespan_context(app):
+        pass
+    assert calls == [(8, {"wait_seconds": 7.5})]
 
 
 async def test_search_local_returns_stubbed_results():

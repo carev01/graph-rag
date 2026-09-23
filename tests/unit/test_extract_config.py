@@ -21,3 +21,4 @@ def test_vector_search_defaults():
                         docext_read_key="k")
     assert s.vector_search_enabled is True
     assert s.vector_search_fetch_k == 200
+    assert s.vector_index_startup_wait_seconds == 60.0

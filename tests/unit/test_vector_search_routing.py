@@ -1,6 +1,7 @@
 """Routing rule, fallback and install, against a fake driver -- no database."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -140,6 +141,56 @@ async def test_missing_index_falls_back_and_counts(originals):
     assert out == ["original-node"]
     assert vs.stats_snapshot()["node"]["fell_back"] == 1
     assert vs.stats_snapshot()["node"]["routed"] == 0
+
+
+# Verbatim from Neo4j 2026.07.1, querying an index created ~0.2 s earlier over
+# 120k 768-dim vectors: the call BLOCKED 30.3 s, then raised this (fix report F1).
+_NOT_ONLINE_MESSAGE = (
+    "Failed to invoke procedure `db.index.vector.queryNodes`: Caused by: "
+    "java.lang.IllegalStateException: Expected index to come online within a "
+    "reasonable time.")
+
+
+def _not_online() -> ClientError:
+    return ClientError._hydrate_neo4j(
+        code="Neo.ClientError.Procedure.ProcedureCallFailed", message=_NOT_ONLINE_MESSAGE)
+
+
+async def test_a_populating_index_falls_back_and_counts(originals):
+    driver = _FakeDriver(raise_exc=_not_online())
+    out = await vs.index_node_similarity_search(driver, VEC, SearchFilters(), ["g"], 15, 0.6)
+    assert out == ["original-node"]
+    assert vs.stats_snapshot()["node"]["fell_back"] == 1
+    assert vs.stats_snapshot()["node"]["routed"] == 0
+
+
+async def test_a_populating_index_falls_back_on_the_edge_path(originals):
+    driver = _FakeDriver(raise_exc=_not_online())
+    out = await vs.index_edge_similarity_search(
+        driver, VEC, None, None, SearchFilters(), ["g"], 10, 0.6)
+    assert out == ["original-edge"]
+    assert vs.stats_snapshot()["edge"]["fell_back"] == 1
+
+
+def test_index_unavailable_recognises_exactly_missing_and_not_online():
+    assert vs._index_unavailable(_not_online())
+    assert vs._index_unavailable(ClientError._hydrate_neo4j(
+        code="Neo.ClientError.Procedure.ProcedureCallFailed",
+        message="Failed to invoke procedure: There is no such vector schema index: x"))
+    assert not vs._index_unavailable(ClientError._hydrate_neo4j(
+        code="Neo.ClientError.Procedure.ProcedureCallFailed",
+        message="Failed to invoke procedure: Caused by: java.lang.IllegalStateException: boom"))
+
+
+def test_the_populating_warning_names_the_wait_and_not_a_rebuild(originals, caplog):
+    vs._warned.clear()
+    with caplog.at_level(logging.WARNING, logger=vs.logger.name):
+        vs._warn_once(vs.NODE_INDEX, _not_online())
+        vs._warn_once(vs.NODE_INDEX, _not_online())
+    (rec,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    msg = rec.getMessage()
+    assert "not ONLINE" in msg and "30 s" in msg
+    assert "rebuild" not in msg.lower()
 
 
 async def test_any_other_client_error_propagates(originals):

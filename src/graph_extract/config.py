@@ -126,6 +126,13 @@ class ExtractSettings(BaseSettings):
     # caller's `limit` are applied. 200 measured 97.4-99.6% of exact search's
     # dedup partners at 250k entities (ann-dedup-probe-2026-09-23.md).
     vector_search_fetch_k: int = 200
+    # How long a service start waits for the two vector indexes (only those --
+    # not every index in the database) before continuing. One still POPULATING
+    # after it is logged at WARNING and the start proceeds; searches fall back
+    # to the exact scan until it is ONLINE (after ~30 s of Neo4j waiting on it
+    # per call -- vector_search's module docstring). FAILED or mis-configured
+    # indexes still refuse to start.
+    vector_index_startup_wait_seconds: float = 60.0
     # How many ARTICLES to ingest concurrently. Episodes within an article always
     # stay sequential: consecutive chunks of one document share entities most
     # heavily, and graphiti resolves entities by searching the graph as it
