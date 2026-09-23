@@ -1086,6 +1086,14 @@ current Neo4j instance. The temporal-coherence slice added live proof for the up
 specifically, so **[verify first]** — but the webhook/queue/scheduler path as an
 operating system remains untested in anger.
 
+### 38. Neo4j and Postgres backups, with a tested restore — **P4, deferred by the user 2026-09-22**
+Production review M6. Nothing in the repo takes or restores a backup. Neo4j runs on a
+dedicated **VMware VM** (Community 2026.07.1: `neo4j-admin database dump` needs the
+database stopped; no APOC), so VM snapshots or an offline dump on the VM are the natural
+routes; a logical export over Bolt is the fallback. Postgres (`semantic_jobs`, cursor,
+token ledger) needs a `pg_dump` alongside. Moved to the end of the backlog by the user;
+revisit before the paid full-corpus bootstrap.
+
 ---
 
 ## Next steps, in order
