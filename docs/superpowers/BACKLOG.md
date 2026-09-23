@@ -1097,6 +1097,14 @@ the largest remaining per-call cost on the ingest search path. Same fix shape as
 drop silently — so it needs `lean_edge_search`'s startup guard (fail if a key outside the
 projection exists) and a check of how `get_entity_node_from_record` rebuilds `attributes`.
 
+### 40. A POPULATING vector index costs ~30 s per search — **P3, operational**
+Measured 2026-09-23 (`vector-index-search-2026-09-23.md`): Neo4j blocks a query on a
+POPULATING vector index ~30 s, then raises; the wrappers fall back to the exact scan. During
+a rebuild (hours at corpus scale) every unbounded search pays that. Handled operationally
+for now — the runbook says to rebuild with ingestion paused. If rebuilds ever need to run
+under load, add a skip-while-populating memo: after one not-ONLINE error, route that index's
+calls straight to the exact scan for N seconds instead of re-paying the 30 s wait.
+
 ### 8-B. ~~Retrieval and node dedup scan the whole corpus per call~~ — **DONE 2026-09-23 (Phase B)**
 Index-backed similarity search: `vector-index-search-2026-09-23.md`. Tuned indexes
 (m=32, ef_construction=400, no quantization, expansion 4) find 97.4–99.6% of exact

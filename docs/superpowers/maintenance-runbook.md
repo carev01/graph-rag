@@ -75,6 +75,20 @@ uv run --extra dev python -m graph_sync.cli queue-status
   exception: it deletes `:Entity` nodes, and an ingest overlapping it loses
   edges silently — see [Duplicate entities](#duplicate-entities-merge-duplicates).
 
+## Vector indexes (`vector-index`)
+
+Retrieval and node dedup run on two tuned vector indexes (`vector_search.py`,
+`vector-index-search-2026-09-23.md`). `python -m graph_extract.cli vector-index` prints
+each index's state, `populationPercent` and any config mismatch; services refuse to start
+only on a mismatch or a FAILED index.
+
+**Rebuild with ingestion paused.** `vector-index --rebuild --yes` drops and recreates both
+indexes, which takes hours at corpus scale. While an index is POPULATING, Neo4j blocks every
+query on it for ~30 s before raising, and the wrappers then fall back to the exact scan — so
+each unbounded search costs ~30 s plus the scan (~6 min per episode for node dedup). Stop the
+semantic workers first, and restart them once `vector-index` shows both ONLINE. Answer-api
+keeps serving during a rebuild, but each local/timeline/DRIFT query pays the same ~30 s.
+
 ## Duplicate entities (`merge-duplicates`)
 
 ```bash
