@@ -751,9 +751,13 @@ assert on `inspect.getsource()` substrings. `test_answer_api_app.py` monkeypatch
 retrieval function and asserts the stub's own value comes back (wiring, not retrieval).
 `test_compat_harness.py:57` accepts any verdict.
 
-**Most importantly:** `tests/integration/test_ingest_driver.py:28-31` runs `DETACH DELETE`
+~~**Most importantly:** `tests/integration/test_ingest_driver.py:28-31` runs `DETACH DELETE`
 on episodes of the shared live graph as test setup — the one place in the repo that does
-what design invariant #3 forbids.
+what design invariant #3 forbids.~~ **FIXED 2026-09-22:** the test now writes into a
+Neo4j testcontainer seeded with its one `:Article`/`:Chapter` (LLM and DocExtractor stay
+real), and the `live_ingest_driver` fixture that wired ingestion to the `.env` graph is
+gone. The other `@live` tests still read the `.env` graph; `test_incremental_live`
+runs a theme-build path against it and has not been audited for writes.
 
 GDS is in no automated lane (`conftest.py` uses the bare community image;
 `detect_communities` is monkeypatched everywhere), so Leiden on the production GDS is
