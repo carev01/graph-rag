@@ -36,6 +36,7 @@ asyncio_mode = "auto"
 markers = ["live: hits the real DocExtractor cluster (opt-in)"]
 addopts = "-m 'not live'"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
