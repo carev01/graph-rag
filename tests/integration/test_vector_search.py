@@ -154,6 +154,7 @@ async def test_index_path_matches_the_exact_scan_on_a_planted_ranking(
     await vs.ensure_vector_indexes(extract_driver, DIM)
     d = hermetic_graphiti.driver
     exact_e = await vs._ORIG_EDGE(d, _unit(0), None, None, SearchFilters(), [G], 5, 0.6)
+    vs.reset_stats()
     index_e = await vs.index_edge_similarity_search(
         d, _unit(0), None, None, SearchFilters(), [G], 5, 0.6)
     assert [e.uuid for e in index_e] == [e.uuid for e in exact_e] == [
@@ -164,14 +165,29 @@ async def test_index_path_matches_the_exact_scan_on_a_planted_ranking(
         "n0", "n1", "n2", "n3", "n4"]
     # the lean projection still applies on the index path: no embedding shipped
     assert all(e.fact_embedding is None for e in index_e)
+    # Equal results alone would also pass on a silent fallback to the exact
+    # scan: prove both calls were answered by the index.
+    assert vs.stats_snapshot() == {
+        "edge": {"routed": 1, "delegated_bounded": 0, "fell_back": 0},
+        "node": {"routed": 1, "delegated_bounded": 0, "fell_back": 0}}
 
 
 async def test_other_groups_are_filtered_out(hermetic_graphiti, extract_driver):
     await _seed(extract_driver)
     await vs.ensure_vector_indexes(extract_driver, DIM)
+    vs.reset_stats()
     out = await vs.index_node_similarity_search(
         hermetic_graphiti.driver, _unit(0), SearchFilters(), ["another-group"], 5, 0.6)
     assert out == []
+    # empty because the index path filtered the group, not because it fell back
+    assert vs.stats_snapshot()["node"] == {
+        "routed": 1, "delegated_bounded": 0, "fell_back": 0}
+    out = await vs.index_edge_similarity_search(
+        hermetic_graphiti.driver, _unit(0), None, None, SearchFilters(),
+        ["another-group"], 5, 0.6)
+    assert out == []
+    assert vs.stats_snapshot()["edge"] == {
+        "routed": 1, "delegated_bounded": 0, "fell_back": 0}
 
 
 async def test_retrieval_and_node_dedup_both_route_through_the_real_call_paths(
