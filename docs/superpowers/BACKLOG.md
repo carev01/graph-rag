@@ -1111,6 +1111,15 @@ Index-backed similarity search: `vector-index-search-2026-09-23.md`. Tuned index
 search's dedup partners at 250k entities (`ann-dedup-probe-2026-09-23.md`); live
 acceptance agreement 1.000 on retrieval and dedup, index engaged on every call.
 
+Residual minors from the branch's reviews, all triaged "can wait" by the final review:
+answer-api's `ensure_vector_indexes` failure branch and `vector-index`'s plain status branch
+are untested; `ingest` prints the vector-search stats after the timing report rather than
+beside the dedup summary; unit teardown forces `enabled=False` instead of restoring the prior
+state (safe while `tests/unit/conftest.py` pins the patches); several non-live integration
+tests build graphiti on containers without the indexes and so silently exercise the fallback;
+answer-api now needs write-capable Neo4j credentials to create the indexes at startup, which
+conflicts with a read-only answer-api user in Phase 5; answer-api never reports the counters.
+
 ### 38. Neo4j and Postgres backups, with a tested restore — **P4, deferred by the user 2026-09-22**
 Production review M6. Nothing in the repo takes or restores a backup. Neo4j runs on a
 dedicated **VMware VM** (Community 2026.07.1: `neo4j-admin database dump` needs the
