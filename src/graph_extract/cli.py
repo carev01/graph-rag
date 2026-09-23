@@ -10,6 +10,7 @@ import typer
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from graph_extract import quality_labels
+from graph_extract import vector_search
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.eval import (
     cost_report,
@@ -91,7 +92,10 @@ async def _build_ingest_driver(
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password)
         )
-        await init_indices(graphiti)
+        await init_indices(
+            graphiti,
+            embed_dim=settings.embed_dim if settings.vector_search_enabled else None,
+            vector_index_wait_seconds=settings.vector_index_startup_wait_seconds)
         provenance = Provenance(driver)
         strong_tier = ExtractionTier("strong", graphiti, EXTRACTION_INSTRUCTIONS,
                                      settings.max_chunk_tokens)
@@ -271,6 +275,9 @@ def ingest(
             # BACKLOG 31: where an episode's wall time actually goes, and whether
             # the provider runs our 20-wide concurrent dedup calls in parallel.
             typer.echo(ingest_driver.timings.report())
+            # Phase B: proves the index path engaged (routed > 0) or shows it
+            # falling back to the full scan.
+            typer.echo(f"vector search: {vector_search.stats_summary()}")
             # Emit the cost report HERE, in-process: the usage tally is
             # process-local, so a separate `eval cost` invocation would see an
             # empty tally. This is the only path that reports real extraction
@@ -596,6 +603,45 @@ def probe(
         ids = [a.strip() for a in article_ids.split(",") if a.strip()]
         report = await run_probe(settings, ids, n, DEFAULT_MODES)
         _dump(report)
+
+    asyncio.run(_run())
+
+
+@app.command("vector-index")
+def vector_index(
+    rebuild: bool = typer.Option(False, "--rebuild",
+                                 help="drop and recreate both vector indexes"),
+    yes: bool = typer.Option(False, "--yes", help="confirm --rebuild"),
+) -> None:
+    """Show each vector index's state, populationPercent and config mismatches,
+    or rebuild them.
+
+    Rebuild drops both, recreates them and waits up to an hour for them, then
+    reports the final state. Until an index is ONLINE -- hours at corpus scale
+    -- each similarity search waits ~30 s on it in Neo4j, then falls back to
+    graphiti's exact scan."""
+    if rebuild and not yes:
+        typer.echo("--rebuild drops both vector indexes; until they are ONLINE again "
+                   "each similarity search waits ~30 s, then falls back to a full "
+                   "scan. Re-run with --yes to confirm.")
+        raise typer.Exit(code=2)
+
+    async def _run() -> None:
+        settings = get_extract_settings()
+        driver = AsyncGraphDatabase.driver(
+            settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
+        try:
+            if rebuild:
+                await vector_search.drop_vector_indexes(driver)
+                await vector_search.ensure_vector_indexes(
+                    driver, settings.embed_dim,
+                    wait_seconds=vector_search.REBUILD_WAIT_SECONDS)
+            status = await vector_search.index_status(driver)
+            want = vector_search.expected_config(settings.embed_dim)
+            _dump({name: {**st, "mismatches": vector_search.config_mismatches(
+                st["config"], want)} for name, st in status.items()})
+        finally:
+            await driver.close()
 
     asyncio.run(_run())
 

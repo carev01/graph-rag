@@ -172,7 +172,7 @@ async def test_build_ingest_driver_builds_cheap_tier_when_configured(monkeypatch
                         lambda s: built.append("cheap") or _FakeGraphiti("CG"))
     monkeypatch.setattr(cli, "make_docext_client", lambda **k: _FakeAsync())
     monkeypatch.setattr(cli, "AsyncGraphDatabase", _FakeNeo())
-    async def _noop(g): return None
+    async def _noop(g, **_kwargs): return None
     monkeypatch.setattr(cli, "init_indices", _noop)
 
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
@@ -193,7 +193,7 @@ async def test_build_ingest_driver_strong_only_without_cheap_key(monkeypatch):
     monkeypatch.setattr(cli, "build_cheap_graphiti", lambda s: (_ for _ in ()).throw(AssertionError("must not build cheap")))
     monkeypatch.setattr(cli, "make_docext_client", lambda **k: _FakeAsync())
     monkeypatch.setattr(cli, "AsyncGraphDatabase", _FakeNeo())
-    async def _noop(g): return None
+    async def _noop(g, **_kwargs): return None
     monkeypatch.setattr(cli, "init_indices", _noop)
 
     # cheap_llm_api_key set empty EXPLICITLY (init kwargs beat .env) so this "no

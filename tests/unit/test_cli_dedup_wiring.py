@@ -46,7 +46,7 @@ def stubs(monkeypatch):
     strong = _LLM({"duplicate_facts": [1], "contradicted_facts": []})
     cheap = _LLM({"duplicate_facts": [10], "contradicted_facts": []})
 
-    async def init(_):
+    async def init(_, **_kwargs):
         return None
 
     class _Docext:

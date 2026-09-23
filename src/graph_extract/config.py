@@ -116,6 +116,23 @@ class ExtractSettings(BaseSettings):
     # longer extracted into `invalid_at`. Accepted, because invalid_at should
     # record evidence of supersession, not a model's reading of prose.
     valid_at_from_content_changed: bool = True
+    # Index-backed similarity search (Phase B, spec 2026-09-23). Unbounded
+    # edge/node similarity searches -- retrieval and node dedup -- go to tuned
+    # Neo4j vector indexes instead of graphiti's full cosine scan, which grows
+    # linearly (~12.5 s per call at 250k rows). False restores graphiti's own
+    # functions exactly and skips index management.
+    vector_search_enabled: bool = True
+    # Neighbours requested from the index before the group/score filter and the
+    # caller's `limit` are applied. 200 measured 97.4-99.6% of exact search's
+    # dedup partners at 250k entities (ann-dedup-probe-2026-09-23.md).
+    vector_search_fetch_k: int = 200
+    # How long a service start waits for the two vector indexes (only those --
+    # not every index in the database) before continuing. One still POPULATING
+    # after it is logged at WARNING and the start proceeds; searches fall back
+    # to the exact scan until it is ONLINE (after ~30 s of Neo4j waiting on it
+    # per call -- vector_search's module docstring). FAILED or mis-configured
+    # indexes still refuse to start.
+    vector_index_startup_wait_seconds: float = 60.0
     # How many ARTICLES to ingest concurrently. Episodes within an article always
     # stay sequential: consecutive chunks of one document share entities most
     # heavily, and graphiti resolves entities by searching the graph as it

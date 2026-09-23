@@ -15,11 +15,13 @@ defaults.
 from __future__ import annotations
 
 import pytest
+from graphiti_core.search import search as _search_module
 from graphiti_core.search.search import search as _defining_module_search
 from graphiti_core.search import search_utils
-from graphiti_core.utils.maintenance import edge_operations
+from graphiti_core.utils.maintenance import edge_operations, node_operations
 
 from graph_extract.config import ExtractSettings
+from graph_extract.vector_search import _ORIG_EDGE, _ORIG_NODE
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +51,12 @@ _PROCESS_WIDE_PATCHES = (
      edge_operations._extract_edge_timestamps),
     (search_utils, "get_entity_edge_return_query",
      search_utils.get_entity_edge_return_query),
+    # graph_extract.vector_search.install_vector_search (called from
+    # build_graphiti) patches these four process-wide too.
+    (_search_module, "edge_similarity_search", _ORIG_EDGE),
+    (_search_module, "node_similarity_search", _ORIG_NODE),
+    (search_utils, "node_similarity_search", _ORIG_NODE),
+    (node_operations, "node_similarity_search", _ORIG_NODE),
 )
 
 

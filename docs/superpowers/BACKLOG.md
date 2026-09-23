@@ -1086,6 +1086,40 @@ current Neo4j instance. The temporal-coherence slice added live proof for the up
 specifically, so **[verify first]** — but the webhook/queue/scheduler path as an
 operating system remains untested in anger.
 
+### 39. Node similarity search ships `name_embedding` — 2.8x on every node-dedup call — **P2, measured**
+Found by the Phase B acceptance run (`vector-index-search-2026-09-23.md`). graphiti's node
+return query ends `properties(n) AS attributes`, which carries the 768-float
+`name_embedding` of every candidate. Measured on the live graph, index path, 30 queries:
+**1,006 ms → 358 ms** without it. Node dedup runs ~a dozen of these per episode, so this is
+the largest remaining per-call cost on the ingest search path. Same fix shape as
+`lean_edge_search` (item 1-profiled), with one extra hazard: entity nodes can carry
+**ontology attributes** stored as node properties, which a hand-written projection would
+drop silently — so it needs `lean_edge_search`'s startup guard (fail if a key outside the
+projection exists) and a check of how `get_entity_node_from_record` rebuilds `attributes`.
+
+### 40. A POPULATING vector index costs ~30 s per search — **P3, operational**
+Measured 2026-09-23 (`vector-index-search-2026-09-23.md`): Neo4j blocks a query on a
+POPULATING vector index ~30 s, then raises; the wrappers fall back to the exact scan. During
+a rebuild (hours at corpus scale) every unbounded search pays that. Handled operationally
+for now — the runbook says to rebuild with ingestion paused. If rebuilds ever need to run
+under load, add a skip-while-populating memo: after one not-ONLINE error, route that index's
+calls straight to the exact scan for N seconds instead of re-paying the 30 s wait.
+
+### 8-B. ~~Retrieval and node dedup scan the whole corpus per call~~ — **DONE 2026-09-23 (Phase B)**
+Index-backed similarity search: `vector-index-search-2026-09-23.md`. Tuned indexes
+(m=32, ef_construction=400, no quantization, expansion 4) find 97.4–99.6% of exact
+search's dedup partners at 250k entities (`ann-dedup-probe-2026-09-23.md`); live
+acceptance agreement 1.000 on retrieval and dedup, index engaged on every call.
+
+Residual minors from the branch's reviews, all triaged "can wait" by the final review:
+answer-api's `ensure_vector_indexes` failure branch and `vector-index`'s plain status branch
+are untested; `ingest` prints the vector-search stats after the timing report rather than
+beside the dedup summary; unit teardown forces `enabled=False` instead of restoring the prior
+state (safe while `tests/unit/conftest.py` pins the patches); several non-live integration
+tests build graphiti on containers without the indexes and so silently exercise the fallback;
+answer-api now needs write-capable Neo4j credentials to create the indexes at startup, which
+conflicts with a read-only answer-api user in Phase 5; answer-api never reports the counters.
+
 ### 38. Neo4j and Postgres backups, with a tested restore — **P4, deferred by the user 2026-09-22**
 Production review M6. Nothing in the repo takes or restores a backup. Neo4j runs on a
 dedicated **VMware VM** (Community 2026.07.1: `neo4j-admin database dump` needs the
