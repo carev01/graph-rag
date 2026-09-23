@@ -67,11 +67,38 @@ def clean_block(suffix: str) -> str:
 
 
 def reorder(user: str, block: str) -> str:
-    """Static block first, then everything else, with the block removed from the end."""
+    """Static block first WITHIN the user message, variable content after.
+
+    MEASURED NOT TO WORK for caching on llama.cpp b9828, and kept only so the two
+    placements can be compared. Same tokens, same shared-prefix length as the
+    system variant, and no reuse whatsoever: 8.88s against 9.24s cold, versus
+    1.37s when the identical block sits in the system message instead. Use
+    `--target system`.
+    """
     if not user.endswith(block):
         return user  # untouched; caller counts these
     head = user[: len(user) - len(block)]
     return f"{block.rstrip()}\n\n{head.rstrip()}\n"
+
+
+def to_system(system: str, user: str, block: str) -> tuple[str, str]:
+    """Move the static block out of the user message and into the system message.
+
+    This is the placement that actually caches. Measured on an identical 9,892-token
+    prompt whose only difference was where the static block lived:
+
+        block at the front of the USER message   8.88s  (no reuse)
+        block in the SYSTEM message              1.37s  (6.4x, 7,225 tok/s)
+
+    Why the two differ is not established here -- the rendered token sequences differ
+    only by the `<|im_end|><|im_start|>user` boundary between them, so on the tokens
+    alone they should be equivalent. They are not, so the placement is treated as an
+    empirical fact rather than a derived one.
+    """
+    if not user.endswith(block):
+        return system, user
+    head = user[: len(user) - len(block)]
+    return f"{system.rstrip()}\n\n{block.rstrip()}\n", head.rstrip() + "\n"
 
 
 def main() -> int:
@@ -79,6 +106,10 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--in", dest="src", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--target", choices=("system", "user-front"), default="system",
+                   help="where the static block goes. 'system' is the only one that "
+                        "caches (measured 6.4x vs none); 'user-front' is kept for "
+                        "comparison.")
     ap.add_argument("--corpus", type=Path, default=None,
                     help="derive the static blocks from this file instead of --in; "
                          "use the TRAIN split so the blocks do not depend on the "
@@ -106,26 +137,36 @@ def main() -> int:
     out = []
     for r in records:
         block = blocks.get(r["prompt_name"], "")
-        msgs = []
-        for m in r["messages"]:
-            if m["role"] == "user" and block:
-                new = reorder(m["content"], block)
-                if new != m["content"]:
+        msgs = [dict(m) for m in r["messages"]]
+        if block:
+            ui = next((i for i, m in enumerate(msgs) if m["role"] == "user"), None)
+            si = next((i for i, m in enumerate(msgs) if m["role"] == "system"), None)
+            if ui is not None and args.target == "system" and si is not None:
+                new_sys, new_user = to_system(
+                    msgs[si]["content"], msgs[ui]["content"], block)
+                if new_user != msgs[ui]["content"]:
                     moved += 1
+                    msgs[si]["content"] = new_sys
+                    msgs[ui]["content"] = new_user
                 else:
                     skipped += 1
-                m = {**m, "content": new}
-            msgs.append(m)
+            elif ui is not None:
+                new_user = reorder(msgs[ui]["content"], block)
+                if new_user != msgs[ui]["content"]:
+                    moved += 1
+                    msgs[ui]["content"] = new_user
+                else:
+                    skipped += 1
         out.append({**r, "messages": msgs,
-                    "meta": {**r["meta"], "prompt_layout": "static-first"}})
+                    "meta": {**r["meta"], "prompt_layout": args.target}})
 
     # Self-check: a reorder is a PERMUTATION. If the word multiset changed, the
     # cut landed mid-token and the prompt is corrupted -- refuse to write it
     # rather than leave a plausible-looking file for a benchmark to consume.
     corrupted = []
     for before, after in zip(records, out):
-        ub = next(m["content"] for m in before["messages"] if m["role"] == "user")
-        ua = next(m["content"] for m in after["messages"] if m["role"] == "user")
+        ub = " ".join(m["content"] for m in before["messages"] if m["role"] != "assistant")
+        ua = " ".join(m["content"] for m in after["messages"] if m["role"] != "assistant")
         if sorted(ub.split()) != sorted(ua.split()):
             corrupted.append(before["prompt_name"])
     if corrupted:
