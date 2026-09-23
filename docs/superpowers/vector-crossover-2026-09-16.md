@@ -13,6 +13,27 @@ did not survive a reboot). The tables below are recovered from the session trans
 the run. Figures marked *derived* were computed from the printed summary (ms/row × rows,
 brute ÷ speedup) rather than copied from the harness's own table.
 
+## 0. CORRECTION (2026-09-23) — the recall figures below are not evidence
+
+Two defects found by the follow-up dedup probe. **The latency conclusions stand; the
+recall conclusions in §1, §2 and §5 do not.**
+
+1. **The fixture was near-isotropic, not "resampled real embeddings".** `resample_one`
+   adds N(0, 0.15) noise *per dimension* to a 768-d unit vector — a noise vector of norm
+   ≈ 0.15·√768 ≈ 4.2, four times the signal. Measured: cos(seed, resampled) median
+   **0.231**, against **0.466** for a random pair of real entity names and **0.806** for a
+   real nearest neighbour. The sweep measured HNSW on data far more uniform than real
+   embeddings — the very case `VectorPool`'s docstring warns makes an index look worse
+   than reality.
+2. **Neo4j cosine is normalised.** Both `vector.similarity.cosine` and the vector-index
+   score return **(1 + cos) / 2** (probed: raw cosine 0.071 scores 0.5357). graphiti's
+   `min_score = 0.6` is therefore **raw cosine > 0.2**. The two queries in this harness
+   share the scale, so this did not bias the comparison, but any threshold read off these
+   numbers must be converted.
+
+Recall for the path where it matters, node dedup, is measured directly on real duplicate
+pairs in `ann-dedup-probe-2026-09-23.md`.
+
 ## 1. Edges — `RELATES_TO.fact_embedding`
 
 | rows | brute ms | index ms | speedup | control dev | r@10, k=10 | k=50 | k=200 |
@@ -68,7 +89,7 @@ log-scaling guess and should be treated as such.
 graphiti runs on every `/search/local`, `/timeline` and DRIFT follow-up would take minutes,
 and the node-dedup scan at ingest is the same shape. The index keeps both under ~100 ms.
 
-**Recall: it degrades with N, and over-fetch slows the decline but does not stop it.**
+**Recall — WITHDRAWN, see §0.** *As originally written:* it degrades with N, and over-fetch slows the decline but does not stop it.
 This is the question spec §8 existed to answer, and the answer is the unfavourable one:
 
 - k=10 falls 0.66 → 0.40 over 25x more rows.
