@@ -1,4 +1,4 @@
-from graph_extract.config import get_extract_settings
+from graph_extract.config import ExtractSettings, get_extract_settings
 
 
 def test_extract_settings_defaults(monkeypatch):
@@ -13,3 +13,11 @@ def test_extract_settings_defaults(monkeypatch):
     assert s.group_id == "backup-docs"
     assert s.llm_client_mode == "generic_json_schema"
     assert s.max_chunk_tokens == 1800
+
+
+def test_vector_search_defaults():
+    s = ExtractSettings(_env_file=None, neo4j_uri="bolt://x", neo4j_user="u",
+                        neo4j_password="p", docext_base_url="https://x",
+                        docext_read_key="k")
+    assert s.vector_search_enabled is True
+    assert s.vector_search_fetch_k == 200
