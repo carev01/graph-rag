@@ -49,7 +49,8 @@ async def run_probe(s: ExtractSettings, article_ids: list[str], n_chunks: int,
         for mode in modes:
             sm = replace(s, llm_client_mode=mode)  # type: ignore[arg-type]
             g = build_graphiti(sm)
-            await init_indices(g)
+            await init_indices(
+                g, embed_dim=sm.embed_dim if sm.vector_search_enabled else None)
             reset_tally()
             t0 = time.time()
             errors = 0
