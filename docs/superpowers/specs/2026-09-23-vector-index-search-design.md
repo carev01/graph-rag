@@ -83,11 +83,25 @@ original.
 
 **Fallback.** If the index query raises because the index does not exist or is not ONLINE,
 the call is delegated to the original function and logged at WARNING once per process per
-index. Any other exception propagates. Answers stay correct, only slower, and the event is
-counted.
+index and reason. Any other exception propagates. Answers stay correct, only slower, and the
+event is counted.
+
+*Amended 2026-09-23 (final-review F1, measured on `neo4j:2026.07.1-community`):* the two
+cases differ in cost. A missing index fails immediately (`There is no such vector schema
+index`). A **POPULATING** index does not fail fast: `queryNodes` / `queryRelationships`
+**block ~30 s** server-side waiting for it, then raise `ProcedureCallFailed` "Expected index
+to come online within a reasonable time" (if it comes ONLINE inside that window the query
+is answered from it). So while an index populates, every unbounded similarity search costs
+~30 s plus the exact scan. Each fallback also produces an ERROR line from graphiti's
+`Neo4jDriver.execute_query`, which logs every failing query before re-raising; that logger
+is left alone, the `fell_back` counter sizes the event.
+
+**Other backends.** The wrappers delegate to graphiti's original (counted as
+`delegated_backend`) when the driver has a `search_interface` or its provider is not
+`GraphProvider.NEO4J`: the indexes and the Cypher are Neo4j's.
 
 **Counters.** A module-level `VectorSearchStats` (`routed`, `delegated_bounded`,
-`fell_back`, per kind edge/node) with `snapshot()` and `reset()`. `graph_extract.cli ingest`
+`delegated_backend`, `fell_back`, per kind edge/node) with `snapshot()` and `reset()`. `graph_extract.cli ingest`
 prints it with the dedup summary; `run_worker_once` logs it per batch next to
 `reference_basis`. A run can then prove the index path engaged (`routed > 0`) — the
 cost-awareness rule in `CLAUDE.md`.
@@ -109,26 +123,32 @@ INDEX_OPTIONS = {
 }
 ```
 
-`async ensure_vector_indexes(driver, embed_dim) -> None`:
+`async ensure_vector_indexes(driver, embed_dim, *, wait_seconds=60.0) -> None`:
 
 1. `CREATE VECTOR INDEX … IF NOT EXISTS` for both, with the options above.
-2. `CALL db.awaitIndexes(<timeout>)`, then read `SHOW INDEXES` and **raise** unless both
-   are `ONLINE` (`awaitIndexes` returns silently on timeout — the crossover harness's
-   lesson).
-3. Compare each index's stored `indexConfig` with the expected values (as read back:
-   `vector.quantization.type: NONE`, `vector.similarity_function: COSINE`, numeric equality
-   for the rest). On mismatch **raise** `VectorIndexMismatch` naming the index, the
-   differing keys, and the rebuild command. Never drop or rebuild automatically: at corpus
-   scale a rebuild is hours, and an index under construction serves nothing.
+2. `CALL db.awaitIndex(<name>, <remaining>)` for **these two indexes only**, sharing one
+   `wait_seconds` budget (amended 2026-09-23, F1: the original `db.awaitIndexes(3600)`
+   waited on every index in the database). `awaitIndex` raises `ProcedureTimedOut` on
+   timeout, which is expected; any other error propagates unless that index is FAILED.
+3. Read `SHOW VECTOR INDEXES` and compare each index's schema and stored `indexConfig` with
+   the expected values (as read back: `vector.quantization.type: NONE`,
+   `vector.similarity_function: COSINE`, numeric equality for the rest).
+4. Schema or config mismatch, or state `FAILED` → **raise** `VectorIndexMismatch` naming the
+   index, the problem and the rebuild command. State `POPULATING` → log a WARNING naming the
+   index and its `populationPercent` (searches wait ~30 s on it, then fall back, until it is
+   ONLINE) and **return**: a populating index is healthy, and telling an operator to rebuild
+   it would discard the work in flight. Never drop or rebuild automatically: at corpus scale
+   a rebuild is hours.
 
 Called from `init_indices` (so `graph_extract.cli ingest`, the worker path and `probe`
-get it) and from answer-api's `_lifespan` after the driver is built. Skipped when
-`vector_search_enabled` is False.
+get it) and from answer-api's `_lifespan` after the driver is built, each passing
+`vector_index_startup_wait_seconds`. Skipped when `vector_search_enabled` is False.
 
 **Rebuild command:** `python -m graph_extract.cli vector-index --rebuild` drops both indexes
-and recreates them via `ensure_vector_indexes`; `vector-index` alone prints each index's
-state and config against the expected. `--rebuild` requires `--yes`, since searches fall
-back to exact scans until the new index is ONLINE.
+and recreates them via `ensure_vector_indexes` with a 3600 s wait, then reports the final
+state; `vector-index` alone prints each index's state, `populationPercent` and config
+against the expected. `--rebuild` requires `--yes`, since until the new index is ONLINE
+each search waits ~30 s on it and then falls back to the exact scan.
 
 ## 5. Configuration (`ExtractSettings`)
 
@@ -136,6 +156,7 @@ back to exact scans until the new index is ONLINE.
 |---|---|---|
 | `vector_search_enabled` | `True` | kill switch; `False` restores graphiti's functions and skips index management |
 | `vector_search_fetch_k` | `200` | neighbours requested from the index before filtering |
+| `vector_index_startup_wait_seconds` | `60.0` | how long a service start waits for the two indexes; one still POPULATING after it is logged and the start proceeds |
 
 ## 6. Testing
 
@@ -151,7 +172,9 @@ Hermetic unit tests (fakes) and Neo4j testcontainer integration tests; no LLM ca
    `Graphiti._search` with `EDGE_HYBRID_SEARCH_RRF` (retrieval) both increment `routed`.
 4. **Lifecycle:** first call creates both indexes ONLINE with the expected config; a
    second call is a no-op; an index created with default options raises
-   `VectorIndexMismatch`; a missing index at query time falls back and counts it.
+   `VectorIndexMismatch`; a missing index at query time falls back and counts it; a
+   POPULATING index is warned about, not refused, and a query against it falls back; a
+   FAILED index raises.
 5. **Kill switch:** `install_vector_search(False, …)` leaves every patched module
    attribute identical (`is`) to graphiti's original.
 6. **Unknown filter field:** a `SearchFilters` subclass / instance with an extra non-None

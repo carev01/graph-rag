@@ -13,14 +13,33 @@
   `graphiti_core.search.search`, `search_utils` and `node_operations` that send every
   **unbounded** similarity search to the index and delegate everything bounded
   (same-pair dedup's `edge_uuids`, endpoint uuids, any filter) to graphiti's original.
-- A missing index falls back to the exact scan with a WARNING; any other error
-  propagates.
-- Counters (`routed` / `delegated_bounded` / `fell_back`, per edge/node) printed by
-  `ingest` and logged per worker batch.
-- `python -m graph_extract.cli vector-index` (status against the expected config) and
-  `vector-index --rebuild --yes`.
-- Settings: `VECTOR_SEARCH_ENABLED` (default on; off restores graphiti exactly) and
-  `VECTOR_SEARCH_FETCH_K` (default 200).
+- A missing or not-yet-ONLINE index falls back to the exact scan with a WARNING (once
+  per index and reason; graphiti additionally logs each failing query at ERROR); any
+  other error propagates. Non-Neo4j backends are delegated to graphiti untouched.
+- Counters (`routed` / `delegated_bounded` / `delegated_backend` / `fell_back`, per
+  edge/node) printed by `ingest` and logged per worker batch.
+- `python -m graph_extract.cli vector-index` (state, `populationPercent` and config
+  against the expected) and `vector-index --rebuild --yes` (waits up to an hour, reports
+  the final state).
+- Settings: `VECTOR_SEARCH_ENABLED` (default on; off restores graphiti exactly),
+  `VECTOR_SEARCH_FETCH_K` (default 200) and `VECTOR_INDEX_STARTUP_WAIT_SECONDS`
+  (default 60).
+
+## While an index is POPULATING (final-review F1)
+
+Service starts wait up to `VECTOR_INDEX_STARTUP_WAIT_SECONDS` for **these two indexes**
+(`db.awaitIndex`, not the database-wide `db.awaitIndexes`). An index still POPULATING
+after that is logged at WARNING with its `populationPercent` and the start proceeds; only
+a schema/config mismatch or a FAILED index refuses to start.
+
+Measured on `neo4j:2026.07.1-community` (120k 768-dim vectors, tuned options): a query
+issued 0.2 s after `CREATE VECTOR INDEX` **blocked 30.3 s** (nodes) / 30.2 s
+(relationships), then raised `Neo.ClientError.Procedure.ProcedureCallFailed` —
+"Expected index to come online within a reasonable time." The wrappers recognise that
+message and fall back. So during a rebuild (hours at corpus scale) **every unbounded
+similarity search costs ~30 s of waiting plus the exact scan** until the index is ONLINE.
+Pinned by `test_a_populating_index_is_reported_not_refused_and_searches_fall_back`
+(integration, 100k vectors) and the unit tests on the verbatim error.
 
 ## Live acceptance on `backup-docs`
 
@@ -34,10 +53,14 @@ unchanged; the only difference is two `ONLINE` vector indexes.
 | node dedup (200 live entity names, top 15, min 0.6) | 200 | **1.000** (min 1.000) | 1,081 | 1,085 |
 
 Counters: edge `routed=29`, node `routed=200`, `fell_back=0`, `delegated_bounded=0` —
-every call provably took the index path.
+every call the script made provably took the index path. Scope: the acceptance script
+calls the wrappers **directly** (`index_edge_similarity_search` /
+`index_node_similarity_search`), not through `_retrieve_edges` / `Graphiti.search` or
+node dedup. That graphiti's real call paths reach the wrappers is covered by the hermetic
+integration test `test_retrieval_and_node_dedup_both_route_through_the_real_call_paths`.
 
-**What this establishes:** the wiring is correct on real data and real embeddings —
-identical results, the index engaged on every call. **What it does not:** recall at
+**What this establishes:** the wrappers are correct on real data and real embeddings —
+identical results, the index engaged on every direct call. **What it does not:** recall at
 scale. At 999 entities and 3.6k facts HNSW is effectively exact and the scan is cheap;
 recall and latency at 250k rows are the probe's evidence, not this run's.
 
