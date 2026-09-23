@@ -14,8 +14,6 @@ from neo4j.exceptions import ClientError
 
 from graph_extract import vector_search as vs
 
-pytestmark = pytest.mark.asyncio
-
 VEC = [1.0, 0.0, 0.0]
 
 
@@ -61,6 +59,7 @@ def originals(monkeypatch):
     {"source_node_uuid": None, "target_node_uuid": None,
      "search_filter": SearchFilters(edge_types=["USES"])},
 ])
+@pytest.mark.asyncio
 async def test_bounded_edge_calls_reach_the_original_untouched(originals, kwargs):
     driver = _FakeDriver()
     out = await vs.index_edge_similarity_search(driver, VEC, group_ids=["g"], **kwargs)
@@ -70,6 +69,32 @@ async def test_bounded_edge_calls_reach_the_original_untouched(originals, kwargs
     assert vs.stats_snapshot()["edge"]["delegated_bounded"] == 1
 
 
+class _OtherBackend(_FakeDriver):
+    provider = GraphProvider.FALKORDB
+
+
+class _WithSearchInterface(_FakeDriver):
+    search_interface = object()
+
+
+@pytest.mark.parametrize("driver_cls", [_OtherBackend, _WithSearchInterface])
+@pytest.mark.asyncio
+async def test_a_non_neo4j_backend_reaches_the_original_on_both_paths(originals, driver_cls):
+    """The indexes and the Cypher are Neo4j's; graphiti routes other backends
+    (another provider, or a driver-supplied search_interface) itself."""
+    driver = driver_cls()
+    assert await vs.index_edge_similarity_search(
+        driver, VEC, None, None, SearchFilters(), ["g"], 10, 0.6) == ["original-edge"]
+    assert await vs.index_node_similarity_search(
+        driver, VEC, SearchFilters(), ["g"], 15, 0.6) == ["original-node"]
+    assert driver.queries == []
+    assert len(originals["edge"]) == len(originals["node"]) == 1
+    assert vs.stats_snapshot() == {
+        kind: {"routed": 0, "delegated_bounded": 0, "delegated_backend": 1, "fell_back": 0}
+        for kind in ("edge", "node")}
+
+
+@pytest.mark.asyncio
 async def test_positional_bounded_edge_call_is_read_correctly(originals):
     """graphiti passes these positionally; binding by signature must see the filter."""
     driver = _FakeDriver()
@@ -79,6 +104,7 @@ async def test_positional_bounded_edge_call_is_read_correctly(originals):
     assert len(originals["edge"]) == 1
 
 
+@pytest.mark.asyncio
 async def test_unbounded_edge_call_goes_to_the_index(originals):
     driver = _FakeDriver()
     out = await vs.index_edge_similarity_search(
@@ -97,6 +123,7 @@ async def test_unbounded_edge_call_goes_to_the_index(originals):
     assert vs.stats_snapshot()["edge"]["routed"] == 1
 
 
+@pytest.mark.asyncio
 async def test_fetch_k_never_below_limit(originals):
     driver = _FakeDriver()
     await vs.index_edge_similarity_search(
@@ -104,6 +131,7 @@ async def test_fetch_k_never_below_limit(originals):
     assert driver.queries[0][1]["fetch_k"] == 500
 
 
+@pytest.mark.asyncio
 async def test_no_group_ids_drops_the_group_predicate(originals):
     driver = _FakeDriver()
     await vs.index_node_similarity_search(driver, VEC, SearchFilters(), None, 15, 0.6)
@@ -113,6 +141,7 @@ async def test_no_group_ids_drops_the_group_predicate(originals):
     assert params["index_name"] == vs.NODE_INDEX
 
 
+@pytest.mark.asyncio
 async def test_bounded_node_call_reaches_the_original(originals):
     driver = _FakeDriver()
     out = await vs.index_node_similarity_search(
@@ -121,6 +150,7 @@ async def test_bounded_node_call_reaches_the_original(originals):
     assert driver.queries == []
 
 
+@pytest.mark.asyncio
 async def test_a_filter_field_from_a_future_graphiti_counts_as_bounded(originals):
     class _Future(SearchFilters):
         future_field: list[str] | None = None
@@ -132,6 +162,7 @@ async def test_a_filter_field_from_a_future_graphiti_counts_as_bounded(originals
     assert len(originals["node"]) == 1
 
 
+@pytest.mark.asyncio
 async def test_missing_index_falls_back_and_counts(originals):
     err = ClientError._hydrate_neo4j(
         code="Neo.ClientError.Procedure.ProcedureCallFailed",
@@ -156,6 +187,7 @@ def _not_online() -> ClientError:
         code="Neo.ClientError.Procedure.ProcedureCallFailed", message=_NOT_ONLINE_MESSAGE)
 
 
+@pytest.mark.asyncio
 async def test_a_populating_index_falls_back_and_counts(originals):
     driver = _FakeDriver(raise_exc=_not_online())
     out = await vs.index_node_similarity_search(driver, VEC, SearchFilters(), ["g"], 15, 0.6)
@@ -164,6 +196,7 @@ async def test_a_populating_index_falls_back_and_counts(originals):
     assert vs.stats_snapshot()["node"]["routed"] == 0
 
 
+@pytest.mark.asyncio
 async def test_a_populating_index_falls_back_on_the_edge_path(originals):
     driver = _FakeDriver(raise_exc=_not_online())
     out = await vs.index_edge_similarity_search(
@@ -193,6 +226,7 @@ def test_the_populating_warning_names_the_wait_and_not_a_rebuild(originals, capl
     assert "rebuild" not in msg.lower()
 
 
+@pytest.mark.asyncio
 async def test_any_other_client_error_propagates(originals):
     err = ClientError._hydrate_neo4j(
         code="Neo.ClientError.Statement.TypeError",
@@ -203,6 +237,7 @@ async def test_any_other_client_error_propagates(originals):
     assert originals["node"] == []
 
 
+@pytest.mark.asyncio
 async def test_any_other_client_error_propagates_on_the_edge_path(originals):
     err = ClientError._hydrate_neo4j(
         code="Neo.ClientError.Statement.TypeError",
@@ -256,3 +291,4 @@ def test_stats_summary_names_both_kinds():
     vs.reset_stats()
     s = vs.stats_summary()
     assert "edge" in s and "node" in s and "routed=0" in s
+    assert "delegated_backend=0" in s

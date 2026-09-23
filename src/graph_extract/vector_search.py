@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
 
+from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.edges import EntityEdge, get_entity_edge_from_record
 from graphiti_core.nodes import EntityNode, get_entity_node_from_record
 from graphiti_core.search import search as _g_search
@@ -257,7 +258,8 @@ _NOT_ONLINE = "Expected index to come online within a reasonable time"
 _fetch_k = 200
 _warned: set[tuple[str, str]] = set()
 _stats: dict[str, dict[str, int]] = {
-    kind: {"routed": 0, "delegated_bounded": 0, "fell_back": 0} for kind in ("edge", "node")
+    kind: {"routed": 0, "delegated_bounded": 0, "delegated_backend": 0, "fell_back": 0}
+    for kind in ("edge", "node")
 }
 
 
@@ -274,7 +276,16 @@ def reset_stats() -> None:
 def stats_summary() -> str:
     return " | ".join(
         f"{kind} routed={c['routed']} delegated_bounded={c['delegated_bounded']} "
-        f"fell_back={c['fell_back']}" for kind, c in _stats.items())
+        f"delegated_backend={c['delegated_backend']} fell_back={c['fell_back']}"
+        for kind, c in _stats.items())
+
+
+def _is_plain_neo4j(driver: Any) -> bool:
+    """The indexes and the Cypher here are Neo4j's. graphiti routes other
+    backends -- another provider, or a driver-supplied `search_interface` --
+    itself, so those calls go to its original untouched (`delegated_backend`)."""
+    return (getattr(driver, "search_interface", None) is None
+            and getattr(driver, "provider", None) == GraphProvider.NEO4J)
 
 
 def _is_unbounded(search_filter: Any) -> bool:
@@ -329,6 +340,9 @@ async def index_edge_similarity_search(*args: Any, **kwargs: Any) -> list[Entity
     a = _EDGE_SIG.bind(*args, **kwargs)
     a.apply_defaults()
     p = a.arguments
+    if not _is_plain_neo4j(p["driver"]):
+        _stats["edge"]["delegated_backend"] += 1
+        return await _ORIG_EDGE(*args, **kwargs)
     if not (p["source_node_uuid"] is None and p["target_node_uuid"] is None
             and _is_unbounded(p["search_filter"])):
         _stats["edge"]["delegated_bounded"] += 1
@@ -363,6 +377,9 @@ async def index_node_similarity_search(*args: Any, **kwargs: Any) -> list[Entity
     a = _NODE_SIG.bind(*args, **kwargs)
     a.apply_defaults()
     p = a.arguments
+    if not _is_plain_neo4j(p["driver"]):
+        _stats["node"]["delegated_backend"] += 1
+        return await _ORIG_NODE(*args, **kwargs)
     if not _is_unbounded(p["search_filter"]):
         _stats["node"]["delegated_bounded"] += 1
         return await _ORIG_NODE(*args, **kwargs)

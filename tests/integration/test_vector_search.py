@@ -168,8 +168,10 @@ async def test_index_path_matches_the_exact_scan_on_a_planted_ranking(
     # Equal results alone would also pass on a silent fallback to the exact
     # scan: prove both calls were answered by the index.
     assert vs.stats_snapshot() == {
-        "edge": {"routed": 1, "delegated_bounded": 0, "fell_back": 0},
-        "node": {"routed": 1, "delegated_bounded": 0, "fell_back": 0}}
+        "edge": {"routed": 1, "delegated_bounded": 0, "delegated_backend": 0,
+                 "fell_back": 0},
+        "node": {"routed": 1, "delegated_bounded": 0, "delegated_backend": 0,
+                 "fell_back": 0}}
 
 
 async def test_other_groups_are_filtered_out(hermetic_graphiti, extract_driver):
@@ -181,13 +183,13 @@ async def test_other_groups_are_filtered_out(hermetic_graphiti, extract_driver):
     assert out == []
     # empty because the index path filtered the group, not because it fell back
     assert vs.stats_snapshot()["node"] == {
-        "routed": 1, "delegated_bounded": 0, "fell_back": 0}
+        "routed": 1, "delegated_bounded": 0, "delegated_backend": 0, "fell_back": 0}
     out = await vs.index_edge_similarity_search(
         hermetic_graphiti.driver, _unit(0), None, None, SearchFilters(),
         ["another-group"], 5, 0.6)
     assert out == []
     assert vs.stats_snapshot()["edge"] == {
-        "routed": 1, "delegated_bounded": 0, "fell_back": 0}
+        "routed": 1, "delegated_bounded": 0, "delegated_backend": 0, "fell_back": 0}
 
 
 async def test_retrieval_and_node_dedup_both_route_through_the_real_call_paths(
@@ -265,7 +267,7 @@ async def test_a_populating_index_is_reported_not_refused_and_searches_fall_back
         # Neo4j blocked ~30 s waiting for the index, then refused; the wrapper
         # recognised that and served the exact scan.
         assert vs.stats_snapshot()["node"] == {
-            "routed": 0, "delegated_bounded": 0, "fell_back": 1}
+            "routed": 0, "delegated_bounded": 0, "delegated_backend": 0, "fell_back": 1}
         status = await vs.index_status(extract_driver)
         assert status[vs.NODE_INDEX]["state"] == "POPULATING", \
             "index came ONLINE during the query: seed more rows"
