@@ -15,6 +15,7 @@ from answer_api import timeline as timeline_mod
 from answer_api.router import Mode
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
+from graph_extract.vector_search import ensure_vector_indexes
 from graphiti_core import Graphiti
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         await graphiti.close()
         raise
+    # Verify (and on a fresh database create) the tuned vector indexes before
+    # serving: a mismatch refuses to start rather than serving full scans.
+    if settings.vector_search_enabled:
+        try:
+            await ensure_vector_indexes(graphiti.driver, settings.embed_dim)
+        except Exception:
+            await graphiti.close()
+            await driver.close()
+            raise
     # Same guard, extended: if building the synthesis client fails (e.g.
     # judge_base_url unset), close both already-built graphiti and driver
     # before re-raising.

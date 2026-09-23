@@ -10,6 +10,8 @@ pytestmark = pytest.mark.asyncio
 
 
 class FakeGraphiti:
+    driver = None
+
     async def close(self) -> None:
         pass
 
@@ -110,6 +112,11 @@ def _stub_deps(monkeypatch):
     the endpoint tests need no Neo4j and no GLM endpoint."""
     monkeypatch.setattr(app_mod, "build_graphiti", lambda settings: FakeGraphiti())
     monkeypatch.setattr(app_mod, "_build_driver", _fake_build_driver)
+
+    async def _fake_ensure_vector_indexes(driver, embed_dim):
+        return None
+
+    monkeypatch.setattr(app_mod, "ensure_vector_indexes", _fake_ensure_vector_indexes)
     monkeypatch.setattr(search_mod, "search_local", _fake_search_local)
     monkeypatch.setattr(
         synth_mod, "_synthesis_client_and_model", _fake_synthesis_client_and_model

@@ -46,7 +46,7 @@ async def test_build_ingest_driver_builds_a_warmup_gate_iff_the_threshold_is_pos
         def driver(uri, auth):
             return neo4j_driver
 
-    async def _init_indices(graphiti):
+    async def _init_indices(graphiti, **_kwargs):
         return None
 
     monkeypatch.setattr(cli, "build_graphiti", lambda s: _Closable())

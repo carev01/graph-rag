@@ -6,6 +6,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 
+from graph_extract import vector_search
 from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
 from graph_extract.ingest_driver import CRAWL_FALLBACK
@@ -190,6 +191,10 @@ async def run_worker_once(
     if jobs:
         logger.info("semantic batch: jobs=%d reference_basis=%s dedup: %s",
                     len(jobs), dict(basis_counts), batch_dedup.summary())
+        # Phase B: per-batch proof the index path engaged; reset so each batch
+        # reports its own counts.
+        logger.info("semantic batch vector search: %s", vector_search.stats_summary())
+        vector_search.reset_stats()
         fallbacks = basis_counts.get(CRAWL_FALLBACK, 0)
         if fallbacks:
             logger.warning(

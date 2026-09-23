@@ -16,6 +16,7 @@ from graph_extract.contradiction_gate import install_contradiction_gate
 from graph_extract.deterministic_valid_at import install_deterministic_valid_at
 from graph_extract.lean_edge_search import install_lean_edge_search
 from graph_extract.usage import instrument
+from graph_extract.vector_search import ensure_vector_indexes, install_vector_search
 from graph_extract.ontology import (
     ENTITY_TYPES, EDGE_TYPES, EDGE_TYPE_MAP, EXCLUDED_ENTITY_TYPES,
     EXTRACTION_INSTRUCTIONS,
@@ -215,6 +216,10 @@ def build_graphiti(s: ExtractSettings, *, tier: str = "strong") -> Graphiti:
     # valid_at from the episode reference time, skipping a per-fact LLM call that
     # dated 23% of facts for 21.7% of run time. Idempotent.
     install_deterministic_valid_at(enabled=s.valid_at_from_content_changed)
+    # Unbounded edge/node similarity searches -> tuned vector indexes (Phase B).
+    # Idempotent; enabled=False restores graphiti's own functions exactly.
+    install_vector_search(enabled=s.vector_search_enabled,
+                          fetch_k=s.vector_search_fetch_k)
     embed_client = _batch_capped_embeddings(
         AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
                     timeout=90.0, max_retries=4), s.embed_max_batch)
@@ -274,8 +279,13 @@ def build_embedder(s: ExtractSettings) -> OpenAIEmbedder:
         api_key="not-needed", embedding_model=s.embed_model,
         embedding_dim=s.embed_dim, base_url=s.embed_base_url), client=client)
 
-async def init_indices(graphiti: Graphiti) -> None:
+async def init_indices(graphiti: Graphiti, *, embed_dim: int | None = None) -> None:
+    """graphiti's own indices, plus -- when `embed_dim` is given -- the tuned
+    vector indexes, created if absent and VERIFIED (a mismatch raises; nothing
+    is ever rebuilt automatically)."""
     await graphiti.build_indices_and_constraints()
+    if embed_dim is not None:
+        await ensure_vector_indexes(graphiti.driver, embed_dim)
 
 async def add_text_episode(graphiti: Graphiti, s: ExtractSettings, *, name: str,
                            body: str, source_description: str,
