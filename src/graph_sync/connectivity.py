@@ -86,6 +86,15 @@ async def _http(url: str, verify: bool = True) -> str:
     return f"HTTP {resp.status_code} {url}"
 
 
+async def _optional_http(base_url: str) -> str:
+    """judge/report/map/rerank/eval-judge default to empty and fall back to
+    another tier's client at call time -- an unset base URL is a valid
+    deployment choice, not a failure, so skip the probe and say so."""
+    if not base_url:
+        return "not configured"
+    return await _http(base_url.rstrip("/") + "/models")
+
+
 def _checks() -> list[tuple[str, Callable[[], Awaitable[str]]]]:
     s = get_extract_settings()
     g = get_settings()
@@ -115,6 +124,13 @@ def _checks() -> list[tuple[str, Callable[[], Awaitable[str]]]]:
         ("chunker", lambda: _http(s.chonkie_base_url.rstrip("/") + "/")),
         ("llm", lambda: _http(s.llm_base_url.rstrip("/") + "/models")),
         ("cheap-llm", lambda: _http(s.cheap_llm_base_url.rstrip("/") + "/models")),
+        # Optional tiers: empty base URL means "falls back to another tier at
+        # call time", not "misconfigured" -- _optional_http reports that as OK.
+        ("judge", lambda: _optional_http(s.judge_base_url)),
+        ("report", lambda: _optional_http(s.report_llm_base_url)),
+        ("map", lambda: _optional_http(s.map_llm_base_url)),
+        ("rerank", lambda: _optional_http(s.rerank_base_url)),
+        ("eval-judge", lambda: _optional_http(s.eval_judge_base_url)),
     ]
 
 

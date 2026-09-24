@@ -45,3 +45,17 @@ async def test_failure_details_are_redacted_by_run_checks(monkeypatch):
     monkeypatch.setattr(c, "_secret_values", lambda: ["hunter2"])
     (r,) = await c.run_checks([("pg", _boom)])
     assert "hunter2" not in r.detail and "***" in r.detail
+
+
+async def test_optional_tier_with_empty_base_url_is_reported_ok_not_probed():
+    (r,) = await c.run_checks([("judge", lambda: c._optional_http(""))])
+    assert r.ok and r.detail == "not configured"
+
+
+async def test_optional_tier_with_a_base_url_is_probed_like_any_other(monkeypatch):
+    async def _fake_http(url: str, verify: bool = True) -> str:
+        return f"probed {url}"
+
+    monkeypatch.setattr(c, "_http", _fake_http)
+    (r,) = await c.run_checks([("judge", lambda: c._optional_http("http://x/v1"))])
+    assert r.ok and r.detail == "probed http://x/v1/models"
