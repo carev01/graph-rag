@@ -32,7 +32,9 @@ def _merge_tiny(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[C
 def _pack(chunks: list[Chunk], limit: int) -> list[Chunk]:
     """Greedily merge CONSECUTIVE chunks while the total stays <= limit (D6).
     ~70% of an episode's prompt volume is fixed per-episode overhead, so fewer,
-    larger episodes cost less (pre-bootstrap-decisions-2026-09-23.md)."""
+    larger episodes cost less -- but extraction yield per call is roughly constant,
+    so they also yield fewer facts: measured -36% cost, -28% facts at 1,200 tokens
+    (docs/superpowers/chunk-packing-ab-2026-09-24.md). Off by default for that reason."""
     out: list[Chunk] = []
     for c in chunks:
         if out and out[-1].token_count + c.token_count <= limit:

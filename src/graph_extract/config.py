@@ -52,8 +52,11 @@ class ExtractSettings(BaseSettings):
     min_chunk_tokens: int = 128
     # Pack consecutive chunks into episodes of up to this many tokens (never above
     # the tier's max_chunk_tokens). 0 = off. Set ONCE before the bootstrap: changing
-    # it re-keys an ingested article's episodes on its next re-ingest. Decided by the
-    # D6 A/B (pre-bootstrap-decisions-2026-09-23.md).
+    # it re-keys an ingested article's episodes on its next re-ingest.
+    # MEASURED 2026-09-24, keep 0: packing to 1,200 cut cost 36% and wall clock 40%
+    # but lost 28% of facts -- per-call extraction saturates (~4-10 facts per call
+    # whatever the input size), partly because CHEAP_TIER_SALIENCE asks for a fixed
+    # fact count per chunk. docs/superpowers/chunk-packing-ab-2026-09-24.md.
     pack_target_tokens: int = 0
     max_coroutines: int = 3
     # Default set to generic_json_schema per Task 6 evidence: gpt-oss-20b via

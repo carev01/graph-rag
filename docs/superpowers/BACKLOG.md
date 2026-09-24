@@ -1133,12 +1133,26 @@ in the text and lies in the future — three live facts carry `invalid_at = 2028
 retirement) — are therefore hidden from answers today although they are current. Compare
 with now: current while `invalid_at` is null or later than now. Independent of D4.
 
-### 42. Chunk packing — ~29% of the bootstrap bill, quality unmeasured — **P1 before bootstrap**
+### 42. Chunk packing — **MEASURED 2026-09-24: kept OFF** (−36% cost, −40% time, −28% facts)
+`chunk-packing-ab-2026-09-24.md`: per-call extraction saturates, so bigger episodes yield
+fewer facts; part of the loss is redundancy, part is real content. Open follow-up (P3):
+retest with `CHEAP_TIER_SALIENCE`'s per-chunk fact count scaled to episode size — the only
+way to tell the prompt's share of the loss from the model's, and the 40% wall-clock saving
+is worth that one retest. Original entry below.
+
+### 42-orig. Chunk packing — ~29% of the bootstrap bill, quality unmeasured
 `pre-bootstrap-decisions-2026-09-23.md` D6: 70% of each episode's prompt volume is fixed
 overhead, and nothing packs the neural chunker's ~265-token chunks toward a target. Packing
 to 1,200 tokens cuts episodes 48% and the bill to ~71% (~$630 of $2,176) on a 197-article
 corpus sample. Needs a small paid A/B (~30 articles, <$5) on extraction recall before
 adoption, because the cheap tier's 900-token cap was set for the verbose cheap model.
+
+### 43. Report context ranks a future-dated fact as superseded — **P3**
+`theme_builder/context.py:54-55` orders any non-null `invalid_at` after current facts and
+labels it "invalid <date>", so a fact whose end date lies in the future (still true) can be
+cut first by the token budget and is mislabelled in community reports — disagreeing with
+`/search/local` and `/timeline`, which use `answer_api.temporal.is_current` since
+2026-09-24. Pass datetimes (not Neo4j `toString` values) when switching it to the helper.
 
 ### 38. Neo4j and Postgres backups, with a tested restore — **P4, deferred by the user 2026-09-22**
 Production review M6. Nothing in the repo takes or restores a backup. Neo4j runs on a
