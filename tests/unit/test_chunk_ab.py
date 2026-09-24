@@ -111,3 +111,34 @@ def test_reused_rows_must_match_the_article_order():
     import pytest
     with pytest.raises(SystemExit):
         ab.reused_rows(prev, "today", ["b", "a"])
+
+
+def test_reused_rows_raises_systemexit_on_missing_arm():
+    import pytest
+    prev = {"other_arm": {"rows": []}}
+    with pytest.raises(SystemExit, match="missing key 'today'"):
+        ab.reused_rows(prev, "today", [])
+
+
+def test_reused_rows_raises_systemexit_on_missing_rows_key():
+    import pytest
+    prev = {"today": {"summary": {}}}
+    with pytest.raises(SystemExit, match="missing key 'rows'"):
+        ab.reused_rows(prev, "today", [])
+
+
+def test_prepare_capture_clears_stale_file(tmp_path):
+    p = tmp_path / "cap.jsonl"
+    p.write_text("stale marker\n")
+    assert p.exists()
+    result = ab.prepare_capture(p)
+    assert result == p
+    assert not p.exists()
+
+
+def test_prepare_capture_handles_missing_file(tmp_path):
+    p = tmp_path / "cap.jsonl"
+    assert not p.exists()
+    result = ab.prepare_capture(p)
+    assert result == p
+    assert not p.exists()

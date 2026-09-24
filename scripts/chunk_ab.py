@@ -79,11 +79,24 @@ def directive_seen(capture_path: Path, marker: str) -> bool:
 
 
 def reused_rows(prev: dict, arm: str, article_ids: list[str]) -> list[dict]:
-    rows = prev[arm]["rows"]
+    try:
+        rows = prev[arm]["rows"]
+    except KeyError as e:
+        raise SystemExit(f"reused arm {arm!r}: missing key {e.args[0]!r} in previous results")
     if [r["article_id"] for r in rows] != article_ids:
         raise SystemExit(f"reused arm {arm!r} does not match the selected articles "
                          "in order -- refusing to compare different samples")
     return rows
+
+
+def prepare_capture(capture_path: Path) -> Path:
+    """Clear stale capture file and return path for fresh capture.
+
+    Ensures that a marker from a previous invocation does not satisfy
+    the directive_seen gate in a new run.
+    """
+    capture_path.unlink(missing_ok=True)
+    return capture_path
 
 
 def today_episode_count(article: dict, s: ExtractSettings) -> int:
@@ -250,7 +263,7 @@ async def main() -> None:
         prev = json.loads(Path(args.reuse).read_text())
         ids = [a["id"] for a in articles]
         reused = {arm: reused_rows(prev, arm, ids) for arm in ("today", "pack1200")}
-        cap = out / "capture-smoke.jsonl"
+        cap = prepare_capture(out / "capture-smoke.jsonl")
         tally_before = get_tally().prompt_tokens
         smoke_rows = await run_arm("pack1200_coverage", articles[:SMOKE_N], 0.0, out,
                                    capture_path=cap)
