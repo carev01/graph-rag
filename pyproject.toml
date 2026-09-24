@@ -29,7 +29,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/graph_sync", "src/graph_extract", "src/docext", "src/answer_api"]
+packages = ["src/graph_sync", "src/graph_extract", "src/docext", "src/answer_api",
+            "src/theme_builder", "src/compat"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
