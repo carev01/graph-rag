@@ -19,8 +19,12 @@ def _commands(prefix: str) -> list[str]:
 def test_every_one_off_pod_has_a_dry_run_with_flags_before_the_separator():
     runs = _commands("kubectl -n graph-rag run ")
     names = {re.search(r"run (\S+)", r).group(1) for r in runs}
+    # bootstrap-first rehearsal (§8): relane report, relane apply, and the
+    # per-source structural bootstrap are each their own named one-off pod.
     assert names == {"graph-rag-connectivity", "graph-rag-crosscheck",
-                     "graph-rag-sync-once", "graph-rag-smoke"}
+                     "graph-rag-sync-once", "graph-rag-smoke",
+                     "graph-rag-relane", "graph-rag-relane-apply",
+                     "graph-rag-bootstrap-src"}
     for name in names:
         mine = [r for r in runs if f"run {name} " in r]
         dry = [r for r in mine if "--dry-run=client" in r]
@@ -32,7 +36,9 @@ def test_every_one_off_pod_has_a_dry_run_with_flags_before_the_separator():
 
 def test_every_pod_override_carries_resources_env_and_security():
     overrides = re.findall(r"ovr=\$\(cat <<'JSON'\n(.*?)\nJSON\n\)", TEXT, re.S)
-    assert len(overrides) == 4
+    # 4 original (connectivity, crosscheck, sync-once, smoke) + 3 from the
+    # bootstrap-first rehearsal (relane report, relane apply, bootstrap-src).
+    assert len(overrides) == 7
     for raw in overrides:
         spec = json.loads(raw)["spec"]
         assert spec["automountServiceAccountToken"] is False
@@ -44,8 +50,12 @@ def test_every_pod_override_carries_resources_env_and_security():
 
 
 def test_every_rollout_status_is_bounded():
+    # Was 5 before the bootstrap-first rehearsal (§8): `sync.replicas=1` (and its
+    # rollout-status wait) no longer fires here -- the poller stays suspended
+    # until bootstrap completes, a later runbook step -- leaving postgres,
+    # answer, and the two worker-scaling waits (§10).
     cmds = _commands("kubectl -n graph-rag rollout status")
-    assert len(cmds) >= 5
+    assert len(cmds) >= 4
     for cmd in cmds:
         assert "--timeout=" in cmd, cmd
 

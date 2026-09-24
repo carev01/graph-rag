@@ -160,3 +160,54 @@ def test_worker_command_wires_the_global_warmup_lock(monkeypatch, warmup, enable
     assert store.warmup_lock_calls == [1234.0], (
         f"the factory must call the STORE's warmup_lock with the configured "
         f"timeout; got {store.warmup_lock_calls}")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("", None),                    # unscoped -> [] reaches run_worker
+     ("s1,s2", ["s1", "s2"])],
+)
+def test_worker_command_passes_the_claim_scope_to_run_worker(monkeypatch, raw, expected):
+    """`SEMANTIC_CLAIM_SOURCE_IDS` must reach `run_worker`'s `source_ids`, not
+    merely exist on `Settings` -- the same inert-knob defect class the
+    warm-up-lock wiring test above guards against."""
+    received: dict = {}
+
+    async def _deps(settings):
+        return _Closable(), _Ingest(), _Closable(), _Closable(), _Closable()
+
+    async def _fake_run_worker(store, ingest, **kw):
+        received.update(kw)
+
+    monkeypatch.setattr(cli, "get_settings",
+                        lambda: _sync_settings().model_copy(update={
+                            "semantic_claim_source_ids": raw}))
+    monkeypatch.setattr(cli, "get_extract_settings", lambda: _extract_settings())
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+
+    cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    assert "source_ids" in received, f"run_worker must receive source_ids; got {received}"
+    expected_list = expected if expected is not None else []
+    assert received["source_ids"] == expected_list
+
+
+def test_worker_command_logs_the_claim_scope(monkeypatch, caplog):
+    async def _deps(settings):
+        return _Closable(), _Ingest(), _Closable(), _Closable(), _Closable()
+
+    async def _fake_run_worker(store, ingest, **kw):
+        return None
+
+    monkeypatch.setattr(cli, "get_settings",
+                        lambda: _sync_settings().model_copy(update={
+                            "semantic_claim_source_ids": "s1,s2"}))
+    monkeypatch.setattr(cli, "get_extract_settings", lambda: _extract_settings())
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+
+    with caplog.at_level("INFO", logger="graph_sync.cli"):
+        cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    assert any("2 source(s): s1, s2" in r.message for r in caplog.records)

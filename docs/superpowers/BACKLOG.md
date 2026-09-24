@@ -1221,6 +1221,31 @@ patch version under a live PVC) — pin `16.x-alpine` or a digest. The three Cro
 no `spec.timeZone`, so their schedules are in the controller's zone (UTC on k3s) — set it
 explicitly so `30 3 * * *` means what the runbook reader thinks it means.
 
+### 49. First incremental pull on k3s: `httpx.ReadTimeout` mid-stream after 5,646 jobs — **P2, found 2026-09-24; unbudgeted-lane gap RESOLVED**
+The cluster's first incremental pull (cursor from 2026-09-03, ~3 weeks of changes) failed
+with `httpx.ReadTimeout` after queueing 5,646 semantic jobs: DocExtractor sent nothing for
+over 300 s mid-stream (the client's read timeout is 300 s, `docext/client.py`). Safe — the
+cursor only advances on the stream's terminal `{"control":"cursor",...}` line, so nothing
+was lost or double-applied — but a delta this long cannot complete in one shot. Investigate
+server-side before enabling the poller on this cluster: a longer streaming read timeout, or
+a chunked catch-up (resume with `?bootstrap_after=<highest applied id>`-style paging over
+the incremental stream, not just bootstrap). Options unexplored as of this writing.
+
+**Resolution of the separate unbudgeted-incremental-lane gap this pull exposed:** every one
+of those 5,646 jobs landed in the `incremental` lane — unbudgeted and claimed ahead of
+`bootstrap` (`StateStore.claim_semantic_jobs`: `AND ($2 OR lane='incremental')`) — because
+`SyncCore._apply_record` put EVERY record from an incremental pull there, including
+articles from vendors never semantically ingested. CLAUDE.md's "incremental updates
+preempt bootstrap backfill" only ever meant updates to *already-extracted* articles. Fixed:
+the lane is now `incremental` only if `Neo4jRepo.has_episodes(article_id)` is true (both for
+content records and tombstones); everything else — new articles, or a changed/removed
+article from a never-bootstrapped vendor — goes to the budgeted `bootstrap` lane. A one-off
+repair (`python -m graph_sync.cli relane-jobs [--apply]`) backfills `semantic_jobs.source_id`
+(added so a worker can also be scoped to a chosen set of sources via
+`SEMANTIC_CLAIM_SOURCE_IDS`, for a bootstrap-first rehearsal) and moves any already-queued
+`pending`/`incremental` job with no episodes to `bootstrap`. See `docs/deploy/k3s.md` §8 for
+the rehearsal runbook.
+
 ---
 
 ## Next steps, in order

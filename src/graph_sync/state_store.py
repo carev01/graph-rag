@@ -35,6 +35,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_semantic_jobs_pending
   ON semantic_jobs(article_id) WHERE status='pending';
 ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS lane text NOT NULL DEFAULT 'incremental';
 ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS source_id text;
+CREATE INDEX IF NOT EXISTS ix_semantic_jobs_source ON semantic_jobs(source_id) WHERE status='pending';
 CREATE TABLE IF NOT EXISTS token_ledger (day date PRIMARY KEY, tokens bigint NOT NULL DEFAULT 0);
 """
 _LOCK_KEY = 911_222_333
@@ -132,29 +134,39 @@ class StateStore:
 
     async def enqueue_semantic_job(
         self, article_id: str, op: str, content_hash: str | None,
-        lane: str = "incremental"
+        lane: str = "incremental", source_id: str | None = None,
     ) -> None:
         pool = await self._get_pool()
         await pool.execute(
-            "INSERT INTO semantic_jobs (article_id, op, content_hash, lane) VALUES ($1,$2,$3,$4) "
+            "INSERT INTO semantic_jobs (article_id, op, content_hash, lane, source_id) "
+            "VALUES ($1,$2,$3,$4,$5) "
             "ON CONFLICT (article_id) WHERE status='pending' DO UPDATE SET "
             "op=excluded.op, content_hash=excluded.content_hash, "
             "lane=CASE WHEN excluded.lane='incremental' OR semantic_jobs.lane='incremental' "
             "THEN 'incremental' ELSE 'bootstrap' END, "
+            "source_id=coalesce(excluded.source_id, semantic_jobs.source_id), "
             "enqueued_at=now(), updated_at=now()",
-            article_id, op, content_hash, lane)
+            article_id, op, content_hash, lane, source_id)
 
-    async def claim_semantic_jobs(self, batch: int, include_bootstrap: bool) -> list[dict]:
+    async def claim_semantic_jobs(
+        self, batch: int, include_bootstrap: bool, source_ids: list[str] | None = None
+    ) -> list[dict]:
+        # `source_ids` scopes a worker to a subset of sources (the k3s
+        # bootstrap-first rehearsal: `SEMANTIC_CLAIM_SOURCE_IDS`). `None`/empty
+        # is unscoped -- today's behaviour exactly, and the `$3::text[] IS
+        # NULL` branch below makes that the case whether the caller passes
+        # `None` or `[]`.
         pool = await self._get_pool()
         rows = await pool.fetch(
             "UPDATE semantic_jobs SET status='in_progress', claimed_at=now(), updated_at=now() "
             "WHERE id IN (SELECT id FROM semantic_jobs "
             "WHERE status='pending' AND next_attempt_at <= now() "
             "AND ($2 OR lane='incremental') "
+            "AND ($3::text[] IS NULL OR source_id = ANY($3::text[])) "
             "ORDER BY (lane='bootstrap'), next_attempt_at "
             "FOR UPDATE SKIP LOCKED LIMIT $1) "
             "RETURNING id, article_id, op, content_hash, attempts, lane, claimed_at",
-            batch, include_bootstrap)
+            batch, include_bootstrap, source_ids or None)
         return [dict(r) for r in rows]
 
     async def complete_semantic_job(self, job_id: int, claimed_at: datetime | None) -> None:

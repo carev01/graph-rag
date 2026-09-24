@@ -114,3 +114,29 @@ async def test_apply_toc_relinks_unfilled_stub_across_snapshots(neo4j_repo):
 
     assert await neo4j_repo.article_in_chapter_count("a8") == 1
     assert await neo4j_repo.article_chapter_id("a8") == "cQ"
+
+
+async def test_has_episodes_false_before_true_after(neo4j_repo):
+    await neo4j_repo.apply_structural(_write(article_id="hep1", source_id="s-hep", h="h"))
+    assert await neo4j_repo.has_episodes("hep1") is False
+    await neo4j_repo.add_episode_edge("hep1")
+    assert await neo4j_repo.has_episodes("hep1") is True
+
+
+async def test_has_episodes_false_for_an_unknown_article(neo4j_repo):
+    assert await neo4j_repo.has_episodes("no-such-article") is False
+
+
+async def test_article_source_ids_batched_lookup(neo4j_repo):
+    await neo4j_repo.apply_structural(_write(article_id="src1", source_id="s-src", h="h"))
+    await neo4j_repo.apply_structural(_write(article_id="src2", source_id="s-src", h="h"))
+    found = await neo4j_repo.article_source_ids(["src1", "src2", "no-such-article"])
+    assert found == {"src1": "s-src", "src2": "s-src"}
+
+
+async def test_articles_with_episodes_batched_lookup(neo4j_repo):
+    await neo4j_repo.apply_structural(_write(article_id="ep1", source_id="s-ep", h="h"))
+    await neo4j_repo.apply_structural(_write(article_id="ep2", source_id="s-ep", h="h"))
+    await neo4j_repo.add_episode_edge("ep1")  # ep2 stays without episodes
+    found = await neo4j_repo.articles_with_episodes(["ep1", "ep2", "no-such-article"])
+    assert found == {"ep1"}

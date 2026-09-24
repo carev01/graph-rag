@@ -39,7 +39,7 @@ class _Store:
 
     async def reap_stale_jobs(self, *a, **k): return None
     async def today_token_total(self): return 0
-    async def claim_semantic_jobs(self, batch, include_bootstrap): return self._jobs
+    async def claim_semantic_jobs(self, batch, include_bootstrap, source_ids=None): return self._jobs
     async def complete_semantic_job(self, jid, claimed_at): self.completed.append(jid)
     async def fail_semantic_job(self, jid, *a, **k): self.failed.append(jid)
     async def record_tokens(self, n): return None

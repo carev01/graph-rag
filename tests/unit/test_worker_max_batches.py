@@ -28,7 +28,7 @@ class _CountingStore:
     async def today_token_total(self):
         return 0
 
-    async def claim_semantic_jobs(self, batch, include_bootstrap):
+    async def claim_semantic_jobs(self, batch, include_bootstrap, source_ids=None):
         self.claims += 1
         return []          # no jobs -> run_worker_once returns 0, loop would poll
 

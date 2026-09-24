@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     # defaulting it off would make scaling out silently lose the guarantee.
     semantic_global_warmup_lock: bool = True
     semantic_warmup_lock_timeout_seconds: float = 1800.0
+    # Scopes the worker's `claim_semantic_jobs` to a subset of sources -- the
+    # k3s bootstrap-first rehearsal (docs/deploy/k3s.md): comma-separated
+    # source ids, e.g. "s1,s2". Empty (the default) is unscoped, i.e. today's
+    # behaviour: claim across every source. Set via `SEMANTIC_CLAIM_SOURCE_IDS`.
+    semantic_claim_source_ids: str = ""
+
+    @property
+    def semantic_claim_source_id_list(self) -> list[str]:
+        """Parsed, stripped, non-empty ids from `semantic_claim_source_ids`."""
+        return [s.strip() for s in self.semantic_claim_source_ids.split(",") if s.strip()]
 
 @lru_cache
 def get_settings() -> Settings:
