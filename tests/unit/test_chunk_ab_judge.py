@@ -53,3 +53,9 @@ def test_decide_applies_the_spec_rule():
     rows2 = [{"today": {"distinct": 10, "unsupported": 1}, "pack1200_coverage":
               {"distinct": 8, "unsupported": 1}, "cost_ratio": 0.6}] * 3
     assert j.decide(rows2)["adopt"] is False
+
+
+def test_decide_rejects_when_coverage_has_more_unsupported():
+    rows = [{"today": {"distinct": 10, "unsupported": 1}, "pack1200_coverage":
+             {"distinct": 10, "unsupported": 3}, "cost_ratio": 0.6}] * 3
+    assert j.decide(rows)["adopt"] is False
