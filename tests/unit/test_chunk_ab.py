@@ -41,3 +41,31 @@ def test_summarise_totals_and_ratios():
     s = ab.summarise(rows)
     assert s["episodes"] == 4 and s["facts"] == 15 and s["entities"] == 10
     assert abs(s["cost"] - 0.03) < 1e-9 and s["seconds"] == 40.0
+
+
+def test_smoke_refusal_tally_not_moved():
+    a_rows = [{"episodes": 1, "prompt_tokens": 100}]
+    b_rows = [{"episodes": 2, "prompt_tokens": 200}]
+    refusal = ab._smoke_refusal(a_rows, b_rows, tally_moved=False)
+    assert "usage tally did not move" in refusal
+
+
+def test_smoke_refusal_metering_missing():
+    a_rows = [{"episodes": 1, "prompt_tokens": 100}]
+    b_rows = [{"episodes": 0, "prompt_tokens": 0}, {"episodes": 1, "prompt_tokens": 0}]
+    refusal = ab._smoke_refusal(a_rows, b_rows, tally_moved=True)
+    assert "prompt_tokens == 0" in refusal and "episodes > 0" in refusal
+
+
+def test_smoke_refusal_variable_not_engaged():
+    a_rows = [{"episodes": 2, "prompt_tokens": 100}]
+    b_rows = [{"episodes": 3, "prompt_tokens": 200}]
+    refusal = ab._smoke_refusal(a_rows, b_rows, tally_moved=True)
+    assert "variable is not engaged" in refusal
+
+
+def test_smoke_refusal_passes_all_gates():
+    a_rows = [{"episodes": 5, "prompt_tokens": 100}]
+    b_rows = [{"episodes": 3, "prompt_tokens": 200}]
+    refusal = ab._smoke_refusal(a_rows, b_rows, tally_moved=True)
+    assert refusal is None

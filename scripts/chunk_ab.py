@@ -77,6 +77,29 @@ def summarise(rows: list[dict]) -> dict:
     return {k: sum(r[k] for r in rows) for k in keys} | {"articles": len(rows)}
 
 
+def _smoke_refusal(a_rows: list[dict], b_rows: list[dict], tally_moved: bool) -> str | None:
+    """Check smoke gates: tally moved globally, and any row with episodes > 0 is metered.
+
+    Returns error message if a gate fails, None if all gates pass.
+    """
+    if not tally_moved:
+        return "usage tally did not move: cost is not being measured -- refusing"
+
+    smoke_rows = a_rows + b_rows
+    for row in smoke_rows:
+        if row["episodes"] > 0 and row["prompt_tokens"] == 0:
+            return ("smoke row has episodes > 0 but prompt_tokens == 0; "
+                    "a tier whose usage was not tallied -- refusing")
+
+    a_eps = sum(r["episodes"] for r in a_rows)
+    b_eps = sum(r["episodes"] for r in b_rows)
+    if not b_eps < a_eps:
+        return ("packing did not reduce episodes on the smoke articles -- the "
+                "variable is not engaged; refusing to spend on the full run")
+
+    return None
+
+
 async def _seed(driver, articles: list[dict]) -> None:
     await driver.execute_query(
         "UNWIND $rows AS r MERGE (a:Article {id: r.id}) "
@@ -90,19 +113,26 @@ async def _article_graph(driver, article_id: str) -> dict:
     r = await driver.execute_query(
         "MATCH (:Article {id: $a})-[:HAS_EPISODE]->(e:Episodic) "
         "OPTIONAL MATCH (e)-[:MENTIONS]->(n:Entity) "
-        "WITH collect(DISTINCT e.uuid) AS eps, collect(DISTINCT n.name) AS ents "
+        "WITH collect(DISTINCT e.uuid) AS eps, collect(DISTINCT n.uuid) AS entity_uuids, "
+        "  collect(DISTINCT n.name) AS ent_names "
         "OPTIONAL MATCH ()-[f:RELATES_TO]->() WHERE any(u IN f.episodes WHERE u IN eps) "
-        "RETURN size(ents) AS entities, count(DISTINCT f) AS facts, "
-        "collect(DISTINCT f.fact) AS fact_texts, ents",
+        "RETURN size(entity_uuids) AS entities, count(DISTINCT f) AS facts, "
+        "collect(DISTINCT f.fact) AS fact_texts, ent_names",
         a=article_id)
     rec = r.records[0]
     return {"entities": rec["entities"], "facts": rec["facts"],
-            "fact_texts": sorted(rec["fact_texts"]), "entity_names": sorted(rec["ents"])}
+            "fact_texts": sorted(rec["fact_texts"]), "entity_names": sorted(rec["ent_names"])}
 
 
-async def run_arm(name: str, articles: list[dict], spent_before: float) -> list[dict]:
-    """Ingest `articles` in a fresh container under arm `name`'s settings."""
+async def run_arm(name: str, articles: list[dict], spent_before: float,
+                  out: Path) -> list[dict]:
+    """Ingest `articles` in a fresh container under arm `name`'s settings.
+
+    Writes each completed row to out/rows.jsonl immediately (to avoid losing results
+    on a crash or spend-cap exit).
+    """
     rows: list[dict] = []
+    rows_file = out / "rows.jsonl"
     with Neo4jContainer(NEO4J_IMAGE) as neo:
         s = get_extract_settings().model_copy(update={
             "neo4j_uri": neo.get_connection_url(), "neo4j_user": "neo4j",
@@ -119,13 +149,16 @@ async def run_arm(name: str, articles: list[dict], spent_before: float) -> list[
                 t = get_tally()
                 dp, dc = t.prompt_tokens - p0, t.completion_tokens - c0
                 g = await _article_graph(driver, a["id"])
-                rows.append({"arm": name, "article_id": a["id"], "vendor": a["vendor"],
-                             "tier": res.tier, "episodes": res.episodes_added,
-                             "facts": g["facts"], "entities": g["entities"],
-                             "seconds": seconds, "prompt_tokens": dp,
-                             "completion_tokens": dc, "cost": article_cost(dp, dc, res.tier),
-                             "dedup": asdict(res.dedup), "fact_texts": g["fact_texts"],
-                             "entity_names": g["entity_names"]})
+                row = {"arm": name, "article_id": a["id"], "vendor": a["vendor"],
+                       "tier": res.tier, "episodes": res.episodes_added,
+                       "facts": g["facts"], "entities": g["entities"],
+                       "seconds": seconds, "prompt_tokens": dp,
+                       "completion_tokens": dc, "cost": article_cost(dp, dc, res.tier),
+                       "dedup": asdict(res.dedup), "fact_texts": g["fact_texts"],
+                       "entity_names": g["entity_names"]}
+                rows.append(row)
+                rows_file.write_text(rows_file.read_text() + json.dumps(row) + "\n"
+                                     if rows_file.exists() else json.dumps(row) + "\n")
                 spent = spent_before + sum(r["cost"] for r in rows)
                 print(f"[{name}] {len(rows)}/{len(articles)} {a['id']} episodes={res.episodes_added} "
                       f"facts={g['facts']} ${spent:.3f}", flush=True)
@@ -155,26 +188,35 @@ async def main() -> None:
     # Smoke: prove the variable is engaged before the full spend (CLAUDE.md).
     smoke = articles[:SMOKE_N]
     tally_before = get_tally().prompt_tokens
-    a_rows = await run_arm("today", smoke, 0.0)
-    b_rows = await run_arm("pack1200", smoke, sum(r["cost"] for r in a_rows))
-    a_eps, b_eps = sum(r["episodes"] for r in a_rows), sum(r["episodes"] for r in b_rows)
+    a_rows = await run_arm("today", smoke, 0.0, out)
+    b_rows = await run_arm("pack1200", smoke, sum(r["cost"] for r in a_rows), out)
     spent = sum(r["cost"] for r in a_rows + b_rows)
-    print(f"smoke: today episodes={a_eps} pack1200 episodes={b_eps} spent=${spent:.3f}", flush=True)
-    if get_tally().prompt_tokens == tally_before:
-        raise SystemExit("usage tally did not move: cost is not being measured -- refusing")
-    if not b_eps < a_eps:
-        raise SystemExit("packing did not reduce episodes on the smoke articles -- the "
-                         "variable is not engaged; refusing to spend on the full run")
+    print(f"smoke: today episodes={sum(r['episodes'] for r in a_rows)} "
+          f"pack1200 episodes={sum(r['episodes'] for r in b_rows)} spent=${spent:.3f}",
+          flush=True)
+
+    # Write smoke.json BEFORE gate checks (to preserve results if gates refuse)
     (out / "smoke.json").write_text(json.dumps(a_rows + b_rows, indent=1))
+
+    # Check smoke gates
+    refusal = _smoke_refusal(a_rows, b_rows, get_tally().prompt_tokens != tally_before)
+    if refusal:
+        raise SystemExit(refusal)
+
     if args.smoke_only:
         return
 
     results: dict[str, Any] = {}
     for arm in ARMS:
-        rows = await run_arm(arm, articles, spent)
+        rows = await run_arm(arm, articles, spent, out)
         spent += sum(r["cost"] for r in rows)
         results[arm] = {"summary": summarise(rows), "rows": rows}
     results["spent_usd_including_smoke"] = spent
+    results["method_notes"] = [
+        "articles run sequentially through IngestDriver.ingest_article; "
+        "ingest_source's warm-up barrier and sibling spreading were bypassed "
+        "(they do not interact with the chunking variable)"
+    ]
     (out / "results.json").write_text(json.dumps(results, indent=1, default=str))
     for arm in ARMS:
         print(arm, results[arm]["summary"], flush=True)
