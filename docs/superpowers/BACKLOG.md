@@ -1160,14 +1160,18 @@ cut first by the token budget and is mislabelled in community reports — disagr
 `/search/local` and `/timeline`, which use `answer_api.temporal.is_current` since
 2026-09-24. Pass datetimes (not Neo4j `toString` values) when switching it to the helper.
 
-### 44. An anti-restatement directive may cut unsupported facts — **P2, one observation**
-`coverage-prompt-ab-2026-09-24.md`: with the coverage directive (whose "never restate one
-fact; each fact must add a claim or detail" clause is the likely cause) unsupported facts
-fell 6.1% → 2.4% of extracted facts (53 → 14, 27 articles, one judge run) — at the packed
-chunk size. Unsupported facts are wrong answers waiting to be cited. Test the clause alone
-at today's chunking: same 30 articles, same judge, compare unsupported rate and distinct
-ideas; adopt if unsupported falls without losing distinct content. Note the local
-fine-tune was trained on the current prompt, so adoption needs its eval re-run.
+### 44. An anti-restatement directive may cut unsupported facts — **P3, one lead, cause unknown**
+`coverage-prompt-ab-2026-09-24.md` reading 3: against the fair `pack1200` baseline (same
+chunk size, only the instructions differ), unsupported facts fell 5.4% → 2.4% (33 → 14 of
+extracted facts, 27 articles, one judge run). But two strong-tier articles carry most of
+`today`'s unsupported count (28 of 53), one of them's fact volume also collapsed sharply
+under the coverage arm (a likely confound), and — against the clause's own stated intent —
+redundancy *rose* (46 → 61), so the "never restate" clause is **not established as the
+cause**; the arm changed the per-chunk fact cap and the directive at the same time. Test the
+restatement clause alone at today's chunking, no cap change: same 30 articles, same judge,
+compare unsupported rate, redundancy, and distinct ideas; adopt only if unsupported falls
+*and* redundancy does not rise, without losing distinct content. Note the local fine-tune
+was trained on the current prompt, so adoption needs its eval re-run.
 
 ### 38. Neo4j and Postgres backups, with a tested restore — **P4, deferred by the user 2026-09-22**
 Production review M6. Nothing in the repo takes or restores a backup. Neo4j runs on a

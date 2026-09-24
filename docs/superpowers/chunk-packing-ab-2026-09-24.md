@@ -67,7 +67,12 @@ over-stated redundancy. A coverage prompt did not recover it (0.74 vs 0.76).
 Packing off. The standing ruling is that answer quality outranks latency; the saving is
 ~$780 of a ~$2,176 bootstrap, and a measurable loss of real facts is the wrong trade for a
 system whose answers are only as good as the facts it holds. The 40% wall-clock saving is
-the stronger argument and is **not** dismissed: it is recorded as a follow-up (BACKLOG 42)
+the stronger argument and is **not** dismissed: it was recorded as a follow-up (BACKLOG 42)
 — retest packing with the per-chunk salience instruction scaled to episode size, which
-would separate the prompt's share of the loss from the model's. The packing code stays
-merged, default off, with this outcome recorded at the setting.
+would separate the prompt's share of the loss from the model's. **That retest has since run**
+(`coverage-prompt-ab-2026-09-24.md`): removing the fixed per-chunk count and adding a
+coverage directive left distinct ideas at 0.74× today, no better than plain packing's
+0.76×, and it gave back part of the wall-clock saving (~65–72% of today's time vs plain
+packing's ~53–60%). BACKLOG 42 is closed; do not re-propose packing without a change to how
+graphiti itself extracts entities. The packing code stays merged, default off, with this
+outcome recorded at the setting.
