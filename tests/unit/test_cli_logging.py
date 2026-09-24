@@ -2,7 +2,7 @@
 `graph_sync.cli._configure_logging`): without a handler, root logger's default
 level (WARNING) silently drops the worker's INFO-level batch-summary/dedup/
 vector-search/timing lines before they ever reach `kubectl logs`. See
-docs/deploy/k3s.md (§8/§9) -- this is what makes the smoke-ingest and scale-worker
+docs/deploy/k3s.md (§9/§10) -- this is what makes the smoke-ingest and scale-worker
 logs actually show anything in production."""
 from __future__ import annotations
 

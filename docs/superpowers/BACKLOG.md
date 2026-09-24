@@ -1192,7 +1192,7 @@ revisit before the paid full-corpus bootstrap.
 On SIGTERM `run_worker` checks `stop_event` only between `run_worker_once` calls, so a
 pod being scaled down or rolled finishes its whole in-flight *batch*. At `--batch 1` that
 is one article, which is why `worker.args` and `INGEST_ARTICLE_CONCURRENCY` must move
-together (`docs/deploy/k3s.md` §9); raise either alone and the 600 s grace period can land
+together (`docs/deploy/k3s.md` §10); raise either alone and the 600 s grace period can land
 mid-batch, leaving jobs `in_progress` until the reaper (2 h lease) re-queues them. App-side
 fix: pass `stop_event` into `run_worker_once` and check it between article groups, so
 SIGTERM finishes only the article(s) already started and never starts another. Then
