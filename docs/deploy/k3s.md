@@ -13,14 +13,18 @@ commit, or this document. Every credential below is a placeholder (`<pw>`, `<use
 - `kubectl` context pointed at `srv-k3s.home.lan`.
 - `helm` (v3).
 - The image built by the `image` GitHub Actions workflow (`.github/workflows/image.yml`):
-  `ghcr.io/carev01/graph-rag:sha-<7>` (7-char short SHA of the commit on `main`).
+  `ghcr.io/carev01/graph-rag:sha-abc1234` (7-char short SHA of the commit on `main`).
+  The chart enforces the format: `image.tag` must match `^sha-[0-9a-f]{7}$` (lowercase
+  hex) or `helm upgrade`/`helm template` fails fast with a clear message — a bare commit
+  SHA, an uppercase hex digit, or a moving tag like `:main` is rejected before anything
+  is applied.
 
 Verify the image pulls anonymously — the repo and its GHCR package are public and the
 image holds no secret:
 
 ```
 docker logout ghcr.io
-docker pull ghcr.io/carev01/graph-rag:sha-<7>
+docker pull ghcr.io/carev01/graph-rag:sha-abc1234
 ```
 
 If that fails with an auth error, the package defaulted to private: set its visibility
@@ -71,6 +75,16 @@ shred -u "$tmpfile"
 Never paste `$tmpfile`'s contents or the secret's contents into a chat, ticket, or
 commit.
 
+**After changing `graph-rag-secret`** (rotation, or updating a key), every pod that
+reads it must be restarted — `envFrom` is only read at container start, and the
+chart's `checksum/config` pod-template annotation covers the ConfigMap, not this
+out-of-band secret, so a plain `kubectl apply`/`helm upgrade` with no other change
+will not roll these pods on its own:
+
+```
+kubectl -n graph-rag rollout restart deploy/graph-rag-sync deploy/graph-rag-answer deploy/graph-rag-worker
+```
+
 ## 4. Install, quiesced
 
 Nothing should spend tokens or touch Postgres until connectivity is proven and state
@@ -79,7 +93,7 @@ is migrated. Install with the poller at 0 replicas (workers already default to 0
 
 ```
 helm upgrade --install graph-rag deploy/helm/graph-rag -n graph-rag \
-  --set image.tag=sha-<7> \
+  --set image.tag=sha-abc1234 \
   --set sync.replicas=0
 ```
 
@@ -148,6 +162,15 @@ helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values --set s
 kubectl -n graph-rag logs deploy/graph-rag-sync
 ```
 
+**Timing:** the sync app waits a full `POLL_INTERVAL_SECONDS` (6 h, per
+`values.yaml`'s `config.POLL_INTERVAL_SECONDS`) before its *first* poll after every
+start or rollout — it does not poll immediately on boot. To pull right away instead
+of waiting:
+
+```
+kubectl -n graph-rag exec deploy/graph-rag-sync -- python -m graph_sync.cli sync-once
+```
+
 ## 8. One-article smoke ingest (paid: one article)
 
 ```
@@ -163,6 +186,11 @@ kubectl -n graph-rag exec deploy/graph-rag-sync -- python -m graph_sync.cli queu
 
 ## 9. Scale workers
 
+Always scale through Helm, never `kubectl scale deploy/graph-rag-worker`: a later
+`helm upgrade` (even an unrelated one, with `--reuse-values`) re-applies
+`values.yaml`'s `worker.replicas` and silently resets any replica count set outside
+Helm.
+
 ```
 helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values --set worker.replicas=<N>
 kubectl -n graph-rag top pods
@@ -170,6 +198,26 @@ kubectl -n graph-rag top pods
 
 Watch actual usage against the requests in `values.yaml` (`worker.resources.requests`:
 384Mi / 100m per replica) before raising further.
+
+**Concurrency and `--batch` must move together.** `worker.args` sets `--batch 1`
+(`values.yaml`), which must equal `INGEST_ARTICLE_CONCURRENCY` (an env var, default
+1) whenever that is raised — `run_concurrently` only checks for a stop signal
+*between* batches, so a batch bigger than the dispatched concurrency makes SIGTERM's
+grace period land mid-batch instead of between batches. Raise both together:
+
+```
+helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
+  --set worker.args='{--batch,<N>,--poll-seconds,5}' \
+  --set-string config.INGEST_ARTICLE_CONCURRENCY=<N>
+```
+
+**Worker shutdown.** On SIGTERM a worker stops claiming new work but finishes its
+in-flight batch; an article that outlasts `worker.terminationGracePeriodSeconds`
+(600 s) is killed and its job is re-queued by the reaper after
+`SEMANTIC_REAPER_LEASE_SECONDS` (2 h, per `values.config`) — re-running is safe (the
+per-chunk `HAS_EPISODE` gate makes it idempotent), but prefer scaling to 0 between
+batches where the schedule allows it, rather than relying on the reaper to clean up
+an interrupted one.
 
 ## 10. Rollback
 
@@ -187,6 +235,22 @@ helm rollback graph-rag <revision> -n graph-rag
 
 The Postgres PVC survives a `helm uninstall` and is covered by the namespace's Kasten
 backup policy (step 2).
+
+**Data safety.** The PVC's StorageClass (`vsphere-csi-silver-sc`) reclaim policy is
+`Delete` — deleting the PVC directly, or deleting the namespace, destroys the data
+immediately; only Kasten's daily `production-apps-backup` export can recover it
+after that. `helm uninstall` alone does not delete the PVC (StatefulSet
+`volumeClaimTemplates` are left behind on purpose), so that path is safe by itself —
+the danger is a manual `kubectl delete pvc`/`kubectl delete namespace`.
+
+`postgres.size` and `postgres.storageClass` cannot be changed via `helm upgrade`:
+`volumeClaimTemplates` on an existing StatefulSet are immutable, and Helm will
+reject (or Kubernetes will reject) an attempt to change them in place. To grow the
+volume, patch the PVC directly instead — the StorageClass allows expansion:
+
+```
+kubectl -n graph-rag patch pvc data-graph-rag-postgres-0 -p '{"spec":{"resources":{"requests":{"storage":"<new-size>"}}}}'
+```
 
 ## 11. Theme-build
 
