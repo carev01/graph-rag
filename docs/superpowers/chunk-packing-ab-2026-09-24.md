@@ -54,9 +54,13 @@ model. (The strong tier saturated too, so it is not only the prompt.)
   version and authentication requirement, merged more cleanly, and lost two real facts
   (the app-profile requirement; the AvePoint Online Services tenant connection).
 
-Reading: the 28% fact drop overstates the information loss — much of it is redundancy —
-but real facts are lost, perhaps 10–20% of distinct content. Two articles is thin
-evidence for that estimate.
+Reading (as first written): the 28% fact drop overstates the information loss — much of it
+is redundancy — but real facts are lost, perhaps 10–20% of distinct content.
+
+**CORRECTED 2026-09-24** (`coverage-prompt-ab-2026-09-24.md`): a distinct-idea judge over 27
+articles found redundancy is only 10.6% of today's supported facts and distinct ideas fall
+**27%** — as much as raw facts. Packing loses real content; the two hand-checked articles
+over-stated redundancy. A coverage prompt did not recover it (0.74 vs 0.76).
 
 ## Decision and why
 
