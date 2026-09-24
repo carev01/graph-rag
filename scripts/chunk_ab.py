@@ -64,18 +64,34 @@ ARM_INSTRUCTIONS: dict[str, tuple[str, str]] = {
 }
 
 
+def _prompt_texts(rec: dict) -> list[str]:
+    """Message content strings for a capture record, regardless of API shape.
+
+    chat.completions captures (cheap tier) store the prompt under "messages";
+    responses.parse captures (strong tier, gpt-5-mini) store it under "input".
+    Both are lists of {"role", "content": str} dicts.
+    """
+    items = rec.get("messages") or rec.get("input") or []
+    return [str(m.get("content", "")) for m in items]
+
+
 def directive_seen(capture_path: Path, marker: str) -> bool:
-    """True iff graphiti actually SENT the directive in an extraction prompt --
-    proof the override reached the model, not merely that an attribute was set."""
+    """True iff graphiti actually SENT the directive in an extraction prompt for
+    EVERY tier present among the extraction records -- proof the override reached
+    the model on each tier, not merely that an attribute was set on one of them."""
     if not capture_path.exists():
         return False
+    tiers_seen: set[Any] = set()
+    tiers_with_marker: set[Any] = set()
     for line in capture_path.read_text().splitlines():
         rec = json.loads(line)
         if not str(rec.get("prompt_name", "")).startswith(("extract_nodes.", "extract_edges.")):
             continue
-        if any(marker in str(m.get("content", "")) for m in rec.get("messages") or []):
-            return True
-    return False
+        tier = rec.get("tier")
+        tiers_seen.add(tier)
+        if any(marker in text for text in _prompt_texts(rec)):
+            tiers_with_marker.add(tier)
+    return bool(tiers_seen) and tiers_seen <= tiers_with_marker
 
 
 def reused_rows(prev: dict, arm: str, article_ids: list[str]) -> list[dict]:

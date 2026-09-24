@@ -105,6 +105,42 @@ def test_directive_seen_is_false_for_a_missing_capture(tmp_path):
     assert ab.directive_seen(tmp_path / "absent.jsonl", ab.COVERAGE_MARKER) is False
 
 
+def test_directive_seen_recognises_responses_parse_input_shape(tmp_path):
+    """Strong tier (gpt-5-mini, responses.parse) stores the prompt under "input",
+    not "messages" -- the gate must not silently pass it by only reading messages."""
+    p = tmp_path / "cap.jsonl"
+
+    def rec(tier, name, text):
+        return _json.dumps({"tier": tier, "prompt_name": name,
+                            "input": [{"role": "user", "content": text}]})
+
+    p.write_text(rec("strong", "extract_nodes.extract_text", "x " + ab.COVERAGE_MARKER) + "\n")
+    assert ab.directive_seen(p, ab.COVERAGE_MARKER) is True
+
+
+def test_directive_seen_requires_the_marker_on_every_tier_present(tmp_path):
+    """A capture where the cheap tier's extraction prompt carries the marker but the
+    strong tier's does not must fail the gate -- proof is required per tier, not once
+    across the whole capture."""
+    p = tmp_path / "cap.jsonl"
+
+    def msg_rec(tier, name, text):
+        return _json.dumps({"tier": tier, "prompt_name": name,
+                            "messages": [{"role": "user", "content": text}]})
+
+    def input_rec(tier, name, text):
+        return _json.dumps({"tier": tier, "prompt_name": name,
+                            "input": [{"role": "user", "content": text}]})
+
+    p.write_text(msg_rec("cheap", "extract_nodes.extract_text", "x " + ab.COVERAGE_MARKER) + "\n"
+                 + input_rec("strong", "extract_nodes.extract_text", "no marker here") + "\n")
+    assert ab.directive_seen(p, ab.COVERAGE_MARKER) is False
+
+    p.write_text(p.read_text()
+                 + input_rec("strong", "extract_edges.edge", "y " + ab.COVERAGE_MARKER) + "\n")
+    assert ab.directive_seen(p, ab.COVERAGE_MARKER) is True
+
+
 def test_reused_rows_must_match_the_article_order():
     prev = {"today": {"rows": [{"article_id": "a"}, {"article_id": "b"}]}}
     assert [r["article_id"] for r in ab.reused_rows(prev, "today", ["a", "b"])] == ["a", "b"]
