@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import signal
 
@@ -29,6 +30,33 @@ logger = logging.getLogger(__name__)
 
 def _dump(obj: object) -> None:
     typer.echo(json.dumps(obj, indent=2, default=str))
+
+
+def _configure_logging() -> None:
+    """Make INFO-level log lines (the worker's `semantic batch: ...` summary,
+    dedup and vector-search counters, timings) actually reach stdout /
+    `kubectl logs`.
+
+    Nothing in this package ever calls `logging.basicConfig`: the root logger's
+    default level is WARNING and it has no handler, so every `logger.info(...)`
+    call is silently dropped -- not filtered on purpose, just nowhere to go.
+    `LOG_LEVEL` overrides the default; an unrecognised value falls back to INFO
+    rather than raising.
+
+    Guarded against double-configuring: if a handler is already attached (a
+    parent process, a test harness, or a previous call in this process already
+    did it), do nothing rather than fight whatever level/format it chose.
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    level = logging.getLevelName(os.environ.get("LOG_LEVEL", "INFO").upper())
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 async def _build_sync_core(
@@ -126,6 +154,8 @@ def bootstrap(
     source_id: str | None = typer.Option(None, "--source-id"),
     vendor_id: str | None = typer.Option(None, "--vendor-id"),
 ) -> None:
+    _configure_logging()
+
     async def _run() -> None:
         settings = get_settings()
         core, client, repo, store = await _build_sync_core(settings)
@@ -145,6 +175,8 @@ def bootstrap(
 
 @app.command("sync-once")
 def sync_once() -> None:
+    _configure_logging()
+
     async def _run() -> None:
         settings = get_settings()
         core, client, repo, store = await _build_sync_core(settings)
@@ -208,6 +240,7 @@ def worker(
     """Standalone semantic-ingestion worker: claims `semantic_jobs` rows and
     drives them through the real `IngestDriver` (upsert -> ingest_article,
     remove -> tombstone_article_episodes). Runs until SIGINT/SIGTERM."""
+    _configure_logging()
 
     async def _run() -> None:
         settings = get_settings()

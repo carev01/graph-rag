@@ -51,7 +51,7 @@ the repo root, so `.env` resolves to the project's own file.
 First confirm what `.env` already carries — list key **names only**, never values:
 
 ```
-grep -o '^[A-Z_]*=' .env
+grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env
 ```
 
 `.env` already defines its own `POSTGRES_DSN` (the dev host's, pointed at the
@@ -103,15 +103,27 @@ kubectl -n graph-rag rollout restart deploy/graph-rag-sync deploy/graph-rag-answ
 only applies `POSTGRES_PASSWORD` once, at `initdb` (first cluster init on an empty
 `PGDATA`); once the StatefulSet's PVC already holds a database, changing the secret
 and restarting the `postgres` pod does **not** change the live role's password —
-the running database keeps the old one. Rotate the actual role first, entering the
-new password interactively so it is never echoed, logged, or captured in shell
-history or `kubectl`'s own command-line arguments:
+the running database keeps the old one. Rotate the actual role first.
+
+Generate the new password the same way the initial one was generated
+(`openssl rand -hex 24`), not an arbitrary string: it gets embedded directly in
+`POSTGRES_DSN` as a URL, and a DSN-unsafe character in it (`@`, `/`, `:`, `#`, a
+literal space) would silently corrupt the connection string unless percent-encoded.
+Hex has none of those:
+
+```
+openssl rand -hex 24
+```
+
+Copy that value; you will enter it twice below, never as a command-line argument,
+so it is never echoed, logged, or captured in shell history or in `kubectl`'s own
+argument list:
 
 ```
 kubectl -n graph-rag exec -it graph-rag-postgres-0 -- psql -U graphsync -d graphsync
 ```
 
-At the `graphsync=#` prompt:
+At the `graphsync=#` prompt, `\password` prompts twice and hides the input:
 
 ```
 \password graphsync
@@ -170,8 +182,8 @@ kubectl -n graph-rag exec deploy/graph-rag-answer -- python -m graph_sync.connec
 Every line must read `OK` before continuing. A `FAIL` line names the dependency and a
 redacted error — no credential in its `.env` is ever printed, including inside a
 partially-quoted DSN. The optional tiers (`judge`, `report`, `map`, `rerank`,
-`eval-judge`) are only probed when their `*_base_url` setting is non-empty; an unset
-one reports `OK  <tier>  not configured` rather than failing.
+`eval-judge`, `verify`) are only probed when their `*_base_url` setting is
+non-empty; an unset one reports `OK  <tier>  not configured` rather than failing.
 
 ## 6. Migrate the state
 
@@ -199,8 +211,9 @@ hardcoded user/db name, and confirm the dump is non-empty before going any furth
 
 ```
 dumpfile=<private-dir>/graphsync.dump
+: "${dumpfile:?set dumpfile first}"
 docker exec graphrag-postgres sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB"' > "$dumpfile"
-test -s "$dumpfile" || { echo "dump is empty -- stop, do not proceed" >&2; exit 1; }
+test -s "$dumpfile" || echo "dump is EMPTY -- do not proceed past this point" >&2
 ```
 
 Record every state table's contents to compare against after restore — all seven
@@ -209,17 +222,22 @@ tables `src/graph_sync/state_store.py`'s `CREATE TABLE` statements define
 `dead_letter`, `semantic_jobs`, `token_ledger`). A row *count* is enough for the
 five append-only/queue tables, but not for `sync_cursor` (always exactly one row,
 by its own `CHECK (id = 1)`) or `bootstrap_progress` (a fixed row per shard whose
-`watermark`/`last_id`/`status` still change) — hash their actual values instead:
+`watermark`/`last_id`/`status` still change) — hash their actual values instead.
+`semantic_jobs`'s `GROUP BY` output has no defined row order, so it also gets an
+explicit `ORDER BY` to make the two runs byte-for-byte comparable; the
+`bootstrap_progress` hash uses `row(...)::text` rather than `||`-concatenation so a
+NULL `last_id` and a boundary shift between columns (e.g. `shard='ab', last_id='c'`
+vs. `shard='a', last_id='bc'`) can't produce the same hash by coincidence:
 
 ```
 docker exec -i graphrag-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
-SELECT status, lane, count(*) FROM semantic_jobs GROUP BY 1, 2;
+SELECT status, lane, count(*) FROM semantic_jobs GROUP BY 1, 2 ORDER BY 1, 2;
 SELECT count(*) FROM webhook_delivery;
 SELECT count(*) FROM source_debounce;
 SELECT count(*) FROM dead_letter;
 SELECT count(*) FROM token_ledger;
 SELECT md5(cursor) FROM sync_cursor;
-SELECT md5(string_agg(shard || watermark || coalesce(last_id, '') || status, ',' ORDER BY shard)) FROM bootstrap_progress;
+SELECT md5(string_agg(row(shard, watermark, last_id, status)::text, ',' ORDER BY shard)) FROM bootstrap_progress;
 SQL
 docker stop graphrag-postgres
 ```
@@ -228,6 +246,7 @@ Copy the dump into the pod and restore it as a single all-or-nothing operation �
 stop on the first error rather than leaving a half-restored database:
 
 ```
+: "${dumpfile:?set dumpfile first}"
 kubectl -n graph-rag cp "$dumpfile" graph-rag-postgres-0:/tmp/graphsync.dump
 kubectl -n graph-rag exec graph-rag-postgres-0 -- \
   sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --no-acl --exit-on-error --single-transaction /tmp/graphsync.dump'
@@ -238,19 +257,20 @@ dev-host output — they must match exactly:
 
 ```
 kubectl -n graph-rag exec -i graph-rag-postgres-0 -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
-SELECT status, lane, count(*) FROM semantic_jobs GROUP BY 1, 2;
+SELECT status, lane, count(*) FROM semantic_jobs GROUP BY 1, 2 ORDER BY 1, 2;
 SELECT count(*) FROM webhook_delivery;
 SELECT count(*) FROM source_debounce;
 SELECT count(*) FROM dead_letter;
 SELECT count(*) FROM token_ledger;
 SELECT md5(cursor) FROM sync_cursor;
-SELECT md5(string_agg(shard || watermark || coalesce(last_id, '') || status, ',' ORDER BY shard)) FROM bootstrap_progress;
+SELECT md5(string_agg(row(shard, watermark, last_id, status)::text, ',' ORDER BY shard)) FROM bootstrap_progress;
 SQL
 ```
 
 Then delete the dump on both sides:
 
 ```
+: "${dumpfile:?set dumpfile first}"
 kubectl -n graph-rag exec graph-rag-postgres-0 -- rm /tmp/graphsync.dump
 rm "$dumpfile"
 ```
@@ -273,43 +293,80 @@ kubectl -n graph-rag exec deploy/graph-rag-sync -- python -m graph_sync.cli sync
 
 ## 8. One-article smoke ingest (paid: one article)
 
-Run this in an actual **worker** pod, not the sync pod: `graph-rag-sync` is sized
-for the poll loop and its FastAPI app (512Mi limit, per `values.yaml`'s
-`sync.resources`), not for driving `IngestDriver`'s extraction pipeline, which is
-what the `worker` sized pods (`worker.resources`: 1Gi limit) exist for.
+**Do not do this by scaling `graph-rag-worker`.** It is a `Deployment`: the kubelet
+restarts its pod the instant the container exits, with no back-off on the first
+restart. A `--max-batches 1` run inside it would claim, and pay for, another
+article on *every* restart — indefinitely, or on an empty queue, or on an early
+crash — regardless of how fast anything watching the log reacts. (An earlier draft
+of this runbook tried to race that with a scripted `grep -q -m1 'semantic
+batch:' && helm upgrade --set worker.replicas=0`; that is unsound for a second,
+independent reason — nothing in `graph_sync` ever called `logging.basicConfig`
+before this task, so the root logger's default level (WARNING) silently dropped
+every `logger.info(...)` line, including the batch summary, and the `grep` would
+never have matched *at all*. Fixed by `graph_sync.cli._configure_logging()`,
+called at the start of `worker`/`sync-once`/`bootstrap` — but the restart-loop
+problem is independent of logging and needs a different mechanism, not a faster
+one.)
 
-**The chosen approach, and why:** `graph-rag-worker` is a `Deployment`, not a `Job`
-— a container that exits after `--max-batches 1` completes is restarted by the
-kubelet immediately (no back-off on the first exit), so scaling to 0 "after you see
-the summary line" is a race a human will lose. Script the reaction instead of
-relying on reading the log fast enough: pipe the log through `grep -q -m1` for the
-summary line and chain the scale-down as its immediate `&&`, so it fires the
-instant the line appears rather than after a human reacts to it. The same command
-also resets `worker.args` back to its non-`--max-batches` default — `--reuse-values`
-carries whatever was last set via `--set`/`--set-string` forward into every
-subsequent upgrade (see §9), so leaving `--max-batches` in place would silently
-turn every future worker scale-up into another one-batch run:
+Run it as a one-off **Pod** instead, with `restartPolicy: Never`: it runs once,
+reaches `Completed` (or `Failed`), and simply stays there — no restart, no
+loop, regardless of how it exits. Worker replicas stay at 0 throughout; nothing
+about this touches the `graph-rag-worker` Deployment.
 
-```
-helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
-  --set worker.replicas=1 \
-  --set-string worker.args='{--batch,1,--poll-seconds,5,--max-batches,1}'
-
-kubectl -n graph-rag rollout status deploy/graph-rag-worker
-
-kubectl -n graph-rag logs -f deploy/graph-rag-worker | grep -q -m1 'semantic batch:' && \
-  helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
-    --set worker.replicas=0 \
-    --set-string worker.args='{--batch,1,--poll-seconds,5}'
-```
-
-Even so, a restart that lands before the `grep`/`helm` pipeline completes could
-claim a second article; treat "at most one, almost certainly exactly one" as the
-guarantee here, not "exactly one," and check `queue-status` afterwards to see how
-many jobs actually ran:
+Give the pod the same environment and security posture the chart's worker
+container gets (`envFrom`: the secret, then the ConfigMap, in that order; the
+same pod/container `securityContext` and `automountServiceAccountToken: false`)
+via `--overrides`:
 
 ```
+kubectl -n graph-rag run graph-rag-smoke --restart=Never \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides='{
+    "apiVersion": "v1",
+    "spec": {
+      "automountServiceAccountToken": false,
+      "securityContext": {
+        "runAsNonRoot": true,
+        "runAsUser": 10001,
+        "runAsGroup": 10001,
+        "seccompProfile": {"type": "RuntimeDefault"}
+      },
+      "containers": [
+        {
+          "name": "graph-rag-smoke",
+          "image": "ghcr.io/carev01/graph-rag:sha-abc1234",
+          "command": ["python", "-m", "graph_sync.cli", "worker", "--batch", "1", "--max-batches", "1"],
+          "envFrom": [
+            {"secretRef": {"name": "graph-rag-secret"}},
+            {"configMapRef": {"name": "graph-rag-config"}}
+          ],
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]}
+          }
+        }
+      ]
+    }
+  }' \
+  --command -- python -m graph_sync.cli worker --batch 1 --max-batches 1
+```
+
+**Validate it client-side first — no cluster write, nothing sent to the API
+server** — by appending `--dry-run=client -o yaml` to the exact same command, and
+read the rendered object before running it for real: confirm `envFrom` lists the
+secret before the ConfigMap, `restartPolicy: Never`, and both `securityContext`
+blocks (pod and container) are present. (Rendering this locally is how the
+`envFrom`/`securityContext` shape above was confirmed correct against the chart's
+own `graph-rag.envFrom`/`graph-rag.podSecurity`/`graph-rag.containerSecurity`
+helpers — see the task report for the exact rendered YAML.)
+
+Then run it for real, watch it, check the queue, and clean up — the pod does not
+delete itself:
+
+```
+kubectl -n graph-rag logs -f graph-rag-smoke
 kubectl -n graph-rag exec deploy/graph-rag-sync -- python -m graph_sync.cli queue-status
+kubectl -n graph-rag delete pod graph-rag-smoke
 ```
 
 ## 9. Scale workers

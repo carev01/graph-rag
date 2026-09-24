@@ -59,3 +59,11 @@ async def test_optional_tier_with_a_base_url_is_probed_like_any_other(monkeypatc
     monkeypatch.setattr(c, "_http", _fake_http)
     (r,) = await c.run_checks([("judge", lambda: c._optional_http("http://x/v1"))])
     assert r.ok and r.detail == "probed http://x/v1/models"
+
+
+async def test_verify_tier_is_also_optional_and_skipped_when_unset():
+    """`_checks()` wires the report/map/rerank/eval-judge/judge/verify tiers to
+    this same `_optional_http`, so this is the same behavior under the name
+    `verify` (`graph_extract.config.ExtractSettings.verify_llm_base_url`)."""
+    (r,) = await c.run_checks([("verify", lambda: c._optional_http(""))])
+    assert r.ok and r.detail == "not configured"

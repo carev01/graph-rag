@@ -87,8 +87,8 @@ async def _http(url: str, verify: bool = True) -> str:
 
 
 async def _optional_http(base_url: str) -> str:
-    """judge/report/map/rerank/eval-judge default to empty and fall back to
-    another tier's client at call time -- an unset base URL is a valid
+    """judge/report/map/rerank/eval-judge/verify default to empty and fall back
+    to another tier's client at call time -- an unset base URL is a valid
     deployment choice, not a failure, so skip the probe and say so."""
     if not base_url:
         return "not configured"
@@ -131,6 +131,7 @@ def _checks() -> list[tuple[str, Callable[[], Awaitable[str]]]]:
         ("map", lambda: _optional_http(s.map_llm_base_url)),
         ("rerank", lambda: _optional_http(s.rerank_base_url)),
         ("eval-judge", lambda: _optional_http(s.eval_judge_base_url)),
+        ("verify", lambda: _optional_http(s.verify_llm_base_url)),
     ]
 
 
