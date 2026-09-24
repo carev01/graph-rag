@@ -13,8 +13,12 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 0
+      backoffLimit: {{ $job.backoffLimit }}
+      activeDeadlineSeconds: {{ $job.activeDeadlineSeconds }}
       template:
+        metadata:
+          annotations:
+            checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
         spec:
           restartPolicy: Never
           {{- include "graph-rag.podSecurity" $ | nindent 10 }}

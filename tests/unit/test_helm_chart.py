@@ -12,11 +12,11 @@ import yaml
 
 CHART = Path(__file__).parents[2] / "deploy" / "helm" / "graph-rag"
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
-IMAGE = "ghcr.io/carev01/graph-rag:sha-test"
+IMAGE = "ghcr.io/carev01/graph-rag:sha-abc1234"
 
 
 def render(*sets: str) -> list[dict]:
-    args = ["helm", "template", "t", str(CHART), "--set", "image.tag=sha-test"]
+    args = ["helm", "template", "t", str(CHART), "--set", "image.tag=sha-abc1234"]
     for s in sets:
         args += ["--set", s]
     out = subprocess.run(args, capture_output=True, text=True, check=True).stdout
@@ -35,13 +35,19 @@ def pod_spec(doc: dict) -> dict:
     return doc["spec"]["template"]["spec"]
 
 
+def pod_template_annotations(doc: dict) -> dict:
+    if doc["kind"] == "CronJob":
+        return doc["spec"]["jobTemplate"]["spec"]["template"]["metadata"].get("annotations", {})
+    return doc["spec"]["template"]["metadata"].get("annotations", {})
+
+
 APP = [("Deployment", "graph-rag-sync"), ("Deployment", "graph-rag-answer"),
        ("Deployment", "graph-rag-worker"), ("CronJob", "graph-rag-cleanup"),
        ("CronJob", "graph-rag-maintenance"), ("CronJob", "graph-rag-theme-build")]
 
 
 def test_lint_passes():
-    r = subprocess.run(["helm", "lint", str(CHART), "--set", "image.tag=sha-test"],
+    r = subprocess.run(["helm", "lint", str(CHART), "--set", "image.tag=sha-abc1234"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -49,6 +55,13 @@ def test_lint_passes():
 def test_an_image_tag_is_required():
     r = subprocess.run(["helm", "template", "t", str(CHART)], capture_output=True, text=True)
     assert r.returncode != 0 and "image.tag" in r.stderr
+
+
+def test_image_tag_must_match_the_expected_format():
+    r = subprocess.run(["helm", "template", "t", str(CHART), "--set", "image.tag=latest"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "sha-" in r.stderr, r.stderr
 
 
 def test_app_pods_take_the_secret_then_the_configmap_and_the_pinned_image():
@@ -61,6 +74,17 @@ def test_app_pods_take_the_secret_then_the_configmap_and_the_pinned_image():
                                 {"configMapRef": {"name": "graph-rag-config"}}], name
         assert spec["securityContext"]["runAsUser"] == 10001, name
         assert spec["securityContext"]["runAsNonRoot"] is True, name
+        assert spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}, name
+        assert spec["automountServiceAccountToken"] is False, name
+
+
+def test_configmap_change_rolls_the_app_pods():
+    base = render()
+    changed = render("config.POLL_INTERVAL_SECONDS=60")
+    for kind, name in APP:
+        b = pod_template_annotations(get(base, kind, name))["checksum/config"]
+        c = pod_template_annotations(get(changed, kind, name))["checksum/config"]
+        assert b != c, name
 
 
 def test_no_secret_is_rendered_or_stored_in_values():
@@ -88,7 +112,9 @@ def test_worker_defaults_to_zero_replicas_with_a_long_grace_period():
     w = get(docs, "Deployment", "graph-rag-worker")
     assert w["spec"]["replicas"] == 0
     assert pod_spec(w)["terminationGracePeriodSeconds"] == 600
-    assert pod_spec(w)["containers"][0]["command"][:3] == ["python", "-m", "graph_sync.cli"]
+    c = pod_spec(w)["containers"][0]
+    assert c["command"][:3] == ["python", "-m", "graph_sync.cli"]
+    assert c["args"][:2] == ["--batch", "1"]
     assert get(render("worker.replicas=4"), "Deployment", "graph-rag-worker")["spec"]["replicas"] == 4
 
 
@@ -100,6 +126,19 @@ def test_cronjobs_forbid_overlap_and_theme_build_starts_suspended():
     assert get(docs, "CronJob", "graph-rag-cleanup")["spec"]["suspend"] is False
 
 
+def test_cronjobs_have_deadlines_and_backoff_limits():
+    docs = render()
+    expected = {
+        "graph-rag-cleanup": (7200, 2),
+        "graph-rag-maintenance": (14400, 2),
+        "graph-rag-theme-build": (28800, 0),
+    }
+    for name, (deadline, backoff) in expected.items():
+        spec = get(docs, "CronJob", name)["spec"]["jobTemplate"]["spec"]
+        assert spec["activeDeadlineSeconds"] == deadline, name
+        assert spec["backoffLimit"] == backoff, name
+
+
 def test_postgres_takes_its_password_from_the_secret_and_keeps_pgdata_in_a_subdir():
     docs = render()
     sts = get(docs, "StatefulSet", "graph-rag-postgres")
@@ -108,6 +147,8 @@ def test_postgres_takes_its_password_from_the_secret_and_keeps_pgdata_in_a_subdi
     assert env["POSTGRES_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
         "name": "graph-rag-secret", "key": "POSTGRES_PASSWORD"}
     assert env["PGDATA"]["value"].startswith("/var/lib/postgresql/data/")
+    assert c["readinessProbe"]["exec"]["command"][:3] == ["pg_isready", "-h", "127.0.0.1"]
+    assert pod_spec(sts)["automountServiceAccountToken"] is False
     (vct,) = sts["spec"]["volumeClaimTemplates"]
     assert vct["spec"]["storageClassName"] == "vsphere-csi-silver-sc"
     assert vct["spec"]["resources"]["requests"]["storage"] == "10Gi"

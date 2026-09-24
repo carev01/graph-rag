@@ -38,7 +38,11 @@ answer:
 
 worker:
   replicas: 0
-  args: ["--batch", "10", "--poll-seconds", "5"]
+  # --batch must equal INGEST_ARTICLE_CONCURRENCY (default 1) whenever that env var
+  # is raised: run_concurrently only checks for a stop signal between batches, so a
+  # bigger batch than the concurrency it's dispatched with makes SIGTERM's grace
+  # period land mid-batch instead of between batches.
+  args: ["--batch", "1", "--poll-seconds", "5"]
   terminationGracePeriodSeconds: 600
   resources:
     requests: {cpu: 100m, memory: 384Mi}
@@ -49,6 +53,6 @@ cron:
     requests: {cpu: 50m, memory: 256Mi}
     limits: {cpu: "1", memory: 1Gi}
   jobs:
-    cleanup: {schedule: "30 3 * * *", suspend: false, command: ["python", "-m", "graph_extract.cli", "cleanup"]}
-    maintenance: {schedule: "0 4 * * 0", suspend: false, command: ["python", "-m", "graph_extract.cli", "maintenance"]}
-    theme-build: {schedule: "0 5 * * 0", suspend: true, command: ["python", "-m", "theme_builder.cli", "theme-build"]}
+    cleanup: {schedule: "30 3 * * *", suspend: false, activeDeadlineSeconds: 7200, backoffLimit: 2, command: ["python", "-m", "graph_extract.cli", "cleanup"]}
+    maintenance: {schedule: "0 4 * * 0", suspend: false, activeDeadlineSeconds: 14400, backoffLimit: 2, command: ["python", "-m", "graph_extract.cli", "maintenance"]}
+    theme-build: {schedule: "0 5 * * 0", suspend: true, activeDeadlineSeconds: 28800, backoffLimit: 0, command: ["python", "-m", "theme_builder.cli", "theme-build"]}

@@ -11,6 +11,8 @@ spec:
   template:
     metadata:
       labels: {app: graph-rag-sync}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
     spec:
       {{- include "graph-rag.podSecurity" . | nindent 6 }}
       containers:

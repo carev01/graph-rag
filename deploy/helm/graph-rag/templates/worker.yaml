@@ -10,10 +10,14 @@ spec:
   template:
     metadata:
       labels: {app: graph-rag-worker}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
     spec:
       {{- include "graph-rag.podSecurity" . | nindent 6 }}
-      # A worker finishes its in-flight batch on SIGTERM; a killed one's jobs are
-      # re-queued by the lease reaper (SEMANTIC_REAPER_LEASE_SECONDS).
+      # On SIGTERM the worker stops claiming new work after its in-flight batch;
+      # an article that outlasts terminationGracePeriodSeconds is killed and its
+      # job is re-queued by the reaper after SEMANTIC_REAPER_LEASE_SECONDS
+      # (re-running is safe: the per-chunk HAS_EPISODE gate makes it idempotent).
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       containers:
         - name: worker
