@@ -316,7 +316,70 @@ about this touches the `graph-rag-worker` Deployment.
 Give the pod the same environment and security posture the chart's worker
 container gets (`envFrom`: the secret, then the ConfigMap, in that order; the
 same pod/container `securityContext` and `automountServiceAccountToken: false`)
-via `--overrides`:
+via `--overrides`.
+
+**All `kubectl` flags must come before `--`; everything after `--` is the
+container's command**, passed through to the pod verbatim — it is never parsed by
+`kubectl` itself. `--dry-run=client -o yaml` appended *after* `--command --`, as
+an earlier draft of this doc did, is silently swallowed into the container's
+argv instead of being read as a `kubectl` flag, so `kubectl` proceeds with a real
+`create` — the exact opposite of validating first. The image tag is repeated in
+both `--image` and the override's `containers[0].image` (not a single source of
+truth): `--overrides` performs a JSON *merge patch*, which replaces the entire
+`containers` array wholesale rather than merging field-by-field into the
+generated one, so anything the override's container object omits — image,
+command, or otherwise — comes out **missing** from the final pod, not inherited
+from `--image`/`--command`. Confirmed locally (`kubectl run ... --dry-run=client
+-o json` with `image` left out of the override): the rendered container has no
+`image` key at all. Keep the two in sync if the tag ever changes.
+
+Validate client-side first, as its own complete command — this never creates,
+modifies, or deletes anything. (`kubectl run --dry-run=client` can still issue a
+read-only API-discovery `GET` the first time it needs to resolve `Pod`'s schema —
+harmless, and typically served from `kubectl`'s on-disk discovery cache instead
+of the network after the first call — but it is categorically incapable of
+issuing the `POST` that a real create requires, which is the property that
+matters here and is what was actually verified below.)
+
+```
+kubectl -n graph-rag run graph-rag-smoke --restart=Never \
+  --dry-run=client -o yaml \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides='{
+    "apiVersion": "v1",
+    "spec": {
+      "automountServiceAccountToken": false,
+      "securityContext": {
+        "runAsNonRoot": true,
+        "runAsUser": 10001,
+        "runAsGroup": 10001,
+        "seccompProfile": {"type": "RuntimeDefault"}
+      },
+      "containers": [
+        {
+          "name": "graph-rag-smoke",
+          "image": "ghcr.io/carev01/graph-rag:sha-abc1234",
+          "command": ["python", "-m", "graph_sync.cli", "worker", "--batch", "1", "--max-batches", "1"],
+          "envFrom": [
+            {"secretRef": {"name": "graph-rag-secret"}},
+            {"configMapRef": {"name": "graph-rag-config"}}
+          ],
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]}
+          }
+        }
+      ]
+    }
+  }' \
+  --command -- python -m graph_sync.cli worker --batch 1 --max-batches 1
+```
+
+Read the rendered YAML before doing anything else: confirm `envFrom` lists the
+secret before the ConfigMap, `restartPolicy: Never`, both `securityContext`
+blocks (pod and container) are present, and `image:` is the tag you meant
+(neither a stale nor an empty value). Only once that looks right, run the
+identical command **with `--dry-run=client -o yaml` removed** — the real create:
 
 ```
 kubectl -n graph-rag run graph-rag-smoke --restart=Never \
@@ -351,19 +414,12 @@ kubectl -n graph-rag run graph-rag-smoke --restart=Never \
   --command -- python -m graph_sync.cli worker --batch 1 --max-batches 1
 ```
 
-**Validate it client-side first — no cluster write, nothing sent to the API
-server** — by appending `--dry-run=client -o yaml` to the exact same command, and
-read the rendered object before running it for real: confirm `envFrom` lists the
-secret before the ConfigMap, `restartPolicy: Never`, and both `securityContext`
-blocks (pod and container) are present. (Rendering this locally is how the
-`envFrom`/`securityContext` shape above was confirmed correct against the chart's
-own `graph-rag.envFrom`/`graph-rag.podSecurity`/`graph-rag.containerSecurity`
-helpers — see the task report for the exact rendered YAML.)
-
-Then run it for real, watch it, check the queue, and clean up — the pod does not
-delete itself:
+Wait for it to start (best-effort — an image pull can take a while; a fast run
+may already have reached `Completed` by the time this returns, which is fine),
+then watch it, check the queue, and clean up — the pod does not delete itself:
 
 ```
+kubectl -n graph-rag wait --for=condition=Ready pod/graph-rag-smoke --timeout=180s || true
 kubectl -n graph-rag logs -f graph-rag-smoke
 kubectl -n graph-rag exec deploy/graph-rag-sync -- python -m graph_sync.cli queue-status
 kubectl -n graph-rag delete pod graph-rag-smoke
