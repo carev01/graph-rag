@@ -1,4 +1,5 @@
-"""`graph_sync.cli._configure_logging`: without a handler, root logger's default
+"""`graph_sync.logging_setup.configure_logging` (re-exported as
+`graph_sync.cli._configure_logging`): without a handler, root logger's default
 level (WARNING) silently drops the worker's INFO-level batch-summary/dedup/
 vector-search/timing lines before they ever reach `kubectl logs`. See
 docs/deploy/k3s.md (§8/§9) -- this is what makes the smoke-ingest and scale-worker
@@ -7,6 +8,10 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
+import answer_api.app as answer_app
+import graph_sync.app as sync_app
 from graph_sync.cli import _configure_logging
 
 # pytest's own `_pytest.logging` plugin re-attaches a fresh LogCaptureHandler to
@@ -50,3 +55,28 @@ def test_configure_logging_does_not_reconfigure_when_a_handler_already_exists(mo
     _configure_logging()
     assert root.level == logging.ERROR
     assert root.handlers == [sentinel]
+
+
+def test_both_uvicorn_factories_configure_logging_first(monkeypatch):
+    """`uvicorn ...:main --factory` never goes through the CLI, so without this the
+    poller's and the answer API's INFO lines (including poll failures logged by
+    `run_poll_loop`) are dropped in production."""
+    calls: list[str] = []
+
+    class _Stop(Exception):
+        pass
+
+    def _stop(*_a, **_k):
+        raise _Stop
+
+    monkeypatch.setattr(sync_app, "configure_logging", lambda: calls.append("sync"))
+    monkeypatch.setattr(sync_app, "get_settings", _stop)
+    with pytest.raises(_Stop):
+        sync_app.main()
+
+    monkeypatch.setattr(answer_app, "configure_logging", lambda: calls.append("answer"))
+    monkeypatch.setattr(answer_app, "create_app", _stop)
+    with pytest.raises(_Stop):
+        answer_app.main()
+
+    assert calls == ["sync", "answer"]

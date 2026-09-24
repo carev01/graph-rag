@@ -86,6 +86,19 @@ async def _http(url: str, verify: bool = True) -> str:
     return f"HTTP {resp.status_code} {url}"
 
 
+async def _http_200(url: str, *, verify: bool = True,
+                    headers: dict[str, str] | None = None) -> str:
+    """Strict variant: only HTTP 200 passes. Used for DocExtractor, where a
+    401/403 means a rotated or wrong read key -- exactly what the check exists to
+    catch before anything is scaled up. Credentials go in `headers` only, never in
+    the URL, so neither the success detail nor an httpx error can quote them."""
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=verify) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code} from {url} (expected 200)")
+    return f"HTTP 200 {url}"
+
+
 async def _optional_http(base_url: str) -> str:
     """judge/report/map/rerank/eval-judge/verify default to empty and fall back
     to another tier's client at call time -- an unset base URL is a valid
@@ -118,8 +131,13 @@ def _checks() -> list[tuple[str, Callable[[], Awaitable[str]]]]:
     return [
         ("neo4j", neo4j),
         ("postgres", postgres),
-        ("docextractor", lambda: _http(s.docext_base_url.rstrip("/") + "/api/health",
-                                       verify=s.docext_verify_tls)),
+        ("docextractor", lambda: _http_200(s.docext_base_url.rstrip("/") + "/api/health",
+                                           verify=s.docext_verify_tls)),
+        # One AUTHENTICATED read: /api/health needs no key, so without this a
+        # revoked/rotated read key would pass here and fail on the first poll.
+        ("docext-auth", lambda: _http_200(
+            s.docext_base_url.rstrip("/") + "/api/articles?limit=1",
+            verify=s.docext_verify_tls, headers={"X-API-Key": s.docext_read_key})),
         ("embedder", lambda: _http(s.embed_base_url.rstrip("/") + "/models")),
         ("chunker", lambda: _http(s.chonkie_base_url.rstrip("/") + "/")),
         ("llm", lambda: _http(s.llm_base_url.rstrip("/") + "/models")),

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import secrets
 import signal
 
@@ -19,6 +18,7 @@ from graph_extract.warmup import WarmupGate
 from graph_sync.catalog import Catalog
 from graph_sync.config import Settings, get_settings
 from graph_sync.delta_client import make_client
+from graph_sync.logging_setup import configure_logging as _configure_logging
 from graph_sync.neo4j_repo import Neo4jRepo
 from graph_sync.semantic_worker import run_worker
 from graph_sync.state_store import StateStore
@@ -30,49 +30,6 @@ logger = logging.getLogger(__name__)
 
 def _dump(obj: object) -> None:
     typer.echo(json.dumps(obj, indent=2, default=str))
-
-
-def _configure_logging() -> None:
-    """Make INFO-level log lines (the worker's `semantic batch: ...` summary,
-    dedup and vector-search counters, timings) actually reach stdout /
-    `kubectl logs`.
-
-    Nothing in this package ever calls `logging.basicConfig`: the root logger's
-    default level is WARNING and it has no handler, so every `logger.info(...)`
-    call is silently dropped -- not filtered on purpose, just nowhere to go.
-    `LOG_LEVEL` overrides the default; an unrecognised value falls back to INFO
-    rather than raising.
-
-    Guarded against double-configuring: if a handler is already attached (a
-    parent process, a test harness, or a previous call in this process already
-    did it), do nothing rather than fight whatever level/format it chose.
-
-    `httpx`/`httpcore` log one line per HTTP request at INFO -- every LLM,
-    embedder, and DocExtractor call the worker makes during a bootstrap -- which
-    would otherwise drown the handful of lines that actually matter. Quieted to
-    WARNING unconditionally, independent of the guard above, since this is a
-    noise fix, not a "did I configure the root logger" concern.
-    """
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-    root = logging.getLogger()
-    if root.handlers:
-        return
-    level = logging.getLevelName(os.environ.get("LOG_LEVEL", "INFO").upper())
-    if not isinstance(level, int):
-        level = logging.INFO
-    # force=True: without it, basicConfig's own built-in "do nothing if the root
-    # logger already has handlers" check would make the guard above redundant
-    # (harmless, but untestable -- a mutation deleting it would change nothing
-    # observable). With force=True, this call WOULD unconditionally strip any
-    # existing handler and reset the level if reached, so the guard above is the
-    # only thing standing between "leave it alone" and "reconfigure it".
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
-    )
 
 
 async def _build_sync_core(

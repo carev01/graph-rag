@@ -31,6 +31,10 @@ sync:
     limits: {cpu: 500m, memory: 512Mi}
 
 answer:
+  # 0 during the quiesced install (docs/deploy/k3s.md step 4): the answer pod's
+  # startup writes to Neo4j (ensure_vector_indexes), which must wait until the
+  # connectivity check has passed.
+  replicas: 1
   host: graphrag.k3s.home.lan
   resources:
     requests: {cpu: 100m, memory: 512Mi}

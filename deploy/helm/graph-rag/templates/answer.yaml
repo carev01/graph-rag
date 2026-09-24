@@ -4,7 +4,7 @@ metadata:
   name: graph-rag-answer
   labels: {{- include "graph-rag.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.answer.replicas }}
   selector:
     matchLabels: {app: graph-rag-answer}
   template:

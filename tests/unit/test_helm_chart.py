@@ -164,3 +164,12 @@ def test_answer_api_is_exposed_internally_only():
 
 def test_sync_can_be_installed_scaled_down():
     assert get(render("sync.replicas=0"), "Deployment", "graph-rag-sync")["spec"]["replicas"] == 0
+
+
+def test_answer_can_be_installed_scaled_down_and_defaults_to_one():
+    """The quiesced install (docs/deploy/k3s.md step 4) sets answer.replicas=0: the
+    answer pod writes to Neo4j at startup (ensure_vector_indexes), which must not
+    happen before the connectivity check passes."""
+    assert get(render(), "Deployment", "graph-rag-answer")["spec"]["replicas"] == 1
+    assert get(render("answer.replicas=0"), "Deployment",
+               "graph-rag-answer")["spec"]["replicas"] == 0
