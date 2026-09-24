@@ -59,3 +59,21 @@ def test_decide_rejects_when_coverage_has_more_unsupported():
     rows = [{"today": {"distinct": 10, "unsupported": 1}, "pack1200_coverage":
              {"distinct": 10, "unsupported": 3}, "cost_ratio": 0.6}] * 3
     assert j.decide(rows)["adopt"] is False
+
+
+def test_judgeable_partitions_articles():
+    rows = {
+        "today": {
+            "art-1": {"facts": 5}, "art-2": {"facts": 200}, "art-3": {"facts": 10}, "art-4": {"facts": 8}
+        },
+        "pack1200": {
+            "art-1": {"facts": 5}, "art-2": {"facts": 200}, "art-4": {"facts": 8}
+        },
+        "pack1200_coverage": {
+            "art-1": {"facts": 5}, "art-2": {"facts": 200}, "art-3": {"facts": 10}, "art-4": {"facts": 8}
+        }
+    }
+    to_judge, excluded, missing = j.judgeable(rows, ARMS, 150)
+    assert to_judge == ["art-1", "art-4"]
+    assert excluded == ["art-2"]
+    assert missing == ["art-3"]

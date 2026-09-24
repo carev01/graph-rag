@@ -21,6 +21,7 @@ from answer_api.eval_router import _eval_judge_client_and_model
 from docext.client import make_docext_client
 from graph_extract.config import get_extract_settings
 from graph_extract.content_fetch import fetch_article
+from graph_extract.usage import usable_content
 
 ARMS = ["today", "pack1200", "pack1200_coverage"]
 MAX_FACTS = 150
@@ -99,12 +100,31 @@ def decide(per_article: list[dict]) -> dict:
             "cost_ratio_median": cost, "articles": len(per_article)}
 
 
+def judgeable(rows: dict[str, dict[str, Any]], arms: list[str],
+              max_facts: int) -> tuple[list[str], list[str], list[str]]:
+    """Partition articles into judgeable, excluded (over fact limit), and missing from some arm.
+
+    Preserves today's order. Articles are in `to_judge` if present in all arms and under max_facts.
+    """
+    to_judge: list[str] = []
+    excluded: list[str] = []
+    missing: list[str] = []
+    for aid in rows[arms[0]]:
+        if any(aid not in rows[arm] for arm in arms):
+            missing.append(aid)
+        elif max(rows[arm][aid]["facts"] for arm in arms) > max_facts:
+            excluded.append(aid)
+        else:
+            to_judge.append(aid)
+    return to_judge, excluded, missing
+
+
 async def _judge_one(client, model, prompt: str, counts: dict[str, int]) -> dict | None:
     for _ in range(2):
         resp = await client.chat.completions.create(
             model=model, messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}, temperature=0, max_tokens=32000)
-        text = resp.choices[0].message.content if resp.choices else None
+        text = usable_content(resp)
         if not text:
             continue
         try:
@@ -130,13 +150,10 @@ async def main() -> None:
     dx = make_docext_client(base_url=s.docext_base_url, read_key=s.docext_read_key,
                             admin_key=s.docext_admin_key, verify_tls=s.docext_verify_tls)
     per_article: list[dict] = []
-    excluded: list[str] = []
+    to_judge, excluded, missing = judgeable(rows, ARMS, MAX_FACTS)
     unscored: list[str] = []
     try:
-        for aid in rows["today"]:
-            if max(rows[arm][aid]["facts"] for arm in ARMS) > MAX_FACTS:
-                excluded.append(aid)
-                continue
+        for aid in to_judge:
             md = (await fetch_article(dx, aid)).content_markdown
             lab = labels_for(aid, ARMS)
             facts = {lab[arm]: rows[arm][aid]["fact_texts"] for arm in ARMS}
@@ -159,7 +176,8 @@ async def main() -> None:
                "totals": {arm: {k: sum(r[arm][k] for r in per_article)
                                 for k in ("facts", "supported", "distinct", "redundant", "unsupported")}
                           for arm in ARMS},
-               "excluded_over_max_facts": excluded, "unscored": unscored, "judge_model": model}
+               "excluded_over_max_facts": excluded, "unscored": unscored,
+               "missing_from_some_arm": missing, "judge_model": model}
     (out / "judge_summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1), flush=True)
 
