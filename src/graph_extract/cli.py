@@ -104,8 +104,9 @@ async def _build_ingest_driver(
         # One timings object across BOTH tiers: the question is how the provider
         # behaves under our concurrency, and the tiers interleave on one host.
         timings = PromptTimings()
-        strong_guard = install_dedup_guard(graphiti, fallback=None,
-                                           unscoped=DedupIndexStats(), timings=timings)
+        strong_guard = install_dedup_guard(
+            graphiti, fallback=None, unscoped=DedupIndexStats(), timings=timings,
+            suppress_contradictions=not settings.ingest_same_pair_contradictions)
         cheap_tier: ExtractionTier | None = None
         if settings.extraction_routing and settings.cheap_llm_api_key:
             cheap_graphiti = build_cheap_graphiti(settings)
@@ -115,7 +116,8 @@ async def _build_ingest_driver(
                 # `.raw` = the strong client's UNGUARDED method, so a retry is not
                 # counted a second time by the strong tier's own guard.
                 fallback=strong_guard.raw if settings.dedup_retry_on_strong else None,
-                unscoped=DedupIndexStats(), timings=timings)
+                unscoped=DedupIndexStats(), timings=timings,
+                suppress_contradictions=not settings.ingest_same_pair_contradictions)
             cheap_tier = ExtractionTier(
                 "cheap", cheap_graphiti,
                 EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,

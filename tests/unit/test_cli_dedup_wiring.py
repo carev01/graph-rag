@@ -113,6 +113,29 @@ async def test_strong_tier_is_guarded_for_detection_only(stubs):
     assert stats.dup_in_invalidation_range == 1
 
 
+async def test_suppress_contradictions_defaults_to_true_and_follows_the_flag(stubs, monkeypatch):
+    """D4: both install_dedup_guard call sites must pass suppress_contradictions
+    derived from ingest_same_pair_contradictions (inverted -- default False means
+    suppression on)."""
+    calls: list[dict] = []
+    real = cli.install_dedup_guard
+
+    def _capture(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "install_dedup_guard", _capture)
+
+    await cli._build_ingest_driver(_settings())
+    assert calls, "install_dedup_guard was never called"
+    assert all(kw["suppress_contradictions"] is True for kw in calls)
+
+    calls.clear()
+    await cli._build_ingest_driver(_settings(ingest_same_pair_contradictions=True))
+    assert calls, "install_dedup_guard was never called"
+    assert all(kw["suppress_contradictions"] is False for kw in calls)
+
+
 async def test_retry_switch_off_leaves_the_cheap_reply_alone(stubs):
     """Off is the DEFAULT: `_settings()` passes no flag, so this also pins that a
     plain configuration does not spend a strong-tier call per event."""

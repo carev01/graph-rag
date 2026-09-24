@@ -103,6 +103,13 @@ class ExtractSettings(BaseSettings):
     # Scope: off suspends the scan and CROSS-PAIR invalidation. Same-pair
     # contradiction via the duplicate candidates stays live either way (BACKLOG 33).
     ingest_detect_contradictions: bool = False
+    # Same-pair contradiction (BACKLOG 33): when the dedup model says a new fact
+    # contradicts an existing fact between the SAME two entities, graphiti expires
+    # one of them. Measured 0 of 14 genuine on the live graph -- limitations and
+    # refinements read as contradictions, removing core facts from answers
+    # (pre-bootstrap-decisions-2026-09-23.md D4). False clears contradicted_facts in
+    # dedup_guard; genuine change is carried by updates and the weekly sweep.
+    ingest_same_pair_contradictions: bool = False
     # Derive a fact's `valid_at` from its episode's reference time
     # (`content_changed_at`) instead of graphiti's per-fact timestamp LLM call.
     #

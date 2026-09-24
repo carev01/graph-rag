@@ -28,9 +28,11 @@ been written to Neo4j at that point, so a retry has no side effects):
      `CURRENT_DEDUP_STATS` (IngestDriver opens one scope per article);
   4. optionally re-issue the SAME prompt on a fallback client (the strong tier)
      and hand graphiti that reply instead.
+  5. when suppress_contradictions is set (D4), clear contradicted_facts after
+     counting -- see pre-bootstrap-decisions-2026-09-23.md.
 
 What it deliberately does NOT do: rewrite, filter or reinterpret the model's
-indices, and it never adds a per-call `maximum` to the schema. Under constrained
+DUPLICATE indices, and it never adds a per-call `maximum` to the schema. Under constrained
 decoding a value bound would turn `[10, 11]` into an in-range token sequence such as
 `[1, 1]` -- a wrong dedup that merges two distinct facts and is invisible afterwards.
 A detectable drop is strictly better than an undetectable merge.
@@ -70,6 +72,10 @@ class DedupIndexStats:
     # invalidation path (BACKLOG 33) and it is counted on EVERY call, not just
     # out-of-range ones -- a same-pair contradiction is perfectly in range.
     contradicted_same_pair: int = 0
+    # contradicted_facts entries cleared before graphiti saw them (D4 suppression,
+    # ingest_same_pair_contradictions=False). Equals every contradiction the model
+    # asserted while suppression was on.
+    contradictions_suppressed: int = 0
     retried: int = 0                    # invalid calls re-issued on the fallback
     retry_clean: int = 0                # ... whose fallback reply was in range
     retry_dirty: int = 0                # ... whose fallback reply was ALSO out of range
@@ -187,7 +193,8 @@ class DedupIndexGuard:
 
 def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                         unscoped: DedupIndexStats,
-                        timings: PromptTimings | None = None) -> DedupIndexGuard:
+                        timings: PromptTimings | None = None,
+                        suppress_contradictions: bool = False) -> DedupIndexGuard:
     """Wrap `graphiti.llm_client.generate_response` in place (the same instance-
     attribute pattern as the chat.completions wrappers in graphiti_client.py).
     `graphiti` only needs an `llm_client` attribute."""
@@ -195,6 +202,22 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
     orig = client.generate_response
     guard = DedupIndexGuard(fallback=fallback, unscoped=unscoped, raw=_Raw(orig),
                             timings=timings or PromptTimings())
+
+    def _suppressed(response: Any, stats: DedupIndexStats) -> Any:
+        """Clear contradicted_facts so graphiti invalidates nothing on this fact --
+        neither the old edge (resolve_edge_contradictions) nor the new one (the
+        inline later-valid_at block). duplicate_facts is never touched."""
+        if not suppress_contradictions:
+            return response
+        if not isinstance(response, dict):
+            raise TypeError(
+                f"dedup reply is {type(response).__name__}, not dict; cannot suppress "
+                "contradictions (graphiti's generate_response contract changed?)")
+        contra = response.get("contradicted_facts") or []
+        if not contra:
+            return response
+        stats.contradictions_suppressed += len(contra)
+        return {**response, "contradicted_facts": []}
 
     async def _timed(fn, label: str, messages, *args: Any, **kwargs: Any) -> Any:
         """Time one call and record the in-flight count AT DISPATCH. The pairing
@@ -224,7 +247,8 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                 stats.parse_failures += 1
                 logger.warning("dedup prompt not parseable (graphiti prompt format changed?); "
                                "index check skipped for this call")
-                return await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
+                return _suppressed(
+                    await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs), stats)
             n, m = counts
             # graphiti's clients append schema/language text to the messages IN PLACE;
             # keep a pristine copy so the fallback sees the prompt as authored.
@@ -237,7 +261,7 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                 # would never reach the counters below.
                 stats.contradicted_same_pair += len(verdict.contradicted_same_pair)
             if verdict is None or verdict.clean:
-                return response
+                return _suppressed(response, stats)
             stats.invalid_calls += 1
             stats.dup_in_invalidation_range += len(verdict.dup_in_range)
             stats.dup_beyond_range += len(verdict.dup_beyond)
@@ -262,7 +286,7 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                 verdict.invalid_duplicates, verdict.contradicted_beyond, n, m, n, n + m - 1,
                 len(verdict.dup_in_range), len(verdict.dup_beyond) + len(verdict.contradicted_beyond),
                 guard.fallback is not None, retry_clean)
-            return response
+            return _suppressed(response, stats)
         finally:
             CURRENT_PROMPT_NAME.reset(token)
 

@@ -450,3 +450,63 @@ async def test_cross_pair_contradictions_are_not_counted_as_same_pair():
         CURRENT_DEDUP_STATS.reset(token)
     assert stats.contradicted_same_pair == 0
     assert stats.contradicted_beyond_range == 0
+
+
+# --- D4: suppress same-pair contradictions (pre-bootstrap-decisions-2026-09-23) --
+
+async def test_suppression_clears_contradictions_and_keeps_duplicates():
+    primary = _ScriptedLLM(_dedup_response([1], [0, 2]))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None, unscoped=stats,
+                        suppress_contradictions=True)
+    reply = await _call(primary, 3, 0)
+    assert reply["contradicted_facts"] == []
+    assert reply["duplicate_facts"] == [1]
+    assert stats.contradicted_same_pair == 2      # counted BEFORE suppression
+    assert stats.contradictions_suppressed == 2
+
+
+async def test_no_suppression_by_default():
+    primary = _ScriptedLLM(_dedup_response([], [0]))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None, unscoped=stats)
+    reply = await _call(primary, 3, 0)
+    assert reply["contradicted_facts"] == [0]
+    assert stats.contradictions_suppressed == 0
+
+
+async def test_suppression_applies_on_the_parse_failure_path():
+    primary = _ScriptedLLM(_dedup_response([], [0]))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None, unscoped=stats,
+                        suppress_contradictions=True)
+    reply = await primary.generate_response(
+        [Message(role="user", content="not a parseable dedup prompt")],
+        prompt_name=DEDUP_PROMPT_NAME)
+    assert reply["contradicted_facts"] == []
+    assert stats.parse_failures == 1 and stats.contradictions_suppressed == 1
+
+
+async def test_suppression_applies_to_the_fallback_reply():
+    primary = _ScriptedLLM(_dedup_response([15], [0]))       # out of range -> retry
+    fallback = _ScriptedLLM(_dedup_response([], [1]))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=fallback,
+                        unscoped=stats, suppress_contradictions=True)
+    reply = await _call(primary, 3, 0)
+    assert reply["contradicted_facts"] == []
+    assert stats.retried == 1 and stats.contradictions_suppressed == 1
+
+
+async def test_suppressed_same_pair_contradiction_invalidates_nothing_end_to_end():
+    """Through graphiti's real resolve_extracted_edge: the related edge is NOT
+    invalidated and the new edge is NOT expired, although the model said 'contradicts'."""
+    related = [_edge("a", valid_at=_T_OLD), _edge("b", valid_at=_T_OLD)]
+    existing = [_edge("x", src="p", dst="q", valid_at=_T_OLD)]
+    llm = _ScriptedLLM(_dedup_response([], [0]))
+    install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
+                        unscoped=DedupIndexStats(), suppress_contradictions=True)
+    resolved, invalidated, _ = await resolve_extracted_edge(
+        llm, _edge("new", valid_at=_T0), related, existing, _episode())
+    assert invalidated == []
+    assert resolved.expired_at is None
