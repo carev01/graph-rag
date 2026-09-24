@@ -1,0 +1,133 @@
+{
+ "reverted_at": "2026-09-23",
+ "group_id": "backup-docs",
+ "reason": "same-pair contradiction false positives, pre-bootstrap-decisions-2026-09-23.md D4",
+ "edges": [
+  {
+   "uuid": "0c4981e3-7a4f-4e7c-a5cb-1c4b60c58dbf",
+   "src": "Azure Backup",
+   "tgt": "Azure Virtual Machines",
+   "fact": "Azure Backup supports backing up Azure Virtual Machines.",
+   "valid_at": "2026-06-25T23:42:01Z[UTC]",
+   "invalid_at": "2026-06-26T00:28:43.493367Z[UTC]",
+   "expired_at": "2026-09-14T02:29:13.977284Z[UTC]"
+  },
+  {
+   "uuid": "2f851cc5-2af9-45ea-86b8-27a8bd69d109",
+   "src": "Azure Backup",
+   "tgt": "Azure Files",
+   "fact": "Azure Backup supports Azure Files backup.",
+   "valid_at": "2026-06-25T23:42:01Z[UTC]",
+   "invalid_at": "2026-06-26T00:28:43.493367Z[UTC]",
+   "expired_at": "2026-09-14T02:30:27.903289Z[UTC]"
+  },
+  {
+   "uuid": "406e262e-658f-4ca7-831f-85443f2bdfea",
+   "src": "Azure Backup",
+   "tgt": "Azure Storage account",
+   "fact": "Azure Backup supports Azure Storage account (with no file or blobs protected) for governance views.",
+   "valid_at": "2026-06-26T00:28:43Z[UTC]",
+   "invalid_at": "2026-06-26T00:30:23.773793Z",
+   "expired_at": "2026-09-14T06:11:53.555003Z"
+  },
+  {
+   "uuid": "4de0f720-ba86-4686-b763-f718946ec327",
+   "src": "Azure Backup",
+   "tgt": "Azure Disks",
+   "fact": "Azure Backup supports Azure Disks backup.",
+   "valid_at": "2026-06-25T00:00:00Z[UTC]",
+   "invalid_at": "2026-06-26T00:28:43.493367Z[UTC]",
+   "expired_at": "2026-09-14T02:30:27.660883Z[UTC]"
+  },
+  {
+   "uuid": "7d0ae805-49fe-4be2-9b04-db794668d1ac",
+   "src": "AWS Backup",
+   "tgt": "Amazon RDS",
+   "fact": "AWS Backup does not support continuous backups or point-in-time recovery for Amazon RDS Multi-AZ clusters (Multi-AZ clusters are not supported for continuous backups/PITR).",
+   "valid_at": "2026-08-17T23:53:15.02119Z[UTC]",
+   "invalid_at": "2026-08-17T23:53:18Z[UTC]",
+   "expired_at": "2026-09-14T04:16:46.490001Z[UTC]"
+  },
+  {
+   "uuid": "9768a620-ab77-4114-bebb-48a9f8037913",
+   "src": "Azure Backup",
+   "tgt": "Azure Storage account",
+   "fact": "Azure Backup requires the Backup Vault Managed ID to have Owner privileges on the Storage account for the storage account validation operation.",
+   "valid_at": "2026-06-26T00:30:23.773793Z",
+   "invalid_at": "2026-07-14T00:00:00Z[UTC]",
+   "expired_at": "2026-09-14T06:11:53.554972Z"
+  },
+  {
+   "uuid": "a48d3bd0-d522-4a9b-bc24-682fa95d5ce3",
+   "src": "Azure Backup",
+   "tgt": "Azure Blobs (Azure Storage)",
+   "fact": "Backup Now, change policy, and resume backup actions aren't available for Azure Backup protected items of Blobs (Azure Storage account).",
+   "valid_at": "2026-06-26T00:28:43.493367Z",
+   "invalid_at": "2026-07-14T22:04:59Z[UTC]",
+   "expired_at": "2026-09-14T02:30:27.712423Z"
+  },
+  {
+   "uuid": "a774c8c2-257c-4684-9d08-69bab76fbdc6",
+   "src": "Azure Backup",
+   "tgt": "Azure Files",
+   "fact": "Azure Backup supports auditing and enforcing Azure Files backup with Azure Policy.",
+   "valid_at": "2026-06-25T00:00:00Z[UTC]",
+   "invalid_at": "2026-06-26T00:28:43.493367Z",
+   "expired_at": "2026-09-14T02:30:27.903283Z"
+  },
+  {
+   "uuid": "cbc910f7-9a1b-4dd9-be77-aa2495cf0831",
+   "src": "Azure Backup",
+   "tgt": "Azure Virtual Machines",
+   "fact": "Azure Site Recovery supports/configures protection for Azure Virtual Machine (for replication/DR).",
+   "valid_at": "2026-06-26T00:28:43Z[UTC]",
+   "invalid_at": "2026-06-26T00:28:43.493367Z",
+   "expired_at": "2026-09-14T02:29:13.977289Z"
+  },
+  {
+   "uuid": "cea48660-1c1a-4206-bb1d-3a9fe9b7a3f6",
+   "src": "Resiliency",
+   "tgt": "Azure managed Active resources",
+   "fact": "Azure Resiliency provides a retention details view for Azure managed Active resources.",
+   "valid_at": "2026-07-14T00:00:00Z[UTC]",
+   "invalid_at": "2026-07-14T21:59:18Z",
+   "expired_at": "2026-09-14T03:24:05.640883Z"
+  },
+  {
+   "uuid": "e2415708-8b7e-4345-879d-b640305933e2",
+   "src": "AWS Backup",
+   "tgt": "Amazon FSx for NetApp ONTAP",
+   "fact": "AWS Backup supports FSx for ONTAP file systems.",
+   "valid_at": "2026-06-25T00:00:00Z[UTC]",
+   "invalid_at": "2026-08-17T23:53:15.02119Z[UTC]",
+   "expired_at": "2026-09-14T01:35:38.574006Z[UTC]"
+  },
+  {
+   "uuid": "e3c29dc9-2074-451f-95a8-5debf27491c7",
+   "src": "AWS Backup",
+   "tgt": "snapshot backup",
+   "fact": "AWS Backup provides snapshot (periodic) backup capability for all resources in the selection.",
+   "valid_at": "2026-06-25T23:20:37Z[UTC]",
+   "invalid_at": "2026-08-17T00:00:00Z",
+   "expired_at": "2026-09-14T04:13:50.371512Z"
+  },
+  {
+   "uuid": "f3ab03af-1ce2-455b-ba91-f1ff47236f34",
+   "src": "AWS Backup",
+   "tgt": "AWS Organizations",
+   "fact": "AWS Backup integrates with AWS Organizations to manage backups across all AWS accounts inside the organization structure.",
+   "valid_at": "2026-06-25T00:00:00Z[UTC]",
+   "invalid_at": "2026-08-17T23:53:15.02119Z[UTC]",
+   "expired_at": "2026-09-14T01:36:00.94874Z[UTC]"
+  },
+  {
+   "uuid": "fc373152-f235-4374-9007-3fb8ac4d388b",
+   "src": "Azure Backup",
+   "tgt": "Azure Files",
+   "fact": "Undelete action isn't available for Azure Backup protected items of Files (Azure Storage account).",
+   "valid_at": "2026-06-26T00:28:43.493367Z",
+   "invalid_at": "2026-07-14T22:04:59Z[UTC]",
+   "expired_at": "2026-09-14T02:30:27.903207Z"
+  }
+ ]
+}
