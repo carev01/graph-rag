@@ -474,7 +474,13 @@ This corrupts the flagship temporal use case — "how did vendor X's treatment c
 time?" — by inventing change events that never happened. A live minimal repro exists,
 which is the expensive half of the work.
 
-### 33. Same-pair invalidation is still live after the contradiction gate — **P1, UNMEASURED**
+### 33. Same-pair invalidation is still live after the contradiction gate — **P1, MEASURED 2026-09-23: 0 of 14 genuine**
+**Update 2026-09-23** (`pre-bootstrap-decisions-2026-09-23.md` D4): all 14 live same-pair
+invalidations are same-crawl false positives — limitations and refinements read as
+contradictions — and they removed core facts from answers ("Azure Backup supports backing
+up Azure VMs", cited by 11 articles). Recommendation: suppress same-pair invalidation at
+ingest, keep the counter; decide before the bootstrap. Original entry below.
+
 Recorded by the final whole-branch review of `suspend-contradiction-detection` (2026-09-12),
 which found the branch's spec claiming "nothing is invalidated" while the library says
 otherwise.
@@ -1119,6 +1125,20 @@ state (safe while `tests/unit/conftest.py` pins the patches); several non-live i
 tests build graphiti on containers without the indexes and so silently exercise the fallback;
 answer-api now needs write-capable Neo4j credentials to create the indexes at startup, which
 conflicts with a read-only answer-api user in Phase 5; answer-api never reports the counters.
+
+### 41. A future `invalid_at` hides a fact that is still true — **P2, found 2026-09-23**
+`search_local` drops every fact with a non-null `invalid_at` (`src/answer_api/search.py:38`)
+and `/timeline` labels it "superseded" (`timeline.py:29-34`). Facts whose end date is stated
+in the text and lies in the future — three live facts carry `invalid_at = 2028-09-01` (ADE
+retirement) — are therefore hidden from answers today although they are current. Compare
+with now: current while `invalid_at` is null or later than now. Independent of D4.
+
+### 42. Chunk packing — ~29% of the bootstrap bill, quality unmeasured — **P1 before bootstrap**
+`pre-bootstrap-decisions-2026-09-23.md` D6: 70% of each episode's prompt volume is fixed
+overhead, and nothing packs the neural chunker's ~265-token chunks toward a target. Packing
+to 1,200 tokens cuts episodes 48% and the bill to ~71% (~$630 of $2,176) on a 197-article
+corpus sample. Needs a small paid A/B (~30 articles, <$5) on extraction recall before
+adoption, because the cheap tier's 900-token cap was set for the verbose cheap model.
 
 ### 38. Neo4j and Postgres backups, with a tested restore — **P4, deferred by the user 2026-09-22**
 Production review M6. Nothing in the repo takes or restores a backup. Neo4j runs on a
