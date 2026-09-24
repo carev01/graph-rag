@@ -1,0 +1,54 @@
+# No credential belongs in this file. Credentials live in the out-of-band secret
+# named below (created from .env; see docs/deploy/k3s.md).
+image:
+  repository: ghcr.io/carev01/graph-rag
+  tag: ""            # required: sha-<7-char commit>
+  pullPolicy: IfNotPresent
+
+secretName: graph-rag-secret
+
+# Deployment-specific overrides; applied AFTER the secret, so these win.
+config:
+  DOCEXT_BASE_URL: http://docextractor-backend.docextractor.svc:8000
+  DOCEXT_VERIFY_TLS: "false"
+  SEMANTIC_REAPER_LEASE_SECONDS: "7200"
+  POLL_INTERVAL_SECONDS: "21600"
+
+postgres:
+  image: postgres:16-alpine
+  storageClass: vsphere-csi-silver-sc
+  size: 10Gi
+  database: graphsync
+  user: graphsync
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+sync:
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+answer:
+  host: graphrag.k3s.home.lan
+  resources:
+    requests: {cpu: 100m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+worker:
+  replicas: 0
+  args: ["--batch", "10", "--poll-seconds", "5"]
+  terminationGracePeriodSeconds: 600
+  resources:
+    requests: {cpu: 100m, memory: 384Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+cron:
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  jobs:
+    cleanup: {schedule: "30 3 * * *", suspend: false, command: ["python", "-m", "graph_extract.cli", "cleanup"]}
+    maintenance: {schedule: "0 4 * * 0", suspend: false, command: ["python", "-m", "graph_extract.cli", "maintenance"]}
+    theme-build: {schedule: "0 5 * * 0", suspend: true, command: ["python", "-m", "theme_builder.cli", "theme-build"]}

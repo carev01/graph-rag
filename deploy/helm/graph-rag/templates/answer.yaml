@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-rag-answer
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: graph-rag-answer}
+  template:
+    metadata:
+      labels: {app: graph-rag-answer}
+    spec:
+      {{- include "graph-rag.podSecurity" . | nindent 6 }}
+      containers:
+        - name: answer
+          image: {{ include "graph-rag.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uvicorn", "answer_api.app:main", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+          {{- include "graph-rag.envFrom" . | nindent 10 }}
+          {{- include "graph-rag.containerSecurity" . | nindent 10 }}
+          ports: [{containerPort: 8000, name: http}]
+          # startup verifies the vector indexes (ensure_vector_indexes waits up to
+          # VECTOR_INDEX_STARTUP_WAIT_SECONDS, default 60) before serving
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 18}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 15}
+          livenessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 30, failureThreshold: 5}
+          resources: {{- toYaml .Values.answer.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graph-rag-answer
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  selector: {app: graph-rag-answer}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: graph-rag-answer
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: {{ .Values.answer.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: graph-rag-answer, port: {name: http}}
