@@ -3,6 +3,7 @@ from __future__ import annotations
 from graphiti_core.search.search_config_recipes import (
     EDGE_HYBRID_SEARCH_NODE_DISTANCE, EDGE_HYBRID_SEARCH_RRF)
 
+from answer_api.temporal import is_current
 from graph_extract.provenance import Provenance
 
 
@@ -35,7 +36,7 @@ async def search_local(graphiti, driver, *, q, k=10, vendor=None,
     edges = await _retrieve_edges(graphiti, q, fetch_limit=max(k * 3, k),
                                   group_id=group_id, center_node_uuid=center_node_uuid)
     if not include_invalid:
-        edges = [e for e in edges if getattr(e, "invalid_at", None) is None]
+        edges = [e for e in edges if is_current(getattr(e, "invalid_at", None))]
     if vendor:
         scope = await _vendor_episode_uuids(driver, vendor)
         edges = [e for e in edges if scope.intersection(e.episodes or [])]

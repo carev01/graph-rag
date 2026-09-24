@@ -15,14 +15,30 @@ class Episode:
 def needs_presplit(token_count_total: int, ceiling: int = 7000) -> bool:
     return token_count_total > ceiling
 
+def _join(p: Chunk, c: Chunk) -> Chunk:
+    return Chunk(text=p.text + "\n" + c.text, start_index=p.start_index,
+                 end_index=c.end_index, token_count=p.token_count + c.token_count)
+
 def _merge_tiny(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[Chunk]:
     out: list[Chunk] = []
     for c in chunks:
         if (out and c.token_count < min_tokens
                 and out[-1].token_count + c.token_count <= max_tokens):
-            p = out[-1]
-            out[-1] = Chunk(text=p.text + "\n" + c.text, start_index=p.start_index,
-                            end_index=c.end_index, token_count=p.token_count + c.token_count)
+            out[-1] = _join(out[-1], c)
+        else:
+            out.append(c)
+    return out
+
+def _pack(chunks: list[Chunk], limit: int) -> list[Chunk]:
+    """Greedily merge CONSECUTIVE chunks while the total stays <= limit (D6).
+    ~70% of an episode's prompt volume is fixed per-episode overhead, so fewer,
+    larger episodes cost less -- but extraction yield per call is roughly constant,
+    so they also yield fewer facts: measured -36% cost, -28% facts at 1,200 tokens
+    (docs/superpowers/chunk-packing-ab-2026-09-24.md). Off by default for that reason."""
+    out: list[Chunk] = []
+    for c in chunks:
+        if out and out[-1].token_count + c.token_count <= limit:
+            out[-1] = _join(out[-1], c)
         else:
             out.append(c)
     return out
@@ -98,13 +114,15 @@ def _split_oversize(c: Chunk, max_tokens: int) -> list[Chunk]:
     return pieces
 
 def build_episodes(*, article_id: str, title: str, chapter_path: str, content_hash: str,
-                   chunks: list[Chunk], max_chunk_tokens: int, min_chunk_tokens: int) -> list[Episode]:
+                   chunks: list[Chunk], max_chunk_tokens: int, min_chunk_tokens: int, pack_target_tokens: int = 0) -> list[Episode]:
     # Split first (equal, content-preserving pieces), THEN merge tiny remainders.
     # This ordering avoids orphaning a sub-min piece created by splitting.
     split: list[Chunk] = []
     for c in chunks:
         split.extend(_split_oversize(c, max_chunk_tokens))
     sized = _merge_tiny(split, min_chunk_tokens, max_chunk_tokens)
+    if pack_target_tokens > 0:
+        sized = _pack(sized, min(pack_target_tokens, max_chunk_tokens))
     prefix = f"[{title} › {chapter_path}]" if chapter_path else f"[{title}]"
     episodes: list[Episode] = []
     for idx, c in enumerate(sized):

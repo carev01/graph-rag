@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from answer_api.search import _retrieve_edges, _vendor_episode_uuids
+from answer_api.temporal import is_current
 from graph_extract.provenance import Provenance
 
 # Sorts after any real timestamp, so a fact with no valid_at lands last.
@@ -27,7 +28,7 @@ def _valid_at_sort_key(edge) -> tuple[int, datetime]:
 
 
 def _fact_status(invalid_at, expired_by_sweep) -> str:
-    if invalid_at is None:
+    if is_current(invalid_at):
         return "current"
     if expired_by_sweep:
         return "expired"

@@ -125,3 +125,44 @@ def test_split_high_density_never_exceeds_max():
                              max_chunk_tokens=max_tokens, min_chunk_tokens=50)
         assert all(e.token_count <= max_tokens for e in eps), (
             text_len, token_count, max_tokens, [e.token_count for e in eps])
+
+
+def _c(text: str, tok: int) -> Chunk:
+    return Chunk(text=text, start_index=0, end_index=len(text), token_count=tok)
+
+
+def _eps(chunks, *, pack=0, max_tokens=1800, min_tokens=128):
+    return build_episodes(article_id="a", title="T", chapter_path="",
+                          content_hash="h" * 16,
+                          chunks=chunks, max_chunk_tokens=max_tokens,
+                          min_chunk_tokens=min_tokens, pack_target_tokens=pack)
+
+
+def test_packing_off_is_todays_behaviour():
+    chunks = [_c(f"c{i}", 300) for i in range(5)]
+    assert [e.body for e in _eps(chunks)] == [e.body for e in _eps(chunks, pack=0)]
+    assert len(_eps(chunks)) == 5
+
+
+def test_packing_merges_consecutive_chunks_up_to_the_target():
+    chunks = [_c(f"c{i}", 300) for i in range(5)]
+    eps = _eps(chunks, pack=900)
+    assert [e.token_count for e in eps] == [900, 600]
+    assert eps[0].body.endswith("c0\nc1\nc2")
+
+
+def test_packing_never_exceeds_the_tier_cap():
+    chunks = [_c(f"c{i}", 300) for i in range(5)]
+    assert max(e.token_count for e in _eps(chunks, pack=1500, max_tokens=900)) <= 900
+
+
+def test_packing_preserves_content_and_order():
+    chunks = [_c(f"c{i}", 250) for i in range(7)]
+    def body(eps):
+        return "\n".join(e.body.split("\n", 1)[1] for e in eps)
+    assert body(_eps(chunks, pack=1000)) == body(_eps(chunks))
+
+
+def test_packing_leaves_a_chunk_already_at_the_target_alone():
+    chunks = [_c("big", 1000), _c("small", 200)]
+    assert [e.token_count for e in _eps(chunks, pack=1000)] == [1000, 200]

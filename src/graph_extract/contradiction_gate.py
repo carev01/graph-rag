@@ -37,6 +37,14 @@ also mark the NEW edge invalid on arrival. The six hand-inspected bad
 invalidations that justified this change were all same-endpoint, same-relation
 pairs -- that is this path, not the one suspended here. Its share is unmeasured.
 
+Since 2026-09-23 that path is suppressed too, by default, but NOT here:
+graph_extract.dedup_guard clears the whole `contradicted_facts` list before graphiti
+sees it (`ingest_same_pair_contradictions=False`; 0 of 14 live cases were genuine,
+pre-bootstrap-decisions-2026-09-23.md D4). Everything above still describes what
+graphiti does when that suppression is off. Note the coupling: re-enabling this
+gate's search while suppression stays on runs the scan and discards its results --
+the ingest CLI warns about that combination at startup.
+
 Scope: `edge_operations` is ingest-only. The answer path searches via
 `graphiti.search()` / `search_utils`, so retrieval is untouched by construction
 rather than by a flag someone must remember to check.
