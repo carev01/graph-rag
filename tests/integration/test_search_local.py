@@ -1,8 +1,12 @@
+from datetime import datetime, timezone
+
 import pytest
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 GROUP_ID = "backup-docs"
+# graphiti's EntityEdge.invalid_at is datetime | None, never a string.
+_PAST = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
 
 class _Edge:
@@ -43,7 +47,7 @@ async def test_search_local_returns_cited_facts(extract_driver):
     await _seed_article_episode_fact(extract_driver, article_id="art1", episode_uuid="ep1")
     g = _StubGraphiti([
         _Edge("f1", "AWS Backup Vault Lock requires compliance mode", ["ep1"]),
-        _Edge("f_invalid", "stale fact", ["ep1"], invalid_at="2020-01-01"),
+        _Edge("f_invalid", "stale fact", ["ep1"], invalid_at=_PAST),
     ])
     out = await search_local(g, extract_driver, q="vault lock", k=10, group_id=GROUP_ID)
     facts = {r["fact_uuid"] for r in out["results"]}
@@ -58,7 +62,7 @@ async def test_search_local_include_invalid(extract_driver):
     await _seed_article_episode_fact(extract_driver, article_id="art2", episode_uuid="ep2")
     g = _StubGraphiti([
         _Edge("f1", "AWS Backup Vault Lock requires compliance mode", ["ep1"]),
-        _Edge("f_invalid", "stale fact", ["ep1"], invalid_at="2020-01-01"),
+        _Edge("f_invalid", "stale fact", ["ep1"], invalid_at=_PAST),
     ])
     out = await search_local(g, extract_driver, q="vault lock", k=10, group_id=GROUP_ID,
                              include_invalid=True)

@@ -23,7 +23,10 @@ invalidations. A field holding two kinds of date is worse than a field holding t
 less precise one.
 
 **What is given up.** That call also extracts in-text END dates ("deprecated in
-2024") into `invalid_at`. We lose those. It is a real cost, accepted because
+2024") into `invalid_at` -- but only for edges the combined extraction prompt left
+undated, since that prompt already sets `invalid_at` itself (and such an edge takes
+the early return below). We lose the fallback's end dates. It is a real cost,
+accepted because
 `invalid_at` should record *evidence of supersession* -- a newer document, a
 tombstone, the staleness sweep -- rather than a model's reading of prose, and
 because the same call's `valid_at` half was measured unusable.

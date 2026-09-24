@@ -7,9 +7,12 @@ NOW = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
 
 def test_current(): assert _fact_status(None, None) == "current"
 def test_current_ignores_sweep_flag(): assert _fact_status(None, True) == "current"   # invalid_at null wins
-def test_expired(): assert _fact_status("2019-01-10T13:45:24Z", True) == "expired"
-def test_superseded(): assert _fact_status("2019-01-10T13:45:24Z", None) == "superseded"
-def test_superseded_false_flag(): assert _fact_status("2019-01-10T13:45:24Z", False) == "superseded"
+PAST = datetime(2019, 1, 10, 13, 45, 24, tzinfo=timezone.utc)
+
+
+def test_expired(): assert _fact_status(PAST, True) == "expired"
+def test_superseded(): assert _fact_status(PAST, None) == "superseded"
+def test_superseded_false_flag(): assert _fact_status(PAST, False) == "superseded"
 
 
 def test_future_invalid_at_is_current():

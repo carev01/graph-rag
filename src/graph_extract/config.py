@@ -105,15 +105,26 @@ class ExtractSettings(BaseSettings):
     # the pages, because the corpus carries no document revision date. Re-enabling
     # is NOT a flag flip -- see the spec's section 7.
     #
-    # Scope: off suspends the scan and CROSS-PAIR invalidation. Same-pair
-    # contradiction is controlled separately by ingest_same_pair_contradictions (suppressed by default).
+    # Scope: off suspends the scan and CROSS-PAIR invalidation. Turning it on is
+    # NOT enough to bring cross-pair invalidation back: with the default
+    # ingest_same_pair_contradictions=False, dedup_guard clears EVERY contradicted
+    # index, so the scan would run and invalidate nothing (startup logs a WARNING
+    # for that combination). Re-enabling needs BOTH flags plus the section 7 review.
     ingest_detect_contradictions: bool = False
-    # Same-pair contradiction (BACKLOG 33): when the dedup model says a new fact
-    # contradicts an existing fact between the SAME two entities, graphiti expires
-    # one of them. Measured 0 of 14 genuine on the live graph -- limitations and
+    # Ingest-time contradiction invalidation, ALL of it (BACKLOG 33, D4). The name
+    # says "same-pair" because that is the only path live while
+    # ingest_detect_contradictions=False: the dedup model says a new fact contradicts
+    # an existing fact between the SAME two entities and graphiti expires one of
+    # them. Measured 0 of 14 genuine on the live graph -- limitations and
     # refinements read as contradictions, removing core facts from answers
-    # (pre-bootstrap-decisions-2026-09-23.md D4). False clears contradicted_facts in
-    # dedup_guard; genuine change is carried by updates and the weekly sweep.
+    # (pre-bootstrap-decisions-2026-09-23.md D4).
+    #
+    # False (default) clears the WHOLE contradicted_facts list in dedup_guard --
+    # same-pair indices AND, were detection re-enabled, cross-pair ones -- so ingest
+    # writes no contradiction-driven invalidation at all. Genuine change is carried
+    # by updates and the weekly sweep. True alone restores same-pair only; cross-pair
+    # also needs ingest_detect_contradictions=True and the design review in
+    # docs/superpowers/specs/2026-09-12-suspend-contradiction-detection-design.md §7.
     ingest_same_pair_contradictions: bool = False
     # Derive a fact's `valid_at` from its episode's reference time
     # (`content_changed_at`) instead of graphiti's per-fact timestamp LLM call.
@@ -124,9 +135,14 @@ class ExtractSettings(BaseSettings):
     # the fact text on about half, the reference time on the rest -- which is the
     # mixture that caused this project's phantom invalidations.
     #
-    # The cost of the switch: in-text END dates ("deprecated in 2024") are no
-    # longer extracted into `invalid_at`. Accepted, because invalid_at should
-    # record evidence of supersession, not a model's reading of prose.
+    # The cost of the switch is narrower than it looks: only the per-fact FALLBACK
+    # timestamp call is skipped. graphiti's combined edge-extraction prompt still
+    # sets `invalid_at` from in-text end dates ("deprecated in 2024" --
+    # graphiti_core/prompts/extract_edges.py, parsed at edge_operations.py:282-288),
+    # and such an edge is left untouched here. What is lost is the fallback's end
+    # date for facts the extraction prompt left undated. Accepted, because
+    # invalid_at should record evidence of supersession, not a model's reading of
+    # prose. (answer_api.temporal.is_current keeps future end dates current.)
     valid_at_from_content_changed: bool = True
     # Index-backed similarity search (Phase B, spec 2026-09-23). Unbounded
     # edge/node similarity searches -- retrieval and node dedup -- go to tuned

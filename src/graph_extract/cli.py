@@ -67,6 +67,21 @@ def _dump(obj: object) -> None:
     typer.echo(json.dumps(obj, indent=2, default=str))
 
 
+def _warn_if_contradiction_scan_is_discarded(settings: ExtractSettings) -> None:
+    """ingest_same_pair_contradictions=False makes dedup_guard clear the WHOLE
+    contradicted_facts list -- cross-pair indices too, not just same-pair ones. With
+    ingest_detect_contradictions=True the O(corpus) invalidation-candidate search
+    then runs on every fact and none of its results can ever invalidate anything."""
+    if settings.ingest_detect_contradictions and not settings.ingest_same_pair_contradictions:
+        logger.warning(
+            "INGEST_DETECT_CONTRADICTIONS=true with INGEST_SAME_PAIR_CONTRADICTIONS=false: "
+            "the invalidation-candidate scan will run but its results are discarded "
+            "(dedup_guard clears ALL contradicted_facts). Re-enabling cross-pair "
+            "invalidation needs BOTH flags and the design review in "
+            "docs/superpowers/specs/2026-09-12-suspend-contradiction-detection-design.md "
+            "section 7.")
+
+
 async def _build_ingest_driver(
     settings: ExtractSettings,
 ) -> tuple[IngestDriver, Graphiti, httpx.AsyncClient, AsyncDriver]:
@@ -79,6 +94,7 @@ async def _build_ingest_driver(
     *after* this function returns) would never run and the already-open
     graphiti/client/driver would leak.
     """
+    _warn_if_contradiction_scan_is_discarded(settings)
     graphiti = build_graphiti(settings)
     cheap_graphiti: Graphiti | None = None
     docext: httpx.AsyncClient | None = None

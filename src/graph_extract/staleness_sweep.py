@@ -16,6 +16,12 @@ a same-pair contradiction through the duplicate candidates (BACKLOG 33), so most
 `invalid_at` values written from here on come from this sweep. See the spec,
 docs/superpowers/specs/2026-09-12-suspend-contradiction-detection-design.md.
 
+Since 2026-09-23 that same-pair path is suppressed by default as well
+(`ingest_same_pair_contradictions=False`: graph_extract.dedup_guard clears the
+dedup reply's `contradicted_facts`), so ingest writes no contradiction-driven
+invalidation at all and this sweep is the only one. Ingest can still set
+`invalid_at` from an end date stated in the text.
+
 Correctness rule (see graph_extract.episode_liveness, the single definition): a
 supporting episode is ALIVE iff its `HAS_EPISODE` edge is not `superseded`, the
 episode is not `removed`, and the article is not `removed`. Liveness is keyed on

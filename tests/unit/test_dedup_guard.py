@@ -452,7 +452,7 @@ async def test_cross_pair_contradictions_are_not_counted_as_same_pair():
     assert stats.contradicted_beyond_range == 0
 
 
-# --- D4: suppress same-pair contradictions (pre-bootstrap-decisions-2026-09-23) --
+# --- D4: suppress ALL ingest contradictions (pre-bootstrap-decisions-2026-09-23) --
 
 async def test_suppression_clears_contradictions_and_keeps_duplicates():
     primary = _ScriptedLLM(_dedup_response([1], [0, 2]))
@@ -510,3 +510,30 @@ async def test_suppressed_same_pair_contradiction_invalidates_nothing_end_to_end
         llm, _edge("new", valid_at=_T0), related, existing, _episode())
     assert invalidated == []
     assert resolved.expired_at is None
+
+
+_T_LATER = datetime(2027, 1, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("suppress", [False, True])
+async def test_same_pair_contradiction_from_a_LATER_candidate_and_the_new_edge(suppress):
+    """graphiti's inline block (edge_operations.py:826-838, 0.30.1) expires the NEW
+    edge on arrival when a contradicted candidate has a LATER valid_at. The test
+    above cannot reach it (its candidates are older). Unsuppressed pins the library
+    behaviour -- the new edge IS expired, invalid_at taken from the candidate;
+    suppressed, the model's 'contradicts' never reaches that block."""
+    related = [_edge("a", valid_at=_T_LATER), _edge("b", valid_at=_T_OLD)]
+    llm = _ScriptedLLM(_dedup_response([], [0]))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
+                        unscoped=stats, suppress_contradictions=suppress)
+    resolved, invalidated, _ = await resolve_extracted_edge(
+        llm, _edge("new", valid_at=_T0), related, [], _episode())
+    assert invalidated == []     # the candidate is newer: never invalidated either way
+    if suppress:
+        assert resolved.expired_at is None
+        assert resolved.invalid_at is None
+        assert stats.contradictions_suppressed == 1
+    else:
+        assert resolved.expired_at is not None
+        assert resolved.invalid_at == _T_LATER

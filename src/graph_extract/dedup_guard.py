@@ -28,8 +28,11 @@ been written to Neo4j at that point, so a retry has no side effects):
      `CURRENT_DEDUP_STATS` (IngestDriver opens one scope per article);
   4. optionally re-issue the SAME prompt on a fallback client (the strong tier)
      and hand graphiti that reply instead.
-  5. when suppress_contradictions is set (D4), clear contradicted_facts after
-     counting -- see pre-bootstrap-decisions-2026-09-23.md.
+  5. when suppress_contradictions is set (D4; ingest_same_pair_contradictions=False,
+     the default), clear the WHOLE contradicted_facts list after counting --
+     same-pair indices (0..N-1) and cross-pair ones (N..N+M-1) alike, so no
+     ingest-time contradiction invalidation of any kind survives. See
+     pre-bootstrap-decisions-2026-09-23.md and the config.py comments.
 
 What it deliberately does NOT do: rewrite, filter or reinterpret the model's
 DUPLICATE indices, and it never adds a per-call `maximum` to the schema. Under constrained
@@ -71,10 +74,15 @@ class DedupIndexStats:
     # only removes the cross-pair candidates. This is the residual same-pair
     # invalidation path (BACKLOG 33) and it is counted on EVERY call, not just
     # out-of-range ones -- a same-pair contradiction is perfectly in range.
+    # Counted from the PRIMARY reply only: when a dirty call is retried on the
+    # fallback, the fallback reply's same-pair indices are NOT added here.
     contradicted_same_pair: int = 0
     # contradicted_facts entries cleared before graphiti saw them (D4 suppression,
-    # ingest_same_pair_contradictions=False). Equals every contradiction the model
-    # asserted while suppression was on.
+    # ingest_same_pair_contradictions=False). ALL entries, not only same-pair ones:
+    # cross-pair and out-of-range indices are cleared and counted too. Counted from
+    # the reply graphiti would actually have received -- on the retry path that is
+    # the FALLBACK reply, so on retried calls this and contradicted_same_pair
+    # describe different replies and must not be subtracted from each other.
     contradictions_suppressed: int = 0
     retried: int = 0                    # invalid calls re-issued on the fallback
     retry_clean: int = 0                # ... whose fallback reply was in range
@@ -204,9 +212,11 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                             timings=timings or PromptTimings())
 
     def _suppressed(response: Any, stats: DedupIndexStats) -> Any:
-        """Clear contradicted_facts so graphiti invalidates nothing on this fact --
-        neither the old edge (resolve_edge_contradictions) nor the new one (the
-        inline later-valid_at block). duplicate_facts is never touched."""
+        """Clear the WHOLE contradicted_facts list -- same-pair and cross-pair
+        indices alike, despite the setting's "same-pair" name -- so graphiti
+        invalidates nothing on this fact: neither the old edge
+        (resolve_edge_contradictions) nor the new one (the inline later-valid_at
+        block). duplicate_facts is never touched."""
         if not suppress_contradictions:
             return response
         if not isinstance(response, dict):

@@ -150,3 +150,24 @@ async def test_retry_switch_off_leaves_the_cheap_reply_alone(stubs):
     assert out == {"duplicate_facts": [10], "contradicted_facts": []}
     assert strong.calls == 0
     assert (stats.invalid_calls, stats.retried) == (1, 0)   # still detected and counted
+
+
+@pytest.mark.parametrize(("detect", "same_pair", "warned"), [
+    (True, False, True),     # scan runs, suppression discards every result
+    (True, True, False),     # both on: cross-pair invalidation actually live
+    (False, False, False),   # the defaults: no scan, nothing to discard
+    (False, True, False),
+])
+async def test_warns_when_the_invalidation_scan_runs_but_is_discarded(
+        stubs, caplog, detect, same_pair, warned):
+    """I1: ingest_same_pair_contradictions=False clears the WHOLE contradicted_facts
+    list, cross-pair indices included, so detection on + suppression on pays for the
+    O(corpus) scan and invalidates nothing. That combination must be loud."""
+    caplog.set_level("WARNING", logger=cli.logger.name)
+    await cli._build_ingest_driver(_settings(
+        ingest_detect_contradictions=detect,
+        ingest_same_pair_contradictions=same_pair))
+    hits = [r for r in caplog.records
+            if r.name == cli.logger.name and r.levelname == "WARNING"
+            and "results are discarded" in r.getMessage()]
+    assert len(hits) == (1 if warned else 0)
