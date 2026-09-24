@@ -34,7 +34,7 @@ async def _chunks_for(s: ExtractSettings, docext: httpx.AsyncClient,
     eps = episode_builder.build_episodes(
         article_id=art.id, title=art.title, chapter_path="",
         content_hash="probe0000", chunks=chunks,
-        max_chunk_tokens=s.max_chunk_tokens, min_chunk_tokens=s.min_chunk_tokens)
+        max_chunk_tokens=s.max_chunk_tokens, min_chunk_tokens=s.min_chunk_tokens, pack_target_tokens=s.pack_target_tokens)
     return art, eps[:n]
 
 

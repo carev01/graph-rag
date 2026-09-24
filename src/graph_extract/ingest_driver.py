@@ -184,7 +184,7 @@ class IngestDriver:
         episodes = episode_builder.build_episodes(
             article_id=art.id, title=art.title, chapter_path=chapter_path,
             content_hash=content_hash, chunks=chunks,
-            max_chunk_tokens=tier.max_chunk_tokens, min_chunk_tokens=self._s.min_chunk_tokens)
+            max_chunk_tokens=tier.max_chunk_tokens, min_chunk_tokens=self._s.min_chunk_tokens, pack_target_tokens=self._s.pack_target_tokens)
         for e in episodes:
             if await self._prov.already_ingested(art.id, e.chunk_index, e.content_hash):
                 res.episodes_skipped += 1

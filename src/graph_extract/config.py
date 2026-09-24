@@ -50,6 +50,11 @@ class ExtractSettings(BaseSettings):
     group_id: str = "backup-docs"
     max_chunk_tokens: int = 1800
     min_chunk_tokens: int = 128
+    # Pack consecutive chunks into episodes of up to this many tokens (never above
+    # the tier's max_chunk_tokens). 0 = off. Set ONCE before the bootstrap: changing
+    # it re-keys an ingested article's episodes on its next re-ingest. Decided by the
+    # D6 A/B (pre-bootstrap-decisions-2026-09-23.md).
+    pack_target_tokens: int = 0
     max_coroutines: int = 3
     # Default set to generic_json_schema per Task 6 evidence: gpt-oss-20b via
     # llama-server fails the OpenAIClient "structured" (Responses API) path
@@ -101,7 +106,7 @@ class ExtractSettings(BaseSettings):
     # is NOT a flag flip -- see the spec's section 7.
     #
     # Scope: off suspends the scan and CROSS-PAIR invalidation. Same-pair
-    # contradiction via the duplicate candidates stays live either way (BACKLOG 33).
+    # contradiction is controlled separately by ingest_same_pair_contradictions (suppressed by default).
     ingest_detect_contradictions: bool = False
     # Same-pair contradiction (BACKLOG 33): when the dedup model says a new fact
     # contradicts an existing fact between the SAME two entities, graphiti expires
