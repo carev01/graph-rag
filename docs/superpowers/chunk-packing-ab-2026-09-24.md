@@ -54,16 +54,25 @@ model. (The strong tier saturated too, so it is not only the prompt.)
   version and authentication requirement, merged more cleanly, and lost two real facts
   (the app-profile requirement; the AvePoint Online Services tenant connection).
 
-Reading: the 28% fact drop overstates the information loss — much of it is redundancy —
-but real facts are lost, perhaps 10–20% of distinct content. Two articles is thin
-evidence for that estimate.
+Reading (as first written): the 28% fact drop overstates the information loss — much of it
+is redundancy — but real facts are lost, perhaps 10–20% of distinct content.
+
+**CORRECTED 2026-09-24** (`coverage-prompt-ab-2026-09-24.md`): a distinct-idea judge over 27
+articles found redundancy is only 10.6% of today's supported facts and distinct ideas fall
+**27%** — as much as raw facts. Packing loses real content; the two hand-checked articles
+over-stated redundancy. A coverage prompt did not recover it (0.74 vs 0.76).
 
 ## Decision and why
 
 Packing off. The standing ruling is that answer quality outranks latency; the saving is
 ~$780 of a ~$2,176 bootstrap, and a measurable loss of real facts is the wrong trade for a
 system whose answers are only as good as the facts it holds. The 40% wall-clock saving is
-the stronger argument and is **not** dismissed: it is recorded as a follow-up (BACKLOG 42)
+the stronger argument and is **not** dismissed: it was recorded as a follow-up (BACKLOG 42)
 — retest packing with the per-chunk salience instruction scaled to episode size, which
-would separate the prompt's share of the loss from the model's. The packing code stays
-merged, default off, with this outcome recorded at the setting.
+would separate the prompt's share of the loss from the model's. **That retest has since run**
+(`coverage-prompt-ab-2026-09-24.md`): removing the fixed per-chunk count and adding a
+coverage directive left distinct ideas at 0.74× today, no better than plain packing's
+0.76×, and it gave back part of the wall-clock saving (~65–72% of today's time vs plain
+packing's ~53–60%). BACKLOG 42 is closed; do not re-propose packing without a change to how
+graphiti itself extracts entities. The packing code stays merged, default off, with this
+outcome recorded at the setting.

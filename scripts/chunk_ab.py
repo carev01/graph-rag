@@ -5,6 +5,7 @@ bypasses ingest_source's warm-up barrier and sibling spreading, which do not int
 with the chunking variable under test).
 
     uv run python scripts/chunk_ab.py --sample SAMPLE.json --out DIR [--articles 30] [--smoke-only]
+    uv run python scripts/chunk_ab.py --sample SAMPLE.json --out DIR --coverage --reuse PREV.json
 
 SAMPLE.json is scripts/spikes/pre_bootstrap/d6_sample.py's output.
 """
@@ -26,6 +27,7 @@ from graph_extract.chonkie_client import Chunk
 from graph_extract.cli import _build_ingest_driver
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.episode_builder import build_episodes
+from graph_extract.ontology import CHEAP_TIER_SALIENCE, EXTRACTION_INSTRUCTIONS
 from graph_extract.usage import get_tally
 
 PRICES = {"cheap": (0.09, 0.36), "strong": (0.25, 2.00)}  # $/1M in, out
@@ -36,6 +38,81 @@ ARMS: dict[str, dict[str, Any]] = {
     "pack1200": {"pack_target_tokens": 1200, "cheap_max_chunk_tokens": 1200},
 }
 NEO4J_IMAGE = "neo4j:2026.07.1-community"
+
+ARMS["pack1200_coverage"] = dict(ARMS["pack1200"])
+
+_FIXED_COUNT = " A dense table chunk should yield roughly 10-25 facts total, not dozens."
+assert _FIXED_COUNT in CHEAP_TIER_SALIENCE, "CHEAP_TIER_SALIENCE changed; update the variant"
+CHEAP_TIER_SALIENCE_UNCAPPED = CHEAP_TIER_SALIENCE.replace(_FIXED_COUNT, "")
+
+COVERAGE_MARKER = "COVERAGE (work through the whole message)"
+COVERAGE_DIRECTIVE = (
+    f"\n\n{COVERAGE_MARKER}: the CURRENT MESSAGE may be long and cover several "
+    "sections. Go through it section by section, from the first line to the last, and "
+    "extract EVERY product, feature, workload, platform, requirement, limitation and "
+    "availability statement each section states -- do not stop after the first topics "
+    "and do not condense the message into a few summary items. A longer message "
+    "should yield proportionally more entities and facts. Never restate one fact in "
+    "different words: each fact must add a claim or a concrete detail (a version, a "
+    "limit, a region, a condition) that no other fact already states."
+)
+ARM_INSTRUCTIONS: dict[str, tuple[str, str]] = {
+    "pack1200_coverage": (
+        EXTRACTION_INSTRUCTIONS + COVERAGE_DIRECTIVE,
+        EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE_UNCAPPED + COVERAGE_DIRECTIVE,
+    ),
+}
+
+
+def _prompt_texts(rec: dict) -> list[str]:
+    """Message content strings for a capture record, regardless of API shape.
+
+    chat.completions captures (cheap tier) store the prompt under "messages";
+    responses.parse captures (strong tier, gpt-5-mini) store it under "input".
+    Both are lists of {"role", "content": str} dicts.
+    """
+    items = rec.get("messages") or rec.get("input") or []
+    return [str(m.get("content", "")) for m in items]
+
+
+def directive_seen(capture_path: Path, marker: str) -> bool:
+    """True iff graphiti actually SENT the directive in an extraction prompt for
+    EVERY tier present among the extraction records -- proof the override reached
+    the model on each tier, not merely that an attribute was set on one of them."""
+    if not capture_path.exists():
+        return False
+    tiers_seen: set[Any] = set()
+    tiers_with_marker: set[Any] = set()
+    for line in capture_path.read_text().splitlines():
+        rec = json.loads(line)
+        if not str(rec.get("prompt_name", "")).startswith(("extract_nodes.", "extract_edges.")):
+            continue
+        tier = rec.get("tier")
+        tiers_seen.add(tier)
+        if any(marker in text for text in _prompt_texts(rec)):
+            tiers_with_marker.add(tier)
+    return bool(tiers_seen) and tiers_seen <= tiers_with_marker
+
+
+def reused_rows(prev: dict, arm: str, article_ids: list[str]) -> list[dict]:
+    try:
+        rows = prev[arm]["rows"]
+    except KeyError as e:
+        raise SystemExit(f"reused arm {arm!r}: missing key {e.args[0]!r} in previous results")
+    if [r["article_id"] for r in rows] != article_ids:
+        raise SystemExit(f"reused arm {arm!r} does not match the selected articles "
+                         "in order -- refusing to compare different samples")
+    return rows
+
+
+def prepare_capture(capture_path: Path) -> Path:
+    """Clear stale capture file and return path for fresh capture.
+
+    Ensures that a marker from a previous invocation does not satisfy
+    the directive_seen gate in a new run.
+    """
+    capture_path.unlink(missing_ok=True)
+    return capture_path
 
 
 def today_episode_count(article: dict, s: ExtractSettings) -> int:
@@ -125,7 +202,7 @@ async def _article_graph(driver, article_id: str) -> dict:
 
 
 async def run_arm(name: str, articles: list[dict], spent_before: float,
-                  out: Path) -> list[dict]:
+                  out: Path, *, capture_path: Path | None = None) -> list[dict]:
     """Ingest `articles` in a fresh container under arm `name`'s settings.
 
     Writes each completed row to out/rows.jsonl immediately (to avoid losing results
@@ -134,11 +211,20 @@ async def run_arm(name: str, articles: list[dict], spent_before: float,
     rows: list[dict] = []
     rows_file = out / "rows.jsonl"
     with Neo4jContainer(NEO4J_IMAGE) as neo:
-        s = get_extract_settings().model_copy(update={
+        update_dict = {
             "neo4j_uri": neo.get_connection_url(), "neo4j_user": "neo4j",
-            "neo4j_password": neo.password, "group_id": f"ab-{name}", **ARMS[name]})
+            "neo4j_password": neo.password, "group_id": f"ab-{name}", **ARMS[name]}
+        if capture_path is not None:
+            update_dict["llm_capture_path"] = str(capture_path)
+        s = get_extract_settings().model_copy(update=update_dict)
         ingest, graphiti, docext, driver = await _build_ingest_driver(s)
         try:
+            if name in ARM_INSTRUCTIONS:
+                strong_instr, cheap_instr = ARM_INSTRUCTIONS[name]
+                if ingest._cheap is None:
+                    raise SystemExit("cheap tier not configured; the variant needs both tiers")
+                ingest._strong.instructions = strong_instr
+                ingest._cheap.instructions = cheap_instr
             await _seed(driver, articles)
             for a in articles:
                 t = get_tally()
@@ -177,6 +263,8 @@ async def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--articles", type=int, default=30)
     ap.add_argument("--smoke-only", action="store_true")
+    ap.add_argument("--coverage", action="store_true")
+    ap.add_argument("--reuse")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -184,6 +272,42 @@ async def main() -> None:
     articles = select_articles(json.loads(Path(args.sample).read_text()), args.articles,
                                random.Random(7), s)
     print(f"{len(articles)} articles selected", flush=True)
+
+    if args.coverage:
+        if not args.reuse:
+            raise SystemExit("--coverage needs --reuse PREV_results.json")
+        prev = json.loads(Path(args.reuse).read_text())
+        ids = [a["id"] for a in articles]
+        reused = {arm: reused_rows(prev, arm, ids) for arm in ("today", "pack1200")}
+        cap = prepare_capture(out / "capture-smoke.jsonl")
+        tally_before = get_tally().prompt_tokens
+        smoke_rows = await run_arm("pack1200_coverage", articles[:SMOKE_N], 0.0, out,
+                                   capture_path=cap)
+        (out / "smoke_coverage.json").write_text(json.dumps(smoke_rows, indent=1))
+        if get_tally().prompt_tokens == tally_before:
+            raise SystemExit("usage tally did not move -- refusing")
+        if any(r["episodes"] > 0 and r["prompt_tokens"] == 0 for r in smoke_rows):
+            raise SystemExit("an unmetered smoke row -- refusing")
+        if not directive_seen(cap, COVERAGE_MARKER):
+            raise SystemExit("coverage directive not found in any captured extraction "
+                             "prompt -- the variable is not engaged; refusing")
+        spent = sum(r["cost"] for r in smoke_rows)
+        print(f"coverage smoke passed; spent=${spent:.3f}", flush=True)
+        if args.smoke_only:
+            return
+        rows = await run_arm("pack1200_coverage", articles, spent, out)
+        spent += sum(r["cost"] for r in rows)
+        results = {arm: {"summary": summarise(r), "rows": r} for arm, r in reused.items()}
+        results["pack1200_coverage"] = {"summary": summarise(rows), "rows": rows}
+        results["spent_usd_new_arm"] = spent
+        results["method_notes"] = prev.get("method_notes", []) + [
+            "today and pack1200 reused from " + str(args.reuse)
+            + "; pack1200_coverage run separately with overridden tier instructions"]
+        (out / "results_coverage.json").write_text(json.dumps(results, indent=1, default=str))
+        for arm in results:
+            if isinstance(results[arm], dict) and "summary" in results[arm]:
+                print(arm, results[arm]["summary"], flush=True)
+        return
 
     # Smoke: prove the variable is engaged before the full spend (CLAUDE.md).
     smoke = articles[:SMOKE_N]
