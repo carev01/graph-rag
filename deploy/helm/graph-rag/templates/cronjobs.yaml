@@ -1,0 +1,33 @@
+{{- range $name, $job := .Values.cron.jobs }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: graph-rag-{{ $name }}
+  labels: {{- include "graph-rag.labels" $ | nindent 4 }}
+spec:
+  schedule: {{ $job.schedule | quote }}
+  suspend: {{ $job.suspend }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $job.backoffLimit }}
+      activeDeadlineSeconds: {{ $job.activeDeadlineSeconds }}
+      template:
+        metadata:
+          annotations:
+            checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        spec:
+          restartPolicy: Never
+          {{- include "graph-rag.podSecurity" $ | nindent 10 }}
+          containers:
+            - name: {{ $name }}
+              image: {{ include "graph-rag.image" $ }}
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
+              command: {{- toYaml $job.command | nindent 16 }}
+              {{- include "graph-rag.envFrom" $ | nindent 14 }}
+              {{- include "graph-rag.containerSecurity" $ | nindent 14 }}
+              resources: {{- toYaml $.Values.cron.resources | nindent 16 }}
+{{- end }}

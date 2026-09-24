@@ -1,0 +1,62 @@
+# No credential belongs in this file. Credentials live in the out-of-band secret
+# named below (created from .env; see docs/deploy/k3s.md).
+image:
+  repository: ghcr.io/carev01/graph-rag
+  tag: ""            # required: sha-<7-char commit>
+  pullPolicy: IfNotPresent
+
+secretName: graph-rag-secret
+
+# Deployment-specific overrides; applied AFTER the secret, so these win.
+config:
+  DOCEXT_BASE_URL: http://docextractor-backend.docextractor.svc:8000
+  DOCEXT_VERIFY_TLS: "false"
+  SEMANTIC_REAPER_LEASE_SECONDS: "7200"
+  POLL_INTERVAL_SECONDS: "21600"
+
+postgres:
+  image: postgres:16-alpine
+  storageClass: vsphere-csi-silver-sc
+  size: 10Gi
+  database: graphsync
+  user: graphsync
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+sync:
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+answer:
+  # 0 during the quiesced install (docs/deploy/k3s.md step 4): the answer pod's
+  # startup writes to Neo4j (ensure_vector_indexes), which must wait until the
+  # connectivity check has passed.
+  replicas: 1
+  host: graphrag.k3s.home.lan
+  resources:
+    requests: {cpu: 100m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+worker:
+  replicas: 0
+  # --batch must equal INGEST_ARTICLE_CONCURRENCY (default 1) whenever that env var
+  # is raised: run_concurrently only checks for a stop signal between batches, so a
+  # bigger batch than the concurrency it's dispatched with makes SIGTERM's grace
+  # period land mid-batch instead of between batches.
+  args: ["--batch", "1", "--poll-seconds", "5"]
+  terminationGracePeriodSeconds: 600
+  resources:
+    requests: {cpu: 100m, memory: 384Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+cron:
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  jobs:
+    cleanup: {schedule: "30 3 * * *", suspend: false, activeDeadlineSeconds: 7200, backoffLimit: 2, command: ["python", "-m", "graph_extract.cli", "cleanup"]}
+    maintenance: {schedule: "0 4 * * 0", suspend: false, activeDeadlineSeconds: 14400, backoffLimit: 2, command: ["python", "-m", "graph_extract.cli", "maintenance"]}
+    theme-build: {schedule: "0 5 * * 0", suspend: true, activeDeadlineSeconds: 28800, backoffLimit: 0, command: ["python", "-m", "theme_builder.cli", "theme-build"]}

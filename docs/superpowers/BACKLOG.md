@@ -1062,6 +1062,13 @@ Note the coupling: rewriting history before pushing requires the rotation. Until
 once. A `git bundle` to a second location costs nothing and is independent of the
 rotation decision.
 
+**k3s cut-over (2026-09-24):** the production cluster's `graph-rag-secret` is built
+from the same `.env`, so it carries this same leaked read key. Rotating it is a
+DocExtractor-side key change followed by the secret update + `rollout restart` in
+`docs/deploy/k3s.md` §3; the connectivity check's authenticated `docext-auth` probe
+(§5) fails on a revoked key, so a rotation is verified by re-running it. Do this before
+or right after cut-over — it is the same item, not a new one.
+
 ### 23. Never-pushed work
 282 commits ahead of `origin/main`. Intentional (no pushes authorised), but see the
 single-copy risk above.
@@ -1180,6 +1187,39 @@ database stopped; no APOC), so VM snapshots or an offline dump on the VM are the
 routes; a logical export over Bolt is the fallback. Postgres (`semantic_jobs`, cursor,
 token ledger) needs a `pg_dump` alongside. Moved to the end of the backlog by the user;
 revisit before the paid full-corpus bootstrap.
+
+### 45. A worker stops only between batches, not between articles — **P3, k3s review 2026-09-24**
+On SIGTERM `run_worker` checks `stop_event` only between `run_worker_once` calls, so a
+pod being scaled down or rolled finishes its whole in-flight *batch*. At `--batch 1` that
+is one article, which is why `worker.args` and `INGEST_ARTICLE_CONCURRENCY` must move
+together (`docs/deploy/k3s.md` §10); raise either alone and the 600 s grace period can land
+mid-batch, leaving jobs `in_progress` until the reaper (2 h lease) re-queues them. App-side
+fix: pass `stop_event` into `run_worker_once` and check it between article groups, so
+SIGTERM finishes only the article(s) already started and never starts another. Then
+`--batch` no longer needs to track concurrency for shutdown safety.
+
+### 46. ~~answer-api / graph-sync uvicorn apps log nothing at INFO~~ — **DONE 2026-09-24**
+Only the CLI called `logging.basicConfig`; the two uvicorn factories did not, so the
+poller's INFO lines (and, with it, any poll failure) never reached `kubectl logs`. Fixed on
+`k3s-deployment`: `graph_sync.logging_setup.configure_logging` is called by
+`graph_sync.cli`, `graph_sync.app.main()` and `answer_api.app.main()`
+(`tests/unit/test_cli_logging.py`), and `run_poll_loop` now logs and survives a failing
+poll instead of ending the task while `/health` stays ok (`tests/unit/test_poll_loop.py`).
+
+### 47. The answer-api ingress has no auth and no allow-list — **Phase F (exposure)**
+`deploy/helm/graph-rag/templates/answer.yaml` routes `graphrag.k3s.home.lan` through
+Traefik with no authentication, and Traefik's LoadBalancer is shared with a host that is
+public. Safe only while 80/443 on the cluster IP are unreachable from the internet — the
+operator confirms that at cut-over (`docs/deploy/k3s.md`, "Exposure"). A Traefik
+`ipAllowList` was considered and not relied on: behind k3s ServiceLB the client source IP
+may be SNATed, making it ineffective. Public exposure and auth (OAuth, per item 26) are
+Phase F.
+
+### 48. Deployment hygiene: pin Postgres to a patch version, set CronJob `timeZone` — **P4**
+`values.yaml` runs `postgres:16-alpine` (a moving tag: a node re-pull can change the
+patch version under a live PVC) — pin `16.x-alpine` or a digest. The three CronJobs have
+no `spec.timeZone`, so their schedules are in the controller's zone (UTC on k3s) — set it
+explicitly so `30 3 * * *` means what the runbook reader thinks it means.
 
 ---
 

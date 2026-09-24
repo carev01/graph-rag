@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-rag-worker
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels: {app: graph-rag-worker}
+  template:
+    metadata:
+      labels: {app: graph-rag-worker}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+    spec:
+      {{- include "graph-rag.podSecurity" . | nindent 6 }}
+      # On SIGTERM the worker stops claiming new work after its in-flight batch;
+      # an article that outlasts terminationGracePeriodSeconds is killed and its
+      # job is re-queued by the reaper after SEMANTIC_REAPER_LEASE_SECONDS
+      # (re-running is safe: the per-chunk HAS_EPISODE gate makes it idempotent).
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: {{ include "graph-rag.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "graph_sync.cli", "worker"]
+          args: {{- toYaml .Values.worker.args | nindent 12 }}
+          {{- include "graph-rag.envFrom" . | nindent 10 }}
+          {{- include "graph-rag.containerSecurity" . | nindent 10 }}
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}

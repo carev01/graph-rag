@@ -10,6 +10,7 @@ from fastapi import APIRouter, FastAPI
 from graph_sync.catalog import Catalog
 from graph_sync.config import get_settings
 from graph_sync.delta_client import make_client
+from graph_sync.logging_setup import configure_logging
 from graph_sync.neo4j_repo import Neo4jRepo
 from graph_sync.poll_loop import run_poll_loop
 from graph_sync.state_store import StateStore
@@ -149,6 +150,7 @@ def main() -> FastAPI:
     startup/shutdown sequencing to `build_lifespan` and route composition to
     `create_app` so neither is duplicated here.
     """
+    configure_logging()
     settings = get_settings()
     client = make_client(settings, admin=False)
     catalog = Catalog(client)

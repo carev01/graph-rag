@@ -18,6 +18,7 @@ from graph_extract.warmup import WarmupGate
 from graph_sync.catalog import Catalog
 from graph_sync.config import Settings, get_settings
 from graph_sync.delta_client import make_client
+from graph_sync.logging_setup import configure_logging as _configure_logging
 from graph_sync.neo4j_repo import Neo4jRepo
 from graph_sync.semantic_worker import run_worker
 from graph_sync.state_store import StateStore
@@ -126,6 +127,8 @@ def bootstrap(
     source_id: str | None = typer.Option(None, "--source-id"),
     vendor_id: str | None = typer.Option(None, "--vendor-id"),
 ) -> None:
+    _configure_logging()
+
     async def _run() -> None:
         settings = get_settings()
         core, client, repo, store = await _build_sync_core(settings)
@@ -145,6 +148,8 @@ def bootstrap(
 
 @app.command("sync-once")
 def sync_once() -> None:
+    _configure_logging()
+
     async def _run() -> None:
         settings = get_settings()
         core, client, repo, store = await _build_sync_core(settings)
@@ -208,6 +213,7 @@ def worker(
     """Standalone semantic-ingestion worker: claims `semantic_jobs` rows and
     drives them through the real `IngestDriver` (upsert -> ingest_article,
     remove -> tombstone_article_episodes). Runs until SIGINT/SIGTERM."""
+    _configure_logging()
 
     async def _run() -> None:
         settings = get_settings()

@@ -16,6 +16,7 @@ from answer_api.router import Mode
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graph_extract.vector_search import ensure_vector_indexes
+from graph_sync.logging_setup import configure_logging
 from graphiti_core import Graphiti
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,7 @@ def create_app() -> FastAPI:
 
 def main() -> FastAPI:
     """Production entrypoint: `uvicorn answer_api.app:main --factory`."""
+    configure_logging()
     return create_app()
 
 

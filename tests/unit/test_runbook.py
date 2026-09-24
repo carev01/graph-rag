@@ -1,0 +1,66 @@
+"""Static guards on docs/deploy/k3s.md: it is executed verbatim against production,
+so the properties the cut-over review made binding are pinned here."""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+RUNBOOK = Path(__file__).parents[2] / "docs" / "deploy" / "k3s.md"
+TEXT = RUNBOOK.read_text()
+BLOCKS = re.findall(r"```\n(.*?)```", TEXT, re.S)
+
+
+def _commands(prefix: str) -> list[str]:
+    joined = [b.replace("\\\n", " ") for b in BLOCKS]
+    return [line for b in joined for line in b.splitlines() if line.strip().startswith(prefix)]
+
+
+def test_every_one_off_pod_has_a_dry_run_with_flags_before_the_separator():
+    runs = _commands("kubectl -n graph-rag run ")
+    names = {re.search(r"run (\S+)", r).group(1) for r in runs}
+    assert names == {"graph-rag-connectivity", "graph-rag-crosscheck",
+                     "graph-rag-sync-once", "graph-rag-smoke"}
+    for name in names:
+        mine = [r for r in runs if f"run {name} " in r]
+        dry = [r for r in mine if "--dry-run=client" in r]
+        assert len(dry) == 1 and len(mine) == 2, name
+        head, _, _ = dry[0].partition(" -- ")
+        assert "--dry-run=client -o yaml" in head, name
+        assert "--restart=Never" in head, name
+
+
+def test_every_pod_override_carries_resources_env_and_security():
+    overrides = re.findall(r"ovr=\$\(cat <<'JSON'\n(.*?)\nJSON\n\)", TEXT, re.S)
+    assert len(overrides) == 4
+    for raw in overrides:
+        spec = json.loads(raw)["spec"]
+        assert spec["automountServiceAccountToken"] is False
+        (c,) = spec["containers"]
+        assert c["image"] == "ghcr.io/carev01/graph-rag:sha-abc1234"
+        assert c["envFrom"][0] == {"secretRef": {"name": "graph-rag-secret"}}
+        assert set(c["resources"]) == {"requests", "limits"}
+        assert c["securityContext"]["allowPrivilegeEscalation"] is False
+
+
+def test_every_rollout_status_is_bounded():
+    cmds = _commands("kubectl -n graph-rag rollout status")
+    assert len(cmds) >= 5
+    for cmd in cmds:
+        assert "--timeout=" in cmd, cmd
+
+
+def test_quiesced_install_stops_every_writer():
+    (install,) = _commands("helm upgrade --install")
+    for flag in ("sync.replicas=0", "answer.replicas=0",
+                 "cron.jobs.cleanup.suspend=true", "cron.jobs.maintenance.suspend=true"):
+        assert flag in install, flag
+
+
+def test_no_exec_into_app_deployments_for_one_off_commands():
+    assert "exec deploy/graph-rag-answer" not in TEXT
+    assert "exec deploy/graph-rag-sync -- python -m graph_sync.cli sync-once" not in TEXT
+
+
+def test_secret_build_drops_the_admin_key():
+    assert "sed -i '/^DOCEXT_ADMIN_KEY=/d'" in TEXT
