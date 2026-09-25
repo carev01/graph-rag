@@ -2,8 +2,7 @@
 constructing any live dependency (graphiti/neo4j/docext), since Typer
 short-circuits on --help before the command body ever runs.
 """
-import re
-
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -14,12 +13,7 @@ runner = CliRunner()
 # Typer renders help through rich, which forces a styled terminal when it sees
 # GITHUB_ACTIONS/FORCE_COLOR (decided at import time, so a runner env cannot undo
 # it): option names arrive wrapped in ANSI escapes and a plain substring check
-# fails on CI only. Assert on the text, not the styling.
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _plain(text: str) -> str:
-    return _ANSI.sub("", text)
+# fails on CI only. Assert on the text, not the styling (`click.unstyle`).
 
 
 class _FakeAsync:
@@ -46,37 +40,37 @@ class _FakeGraphiti(_FakeAsync):
 def test_root_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "ingest" in _plain(result.stdout)
-    assert "probe" in _plain(result.stdout)
-    assert "eval" in _plain(result.stdout)
+    assert "ingest" in click.unstyle(result.stdout)
+    assert "probe" in click.unstyle(result.stdout)
+    assert "eval" in click.unstyle(result.stdout)
 
 
 def test_ingest_help():
     result = runner.invoke(app, ["ingest", "--help"])
     assert result.exit_code == 0
-    assert "--source-id" in _plain(result.stdout)
-    assert "--limit" in _plain(result.stdout)
+    assert "--source-id" in click.unstyle(result.stdout)
+    assert "--limit" in click.unstyle(result.stdout)
 
 
 def test_probe_help():
     result = runner.invoke(app, ["probe", "--help"])
     assert result.exit_code == 0
-    assert "--article-ids" in _plain(result.stdout)
-    assert "--n" in _plain(result.stdout)
+    assert "--article-ids" in click.unstyle(result.stdout)
+    assert "--n" in click.unstyle(result.stdout)
 
 
 def test_maintenance_help():
     result = runner.invoke(app, ["maintenance", "--help"])
     assert result.exit_code == 0
-    assert "housekeeping" in _plain(result.stdout)
-    assert "reconcile" in _plain(result.stdout)
+    assert "housekeeping" in click.unstyle(result.stdout)
+    assert "reconcile" in click.unstyle(result.stdout)
 
 
 def test_eval_help():
     result = runner.invoke(app, ["eval", "--help"])
     assert result.exit_code == 0
     for sub in ("dedup", "provenance", "cost", "quality"):
-        assert sub in _plain(result.stdout)
+        assert sub in click.unstyle(result.stdout)
 
 
 def test_eval_dedup_help():
@@ -87,19 +81,19 @@ def test_eval_dedup_help():
 def test_eval_provenance_help():
     result = runner.invoke(app, ["eval", "provenance", "--help"])
     assert result.exit_code == 0
-    assert "--sample" in _plain(result.stdout)
+    assert "--sample" in click.unstyle(result.stdout)
 
 
 def test_eval_cost_help():
     result = runner.invoke(app, ["eval", "cost", "--help"])
     assert result.exit_code == 0
-    assert "--episodes-processed" in _plain(result.stdout)
+    assert "--episodes-processed" in click.unstyle(result.stdout)
 
 
 def test_eval_quality_help():
     result = runner.invoke(app, ["eval", "quality", "--help"])
     assert result.exit_code == 0
-    assert "--sample" in _plain(result.stdout)
+    assert "--sample" in click.unstyle(result.stdout)
 
 
 def test_cleanup_help():
@@ -112,20 +106,20 @@ def test_merge_duplicates_help():
     reads this before the command ever prints its runtime warning."""
     result = runner.invoke(app, ["merge-duplicates", "--help"])
     assert result.exit_code == 0
-    assert "--apply" in _plain(result.stdout)
-    assert "Report-only by default" in _plain(result.stdout)
+    assert "--apply" in click.unstyle(result.stdout)
+    assert "Report-only by default" in click.unstyle(result.stdout)
 
 
 def test_quality_baseline_help():
     result = runner.invoke(app, ["quality-baseline", "--help"])
     assert result.exit_code == 0
-    assert "--sample" in _plain(result.stdout)
+    assert "--sample" in click.unstyle(result.stdout)
 
 
 def test_quality_report_help():
     result = runner.invoke(app, ["quality-report", "--help"])
     assert result.exit_code == 0
-    assert "--sample" in _plain(result.stdout)
+    assert "--sample" in click.unstyle(result.stdout)
 
 
 def test_render_quality_report_md_handles_aliased_should_distinct_pair():

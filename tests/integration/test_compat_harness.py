@@ -10,6 +10,7 @@ from graph_extract.graphiti_client import build_graphiti
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 
+@pytest.mark.real_endpoints
 async def test_harness_runs_end_to_end_against_a_testcontainer(
         extract_driver, extract_neo4j):
     """The harness must produce a complete result set and a rendered report against a
