@@ -326,3 +326,29 @@ async def test_global_search_all_communities_scoped_out_returns_empty(monkeypatc
     assert res["communities_used"] == []
     assert res["citations"] == []
     assert res["applies_to"] == []
+
+
+async def test_global_search_communities_emptied_by_scope_filter_drop_from_communities_used(
+        monkeypatch):
+    """Review finding B: the shortlist survived (2 communities came back from
+    shortlist_communities), but the map step picked ONLY out-of-scope facts
+    for both of them. After the scope filter every MapResult.fact_ids is
+    empty, so neither community fed the reduce step -- communities_used must
+    be [], the same signal the router's global->local fallback checks
+    (`not raw.get("communities_used")`), not the pre-filter non-empty list."""
+    hits = [_hit("c1", "Veeam community", ["fc1"]), _hit("c2", "Other community", ["fc2"])]
+    maps = {
+        "c1": gs.MapResult(community_id="c1", title="Veeam community", relevance=None,
+                           key_points=["kp"], fact_ids=["fc1"]),
+        "c2": gs.MapResult(community_id="c2", title="Other community", relevance=None,
+                           key_points=["kp"], fact_ids=["fc2"]),
+    }
+    # Both facts resolve to Cohesity -- out of scope for _SCOPE (Veeam).
+    sources = {"fc1": _COHESITY_SOURCES, "fc2": _COHESITY_SOURCES}
+    texts = {"fc1": "Cohesity fact one.", "fc2": "Cohesity fact two."}
+    res, synth = await _run_global_search(
+        monkeypatch, hits, maps, sources, texts, scope=_SCOPE)
+    assert synth.calls == []                 # never reached the reduce call
+    assert res["communities_used"] == []
+    assert res["applies_to"] == []
+    assert res["citations"] == []

@@ -121,41 +121,64 @@ def _apply_rerank(hits: list[CommunityHit],
     return out
 
 
+def _in_scope_ci(sources: list[dict], scope: Scope) -> bool:
+    """Case-insensitive wrapper around `attribution.in_scope` (R3): a `Scope`
+    reaching global_search may carry either the ScopeResolver's canonical
+    case or raw API-param case, while `sources[].vendor/product` always carry
+    the canonical structural case. Fold both sides rather than loosen
+    `in_scope`'s exact-match contract, which local/timeline still rely on."""
+    if scope.is_empty():
+        return True
+    folded_scope = Scope(tuple(v.lower() for v in scope.vendors),
+                         tuple(p.lower() for p in scope.products), scope.source)
+    folded_sources = [{"vendor": (s.get("vendor") or "").lower(),
+                       "product": (s.get("product") or "").lower()} for s in sources]
+    return in_scope(folded_sources, folded_scope)
+
+
 async def _scope_shares(driver, group_id: str, hits: list[CommunityHit],
                         scope: Scope) -> dict[str, float]:
     """Community_id -> in-scope share of its `cited_fact_uuids` (spec §4.3 step
-    2): the fraction of a community's cited facts whose supporting episode(s)
-    trace, via the SAME chain Provenance.resolve_citations walks (episode ->
-    article -> source -> product -> vendor), to the scope's vendor(s) or
-    product(s). A community absent from the query result -- nothing citable,
-    or none of its cited facts resolve to any structural vendor/product at all
-    -- gets 0.0 rather than being silently missing from the returned dict.
+    2): the fraction of a community's cited facts whose provenance sources
+    intersect the scope's vendor(s)/product(s). A community with no cited
+    facts, or whose cited facts resolve to no structural vendor/product at
+    all, gets 0.0 rather than being silently missing from the returned dict.
 
-    Matches only STRUCTURAL Vendor/Product nodes (`v.id`/`p.id` not null; see
-    scope.py's module docstring on the graphiti :Vendor/:Product label
-    collision). Case-insensitive per R3: both sides are folded to lowercase,
-    so a caller passing raw API-param casing still matches the canonically
-    cased structural names.
+    R4 (post-implementation review): this used to be a per-row custom Cypher
+    traversal duplicating Provenance.resolve_citations's chain -- profiled at
+    20.6s / ~24M dbHits over 24 communities x 20 facts against a 20k-fact
+    graph, vs. 0.7s / ~21k dbHits for one resolve_citations call over the same
+    480 uuids (see the fix report's PROFILE evidence). It now makes exactly
+    ONE resolve_citations call, over the ordered-unique union of every hit's
+    cited_fact_uuids, and computes each share in Python via `_in_scope_ci`
+    (case-insensitive per R3; a fact missing from the resolve result -- no
+    structural provenance at all -- counts as not in scope, matching the old
+    Cypher's `v.id IS NOT NULL AND p.id IS NOT NULL` guard).
+
+    `group_id` is accepted for call-site stability (`_keep_in_scope` passes it
+    through) but unused: resolve_citations resolves by fact uuid alone.
     """
     if not hits:
         return {}
-    hit_rows = [{"cid": h.community_id, "facts": list(h.cited_fact_uuids)} for h in hits]
-    records, _, _ = await driver.execute_query(
-        "UNWIND $hits AS h "
-        "UNWIND h.facts AS fu "
-        "OPTIONAL MATCH ()-[f:RELATES_TO {uuid: fu, group_id: $g}]->() "
-        "OPTIONAL MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(:Source)"
-        "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
-        "WHERE e.uuid IN f.episodes AND v.id IS NOT NULL AND p.id IS NOT NULL "
-        "WITH h.cid AS cid, fu, "
-        "     any(x IN collect(DISTINCT [toLower(v.name), toLower(p.name)]) "
-        "         WHERE x[0] IN $vendors OR x[1] IN $products) AS hit "
-        "RETURN cid, toFloat(sum(CASE WHEN hit THEN 1 ELSE 0 END)) / count(fu) AS share",
-        hits=hit_rows, g=group_id,
-        vendors=[v.lower() for v in scope.vendors],
-        products=[p.lower() for p in scope.products])
-    shares = {r["cid"]: r["share"] for r in records}
-    return {h.community_id: shares.get(h.community_id, 0.0) for h in hits}
+    union: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        for f in h.cited_fact_uuids:
+            if f not in seen:
+                seen.add(f)
+                union.append(f)
+    resolved = await Provenance(driver).resolve_citations(union) if union else {}
+    shares: dict[str, float] = {}
+    for h in hits:
+        facts = h.cited_fact_uuids
+        if not facts:
+            shares[h.community_id] = 0.0
+            continue
+        in_scope_count = sum(
+            1 for f in facts
+            if _in_scope_ci(resolved.get(f, {}).get("sources", []), scope))
+        shares[h.community_id] = in_scope_count / len(facts)
+    return shares
 
 
 async def _keep_in_scope(driver, group_id: str, candidates: list[CommunityHit],
@@ -363,21 +386,6 @@ _REDUCE_PROMPT = (
 )
 
 
-def _in_scope_ci(sources: list[dict], scope: Scope) -> bool:
-    """Case-insensitive wrapper around `attribution.in_scope` (R3): a `Scope`
-    reaching global_search may carry either the ScopeResolver's canonical
-    case or raw API-param case, while `sources[].vendor/product` always carry
-    the canonical structural case. Fold both sides rather than loosen
-    `in_scope`'s exact-match contract, which local/timeline still rely on."""
-    if scope.is_empty():
-        return True
-    folded_scope = Scope(tuple(v.lower() for v in scope.vendors),
-                         tuple(p.lower() for p in scope.products), scope.source)
-    folded_sources = [{"vendor": (s.get("vendor") or "").lower(),
-                       "product": (s.get("product") or "").lower()} for s in sources]
-    return in_scope(folded_sources, folded_scope)
-
-
 async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: str,
                         synth_client: AsyncOpenAI, synth_model: str, *, q: str,
                         level: int, k: int, group_id: str,
@@ -402,11 +410,6 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [], "communities_used": [],
                 "degraded": stats.degraded, "applies_to": []}
-    # Built once, right after `results` exists, and reused by every return
-    # below: this is "the communities that fed the reduce step", which stays
-    # true whether or not the reduce LLM call itself later succeeds.
-    communities_used = [{"community_id": m.community_id, "title": m.title,
-                         "relevance": m.relevance} for m in results]
     # Resolve provenance ONCE, over the union of every map result's fact_ids
     # BEFORE the scope filter or the numbering below (plan ruling 5): the same
     # `resolved` supplies the in-scope check, the fact-line labels, AND the
@@ -423,6 +426,20 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
             f for f in m.fact_ids
             if _in_scope_ci(resolved.get(f, {}).get("sources", []), scope)])
             for m in results]
+        # Review finding B: a community that loses EVERY fact to the scope
+        # filter fed nothing into the reduce step and must not appear in
+        # communities_used, or the router's global->local fallback (which
+        # triggers on `not communities_used`) never fires when the map step
+        # happened to pick only out-of-scope facts for every shortlisted
+        # community. Scoped path only -- the unscoped path's semantics are
+        # untouched: a MapResult with naturally empty fact_ids has always
+        # stayed in communities_used there, and still does.
+        results = [m for m in results if m.fact_ids]
+    # Built once, after any scope filtering/drop above, and reused by every
+    # return below: this is "the communities that fed the reduce step", which
+    # stays true whether or not the reduce LLM call itself later succeeds.
+    communities_used = [{"community_id": m.community_id, "title": m.title,
+                         "relevance": m.relevance} for m in results]
     # number the ordered-unique union of fact ids -> marker_map
     marker_map: dict[int, dict] = {}
     fact_to_marker: dict[str, int] = {}
