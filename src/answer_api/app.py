@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -107,6 +108,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.driver = driver
     app.state.scope_resolver = scope_resolver
     app.state.scope_loaded_at = time.monotonic()
+    app.state.scope_reload_lock = asyncio.Lock()
     app.state.synth_client = synth_client
     app.state.synth_model = synth_model
     app.state.embedder = embedder
@@ -133,18 +135,43 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.exception("error closing %s during shutdown", name)
 
 
+_SCOPE_RELOAD_BACKOFF_SECONDS = 60
+
+
 async def _resolve_scope(app: FastAPI, q: str, vendor: list[str] | None,
                          product: list[str] | None, scope_mode: str) -> Scope:
     """Resolve once, at the route boundary, then pass the same Scope to every
     mode. The resolver reloads lazily on use when older than
     `settings.scope_reload_seconds` (plan ruling 4) rather than on a timer, so
     an idle service never reloads and a busy one reloads at most once per TTL.
+
+    Two failure modes this guards against (R6, review of the first cut):
+    - A reload failure (e.g. a Neo4j blip) must never fail the request or
+      leave every later request retrying-and-failing until it happens to
+      succeed -- the previous resolver keeps serving, a WARNING is logged,
+      and the next attempt is deferred `_SCOPE_RELOAD_BACKOFF_SECONDS` rather
+      than retried on every request in between.
+    - Concurrent requests landing past the TTL must reload at most once
+      (single-flight via `scope_reload_lock`): the second-in re-checks
+      staleness *inside* the lock, after the first may have already reloaded.
     """
     settings = app.state.settings
     now = time.monotonic()
     if now - app.state.scope_loaded_at > settings.scope_reload_seconds:
-        app.state.scope_resolver = await ScopeResolver.load(app.state.driver)
-        app.state.scope_loaded_at = now
+        async with app.state.scope_reload_lock:
+            now = time.monotonic()
+            if now - app.state.scope_loaded_at > settings.scope_reload_seconds:
+                try:
+                    app.state.scope_resolver = await ScopeResolver.load(app.state.driver)
+                    app.state.scope_loaded_at = now
+                except Exception:
+                    logger.warning(
+                        "scope resolver reload failed; serving the previous "
+                        "resolver and retrying in %ss", _SCOPE_RELOAD_BACKOFF_SECONDS,
+                        exc_info=True)
+                    app.state.scope_loaded_at = (
+                        now - settings.scope_reload_seconds
+                        + _SCOPE_RELOAD_BACKOFF_SECONDS)
     try:
         return app.state.scope_resolver.resolve(
             q, vendors=vendor, products=product, disabled=(scope_mode == "none"))

@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -426,3 +429,98 @@ async def test_scope_resolver_reloads_after_ttl(monkeypatch):
             resp2 = await c.get("/answer", params={"q": "x"})
             assert load_calls["n"] == 2                 # stale beyond TTL -> reload
     assert resp1.status_code == 200 and resp2.status_code == 200
+
+
+async def test_scope_resolver_reload_failure_keeps_serving_old_resolver_and_backs_off(
+        monkeypatch, caplog):
+    """R6: a reload failure (e.g. a Neo4j blip) after the TTL must not 500 the
+    request, must not wedge every later request into retrying-and-failing, and
+    must log loudly rather than silently. The previous resolver keeps serving,
+    and the next reload attempt is deferred 60s rather than retried on every
+    request until it happens to succeed."""
+    from graph_extract.config import ExtractSettings
+
+    settings = ExtractSettings(
+        _env_file=None, neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+        docext_base_url="http://x", docext_read_key="k", scope_reload_seconds=100)
+    monkeypatch.setattr(app_mod, "get_extract_settings", lambda: settings)
+
+    load_calls = {"n": 0}
+
+    async def _failing_load(driver, aliases_path=None):
+        load_calls["n"] += 1
+        raise RuntimeError("neo4j blip")
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock["t"])
+
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            # Past the TTL, and the resolver is now unreachable.
+            clock["t"] = 1101.0
+            monkeypatch.setattr(app_mod.ScopeResolver, "load", _failing_load)
+
+            with caplog.at_level(logging.WARNING, logger="answer_api.app"):
+                resp1 = await c.get("/answer", params={"q": "x"})
+            assert resp1.status_code == 200                    # old resolver still served
+            assert load_calls["n"] == 1
+            assert any(r.levelno == logging.WARNING for r in caplog.records)
+            assert any(r.exc_info for r in caplog.records)     # exc_info=True, not swallowed
+
+            resp2 = await c.get("/answer", params={"q": "x"})   # immediate retry
+            assert resp2.status_code == 200
+            assert load_calls["n"] == 1                          # backed off, not retried
+
+            clock["t"] += 61                                     # past the 60s backoff
+            resp3 = await c.get("/answer", params={"q": "x"})
+            assert resp3.status_code == 200
+            assert load_calls["n"] == 2                          # retried after the backoff
+
+
+async def test_concurrent_stale_requests_reload_the_resolver_once(monkeypatch):
+    """The minor finding: two requests landing past the TTL concurrently must
+    not both call `ScopeResolver.load` -- single-flight via a lock, with the
+    second re-checking staleness inside the lock rather than reloading again."""
+    from graph_extract.config import ExtractSettings
+
+    settings = ExtractSettings(
+        _env_file=None, neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+        docext_base_url="http://x", docext_read_key="k", scope_reload_seconds=100)
+    monkeypatch.setattr(app_mod, "get_extract_settings", lambda: settings)
+
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            clock = {"t": 1101.0}          # frozen, stale relative to loaded_at below
+            monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock["t"])
+            app.state.scope_loaded_at = 1000.0
+
+            load_calls = {"n": 0}
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def _slow_load(driver, aliases_path=None):
+                load_calls["n"] += 1
+                started.set()
+                await release.wait()
+                return ScopeResolver(_VENDORS, _PRODUCTS, {})
+
+            monkeypatch.setattr(app_mod.ScopeResolver, "load", _slow_load)
+
+            async def _get():
+                return await c.get("/answer", params={"q": "x"})
+
+            t1 = asyncio.create_task(_get())
+            await started.wait()           # t1 is inside the lock, blocked on release
+            t2 = asyncio.create_task(_get())
+            # Let t2 run forward to (and block on) the lock. A real delay
+            # (asyncio.sleep(n>0)) would need the loop's own clock -- which is
+            # time.monotonic(), frozen by this test -- to advance, so it would
+            # hang forever; sleep(0) just yields to the next loop iteration.
+            for _ in range(50):
+                await asyncio.sleep(0)
+            release.set()
+            r1, r2 = await asyncio.gather(t1, t2)
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert load_calls["n"] == 1
