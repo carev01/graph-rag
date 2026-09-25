@@ -76,7 +76,7 @@ def _hit(cid, title, relevance):
 
 
 async def _fake_shortlist(driver, embedder, q, *, level, k, group_id, rating_boost=0.1,
-                          settings=None, stats=None):
+                          settings=None, stats=None, scope=None):
     return [_hit("c1", "Unreranked", None), _hit("c2", "Reranked", 0.83)]
 
 

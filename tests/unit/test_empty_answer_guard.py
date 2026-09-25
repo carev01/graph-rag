@@ -145,7 +145,7 @@ def _hit():
 
 
 async def _fake_shortlist(driver, embedder, q, *, level, k, group_id, rating_boost=0.1,
-                          settings=None, stats=None):
+                          settings=None, stats=None, scope=None):
     return [_hit()]
 
 
@@ -160,6 +160,18 @@ async def _fake_fact_texts(driver, group_id, fact_uuids):
     return {u: f"fact {u}" for u in fact_uuids}
 
 
+class _FakeProvenance:
+    """global_search now resolves provenance once, unconditionally, right
+    after the map step (for labels -- spec §3.1); these tests pass no driver,
+    so fake it out with no sources (labels are not what they exercise)."""
+
+    def __init__(self, driver):
+        pass
+
+    async def resolve_citations(self, fact_uuids):
+        return {u: {"valid_at": None, "invalid_at": None, "sources": []} for u in fact_uuids}
+
+
 async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
     """The communities WERE shortlisted and mapped before the reduce LLM
     failed -- `communities_used` must report that (the same list the success
@@ -168,6 +180,7 @@ async def test_global_search_refuses_on_unusable_synthesis(monkeypatch):
     monkeypatch.setattr(global_search_mod, "shortlist_communities", _fake_shortlist)
     monkeypatch.setattr(global_search_mod, "map_report", _fake_map_report)
     monkeypatch.setattr(global_search_mod, "_fact_texts", _fake_fact_texts)
+    monkeypatch.setattr(global_search_mod, "Provenance", _FakeProvenance)
     synth_client = _FakeClient([_none_content(), _none_content()])
     result = await global_search_mod.global_search(
         None, None, object(), "map-model", synth_client, "synth-model",
@@ -182,6 +195,7 @@ async def test_global_search_empty_choices_does_not_raise(monkeypatch):
     monkeypatch.setattr(global_search_mod, "shortlist_communities", _fake_shortlist)
     monkeypatch.setattr(global_search_mod, "map_report", _fake_map_report)
     monkeypatch.setattr(global_search_mod, "_fact_texts", _fake_fact_texts)
+    monkeypatch.setattr(global_search_mod, "Provenance", _FakeProvenance)
     synth_client = _FakeClient([_no_choices(), _no_choices()])
     result = await global_search_mod.global_search(
         None, None, object(), "map-model", synth_client, "synth-model",
