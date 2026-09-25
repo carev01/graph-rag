@@ -11,6 +11,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.graphiti import AddEpisodeResults
+from graph_extract.cache_layout import StaticTailLearner, wrap_client
 from graph_extract.config import ExtractSettings
 from graph_extract.contradiction_gate import install_contradiction_gate
 from graph_extract.deterministic_valid_at import install_deterministic_valid_at
@@ -171,6 +172,10 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
                                 presence_penalty=s.llm_presence_penalty)
     if s.llm_max_index_array:
         raw = _bound_index_arrays(raw, s.llm_max_index_array)
+    if s.llm_cache_layout:
+        # Static prompt tails into the system message, learned per prompt type
+        # (graph_extract.cache_layout); one learner per client, i.e. per tier.
+        raw = wrap_client(raw, StaticTailLearner())
     if s.llm_client_mode == "structured":
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
@@ -267,7 +272,8 @@ def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
     the group_id are unchanged, so both tiers share one embedding space."""
     cheap = s.model_copy(update=dict(
         llm_base_url=s.cheap_llm_base_url, llm_model=s.cheap_llm_model,
-        llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode))
+        llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode,
+        llm_cache_layout=s.cheap_llm_cache_layout))
     # The reranker built by build_graphiti is harmless here: it is not invoked
     # during add_episode (the cheap client is used for ingestion only).
     return build_graphiti(cheap, tier="cheap")
