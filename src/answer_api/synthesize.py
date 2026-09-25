@@ -6,6 +6,8 @@ import re
 from openai import AsyncOpenAI
 
 from answer_api import search as search_mod
+from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
+from answer_api.scope import Scope
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import bounded_llm_client, usable_content as _usable_content
 
@@ -64,7 +66,8 @@ _RANGE_RE = re.compile(
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
-    "facts below. Cite every claim inline with its [N] marker. Do NOT use outside "
+    "facts below. " + ATTRIBUTION_RULES +
+    "Cite every claim inline with its [N] marker. Do NOT use outside "
     "knowledge. Do NOT write any URL or link. If the facts do not answer the "
     "question, reply exactly: "
     "\"I don't have enough information to answer that from the available sources.\"\n\n"
@@ -211,19 +214,20 @@ def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI,
 
 
 async def answer_local(graphiti, driver, synth_client, synth_model, *,
-                       q, k=15, vendor=None, group_id) -> dict:
+                       q, k=15, scope: Scope | None = None, group_id) -> dict:
     """Retrieve facts via search_local, number them [1..N], let the LLM cite
     by marker only (design-decision #2: the LLM never writes a URL), then
     resolve citations deterministically from the marker map. Zero-retrieval
     short-circuits to the fixed refusal without spending any LLM tokens."""
     res = await search_mod.search_local(
-        graphiti, driver, q=q, k=k, vendor=vendor, group_id=group_id)
+        graphiti, driver, q=q, k=k, scope=scope, group_id=group_id)
     results = res["results"]
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [],
-                "retrieved": 0, "cited": 0}
+                "retrieved": 0, "cited": 0, "applies_to": []}
     marker_map = {i: r for i, r in enumerate(results, 1)}
-    facts_block = "\n".join(f"[{i}] {r['fact']}" for i, r in marker_map.items())
+    facts_block = "\n".join(
+        fact_line(i, r["fact"], r["sources"]) for i, r in marker_map.items())
     # GLM-5.2 is a reasoning model: a small cap truncates the answer to empty
     # (finish_reason='length', content=None), so give the reasoning headroom --
     # same lesson as the GLM judge -- and _complete_or_none retries once wider
@@ -232,7 +236,7 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
                                   _PROMPT.format(facts=facts_block, q=q), max_tokens=3000)
     if raw is None:
         return {"query": q, "answer": _REFUSAL, "citations": [],
-                "retrieved": len(results), "cited": 0}
+                "retrieved": len(results), "cited": 0, "applies_to": []}
     answer, cited = _finalize_answer(raw, marker_map)
     citations = [{"marker": m, "fact": marker_map[m]["fact"],
                   "fact_uuid": marker_map[m]["fact_uuid"],
@@ -240,4 +244,5 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
                   "invalid_at": marker_map[m].get("invalid_at"),
                   "sources": marker_map[m]["sources"]} for m in cited]
     return {"query": q, "answer": answer, "citations": citations,
-            "retrieved": len(results), "cited": len(cited)}
+            "retrieved": len(results), "cited": len(cited),
+            "applies_to": applies_to(citations)}

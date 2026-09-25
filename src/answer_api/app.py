@@ -13,6 +13,7 @@ from answer_api import router as router_mod
 from answer_api import search as search_mod
 from answer_api import timeline as timeline_mod
 from answer_api.router import Mode
+from answer_api.scope import Scope
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graph_extract.vector_search import ensure_vector_indexes
@@ -132,12 +133,13 @@ def create_app() -> FastAPI:
         q: str, k: int = Query(10, ge=1), vendor: str | None = None,
         include_invalid: bool = False
     ) -> dict[str, Any]:
+        scope = Scope((vendor,), (), "explicit") if vendor else None
         return await search_mod.search_local(
             app.state.graphiti,
             app.state.driver,
             q=q,
             k=k,
-            vendor=vendor,
+            scope=scope,
             include_invalid=include_invalid,
             group_id=app.state.settings.group_id,
         )
@@ -196,12 +198,13 @@ def create_app() -> FastAPI:
     async def timeline(
         q: str, limit: int = Query(30, ge=1), vendor: str | None = None
     ) -> dict[str, Any]:
+        scope = Scope((vendor,), (), "explicit") if vendor else None
         return await timeline_mod.timeline_local(
             app.state.graphiti,
             app.state.driver,
             q=q,
             limit=limit,
-            vendor=vendor,
+            scope=scope,
             group_id=app.state.settings.group_id,
         )
 

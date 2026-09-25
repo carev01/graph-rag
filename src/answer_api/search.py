@@ -3,18 +3,9 @@ from __future__ import annotations
 from graphiti_core.search.search_config_recipes import (
     EDGE_HYBRID_SEARCH_NODE_DISTANCE, EDGE_HYBRID_SEARCH_RRF)
 
+from answer_api.scope import Scope, scope_episode_uuids
 from answer_api.temporal import is_current
 from graph_extract.provenance import Provenance
-
-
-async def _vendor_episode_uuids(driver, vendor: str) -> set[str]:
-    async with driver.session() as s:
-        r = await s.run(
-            "MATCH (v:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)"
-            "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
-            "WHERE toLower(v.name)=toLower($v) RETURN collect(DISTINCT e.uuid) AS u", v=vendor)
-        rec = await r.single()
-        return set(rec["u"]) if rec else set()
 
 
 async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id,
@@ -30,16 +21,16 @@ async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id,
     return list(results.edges)
 
 
-async def search_local(graphiti, driver, *, q, k=10, vendor=None,
+async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
                        include_invalid=False, group_id, center_node_uuid=None):
-    # Over-fetch so post-filters (validity, vendor scope) still leave ~k results.
+    # Over-fetch so post-filters (validity, scope) still leave ~k results.
     edges = await _retrieve_edges(graphiti, q, fetch_limit=max(k * 3, k),
                                   group_id=group_id, center_node_uuid=center_node_uuid)
     if not include_invalid:
         edges = [e for e in edges if is_current(getattr(e, "invalid_at", None))]
-    if vendor:
-        scope = await _vendor_episode_uuids(driver, vendor)
-        edges = [e for e in edges if scope.intersection(e.episodes or [])]
+    if scope is not None and not scope.is_empty():
+        allowed = await scope_episode_uuids(driver, scope)
+        edges = [e for e in edges if allowed.intersection(e.episodes or [])]
     edges = edges[:k]
     citations = await Provenance(driver).resolve_citations([e.uuid for e in edges])
     return {

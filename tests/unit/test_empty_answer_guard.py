@@ -114,7 +114,7 @@ async def test_complete_or_none_returns_none_after_both_attempts_fail():
 # local (answer_local)
 # ---------------------------------------------------------------------------
 
-async def _fake_search_local_with_hit(graphiti, driver, *, q, k=15, vendor=None, group_id):
+async def _fake_search_local_with_hit(graphiti, driver, *, q, k=15, scope=None, group_id):
     return {"query": q, "count": 1, "results": [
         {"fact": "AWS Backup uses Vault Lock", "fact_uuid": "f1", "valid_at": None,
          "invalid_at": None, "sources": [{"article_id": "a1", "source_url": "https://x/a1"}]}]}

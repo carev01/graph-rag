@@ -35,7 +35,7 @@ class FakeEmbedder:
         self.client = FakeEmbedder._Client()
 
 
-async def _fake_search_local(graphiti, driver, *, q, k=10, vendor=None,
+async def _fake_search_local(graphiti, driver, *, q, k=10, scope=None,
                               include_invalid=False, group_id):
     return {
         "query": q,
@@ -69,7 +69,7 @@ async def _fake_answer_router(graphiti, driver, embedder, synth_client, synth_mo
                         "fallback_from": None}}
 
 
-async def _fake_timeline_local(graphiti, driver, *, q, limit=30, vendor=None,
+async def _fake_timeline_local(graphiti, driver, *, q, limit=30, scope=None,
                                 group_id):
     return {
         "query": q,
