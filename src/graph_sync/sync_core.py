@@ -104,9 +104,12 @@ class SyncCore:
             return False
         if await self._repo.has_episodes(rec.id):
             return False
-        await self._store.enqueue_semantic_job(
-            rec.id, "upsert", rec.content_hash, "bootstrap", rec.source_id)
-        log.info("re-queued unextracted article %s (no job row, no episodes)", rec.id)
+        # Never an overwrite: a row that appeared since the check wins.
+        if not await self._store.enqueue_semantic_job_if_absent(
+                rec.id, "upsert", rec.content_hash, rec.source_id):
+            return False
+        # WARNING, not INFO: firing at all means Postgres and Neo4j disagreed.
+        log.warning("re-queued unextracted article %s (no job row, no episodes)", rec.id)
         return True
 
     async def _apply_record(

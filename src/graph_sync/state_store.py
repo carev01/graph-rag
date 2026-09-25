@@ -149,6 +149,27 @@ class StateStore:
             "enqueued_at=now(), updated_at=now()",
             article_id, op, content_hash, lane, source_id)
 
+    async def enqueue_semantic_job_if_absent(
+        self, article_id: str, op: str, content_hash: str | None, source_id: str | None,
+    ) -> bool:
+        """Insert a `bootstrap`-lane job only if the article has NO row in any status;
+        never touch an existing one. Returns whether it inserted.
+
+        For the hash gate's requeue (`SyncCore._requeue_unextracted`), which reads
+        `has_semantic_job` and writes later: a producer may enqueue for the same
+        article in between -- a tombstone, say -- and `enqueue_semantic_job`'s
+        ON CONFLICT would flip that pending `remove` back to `upsert`. Here the
+        existence test and the insert are one statement, and a concurrent pending
+        insert that slips past the NOT EXISTS still loses to DO NOTHING."""
+        pool = await self._get_pool()
+        result = await pool.execute(
+            "INSERT INTO semantic_jobs (article_id, op, content_hash, lane, source_id) "
+            "SELECT $1, $2, $3, 'bootstrap', $4 "
+            "WHERE NOT EXISTS (SELECT 1 FROM semantic_jobs WHERE article_id=$1) "
+            "ON CONFLICT DO NOTHING",
+            article_id, op, content_hash, source_id)
+        return result == "INSERT 0 1"
+
     async def has_semantic_job(self, article_id: str) -> bool:
         """Whether the article has EVER had a semantic job, in any status (the hash
         gate's requeue check, `SyncCore._requeue_unextracted`). Served by

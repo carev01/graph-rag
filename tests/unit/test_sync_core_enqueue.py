@@ -22,6 +22,13 @@ class _FakeStore:
         self.has_job_calls.append(article_id)
         return self._has_job
 
+    async def enqueue_semantic_job_if_absent(
+        self, article_id: str, op: str, content_hash: str | None, source_id: str | None,
+    ) -> bool:
+        # Recorded in the same list, with the lane the real method hard-codes.
+        self.enqueue_calls.append((article_id, op, content_hash, "bootstrap", source_id))
+        return True
+
     async def enqueue_semantic_job(
         self, article_id: str, op: str, content_hash: str | None, lane: str,
         source_id: str | None = None,
@@ -382,3 +389,20 @@ async def test_changed_article_never_consults_the_job_table():
 
     assert store.has_job_calls == []
     assert [c[:2] for c in store.enqueue_calls] == [("a23", "upsert")]
+
+
+async def test_requeue_that_loses_the_race_counts_as_skipped():
+    """A row appeared between the check and the atomic insert: nothing was queued,
+    so nothing may be reported as requeued."""
+    class _RacedStore(_FakeStore):
+        async def enqueue_semantic_job_if_absent(self, *a, **k) -> bool:
+            return False
+
+    store = _RacedStore(has_job=False)
+    repo = _FakeRepo(existing_hash="same-hash", has_episodes=False)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+    res = BootstrapResult()
+
+    await core._apply_record(_unchanged("a24"), res)
+
+    assert res.requeued == 0 and res.skipped == 1
