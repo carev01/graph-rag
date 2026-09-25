@@ -28,9 +28,12 @@ def _patch(monkeypatch):
         return 4
     async def _fake_facts(driver, g, uuids):
         return ["fact"]
+    async def _fake_attribution(client, model, q, answer, labelled_facts):
+        return 0
     monkeypatch.setattr(er.router_mod, "answer_router", _fake_router)
     monkeypatch.setattr(er, "_faithfulness_judge", _fake_judge)
     monkeypatch.setattr(er, "_cited_fact_texts", _fake_facts)
+    monkeypatch.setattr(er, "judge_attribution", _fake_attribution)
 
 
 async def test_run_eval_aggregates_and_comparative():

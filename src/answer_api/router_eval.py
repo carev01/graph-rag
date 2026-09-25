@@ -18,6 +18,17 @@ def _parse_judge_score(raw: str) -> int:
     return max(0, min(5, int(m.group())))
 
 
+def _parse_attribution(text: str | None) -> int | None:
+    """The first non-negative integer in the judge's reply, or None -- never a
+    coerced 0 (memory: "LLM empty reply coerced to a value"). Callers that need
+    to distinguish "judge said 0" from "unusable reply" must do so before
+    calling this (see `judge_attribution`'s `_attempt`), not here."""
+    if not text:
+        return None
+    m = re.search(r"\d+", text)
+    return int(m.group()) if m else None
+
+
 def _mean(xs: Sequence[int | float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
@@ -128,6 +139,16 @@ def aggregate(per_question: list[dict]) -> dict:
             bag_rows.setdefault(r["chosen"], []).append(r["bag_share"])
     bag_share_by_mode = {m: _mean(v) for m, v in bag_rows.items()}
 
+    # Misattributed claims (spec §6): an answer that attributes a claim to a
+    # vendor/product not among its cited facts' labels. `.get`, not `[...]` --
+    # records written before this metric existed carry no key at all, and those
+    # must read as unscored rather than raise KeyError, same as bag_share.
+    misattributed_seen = [r.get("misattributed") for r in per_question]
+    misattributed_scored = [x for x in misattributed_seen if x is not None]
+    misattributed_unscored = sum(1 for x in misattributed_seen if x is None)
+    misattributed_total = sum(misattributed_scored)
+    misattributed_answers = sum(1 for x in misattributed_scored if x > 0)
+
     comp_rows = [r for r in per_question if "comparative" in r]
     comparative: dict | None = None
     drift_wins: bool | None = None
@@ -165,6 +186,9 @@ def aggregate(per_question: list[dict]) -> dict:
         "faithfulness_unscored": faithfulness_unscored,
         "mps_by_mode": mps_by_mode,
         "bag_share_by_mode": bag_share_by_mode,
+        "misattributed_total": misattributed_total,
+        "misattributed_answers": misattributed_answers,
+        "misattributed_unscored": misattributed_unscored,
         "comparative": comparative,
         "drift_wins": drift_wins,
         "per_question": per_question,

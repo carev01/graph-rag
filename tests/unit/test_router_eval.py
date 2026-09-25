@@ -1,5 +1,6 @@
 from answer_api.router_eval import (
-    aggregate, bag_share, markers_per_sentence, _parse_judge_score, routing_hit,
+    aggregate, bag_share, markers_per_sentence, _parse_attribution, _parse_judge_score,
+    routing_hit,
 )
 
 
@@ -125,6 +126,35 @@ def test_aggregate_core_metrics():
     assert s["grounding_precision"] == 0.5          # only a,b scored (c is None)
     assert abs(s["faithfulness_mean"] - 11 / 3) < 1e-9
     assert s["comparative"] is None                 # no comparative blocks
+
+
+# --- attribution check -------------------------------------------------------
+
+def test_parse_attribution():
+    assert _parse_attribution("2") == 2
+    assert _parse_attribution("0") == 0
+    assert _parse_attribution("none") is None
+    assert _parse_attribution("") is None
+    assert _parse_attribution(None) is None
+    assert _parse_attribution("Count: 3 claims") == 3
+
+
+def test_aggregate_sums_misattributed_over_scored_answers_and_counts_unscored():
+    pq = [
+        {"question": "a", "intent": "local", "chosen": "local",
+         "routing_hit": True, "grounding_hit": True, "faithfulness": 5,
+         "misattributed": 0},
+        {"question": "b", "intent": "local", "chosen": "local",
+         "routing_hit": True, "grounding_hit": True, "faithfulness": 4,
+         "misattributed": 2},
+        {"question": "c", "intent": "global", "chosen": "global",
+         "routing_hit": True, "grounding_hit": None, "faithfulness": 3,
+         "misattributed": None},
+    ]
+    s = aggregate(pq)
+    assert s["misattributed_total"] == 2                # sum([0, 2]), None excluded
+    assert s["misattributed_answers"] == 1               # only 'b' is > 0
+    assert s["misattributed_unscored"] == 1              # only 'c' is None
 
 
 def test_aggregate_comparative_drift_wins():

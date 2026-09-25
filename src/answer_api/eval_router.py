@@ -16,14 +16,15 @@ from pathlib import Path
 from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 
-from answer_api import router as router_mod
+from answer_api import attribution, router as router_mod
 from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
-    BAG_MARKERS, _parse_judge_score, aggregate, bag_share, markers_per_sentence, routing_hit,
+    BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
+    markers_per_sentence, routing_hit,
 )
 from answer_api.scope import ScopeResolver
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
@@ -42,6 +43,13 @@ _JUDGE_PROMPT = (
     "Score 0-5 how fully the answer's claims are supported by ONLY these facts "
     "(5 = every claim supported, 0 = unsupported/hallucinated). Reply with ONLY the "
     "integer.\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
+)
+
+_ATTRIBUTION_PROMPT = (
+    "Count the claims in the ANSWER that attribute something to a vendor or product "
+    "that is NOT among the (Vendor · Product) labels of the facts that claim cites. "
+    "Reply with ONLY the integer (0 if none).\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\n"
+    "CITED FACTS:\n{facts}"
 )
 
 
@@ -138,6 +146,50 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
     return None
 
 
+async def judge_attribution(client, model, q, answer, labelled_facts: str) -> int | None:
+    """Count claims the ANSWER attributes to a vendor/product not on its cited
+    facts' (Vendor · Product) labels (spec §6). Uses the SAME independent
+    eval-judge client as `_faithfulness_judge` and the same bounded max_tokens
+    retry: an unusable reply (no content, or `finish_reason == 'length'`) must
+    never be coerced to 0 -- that would record "could not be measured" as "zero
+    misattributions", the same defect the faithfulness judge guards against
+    (memory: "LLM empty reply coerced to a value")."""
+    prompt = _ATTRIBUTION_PROMPT.format(q=q, answer=answer, facts=labelled_facts)
+
+    async def _attempt(max_tokens: int):
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        content = _usable_content(resp)
+        finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
+        usable = (content is not None and finish_reason != "length"
+                  and re.search(r"\d+", content) is not None)
+        return finish_reason, content, usable
+
+    finish_reason, content, usable = await _attempt(8000)
+    if usable:
+        return _parse_attribution(content)
+
+    finish_reason, content, usable = await _attempt(16000)
+    if usable:
+        return _parse_attribution(content)
+
+    logger.warning(
+        "attribution judge unmeasurable for question %r after retry "
+        "(finish_reason=%s); recording as unscored, not 0", q, finish_reason)
+    return None
+
+
+def _labelled_facts(citations: list[dict], facts: list[str]) -> str:
+    """One `fact_line` per citation, in citation order, pairing each citation's
+    marker/sources with its fact text from `_cited_fact_texts` (positional --
+    same correspondence the faithfulness judge already relies on for its
+    `cited_facts` list)."""
+    lines = [attribution.fact_line(c["marker"], fact, c.get("sources", []))
+             for c, fact in zip(citations, facts)]
+    return "\n".join(lines) or "(none)"
+
+
 async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
     if not fact_uuids:
         return []
@@ -159,7 +211,9 @@ async def _score_one(clients, q, mode_override, settings, resolver):
     facts = await _cited_fact_texts(driver, settings.group_id,
                                     [c["fact_uuid"] for c in env["citations"]])
     faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
-    return env, ghit, faith, facts
+    labelled = _labelled_facts(env["citations"], facts)
+    misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
+    return env, ghit, faith, facts, misattributed
 
 
 async def run_eval(clients, questions, settings, resolver) -> dict:
@@ -174,7 +228,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts = await _score_one(clients, q, None, settings, resolver)
+            env, ghit, faith, facts, misattributed = await _score_one(
+                clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
             # conditioned on (BACKLOG 0d): the judge sees only the cited facts,
@@ -196,6 +251,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "mps_mean": round(sum(mps) / len(mps), 1) if mps else None,
                          "mps_max": max(mps) if mps else None,
                          "bag_share": _round_or_none(bag_share(env["answer"])),
+                         "misattributed": misattributed,
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -203,7 +259,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts = await _score_one(clients, q, m, settings, resolver)
+                    _e, _g, _f, _facts, _mis = await _score_one(
+                        clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
                                 "chosen": f"comparative:{m}", "answer": _e["answer"],
@@ -214,7 +271,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
-                   "bag_share": None, "failed": True}
+                   "bag_share": None, "misattributed": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -223,7 +280,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
               f"grounding={rec['grounding_hit']} "
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
               f"cited={rec['cited']} ranges={rec['ranges']} mps={_mps_cell(rec)} "
-              f"bag={_cell(rec.get('bag_share'))} {elapsed:.0f}s", flush=True)
+              f"bag={_cell(rec.get('bag_share'))} "
+              f"misattributed={_cell(rec.get('misattributed'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
     summary["raw"] = raw
@@ -264,20 +322,25 @@ def format_report(summary: dict) -> str:
              f"Markers per sentence by mode (mean/max): {summary.get('mps_by_mode')}",
              f"Share of citations in >={BAG_MARKERS}-marker sentences, by mode: "
              f"{summary.get('bag_share_by_mode')}\n",
+             f"Misattributed claims: {summary['misattributed_total']} across "
+             f"{summary['misattributed_answers']} answers "
+             f"(unscored: {summary['misattributed_unscored']})",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
-             "| mps | bag | question |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "| mps | bag | misattributed | question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
-        # .get(): summaries written before the cited/ranges/bag columns existed.
+        # .get(): summaries written before the cited/ranges/bag/misattributed
+        # columns existed.
         lines.append(f"| {r['intent']} | {r['chosen']} | {routing_cell} | "
                      f"{r['grounding_hit']} | {faith_cell} | {_cell(r.get('cited'))} | "
                      f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
-                     f"{_cell(r.get('bag_share'))} | {r['question']} |")
+                     f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
+                     f"{r['question']} |")
     return "\n".join(lines) + "\n"
 
 
