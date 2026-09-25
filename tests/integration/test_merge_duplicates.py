@@ -1169,3 +1169,22 @@ async def test_cleanup_carries_the_whole_report_not_just_a_count(neo4j_driver):
     assert duplicates["near_duplicates_not_merged"] == [
         {"normalized": "access control", "names": ["Access Control", "Access control"]}]
     assert await count_duplicates(neo4j_driver, GROUP) == 1, "reported, not merged"
+
+
+async def test_survivor_stamps_are_prompt_serialisable(neo4j_driver):
+    """graphiti hands an Entity's custom properties to its prompts as `attributes`
+    (e.g. `dedupe_nodes.nodes` -> `to_prompt_json(existing_nodes)`). A Neo4j
+    `DateTime` there is not JSON-serialisable: after the 2026-09-25 merge, every
+    episode that met a merged survivor as a dedup candidate failed with
+    "Object of type DateTime is not JSON serializable". The stamps must be plain
+    values."""
+    from graphiti_core.prompts.prompt_helpers import to_prompt_json
+
+    await _seed_duplicate_group(neo4j_driver, name="AWS Backup", n=2, labels=("Product",),
+                                summary="kept", name_embedding=[0.3, 0.2, 0.1])
+    await apply_merges(neo4j_driver, GROUP)
+    props = (await _entity(neo4j_driver, _S))["props"]
+
+    stamps = {k: props[k] for k in ("merged_from", "merged_at")}
+    to_prompt_json(stamps)  # raises TypeError on a DateTime
+    assert isinstance(props["merged_at"], str)
