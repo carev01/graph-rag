@@ -19,7 +19,10 @@ async def test_router_eval_smoke_live(live_extract_driver):
     mc, mm = _map_client_and_model(s)
     cc, cmodel = _cheap_classify_client(s)
     resolver = await ScopeResolver.load(live_extract_driver)
-    clients = (graphiti, live_extract_driver, emb, sc, sm, mc, mm, cc, cmodel)
+    # _score_one unpacks 11 clients: the faithfulness judge is independent of
+    # synthesis (eval_router._eval_judge_client_and_model refuses a self-judge).
+    jc, jm = er._eval_judge_client_and_model(s)
+    clients = (graphiti, live_extract_driver, emb, sc, sm, mc, mm, cc, cmodel, jc, jm)
     # one factual + one broad (comparative fires for the broad one) — bounds cost
     questions = [
         {"question": "What does AWS Backup Vault Lock enforce on recovery points?",
@@ -42,5 +45,7 @@ async def test_router_eval_smoke_live(live_extract_driver):
         await graphiti.close()
         await sc.close()
         await mc.close()
+        await jc.close()
+        await emb.client.close()
         if cc is not None:
             await cc.close()
