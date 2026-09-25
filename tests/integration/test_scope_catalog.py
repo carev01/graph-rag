@@ -34,6 +34,12 @@ async def test_load_reads_only_structural_catalog_and_scopes_episodes(extract_ne
 
         assert await scope_episode_uuids(driver, Scope(("Veeam",), (), "x")) == {"e1"}
         assert await scope_episode_uuids(driver, Scope((), ("Veeam ONE",), "x")) == {"e1"}
+
+        # Case-insensitive (R3): a lower/mixed-cased vendor/product name (as a
+        # query param like ?vendor=veeam would arrive) must still match the
+        # canonically-cased structural name.
+        assert await scope_episode_uuids(driver, Scope(("veeam",), (), "x")) == {"e1"}
+        assert await scope_episode_uuids(driver, Scope((), ("VEEAM one",), "x")) == {"e1"}
     finally:
         await driver.execute_query("MATCH (n) DETACH DELETE n")
         await driver.close()

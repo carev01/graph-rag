@@ -25,7 +25,7 @@ _EPISODES = (
     "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(:Source)"
     "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
     "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
-    "AND (v.name IN $vendors OR p.name IN $products) "
+    "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products) "
     "RETURN collect(DISTINCT e.uuid) AS u")
 
 
@@ -151,9 +151,15 @@ class ScopeResolver:
 
 async def scope_episode_uuids(driver, scope: Scope) -> set[str]:
     """Episode uuids of every article in scope (vendor named directly OR product
-    named). Empty scope -> empty set; callers skip filtering on an empty scope."""
+    named). Empty scope -> empty set; callers skip filtering on an empty scope.
+
+    Case-insensitive: matched against `toLower(v.name)`/`toLower(p.name)` in
+    `_EPISODES`, so the vendor/product names here are lower-cased on this side
+    too -- a caller passing a query-param-cased name (`vendor=aws`) must still
+    match the canonical structural name ("AWS")."""
     if scope.is_empty():
         return set()
     records, _, _ = await driver.execute_query(
-        _EPISODES, vendors=list(scope.vendors), products=list(scope.products))
+        _EPISODES, vendors=[v.lower() for v in scope.vendors],
+        products=[p.lower() for p in scope.products])
     return set(records[0]["u"]) if records else set()

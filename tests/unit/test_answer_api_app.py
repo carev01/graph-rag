@@ -183,6 +183,26 @@ async def test_search_local_requires_q():
     assert resp.status_code == 422
 
 
+async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
+    """/search/local?vendor=aws must reach search_local with a Scope, not a
+    dropped/raw vendor string -- the app-side half of R3's conversion."""
+    captured: dict = {}
+
+    async def _capture_search_local(graphiti, driver, *, q, k=10, scope=None,
+                                    include_invalid=False, group_id):
+        captured["scope"] = scope
+        return {"query": q, "count": 0, "results": []}
+
+    monkeypatch.setattr(search_mod, "search_local", _capture_search_local)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/local", params={"q": "x", "vendor": "aws"})
+    assert resp.status_code == 200
+    assert captured["scope"].vendors == ("aws",)
+    assert captured["scope"].source == "explicit"
+
+
 async def test_answer_router_returns_envelope():
     app = app_mod.create_app()
     async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
