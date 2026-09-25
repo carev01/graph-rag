@@ -64,3 +64,36 @@ def test_as_dict_and_vendor_of():
     assert Scope(("AWS",), ("FortKnox",), "detected").as_dict() == {
         "vendors": ["AWS"], "products": ["FortKnox"], "source": "detected"}
     assert r.vendor_of("FortKnox") == "Cohesity" and r.vendor_of("x") is None
+
+
+# Name collisions: 11 real vendors (afi.ai, bacula, cloudcasa, druva, eon, gearset,
+# grax, keepit, slide, velero, zerto) each have a product of the same name.
+COLLISION_VENDORS = VENDORS + ["Keepit"]
+COLLISION_PRODUCTS = PRODUCTS + [("Keepit", "Keepit")]
+
+
+def _rc():
+    return ScopeResolver(COLLISION_VENDORS, COLLISION_PRODUCTS, ALIASES)
+
+
+def test_vendor_wins_a_name_collision_in_detection():
+    s = _rc().detect("Does Keepit support X?")
+    assert s.vendors == ("Keepit",) and s.products == ()
+
+
+def test_explicit_vendor_param_resolves_by_declared_kind_on_collision():
+    assert _rc().resolve("q", vendors=["keepit"]) == Scope(("Keepit",), (), "explicit")
+
+
+def test_explicit_product_param_resolves_by_declared_kind_on_collision():
+    assert _rc().resolve("q", products=["Keepit"]) == Scope((), ("Keepit",), "explicit")
+
+
+def test_explicit_vendor_param_accepts_an_alias_of_matching_kind():
+    assert _rc().resolve("q", vendors=["Azure"]) == Scope(("Microsoft",), (), "explicit")
+
+
+def test_explicit_product_param_rejects_an_alias_of_mismatched_kind():
+    with pytest.raises(UnknownScopeName) as e:
+        _rc().resolve("q", products=["Azure"])
+    assert e.value.names == ["Azure"]

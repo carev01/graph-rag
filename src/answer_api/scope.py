@@ -24,7 +24,8 @@ _CATALOG = (
 _EPISODES = (
     "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(:Source)"
     "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
-    "WHERE v.id IS NOT NULL AND (v.name IN $vendors OR p.name IN $products) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "AND (v.name IN $vendors OR p.name IN $products) "
     "RETURN collect(DISTINCT e.uuid) AS u")
 
 
@@ -54,11 +55,15 @@ class ScopeResolver:
         self._vendors = {v.lower(): v for v in vendors}
         self._products = {p.lower(): p for p, _ in products}
         self._vendor_of = {p: v for p, v in products}
+        # Detection and alias-target resolution: on a name collision (a vendor and a
+        # product sharing the same name, e.g. "Keepit"/"Keepit"), the vendor wins --
+        # scoping to the vendor also covers the same-named product.
         terms: dict[str, tuple[str, str]] = {}          # lower term -> (kind, canonical)
         for v in vendors:
             terms[v.lower()] = ("vendor", v)
         for p, _ in products:
-            terms[p.lower()] = ("product", p)
+            terms.setdefault(p.lower(), ("product", p))
+        self._alias_targets: dict[str, tuple[str, str]] = {}
         for alias, target in aliases.items():
             hit = self._canonical(target)
             if hit is None:
@@ -66,17 +71,31 @@ class ScopeResolver:
                                 "vendor/product; ignored", alias, target)
                 continue
             terms[alias.lower()] = hit
+            self._alias_targets[alias.lower()] = hit
         self._terms = terms
         alternation = "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
         self._re = re.compile(rf"(?<![\w-])({alternation})(?![\w])", re.IGNORECASE) \
             if terms else None
 
     def _canonical(self, name: str) -> tuple[str, str] | None:
+        """Resolve an alias TARGET to (kind, canonical name); vendor wins a collision."""
         n = name.strip().lower()
-        if n in self._products:
-            return ("product", self._products[n])
         if n in self._vendors:
             return ("vendor", self._vendors[n])
+        if n in self._products:
+            return ("product", self._products[n])
+        return None
+
+    def _explicit(self, name: str, kind: str) -> str | None:
+        """Resolve an explicit vendors=/products= name by its DECLARED kind: the
+        name (or an alias of it) must be of that kind, collisions notwithstanding."""
+        n = name.strip().lower()
+        table = self._vendors if kind == "vendor" else self._products
+        if n in table:
+            return table[n]
+        hit = self._alias_targets.get(n)
+        if hit is not None and hit[0] == kind:
+            return hit[1]
         return None
 
     def vendor_of(self, product: str) -> str | None:
@@ -105,17 +124,17 @@ class ScopeResolver:
             vs: list[str] = []
             ps: list[str] = []
             for name in vendors or []:
-                hit = self._canonical(name)
-                if hit is None or hit[0] != "vendor":
+                hit = self._explicit(name, "vendor")
+                if hit is None:
                     unknown.append(name)
-                elif hit[1] not in vs:
-                    vs.append(hit[1])
+                elif hit not in vs:
+                    vs.append(hit)
             for name in products or []:
-                hit = self._canonical(name)
-                if hit is None or hit[0] != "product":
+                hit = self._explicit(name, "product")
+                if hit is None:
                     unknown.append(name)
-                elif hit[1] not in ps:
-                    ps.append(hit[1])
+                elif hit not in ps:
+                    ps.append(hit)
             if unknown:
                 raise UnknownScopeName(unknown)
             return Scope(tuple(vs), tuple(ps), "explicit")
