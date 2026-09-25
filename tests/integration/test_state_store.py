@@ -104,3 +104,23 @@ async def test_warmup_lock_releases_when_the_body_raises(state_store):
         await other.execute("SELECT pg_advisory_unlock(911222334)")
     finally:
         await other.close()
+
+
+async def test_warmup_lock_without_waiting_reports_a_busy_lock_at_once(state_store, caplog):
+    """wait=False (the worker's defer mode): one attempt, no polling, and no
+    'proceeding WITHOUT it' warning -- the caller defers the article instead of
+    running it unprotected."""
+    import time as _t
+    other = await asyncpg.connect(state_store._dsn)
+    try:
+        assert await other.fetchval("SELECT pg_try_advisory_lock(911222334)") is True
+        started = _t.monotonic()
+        async with state_store.warmup_lock(timeout=30.0, wait=False) as held:
+            assert held is False
+        assert _t.monotonic() - started < 2.0, "it waited instead of trying once"
+        assert "proceeding WITHOUT it" not in caplog.text
+    finally:
+        await other.execute("SELECT pg_advisory_unlock(911222334)")
+        await other.close()
+    async with state_store.warmup_lock(timeout=30.0, wait=False) as held:
+        assert held is True, "a free lock is taken on the single attempt"

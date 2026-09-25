@@ -274,3 +274,54 @@ async def test_requeue_insert_skips_any_status_and_inserts_when_absent(state_sto
                               "FROM semantic_jobs WHERE article_id='rq-new'")
     assert dict(row) == {"op": "upsert", "content_hash": "h", "lane": "bootstrap",
                          "source_id": "s1", "status": "pending"}
+
+
+async def test_defer_returns_a_claimed_job_without_spending_an_attempt(state_store):
+    """A cold article whose warm-up lock is busy goes back to pending, later, with
+    its attempts untouched -- deferring is not failing."""
+    pool = await state_store._get_pool()
+    await pool.execute("DELETE FROM semantic_jobs")
+    await state_store.enqueue_semantic_job("df-1", "upsert", "h", "bootstrap", "s1")
+    [job] = await state_store.claim_semantic_jobs(1, True)
+
+    assert await state_store.defer_semantic_job(job["id"], job["claimed_at"], 30.0) is True
+
+    row = await pool.fetchrow(
+        "SELECT status, attempts, claimed_at, "
+        "extract(epoch FROM next_attempt_at - now()) AS wait FROM semantic_jobs WHERE id=$1",
+        job["id"])
+    assert row["status"] == "pending" and row["attempts"] == 0 and row["claimed_at"] is None
+    assert 20 < row["wait"] <= 30
+    assert await state_store.claim_semantic_jobs(1, True) == [], "hidden until the delay passes"
+
+
+async def test_defer_by_a_stale_claimer_changes_nothing(state_store):
+    pool = await state_store._get_pool()
+    await pool.execute("DELETE FROM semantic_jobs")
+    await state_store.enqueue_semantic_job("df-2", "upsert", "h", "bootstrap", "s1")
+    [job] = await state_store.claim_semantic_jobs(1, True)
+    from datetime import datetime, timezone
+    stale = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    assert await state_store.defer_semantic_job(job["id"], stale, 30.0) is False
+    assert await pool.fetchval("SELECT status FROM semantic_jobs WHERE id=$1",
+                               job["id"]) == "in_progress"
+
+
+async def test_defer_when_a_newer_pending_twin_exists_retires_the_old_job(state_store):
+    """While the job was claimed, the article was enqueued again (a newer
+    content hash). Putting the old job back to pending would violate the
+    one-pending-per-article index; the twin already covers the article, so the
+    deferred job is retired as done, saying why."""
+    pool = await state_store._get_pool()
+    await pool.execute("DELETE FROM semantic_jobs")
+    await state_store.enqueue_semantic_job("df-3", "upsert", "old", "bootstrap", "s1")
+    [job] = await state_store.claim_semantic_jobs(1, True)
+    await state_store.enqueue_semantic_job("df-3", "upsert", "new", "bootstrap", "s1")
+
+    assert await state_store.defer_semantic_job(job["id"], job["claimed_at"], 30.0) is True
+
+    rows = await pool.fetch("SELECT id, status, content_hash, last_error FROM semantic_jobs "
+                            "WHERE article_id='df-3' ORDER BY id")
+    assert [(r["status"], r["content_hash"]) for r in rows] == [("done", "old"), ("pending", "new")]
+    assert "superseded" in rows[0]["last_error"]

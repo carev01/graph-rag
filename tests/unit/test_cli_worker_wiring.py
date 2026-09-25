@@ -109,10 +109,10 @@ class _Store(_Closable):
     """Records how the cli asks for the warm-up lock."""
 
     def __init__(self):
-        self.warmup_lock_calls: list[float] = []
+        self.warmup_lock_calls: list[tuple[float, bool]] = []
 
-    def warmup_lock(self, *, timeout: float):
-        self.warmup_lock_calls.append(timeout)
+    def warmup_lock(self, *, timeout: float, wait: bool = True):
+        self.warmup_lock_calls.append((timeout, wait))
         return object()
 
 
@@ -157,9 +157,38 @@ def test_worker_command_wires_the_global_warmup_lock(monkeypatch, warmup, enable
         return
     assert cold_lock is not None
     cold_lock()
-    assert store.warmup_lock_calls == [1234.0], (
+    # Default mode is `defer`: one non-blocking attempt, and run_worker gets the
+    # configured deferral delay (both halves must reach their call sites).
+    assert store.warmup_lock_calls == [(1234.0, False)], (
         f"the factory must call the STORE's warmup_lock with the configured "
-        f"timeout; got {store.warmup_lock_calls}")
+        f"timeout, non-blocking; got {store.warmup_lock_calls}")
+    assert received["defer_seconds"] == 30.0
+
+
+def test_worker_command_wait_mode_restores_the_blocking_lock(monkeypatch):
+    received: dict = {}
+    store = _Store()
+
+    async def _deps(settings):
+        return store, _Ingest(), _Closable(), _Closable(), _Closable()
+
+    async def _fake_run_worker(store_, ingest, **kw):
+        received.update(kw)
+
+    monkeypatch.setattr(cli, "get_settings",
+                        lambda: _sync_settings().model_copy(update={
+                            "semantic_warmup_lock_mode": "wait",
+                            "semantic_warmup_lock_timeout_seconds": 1234.0}))
+    monkeypatch.setattr(cli, "get_extract_settings",
+                        lambda: _extract_settings(ingest_warmup_articles=5))
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+
+    cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    received["cold_lock"]()
+    assert store.warmup_lock_calls == [(1234.0, True)]
+    assert received["defer_seconds"] is None
 
 
 @pytest.mark.parametrize(

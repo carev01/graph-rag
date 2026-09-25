@@ -31,6 +31,7 @@ class _Store:
         self._jobs = jobs
         self.completed: list[str] = []
         self.failed: list[str] = []
+        self.deferred: list[tuple] = []
 
     async def reap_stale_jobs(self, *a, **k): return None
     async def today_token_total(self): return 0
@@ -38,6 +39,10 @@ class _Store:
     async def complete_semantic_job(self, jid, claimed_at): self.completed.append(jid)
     async def fail_semantic_job(self, jid, *a, **k): self.failed.append(jid)
     async def record_tokens(self, n): return None
+
+    async def defer_semantic_job(self, jid, claimed_at, delay):
+        self.deferred.append((jid, delay))
+        return True
 
 
 class _Ingest:
@@ -64,7 +69,7 @@ _KW = dict(batch=10, budget=10**9, max_attempts=3, backoff_base=1.0,
            backoff_cap=60.0, lease=300.0)
 
 
-def _lock_factory(log, *, fail: bool = False):
+def _lock_factory(log, *, fail: bool = False, busy: bool = False):
     """A stand-in for StateStore.warmup_lock that records acquire/release."""
     calls: list[str] = []
 
@@ -73,6 +78,10 @@ def _lock_factory(log, *, fail: bool = False):
         async def _cm():
             if fail:
                 raise ConnectionError("postgres down")
+            if busy:
+                log.append("BUSY")
+                yield False
+                return
             log.append("LOCK")
             try:
                 yield True
@@ -84,13 +93,15 @@ def _lock_factory(log, *, fail: bool = False):
     return factory
 
 
-async def _run(jobs, *, cold_articles: set[str], log, cold_lock, concurrency=4):
+async def _run(jobs, *, cold_articles: set[str], log, cold_lock, concurrency=4,
+               store=None, defer_seconds=None):
     async def is_cold(article_id: str) -> bool:
         return article_id in cold_articles
 
     return await run_worker_once(
-        _Store(jobs), _Ingest(log), **_KW, concurrency=concurrency,
-        is_cold=is_cold, cold_lock=cold_lock)
+        store if store is not None else _Store(jobs), _Ingest(log), **_KW,
+        concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock,
+        defer_seconds=defer_seconds)
 
 
 async def test_only_cold_articles_take_the_lock():
@@ -170,3 +181,41 @@ async def test_failing_to_take_the_lock_stops_the_batch():
                    concurrency=1)
     assert not any(x.startswith("start-") for x in log), (
         f"no article may be ingested once the lock is unavailable; got {log}")
+
+
+async def test_a_busy_lock_defers_the_cold_article_and_the_warm_one_still_runs(caplog):
+    """Defer mode: a cold article whose global warm-up lock is held elsewhere is
+    handed back (no attempt spent) instead of idling the worker; a warm article
+    in the same batch runs. Only the warm one counts as processed, so a batch
+    that did nothing but defer returns 0 and run_worker sleeps its poll interval
+    before claiming again -- no busy loop over an all-cold queue."""
+    log: list[str] = []
+    store = _Store([_job(1, "warm"), _job(2, "cold")])
+    with caplog.at_level(logging.INFO, logger="graph_sync.semantic_worker"):
+        n = await _run(store._jobs, cold_articles={"cold"}, log=log,
+                       cold_lock=_lock_factory(log, busy=True), store=store,
+                       defer_seconds=30.0)
+    assert store.deferred == [(2, 30.0)]
+    assert "start-cold" not in log and "start-warm" in log
+    assert store.completed == [1] and store.failed == []
+    assert n == 1
+    assert any("deferred" in r.getMessage() and "cold" in r.getMessage()
+               for r in caplog.records), "the first deferral is visible at INFO"
+
+
+async def test_a_deferral_only_batch_reports_zero_processed():
+    log: list[str] = []
+    store = _Store([_job(1, "cold")])
+    n = await _run(store._jobs, cold_articles={"cold"}, log=log,
+                   cold_lock=_lock_factory(log, busy=True), store=store, defer_seconds=30.0)
+    assert n == 0 and store.deferred == [(1, 30.0)]
+
+
+async def test_wait_mode_still_runs_a_cold_article_without_the_lock():
+    """defer_seconds=None is the old contract: after warmup_lock gives up (it
+    yields False on timeout) the article runs anyway."""
+    log: list[str] = []
+    store = _Store([_job(1, "cold")])
+    n = await _run(store._jobs, cold_articles={"cold"}, log=log,
+                   cold_lock=_lock_factory(log, busy=True), store=store, defer_seconds=None)
+    assert "start-cold" in log and store.deferred == [] and n == 1
