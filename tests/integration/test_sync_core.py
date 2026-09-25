@@ -50,6 +50,48 @@ async def test_bootstrap_ingests_and_gates(neo4j_repo, state_store):
     assert await neo4j_repo.article_chapter_id(
         "2c92266f-f84c-49c2-9e89-3b4376ec9043") is not None
 
+async def test_bootstrap_requeues_articles_stranded_by_a_state_reset(neo4j_repo, state_store):
+    """BACKLOG 50, end to end: after the job table loses its rows, a plain re-run
+    of the bootstrap re-queues exactly the articles that were never extracted --
+    not the ones with episodes, not the ones with a done job -- and a further
+    re-run is a no-op."""
+    src = "21632f3b-5a4c-4c93-9f00-6701d0e9f677"
+    await neo4j_repo.delete_source_articles(src)
+    core = SyncCore(_client(), _catalog(), neo4j_repo, state_store, _settings())
+    assert (await core.bootstrap(source_id=src)).applied == 146
+
+    async with neo4j_repo._driver.session() as s:
+        ids = [r["id"] async for r in await s.run(
+            "MATCH (a:Article {source_id:$s}) RETURN a.id AS id ORDER BY a.id", s=src)]
+    assert len(ids) == 146
+    extracted, completed = ids[:3], ids[3:5]
+    pool = await state_store._get_pool()
+    # The reset: every job row for this source is gone ...
+    await pool.execute("DELETE FROM semantic_jobs WHERE article_id = ANY($1::text[])", ids)
+    # ... except two that completed with no episodes (navigation-style) ...
+    for a in completed:
+        await pool.execute("INSERT INTO semantic_jobs (article_id, op, status, lane) "
+                           "VALUES ($1, 'upsert', 'done', 'bootstrap')", a)
+    # ... and three articles the graph shows as extracted.
+    async with neo4j_repo._driver.session() as s:
+        await s.run("UNWIND $ids AS i MATCH (a:Article {id:i}) "
+                    "CREATE (a)-[:HAS_EPISODE]->(:Episodic {uuid: 'ep-' + i})", ids=extracted)
+
+    try:
+        r2 = await core.bootstrap(source_id=src)
+        assert r2.applied == 0 and r2.skipped == 5 and r2.requeued == 141
+        rows = await pool.fetch(
+            "SELECT article_id, lane FROM semantic_jobs WHERE status='pending' "
+            "AND article_id = ANY($1::text[])", ids)
+        assert {r["article_id"] for r in rows} == set(ids[5:])
+        assert {r["lane"] for r in rows} == {"bootstrap"}
+
+        r3 = await core.bootstrap(source_id=src)
+        assert r3.requeued == 0 and r3.skipped == 146
+    finally:
+        async with neo4j_repo._driver.session() as s:
+            await s.run("MATCH (e:Episodic) WHERE e.uuid STARTS WITH 'ep-' DETACH DELETE e")
+
 def _resuming_client():
     """First delta call truncates (no terminal); the bootstrap_after retry completes."""
     lines = FIX.joinpath("aws_delta.ndjson").read_bytes().split(b"\n")

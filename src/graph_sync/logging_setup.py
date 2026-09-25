@@ -29,10 +29,15 @@ def configure_logging() -> None:
     embedder, and DocExtractor call the worker makes during a bootstrap -- which
     would otherwise drown the handful of lines that actually matter. Quieted to
     WARNING unconditionally, independent of the guard above, since this is a
-    noise fix, not a "did I configure the root logger" concern.
+    noise fix, not a "did I configure the root logger" concern. The Neo4j
+    driver's `neo4j.notifications` logger gets the same treatment: it logs every
+    server notification at INFO (`IF NOT EXISTS` schema no-ops on each start, a
+    cartesian-product hint per structural batch); its WARNING-level
+    notifications still get through.
     """
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
 
     root = logging.getLogger()
     if root.handlers:

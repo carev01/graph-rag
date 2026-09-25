@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
@@ -112,7 +113,13 @@ async def run_worker_once(
                     # case `_run_job`'s escape handles: it sets escaped_early and
                     # the batch stops rather than ingesting at full LLM cost with
                     # nowhere to record completion.
+                    waited_from = time.monotonic()
                     await stack.enter_async_context(cold_lock())
+                    # The only direct evidence the cross-process barrier fired
+                    # (CLAUDE.md, cost awareness); without it, engagement can
+                    # only be reconstructed from episode timestamps afterwards.
+                    logger.info("warm-up lock held for cold article %s (waited %.1fs)",
+                                group[0]["article_id"], time.monotonic() - waited_from)
                 for job in group:
                     await _run_job(job)
         except BaseException:

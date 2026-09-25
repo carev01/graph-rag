@@ -230,3 +230,47 @@ async def test_migration_adds_columns_to_existing_table(state_store):
     async with pool.acquire() as c:
         assert await c.fetchval(
             "SELECT source_id FROM semantic_jobs WHERE article_id='mig1'") == "src-mig"
+
+
+async def test_has_semantic_job_sees_every_status(state_store):
+    """The hash gate's requeue check (BACKLOG 50) must treat a done or dead job as
+    'accounted for', not only a pending one."""
+    pool = await state_store._get_pool()
+    for status in ("pending", "in_progress", "done", "dead"):
+        await pool.execute(
+            "INSERT INTO semantic_jobs (article_id, op, status, lane) "
+            "VALUES ($1, 'upsert', $2, 'bootstrap')", f"hsj-{status}", status)
+        assert await state_store.has_semantic_job(f"hsj-{status}"), status
+    assert not await state_store.has_semantic_job("hsj-never")
+    idx = await pool.fetchval(
+        "SELECT indexdef FROM pg_indexes WHERE indexname='ix_semantic_jobs_article'")
+    assert idx is not None and "WHERE" not in idx, "the check needs an unfiltered index"
+
+
+async def test_requeue_insert_never_overwrites_a_row_that_appeared_meanwhile(state_store):
+    """The requeue path checks `has_semantic_job` and later writes. A producer can
+    enqueue for the same article in between -- worst case a tombstone. The requeue
+    write must then do nothing, never flip that pending `remove` back to `upsert`
+    the way `enqueue_semantic_job`'s ON CONFLICT would."""
+    await state_store.enqueue_semantic_job("rq-raced", "remove", None, "bootstrap", "s1")
+
+    inserted = await state_store.enqueue_semantic_job_if_absent(
+        "rq-raced", "upsert", "h", "s1")
+
+    pool = await state_store._get_pool()
+    rows = await pool.fetch("SELECT op, content_hash FROM semantic_jobs "
+                            "WHERE article_id='rq-raced'")
+    assert inserted is False
+    assert [(r["op"], r["content_hash"]) for r in rows] == [("remove", None)]
+
+
+async def test_requeue_insert_skips_any_status_and_inserts_when_absent(state_store):
+    pool = await state_store._get_pool()
+    await pool.execute("INSERT INTO semantic_jobs (article_id, op, status, lane) "
+                       "VALUES ('rq-done', 'upsert', 'done', 'bootstrap')")
+    assert await state_store.enqueue_semantic_job_if_absent("rq-done", "upsert", "h", "s1") is False
+    assert await state_store.enqueue_semantic_job_if_absent("rq-new", "upsert", "h", "s1") is True
+    row = await pool.fetchrow("SELECT op, content_hash, lane, source_id, status "
+                              "FROM semantic_jobs WHERE article_id='rq-new'")
+    assert dict(row) == {"op": "upsert", "content_hash": "h", "lane": "bootstrap",
+                         "source_id": "s1", "status": "pending"}

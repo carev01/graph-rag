@@ -1246,6 +1246,56 @@ repair (`python -m graph_sync.cli relane-jobs [--apply]`) backfills `semantic_jo
 `pending`/`incremental` job with no episodes to `bootstrap`. See `docs/deploy/k3s.md` §8 for
 the rehearsal runbook.
 
+### 50. ~~`bootstrap` never re-queues a structurally present, never-extracted article~~ — **DONE 2026-09-25** (found the same day)
+`SyncCore._apply_record` skips a record whose `content_hash` equals the stored one
+*before* it enqueues anything, so a bootstrap only queues semantic work for articles that
+are new or changed in the graph. That is right while Postgres and Neo4j agree, and wrong
+the moment they do not: after a deliberate state reset (runbook §7b offers "reset the state
+for a fresh bootstrap" as a resolution), a lost/deleted `semantic_jobs` row, or a restore
+of one store without the other, every article already written structurally is hash-gated
+and **silently never extracted** — no job, no episodes, no error. The rehearsal was not hit
+(FortKnox's 63 pre-existing Articles all still had pending jobs; checked before the run),
+but the full vendor-priority bootstrap runs over a graph where ~4,500 Articles are already
+structural. Fix options: on a hash-gate skip, enqueue anyway when the article has no
+episodes and no pending/done job (one extra read on the skip path, bootstrap only), or a
+`requeue-unextracted --source-id` repair that diffs Articles-without-episodes against
+`semantic_jobs`. Either way, add the check to `state_crosscheck`.
+
+**Resolution:** the first option, in the skip path itself
+(`SyncCore._requeue_unextracted`). An unchanged record whose article has no
+`semantic_jobs` row in ANY status (`StateStore.has_semantic_job`, served by the new
+unfiltered `ix_semantic_jobs_article`) and no episodes is re-queued in the `bootstrap`
+lane and counted as `requeued=` in the `bootstrap complete:` / `sync-once complete:`
+line; any job row (a `done` navigation page, a `dead` job) is trusted, and an article
+with episodes is left alone. The common skip path costs one indexed Postgres read and
+no Neo4j round trip. A plain re-run of `bootstrap --source-id` is therefore the repair.
+`state_crosscheck` now FAILs on any Article with content, no episodes and no job row,
+per source, naming that repair (content-less TOC placeholders excluded).
+
+### 51. No dollar accounting for semantic ingest — **P3, found 2026-09-25**
+`token_ledger` holds one total per day: no prompt/completion split and no tier, so a run's
+cost can only be bracketed (the rehearsal's 12.0M tokens: ~$1.6 all-cheap to ~$6
+all-strong). The budget gate is in tokens, which is fine for metering; but the
+worker-count / daily-budget decision for the full bootstrap needs $/article, and today it
+comes from the harness-only price table in `scripts/chunk_ab.py`. Record per-tier
+prompt/completion tokens in the worker's batch summary (the `UsageTally` already has them)
+and a per-day, per-tier ledger row.
+
+### 52. Global/DRIFT community shortlist is not vendor-aware — **P1 before the full bootstrap, found 2026-09-25**
+After adding just two sources (Cohesity FortKnox, Veeam VSPC), global grounding on the
+router golden set fell to 0.29: for questions that explicitly name AWS and Azure, 1–2 of
+the 4 shortlisted communities are Cohesity ones, and a community titled *Azure VM Recovery
+and Private Connectivity* cites 21 Cohesity facts to 4 Microsoft (retrieval-only
+re-run, `bootstrap-rehearsal-2026-09-25.md` §7). `global_search.shortlist_communities`
+ranks every community at the level by cosine (+ rerank) with no scoping, unlike
+`search_local`, which takes `vendor=`. With 40 vendors, a vendor-named question will
+compete with every vendor's reports on the same concepts. Options: detect named vendors
+in the question (the router already classifies) and weight or filter communities by the
+vendor mix of their cited facts (fact → episode → article → source → vendor is a
+traversal, invariant #2's own chain); or carry a per-community vendor distribution,
+written by `theme-builder`, so the shortlist can filter without a traversal per query.
+Keep unscoped behaviour for genuinely cross-vendor questions ("across cloud vendors").
+
 ---
 
 ## Next steps, in order

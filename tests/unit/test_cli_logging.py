@@ -47,6 +47,17 @@ def test_configure_logging_quiets_httpx_and_httpcore_to_warning(monkeypatch):
     assert not logging.getLogger("httpcore").isEnabledFor(logging.INFO)
 
 
+def test_configure_logging_quiets_neo4j_notifications_to_warning(monkeypatch):
+    """The driver logs every server notification at INFO -- `CREATE ... IF NOT
+    EXISTS` on each start, a cartesian-product hint per structural batch -- which
+    buried the lines that matter in every rehearsal pod log. Its WARNING-level
+    notifications (an unknown property key, say) must still get through."""
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    _configure_logging()
+    assert not logging.getLogger("neo4j.notifications").isEnabledFor(logging.INFO)
+    assert logging.getLogger("neo4j.notifications").isEnabledFor(logging.WARNING)
+
+
 def test_configure_logging_does_not_reconfigure_when_a_handler_already_exists(monkeypatch):
     sentinel = logging.NullHandler()
     root = logging.getLogger()
