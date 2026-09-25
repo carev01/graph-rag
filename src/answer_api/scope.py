@@ -1,0 +1,202 @@
+"""Which vendors/products a question is about (spec §4.1).
+
+Built from the STRUCTURAL layer only: graphiti's extracted entities also carry
+:Vendor/:Product labels, so nodes are selected by the HAS_PRODUCT edge and a
+non-null `id`, never by label alone. Detection is deterministic: whole-word,
+case-insensitive, longest match first, so a product name is never split into
+the vendor names it contains ("Veeam Backup for Microsoft 365").
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+_ALIASES = Path(__file__).with_name("scope_aliases.json")
+
+_CATALOG = (
+    "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "RETURN v.name AS vendor, p.name AS product")
+_EPISODES = (
+    "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(:Source)"
+    "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products) "
+    "RETURN collect(DISTINCT e.uuid) AS u")
+# Candidate-bounded (request path): check only the episodes of the retrieved
+# edges, walking UP from each via the Episodic uuid index -- the unbounded form
+# above returns every episode a vendor has (~10^5 at bootstrap scale) per call.
+_EPISODES_AMONG = (
+    "UNWIND $eps AS u "
+    "MATCH (e:Episodic {uuid: u})<-[:HAS_EPISODE]-(:Article)<-[:HAS_ARTICLE]-(:Source)"
+    "<-[:HAS_SOURCE]-(p:Product)<-[:HAS_PRODUCT]-(v:Vendor) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products) "
+    "RETURN collect(DISTINCT u) AS u")
+
+
+# Wording that makes a question explicitly cross-vendor. Such a question stays
+# unscoped even when it names a platform or product: "Which backup vendors can
+# protect Azure VMs?" is about Azure as a WORKLOAD, and scoping it to Microsoft's
+# documentation would drop every other vendor's answer (final review, 2026-09-25).
+#
+# Deliberately narrow: "across regions/accounts", "a third-party KMS key", "which
+# options in Azure Backup" are everyday SINGLE-vendor wording and must stay scoped
+# (scoped re-review). Only a cross-vendor noun makes it cross-vendor.
+_CROSS_VENDOR = re.compile(
+    r"\bvendors\b"
+    r"|\b(which|what|any|other|different|competing) vendor\b(?!-)"
+    r"|\bacross (\w+ )?(vendors|providers|clouds|platforms|products|solutions)\b"
+    r"|\bthird[- ]party (vendors?|tools|products|solutions|backup)\b"
+    r"|\b(all|other|alternative|competing) (backup )?(products|solutions|vendors)\b",
+    re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class Scope:
+    vendors: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
+    source: str = "none"
+
+    def is_empty(self) -> bool:
+        return not self.vendors and not self.products
+
+    def as_dict(self) -> dict:
+        return {"vendors": list(self.vendors), "products": list(self.products),
+                "source": self.source}
+
+
+class UnknownScopeName(ValueError):
+    def __init__(self, names: list[str]) -> None:
+        super().__init__(f"unknown vendor/product: {', '.join(names)}")
+        self.names = names
+
+
+class ScopeResolver:
+    def __init__(self, vendors: list[str], products: list[tuple[str, str]],
+                 aliases: dict[str, str]) -> None:
+        self._vendors = {v.lower(): v for v in vendors}
+        self._products = {p.lower(): p for p, _ in products}
+        self._vendor_of = {p: v for p, v in products}
+        # Detection and alias-target resolution: on a name collision (a vendor and a
+        # product sharing the same name, e.g. "Keepit"/"Keepit"), the vendor wins --
+        # scoping to the vendor also covers the same-named product.
+        terms: dict[str, tuple[str, str]] = {}          # lower term -> (kind, canonical)
+        for v in vendors:
+            terms[v.lower()] = ("vendor", v)
+        for p, _ in products:
+            terms.setdefault(p.lower(), ("product", p))
+        self._alias_targets: dict[str, tuple[str, str]] = {}
+        for alias, target in aliases.items():
+            hit = self._canonical(target)
+            if hit is None:
+                logger.warning("scope alias %r -> %r: target is not an ingested "
+                                "vendor/product; ignored", alias, target)
+                continue
+            terms[alias.lower()] = hit
+            self._alias_targets[alias.lower()] = hit
+        self._terms = terms
+        alternation = "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
+        self._re = re.compile(rf"(?<![\w-])({alternation})(?![\w])", re.IGNORECASE) \
+            if terms else None
+
+    def _canonical(self, name: str) -> tuple[str, str] | None:
+        """Resolve an alias TARGET to (kind, canonical name); vendor wins a collision."""
+        n = name.strip().lower()
+        if n in self._vendors:
+            return ("vendor", self._vendors[n])
+        if n in self._products:
+            return ("product", self._products[n])
+        return None
+
+    def _explicit(self, name: str, kind: str) -> str | None:
+        """Resolve an explicit vendors=/products= name by its DECLARED kind: the
+        name (or an alias of it) must be of that kind, collisions notwithstanding."""
+        n = name.strip().lower()
+        table = self._vendors if kind == "vendor" else self._products
+        if n in table:
+            return table[n]
+        hit = self._alias_targets.get(n)
+        if hit is not None and hit[0] == kind:
+            return hit[1]
+        return None
+
+    def vendor_of(self, product: str) -> str | None:
+        return self._vendor_of.get(product)
+
+    def detect(self, q: str) -> Scope:
+        if self._re is None or _CROSS_VENDOR.search(q):
+            return Scope()
+        vendors: list[str] = []
+        products: list[str] = []
+        for m in self._re.finditer(q):
+            kind, name = self._terms[m.group(1).lower()]
+            bucket = products if kind == "product" else vendors
+            if name not in bucket:
+                bucket.append(name)
+        if not vendors and not products:
+            return Scope()
+        return Scope(tuple(vendors), tuple(products), "detected")
+
+    def resolve(self, q: str, *, vendors: list[str] | None = None,
+                products: list[str] | None = None, disabled: bool = False) -> Scope:
+        if disabled:
+            return Scope()
+        if vendors or products:
+            unknown: list[str] = []
+            vs: list[str] = []
+            ps: list[str] = []
+            for name in vendors or []:
+                hit = self._explicit(name, "vendor")
+                if hit is None:
+                    unknown.append(name)
+                elif hit not in vs:
+                    vs.append(hit)
+            for name in products or []:
+                hit = self._explicit(name, "product")
+                if hit is None:
+                    unknown.append(name)
+                elif hit not in ps:
+                    ps.append(hit)
+            if unknown:
+                raise UnknownScopeName(unknown)
+            return Scope(tuple(vs), tuple(ps), "explicit")
+        return self.detect(q)
+
+    @classmethod
+    async def load(cls, driver, aliases_path: Path | None = None) -> "ScopeResolver":
+        records, _, _ = await driver.execute_query(_CATALOG)
+        pairs = [(r["product"], r["vendor"]) for r in records]
+        vendors = sorted({v for _, v in pairs})
+        aliases = json.loads((aliases_path or _ALIASES).read_text())
+        return cls(vendors, pairs, aliases)
+
+
+async def scope_episode_uuids(driver, scope: Scope,
+                              candidates: list[str] | None = None) -> set[str]:
+    """Episode uuids of every article in scope (vendor named directly OR product
+    named). Empty scope -> empty set; callers skip filtering on an empty scope.
+
+    Case-insensitive: matched against `toLower(v.name)`/`toLower(p.name)` in
+    `_EPISODES`, so the vendor/product names here are lower-cased on this side
+    too -- a caller passing a query-param-cased name (`vendor=aws`) must still
+    match the canonical structural name ("AWS")."""
+    if scope.is_empty():
+        return set()
+    params = {"vendors": [v.lower() for v in scope.vendors],
+              "products": [p.lower() for p in scope.products]}
+    if candidates is not None:
+        # `candidates` bounds the answer: which of THESE episodes are in scope.
+        # Every request-path caller passes its retrieved edges' episodes; only
+        # compat checks ask for the whole scope.
+        if not candidates:
+            return set()
+        records, _, _ = await driver.execute_query(
+            _EPISODES_AMONG, eps=list(dict.fromkeys(candidates)), **params)
+    else:
+        records, _, _ = await driver.execute_query(_EPISODES, **params)
+    return set(records[0]["u"]) if records else set()

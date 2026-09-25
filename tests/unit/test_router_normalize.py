@@ -1,4 +1,5 @@
 from answer_api.router import _render_timeline, _normalize
+from answer_api.scope import Scope
 
 
 def test_render_timeline_builds_markdown_and_citations():
@@ -26,7 +27,7 @@ def test_normalize_global_carries_communities():
     raw = {"query": "q", "answer": "A [1]",
            "citations": [{"marker": 1, "fact_uuid": "f1", "sources": []}],
            "communities_used": [{"community_id": "c1", "title": "T"}]}
-    env = _normalize("global", "heuristic", None, raw, "q")
+    env = _normalize("global", "heuristic", None, raw, "q", Scope())
     assert env["mode"] == "global"
     assert env["routing"] == {"chosen": "global", "via": "heuristic", "fallback_from": None}
     assert env["communities_used"] == [{"community_id": "c1", "title": "T"}]
@@ -36,7 +37,7 @@ def test_normalize_global_carries_communities():
 def test_normalize_drift_degrade_surfaces_flag():
     raw = {"query": "q", "answer": "local A", "citations": [],
            "retrieved": 2, "cited": 0, "degraded": "no-primer-communities"}
-    env = _normalize("drift", "llm", None, raw, "q")
+    env = _normalize("drift", "llm", None, raw, "q", Scope())
     assert env["routing"]["degraded"] == "no-primer-communities"
     assert env["answer"] == "local A"
     assert "communities_used" not in env
@@ -45,7 +46,7 @@ def test_normalize_drift_degrade_surfaces_flag():
 def test_normalize_timeline_renders_and_carries_array():
     raw = {"timeline": [{"fact": "F", "fact_uuid": "f1", "valid_at": "2023-01-01",
                          "invalid_at": None, "status": "current", "sources": []}]}
-    env = _normalize("timeline", "heuristic", None, raw, "q")
+    env = _normalize("timeline", "heuristic", None, raw, "q", Scope())
     assert env["mode"] == "timeline"
     assert "[1]" in env["answer"]
     assert env["citations"][0]["fact_uuid"] == "f1"
@@ -54,5 +55,5 @@ def test_normalize_timeline_renders_and_carries_array():
 
 def test_normalize_records_fallback_from():
     raw = {"query": "q", "answer": "A", "citations": []}
-    env = _normalize("drift", "llm", "local", raw, "q")
+    env = _normalize("drift", "llm", "local", raw, "q", Scope())
     assert env["routing"]["fallback_from"] == "local"

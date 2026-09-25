@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from answer_api.search import _retrieve_edges, _vendor_episode_uuids
+from answer_api.scope import Scope, scope_episode_uuids
+from answer_api.search import _retrieve_edges
 from answer_api.temporal import is_current
 from graph_extract.provenance import Provenance
 
@@ -48,12 +49,14 @@ async def _sweep_flags(driver, uuids: list[str], group_id) -> dict[str, bool]:
         return {rec["uuid"]: rec["swept"] async for rec in r}
 
 
-async def timeline_local(graphiti, driver, *, q, limit=30, vendor=None, group_id) -> dict:
+async def timeline_local(graphiti, driver, *, q, limit=30, scope: Scope | None = None,
+                         group_id) -> dict:
     edges = await _retrieve_edges(graphiti, q, fetch_limit=max(limit * 3, limit),
                                   group_id=group_id)
-    if vendor:
-        scope = await _vendor_episode_uuids(driver, vendor)
-        edges = [e for e in edges if scope.intersection(e.episodes or [])]
+    if scope is not None and not scope.is_empty():
+        allowed = await scope_episode_uuids(
+            driver, scope, candidates=[u for e in edges for u in (e.episodes or [])])
+        edges = [e for e in edges if allowed.intersection(e.episodes or [])]
     # ascending by valid_at (true UTC instant); facts without valid_at sort last
     edges.sort(key=_valid_at_sort_key)
     edges = edges[:limit]

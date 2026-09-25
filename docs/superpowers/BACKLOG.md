@@ -1221,7 +1221,7 @@ patch version under a live PVC) — pin `16.x-alpine` or a digest. The three Cro
 no `spec.timeZone`, so their schedules are in the controller's zone (UTC on k3s) — set it
 explicitly so `30 3 * * *` means what the runbook reader thinks it means.
 
-### 49. First incremental pull on k3s: `httpx.ReadTimeout` mid-stream after 5,646 jobs — **P2, found 2026-09-24; unbudgeted-lane gap RESOLVED**
+### 49. First incremental pull on k3s: `httpx.ReadTimeout` mid-stream after 5,646 jobs — **P2, found 2026-09-24; unbudgeted-lane gap RESOLVED; bootstrap resume RESOLVED 2026-09-25; incremental still open**
 The cluster's first incremental pull (cursor from 2026-09-03, ~3 weeks of changes) failed
 with `httpx.ReadTimeout` after queueing 5,646 semantic jobs: DocExtractor sent nothing for
 over 300 s mid-stream (the client's read timeout is 300 s, `docext/client.py`). Safe — the
@@ -1230,6 +1230,20 @@ was lost or double-applied — but a delta this long cannot complete in one shot
 server-side before enabling the poller on this cluster: a longer streaming read timeout, or
 a chunked catch-up (resume with `?bootstrap_after=<highest applied id>`-style paging over
 the incremental stream, not just bootstrap). Options unexplored as of this writing.
+
+**2026-09-25 — the same stall hit a bootstrap:** the Veeam vendor-wide structural
+bootstrap died with `ReadTimeout` after 47 min and 9,254 records, and `SyncCore.bootstrap`
+made it worse: it resumed only after a *clean* truncation, so a transport error raised
+straight out with no progress row and every re-run replayed from the first id. Fixed:
+a `httpx.TransportError` mid-stream, or a 5xx/429 response, is a dropped stream (other
+4xx fail immediately) and resumes with
+`bootstrap_after=<last applied id>` and the original watermark, with backoff; only
+`BOOTSTRAP_MAX_STALLS` (5) consecutive attempts that apply nothing give up. Progress is
+saved every `BOOTSTRAP_PROGRESS_EVERY` (200) records, and a new run of an `in_progress`
+shard resumes from it (a `complete` shard is still replayed in full — a deliberate
+repair). **Still open:** the incremental stream cannot resume mid-way (its only resume
+point is the same cursor), so a long catch-up delta that always stalls at the same
+point never completes — matters when the poller is enabled.
 
 **Resolution of the separate unbudgeted-incremental-lane gap this pull exposed:** every one
 of those 5,646 jobs landed in the `incremental` lane — unbudgeted and claimed ahead of
@@ -1281,7 +1295,7 @@ comes from the harness-only price table in `scripts/chunk_ab.py`. Record per-tie
 prompt/completion tokens in the worker's batch summary (the `UsageTally` already has them)
 and a per-day, per-tier ledger row.
 
-### 52. Global/DRIFT community shortlist is not vendor-aware — **P1 before the full bootstrap, found 2026-09-25**
+### 52. ~~Global/DRIFT community shortlist is not vendor-aware~~ — **DONE 2026-09-25** (found the same day)
 After adding just two sources (Cohesity FortKnox, Veeam VSPC), global grounding on the
 router golden set fell to 0.29: for questions that explicitly name AWS and Azure, 1–2 of
 the 4 shortlisted communities are Cohesity ones, and a community titled *Azure VM Recovery
@@ -1295,6 +1309,29 @@ vendor mix of their cited facts (fact → episode → article → source → ven
 traversal, invariant #2's own chain); or carry a per-community vendor distribution,
 written by `theme-builder`, so the shortlist can filter without a traversal per query.
 Keep unscoped behaviour for genuinely cross-vendor questions ("across cloud vendors").
+
+**Resolution:** shipped as the wider "vendor and product end to end" slice
+(`specs/2026-09-25-vendor-product-end-to-end-design.md`, plan of the same date):
+query-time in-scope share per community (one `resolve_citations` call), out-of-scope
+facts dropped before reduce, `(Vendor · Product)` labels on every LLM fact line,
+`applies_to` in every envelope, scope detection with cross-vendor wording and a soft
+(relaxable) detected scope, global->local fallback when global cites nothing. The
+acceptance measure was re-baselined: grounding is split into scoped (valid) and
+cross-vendor (informational — the golden answers predate the Tier 1 vendors), and
+routing into classifier vs answer path. Tier 1 golden questions remain a follow-up.
+
+### 53. Superseded/removed episodes still count toward vendor/product labels — **P3, found 2026-09-25**
+Spec §1 says applicability excludes superseded/removed episodes, but neither
+`Provenance.resolve_citations` (pre-existing) nor `scope._EPISODES*` filters
+`superseded`/`removed`, so a label can name a vendor whose only support for the fact is
+a superseded episode. Filter `coalesce(he.superseded,false)=false` and
+`coalesce(e.removed,false)=false` in both.
+
+### 54. Generic product names could over-scope detection — **P3, found 2026-09-25**
+Detection matches every structural product name as a whole word. A generically named
+product (a one-word "Cloud"/"Agent"-style name) would scope unrelated questions. Check
+the full catalog's product names before the full bootstrap and add a stop-list (or
+require the vendor name alongside) for generic ones.
 
 ---
 

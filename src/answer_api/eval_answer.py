@@ -14,6 +14,7 @@ from pathlib import Path
 from neo4j import AsyncGraphDatabase
 
 from answer_api.golden import precision_at_k
+from answer_api.scope import Scope
 from answer_api.synthesize import (
     _REFUSAL,
     _URL_RE,
@@ -38,9 +39,11 @@ async def main(k: int) -> None:
     try:
         print(f"# Answer-groundedness eval (k={k}, {len(questions)} questions, {synth_model})\n")
         for q in questions:
+            v = q.get("vendor")
+            scope = Scope((v,), (), "explicit") if v else None
             out = await answer_local(
                 graphiti, driver, synth_client, synth_model,
-                q=q["question"], k=k, vendor=q.get("vendor"), group_id=settings.group_id)
+                q=q["question"], k=k, scope=scope, group_id=settings.group_id)
             is_grounded = precision_at_k(out["citations"], q["expected_article_ids"])
             is_refusal = out["answer"].strip() == _REFUSAL
             # only an actual https?:// URL is a design-decision-#2 breach;

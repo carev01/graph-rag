@@ -81,6 +81,15 @@ def test_drift_defaults():
     assert s.drift_iterations == 1
 
 
+def test_global_scope_defaults():
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.global_scope_candidates == 24
+    assert s.global_scope_min_share == 0.5
+    assert s.scope_reload_seconds == 3600
+
+
 def test_router_default_mode():
     from graph_extract.config import ExtractSettings
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",

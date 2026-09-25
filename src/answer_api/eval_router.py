@@ -16,15 +16,17 @@ from pathlib import Path
 from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 
-from answer_api import router as router_mod
+from answer_api import attribution, router as router_mod
 from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
-    BAG_MARKERS, _parse_judge_score, aggregate, bag_share, markers_per_sentence, routing_hit,
+    BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
+    markers_per_sentence, routing_hit,
 )
+from answer_api.scope import ScopeResolver
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -41,6 +43,25 @@ _JUDGE_PROMPT = (
     "Score 0-5 how fully the answer's claims are supported by ONLY these facts "
     "(5 = every claim supported, 0 = unsupported/hallucinated). Reply with ONLY the "
     "integer.\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
+)
+
+# Calibrated on scripts/calibrate_attribution_judge.py (known-count probes). The
+# first cut ("attributes something to a vendor or product not among the labels")
+# counted every component, workload or tool a correctly labelled fact names --
+# Backup center, Azure Files, PowerShell, MABS -- as a misattribution: 6 on a
+# deterministic Azure Backup timeline render. A misattribution is a claim moved
+# to a DIFFERENT vendor/product line than its fact's label.
+_ATTRIBUTION_PROMPT = (
+    "Each cited fact is labelled (Vendor · Product) with the vendor and product whose "
+    "documentation states it. Count the claims in the ANSWER that credit a vendor or "
+    "product with something its cited fact states for a DIFFERENT vendor or product -- "
+    "e.g. a fact labelled (AWS · AWS Backup) presented as true of Azure Backup, or "
+    "presented as true of both. Naming components, features, workloads, tools, services "
+    "or platforms that the cited fact itself mentions (a console, a storage service, a "
+    "database, a CLI) is NOT a misattribution. Check every sentence against the labels "
+    "of the markers it cites and count each misattributed claim separately. Reply with "
+    "ONLY the integer (0 if none)."
+    "\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
 
 
@@ -137,6 +158,52 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
     return None
 
 
+async def judge_attribution(client, model, q, answer, labelled_facts: str) -> int | None:
+    """Count claims the ANSWER attributes to a vendor/product not on its cited
+    facts' (Vendor · Product) labels (spec §6). Uses the SAME independent
+    eval-judge client as `_faithfulness_judge` and the same bounded max_tokens
+    retry: an unusable reply (no content, or `finish_reason == 'length'`) must
+    never be coerced to 0 -- that would record "could not be measured" as "zero
+    misattributions", the same defect the faithfulness judge guards against
+    (memory: "LLM empty reply coerced to a value")."""
+    prompt = _ATTRIBUTION_PROMPT.format(q=q, answer=answer, facts=labelled_facts)
+
+    async def _attempt(max_tokens: int):
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        content = _usable_content(resp)
+        finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
+        usable = (content is not None and finish_reason != "length"
+                  and re.search(r"\d+", content) is not None)
+        return finish_reason, content, usable
+
+    finish_reason, content, usable = await _attempt(8000)
+    if usable:
+        return _parse_attribution(content)
+
+    finish_reason, content, usable = await _attempt(16000)
+    if usable:
+        return _parse_attribution(content)
+
+    logger.warning(
+        "attribution judge unmeasurable for question %r after retry "
+        "(finish_reason=%s); recording as unscored, not 0", q, finish_reason)
+    return None
+
+
+def _labelled_facts(citations: list[dict], texts: dict[str, str]) -> str:
+    """One `fact_line` per citation, in citation order, paired by `fact_uuid`
+    (R7) -- never by position. `_cited_fact_texts`'s Cypher `IN`-scan row order
+    is not guaranteed to match the requested uuid list, and a fact_uuid shared
+    by two citations would shift a positional pairing for every citation after
+    it. A citation whose uuid has no text (edge gone) is skipped, not
+    mislabeled against a neighbour's fact."""
+    lines = [attribution.fact_line(c["marker"], texts[c["fact_uuid"]], c.get("sources", []))
+             for c in citations if c["fact_uuid"] in texts]
+    return "\n".join(lines) or "(none)"
+
+
 async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
     if not fact_uuids:
         return []
@@ -147,20 +214,45 @@ async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
         return [rec["fact"] async for rec in r]
 
 
-async def _score_one(clients, q, mode_override, settings):
+async def _cited_fact_texts_by_uuid(driver, group_id, fact_uuids) -> dict[str, str]:
+    """Fact text keyed by uuid (R7): `_cited_fact_texts`'s list return is fine
+    for the faithfulness judge, which folds every fact into one unordered bag
+    and never needs a fact tied back to a specific citation. The attribution
+    judge's labelled fact lines DO need that tie -- each citation's own
+    marker/sources must sit beside its own fact text, and Cypher's `IN`-scan
+    row order is not guaranteed to match the requested list (nor survive a
+    fact_uuid shared by two citations). Kept as a sibling function rather than
+    changing `_cited_fact_texts`'s shape: that list is also persisted verbatim
+    into `raw["cited_facts"]` and consumed as a bag by the faithfulness prompt,
+    so reshaping it would ripple beyond this fix."""
+    if not fact_uuids:
+        return {}
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
+            "RETURN f.uuid AS uuid, f.fact AS fact", g=group_id, u=list(fact_uuids))
+        return {rec["uuid"]: rec["fact"] async for rec in r}
+
+
+async def _score_one(clients, q, mode_override, settings, resolver):
     graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
+    scope = resolver.resolve(q["question"])
     env = await router_mod.answer_router(
         graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel,
-        q=q["question"], mode_override=mode_override, vendor=None, settings=settings)
+        q=q["question"], mode_override=mode_override, scope=scope, settings=settings)
     ghit = (precision_at_k(env["citations"], q["expected_article_ids"])
             if q["expected_article_ids"] else None)
     facts = await _cited_fact_texts(driver, settings.group_id,
                                     [c["fact_uuid"] for c in env["citations"]])
     faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
-    return env, ghit, faith, facts
+    texts = await _cited_fact_texts_by_uuid(driver, settings.group_id,
+                                            [c["fact_uuid"] for c in env["citations"]])
+    labelled = _labelled_facts(env["citations"], texts)
+    misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
+    return env, ghit, faith, facts, misattributed
 
 
-async def run_eval(clients, questions, settings) -> dict:
+async def run_eval(clients, questions, settings, resolver) -> dict:
     per_question: list[dict] = []
     # Every scored column this harness has gained -- `cited`, `ranges`, `mps`,
     # `bag_share` -- cost a full paid eval run to observe, because the harness
@@ -172,7 +264,8 @@ async def run_eval(clients, questions, settings) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts = await _score_one(clients, q, None, settings)
+            env, ghit, faith, facts, misattributed = await _score_one(
+                clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
             # conditioned on (BACKLOG 0d): the judge sees only the cited facts,
@@ -186,14 +279,19 @@ async def run_eval(clients, questions, settings) -> dict:
             # mass sits in those bags. Half the global-mode answers carried a
             # >=8-marker sentence and all of them scored 4-5.
             mps = markers_per_sentence(env["answer"])
+            scope_d = env.get("scope") or {}
+            classifier_mode = env["routing"].get("fallback_from") or chosen
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
+                         "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),
+                         "scoped": bool(scope_d.get("vendors") or scope_d.get("products")),
                          "grounding_hit": ghit, "faithfulness": faith,
                          "cited": len(env["citations"]),
                          "ranges": len(_range_markers(env["answer"])),
                          "mps_mean": round(sum(mps) / len(mps), 1) if mps else None,
                          "mps_max": max(mps) if mps else None,
                          "bag_share": _round_or_none(bag_share(env["answer"])),
+                         "misattributed": misattributed,
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -201,7 +299,8 @@ async def run_eval(clients, questions, settings) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts = await _score_one(clients, q, m, settings)
+                    _e, _g, _f, _facts, _mis = await _score_one(
+                        clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
                                 "chosen": f"comparative:{m}", "answer": _e["answer"],
@@ -212,7 +311,7 @@ async def run_eval(clients, questions, settings) -> dict:
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
-                   "bag_share": None, "failed": True}
+                   "bag_share": None, "misattributed": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -221,7 +320,8 @@ async def run_eval(clients, questions, settings) -> dict:
               f"grounding={rec['grounding_hit']} "
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
               f"cited={rec['cited']} ranges={rec['ranges']} mps={_mps_cell(rec)} "
-              f"bag={_cell(rec.get('bag_share'))} {elapsed:.0f}s", flush=True)
+              f"bag={_cell(rec.get('bag_share'))} "
+              f"misattributed={_cell(rec.get('misattributed'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
     summary["raw"] = raw
@@ -252,9 +352,15 @@ def format_report(summary: dict) -> str:
     faith_mean_str = f"{faith_mean:.2f}" if faith_mean is not None else "N/A"
     lines = ["# /answer Router Golden-Set Eval\n",
              f"Questions: {summary['n']} (failed: {summary['questions_failed']})\n",
-             f"**Routing accuracy: {summary['routing_accuracy']:.2f}**",
+             f"**Routing accuracy: {summary['routing_accuracy']:.2f}** (answer path); "
+             f"classifier: {summary.get('classifier_routing_accuracy', 0.0):.2f}",
              f"by intent: {summary['routing_by_intent']}",
              f"Grounding precision: {summary['grounding_precision']}",
+             f"**Grounding, scoped questions: {summary.get('grounding_scoped')} "
+             f"(n={summary.get('grounding_scoped_n')})** | cross-vendor, informational "
+             f"(golden answers predate the Tier 1 vendors): "
+             f"{summary.get('grounding_cross_vendor')} "
+             f"(n={summary.get('grounding_cross_vendor_n')})",
              f"by mode: {summary['grounding_by_mode']}",
              f"Faithfulness mean: {faith_mean_str} "
              f"(unscored: {summary['faithfulness_unscored']}/{summary['n']})",
@@ -262,20 +368,25 @@ def format_report(summary: dict) -> str:
              f"Markers per sentence by mode (mean/max): {summary.get('mps_by_mode')}",
              f"Share of citations in >={BAG_MARKERS}-marker sentences, by mode: "
              f"{summary.get('bag_share_by_mode')}\n",
+             f"Misattributed claims: {summary['misattributed_total']} across "
+             f"{summary['misattributed_answers']} answers "
+             f"(unscored: {summary['misattributed_unscored']})",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
-             "| mps | bag | question |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "| mps | bag | misattributed | question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
-        # .get(): summaries written before the cited/ranges/bag columns existed.
+        # .get(): summaries written before the cited/ranges/bag/misattributed
+        # columns existed.
         lines.append(f"| {r['intent']} | {r['chosen']} | {routing_cell} | "
                      f"{r['grounding_hit']} | {faith_cell} | {_cell(r.get('cited'))} | "
                      f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
-                     f"{_cell(r.get('bag_share'))} | {r['question']} |")
+                     f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
+                     f"{r['question']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -300,8 +411,9 @@ async def main() -> None:
     mc, mm = _map_client_and_model(settings)
     cc, cmodel = _cheap_classify_client(settings)
     clients = (graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm)
+    resolver = await ScopeResolver.load(driver)
     try:
-        summary = await run_eval(clients, questions, settings)
+        summary = await run_eval(clients, questions, settings, resolver)
         report = format_report(summary)
         docs = Path(__file__).resolve().parents[2] / "docs" / "superpowers"
         (docs / "router-eval-report.md").write_text(report)

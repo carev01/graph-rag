@@ -18,6 +18,17 @@ def _parse_judge_score(raw: str) -> int:
     return max(0, min(5, int(m.group())))
 
 
+def _parse_attribution(text: str | None) -> int | None:
+    """The first non-negative integer in the judge's reply, or None -- never a
+    coerced 0 (memory: "LLM empty reply coerced to a value"). Callers that need
+    to distinguish "judge said 0" from "unusable reply" must do so before
+    calling this (see `judge_attribution`'s `_attempt`), not here."""
+    if not text:
+        return None
+    m = re.search(r"\d+", text)
+    return int(m.group()) if m else None
+
+
 def _mean(xs: Sequence[int | float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
@@ -128,6 +139,33 @@ def aggregate(per_question: list[dict]) -> dict:
             bag_rows.setdefault(r["chosen"], []).append(r["bag_share"])
     bag_share_by_mode = {m: _mean(v) for m, v in bag_rows.items()}
 
+    # Misattributed claims (spec §6): an answer that attributes a claim to a
+    # vendor/product not among its cited facts' labels. `.get`, not `[...]` --
+    # records written before this metric existed carry no key at all, and those
+    # must read as unscored rather than raise KeyError, same as bag_share.
+    misattributed_seen = [r.get("misattributed") for r in per_question]
+    misattributed_scored = [x for x in misattributed_seen if x is not None]
+    misattributed_unscored = sum(1 for x in misattributed_seen if x is None)
+    misattributed_total = sum(misattributed_scored)
+    misattributed_answers = sum(1 for x in misattributed_scored if x > 0)
+
+    # Grounding split by scope (2026-09-25 re-baseline): the golden set expects
+    # AWS/Azure articles only, so once other vendors are ingested an UNSCOPED
+    # cross-vendor question legitimately cites them and its grounding stops
+    # measuring retrieval quality. Scoped questions stay a valid measure.
+    # Records without the key (older runs) are in neither bucket.
+    scoped_g = [r for r in grounded if r.get("scoped") is True]
+    cross_g = [r for r in grounded if r.get("scoped") is False]
+
+    def _precision(rows: list[dict]) -> float | None:
+        return (sum(1 for r in rows if r["grounding_hit"]) / len(rows)) if rows else None
+
+    # Classifier routing: the mode the classifier picked, before any
+    # global->local / local->drift fallback. Answer-path routing
+    # (`routing_accuracy`) counts a fallback as a miss even when the
+    # classification was right. Older records fall back to `routing_hit`.
+    classifier_hits = [bool(r.get("classifier_hit", r["routing_hit"])) for r in ran]
+
     comp_rows = [r for r in per_question if "comparative" in r]
     comparative: dict | None = None
     drift_wins: bool | None = None
@@ -157,6 +195,12 @@ def aggregate(per_question: list[dict]) -> dict:
         "questions_failed": n - len(ran),
         "routing_accuracy": (sum(1 for r in ran if r["routing_hit"]) / len(ran)) if ran else 0.0,
         "routing_by_intent": {k: sum(v) / len(v) for k, v in by_intent.items()},
+        "classifier_routing_accuracy": (sum(classifier_hits) / len(classifier_hits)
+                                        if classifier_hits else 0.0),
+        "grounding_scoped": _precision(scoped_g),
+        "grounding_scoped_n": len(scoped_g),
+        "grounding_cross_vendor": _precision(cross_g),
+        "grounding_cross_vendor_n": len(cross_g),
         "grounding_precision": (sum(1 for r in grounded if r["grounding_hit"]) / len(grounded)
                                 if grounded else None),
         "grounding_by_mode": {k: sum(v) / len(v) for k, v in ground_by_mode.items()},
@@ -165,6 +209,9 @@ def aggregate(per_question: list[dict]) -> dict:
         "faithfulness_unscored": faithfulness_unscored,
         "mps_by_mode": mps_by_mode,
         "bag_share_by_mode": bag_share_by_mode,
+        "misattributed_total": misattributed_total,
+        "misattributed_answers": misattributed_answers,
+        "misattributed_unscored": misattributed_unscored,
         "comparative": comparative,
         "drift_wins": drift_wins,
         "per_question": per_question,

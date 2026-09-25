@@ -276,6 +276,18 @@ class ExtractSettings(BaseSettings):
     # bounds what reaches the map step instead (see rerank_top_n below).
     global_shortlist_k: int = 10
     global_default_level: int = 1
+    # --- vendor/product scoping, global search (spec 2026-09-25 §4.3, BACKLOG 52) ---
+    # Pre-cut candidate pool widened to at least this many before the in-scope
+    # share filter runs, so scoping a query doesn't just re-filter the same k
+    # cosine winners down to fewer than k.
+    global_scope_candidates: int = 24
+    # A community is kept only if at least this share of its cited_fact_uuids
+    # trace to the scope's vendor(s)/product(s) -- see design spec §4.3 step 3
+    # for the measured Azure/AWS example this threshold was picked against.
+    global_scope_min_share: float = 0.5
+    # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
+    # older than this (plan ruling 4 -- no separate freshness module exists).
+    scope_reload_seconds: int = 3600
     # --- DRIFT search (design: drift-search) ---
     drift_primer_level: int = 1      # community level the primer shortlists at
     # Pre-rerank primer shortlist size. Same caveat as global_shortlist_k: once a

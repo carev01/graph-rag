@@ -6,6 +6,7 @@ import answer_api.drift as drift_mod
 import answer_api.timeline as timeline_mod
 import answer_api.freshness as freshness_mod
 from answer_api.router import answer_router
+from answer_api.scope import Scope
 from graph_extract.config import ExtractSettings
 
 pytestmark = pytest.mark.asyncio
@@ -64,7 +65,7 @@ def _patch_modes(monkeypatch):
 async def _route(mode_override, **over):
     return await answer_router(None, None, None, None, "sm", None, "mm", None, "",
                                q=over.get("q", "q"), mode_override=mode_override,
-                               vendor=None, settings=_S)
+                               scope=Scope(), settings=_S)
 
 
 async def test_routes_global_via_override():

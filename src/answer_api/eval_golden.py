@@ -13,6 +13,7 @@ from pathlib import Path
 from neo4j import AsyncGraphDatabase
 
 from answer_api.golden import first_hit_rank, precision_at_k
+from answer_api.scope import Scope
 from answer_api.search import search_local
 from graph_extract.config import get_extract_settings
 from graph_extract.graphiti_client import build_graphiti
@@ -31,9 +32,11 @@ async def main(k: int) -> None:
     try:
         print(f"# Golden retrieval eval (k={k}, {len(questions)} questions)\n")
         for q in questions:
+            v = q.get("vendor")
+            scope = Scope((v,), (), "explicit") if v else None
             out = await search_local(
                 graphiti, driver, q=q["question"], k=k,
-                vendor=q.get("vendor"), group_id=settings.group_id)
+                scope=scope, group_id=settings.group_id)
             hit = precision_at_k(out["results"], q["expected_article_ids"])
             rank = first_hit_rank(out["results"], q["expected_article_ids"])
             hits += 1 if hit else 0
