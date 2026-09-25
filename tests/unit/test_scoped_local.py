@@ -57,9 +57,13 @@ class FakeDriver:
 
 
 def _counting_scope_fn(calls, allowed):
-    async def _fn(driver, scope):
+    async def _fn(driver, scope, candidates=None):
+        # The request path must pass the retrieved edges' episodes (bounded
+        # query), never ask for every episode the scope has.
+        assert candidates is not None, "search/timeline must bound the scope query"
         calls["n"] += 1
-        return set(allowed)
+        calls["candidates"] = list(candidates)
+        return set(allowed) & set(candidates)
     return _fn
 
 

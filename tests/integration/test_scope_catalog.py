@@ -40,6 +40,17 @@ async def test_load_reads_only_structural_catalog_and_scopes_episodes(extract_ne
         # canonically-cased structural name.
         assert await scope_episode_uuids(driver, Scope(("veeam",), (), "x")) == {"e1"}
         assert await scope_episode_uuids(driver, Scope((), ("VEEAM one",), "x")) == {"e1"}
+
+        # Candidate-bounded (final review): only the given episodes are checked,
+        # so the result never exceeds the candidates -- the request path passes
+        # the retrieved edges' episodes, not "every episode the vendor has".
+        await driver.execute_query(
+            "MATCH (a:Article {id:'a1'}) CREATE (a)-[:HAS_EPISODE]->(:Episodic {uuid:'e2'})")
+        await driver.execute_query("CREATE (:Episodic {uuid:'orphan'})")
+        v = Scope(("Veeam",), (), "x")
+        assert await scope_episode_uuids(driver, v, candidates=["e2", "orphan", "nope"]) == {"e2"}
+        assert await scope_episode_uuids(driver, v, candidates=[]) == set()
+        assert await scope_episode_uuids(driver, v) == {"e1", "e2"}   # no list: whole scope
     finally:
         await driver.execute_query("MATCH (n) DETACH DELETE n")
         await driver.close()

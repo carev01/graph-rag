@@ -176,12 +176,45 @@ async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
         graphiti, driver, q=q, scope=scope, group_id=g)
 
 
+def _grounded(mode: Mode, raw: dict) -> bool:
+    if mode == "timeline":
+        return bool(raw.get("timeline"))
+    return bool(raw.get("citations"))
+
+
 async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
                         map_client, map_model, cheap_client, cheap_model, *,
                         q, mode_override, scope: Scope, settings) -> dict:
     mode, via = await classify(q, cheap_client=cheap_client, cheap_model=cheap_model,
                                mode_override=mode_override,
                                default_mode=settings.router_default_mode)
+    args = (graphiti, driver, embedder, synth_client, synth_model, map_client, map_model)
+    first = mode
+    mode, fallback_from, raw = await _run_mode(first, *args, q=q, scope=scope,
+                                               settings=settings)
+    env_scope = scope
+    relaxed = False
+    if scope.source == "detected" and not _grounded(mode, raw):
+        # A DETECTED scope is a guess from names in the question; when the scoped
+        # path grounds nothing, answer unscoped rather than refuse where the
+        # unscoped system would have answered (final review). An explicit scope
+        # is the caller's instruction and is never relaxed.
+        mode, fallback_from, raw = await _run_mode(first, *args, q=q, scope=Scope(),
+                                                   settings=settings)
+        relaxed = True
+    env = _normalize(mode, via, fallback_from, raw, q, env_scope)
+    if relaxed:
+        env["scope"] = {**scope.as_dict(), "source": "detected-relaxed"}
+    env["freshness"] = await freshness_mod.freshness(
+        driver, settings.group_id, reports=mode in ("global", "drift"))
+    return env
+
+
+async def _run_mode(mode: Mode, graphiti, driver, embedder, synth_client, synth_model,
+                    map_client, map_model, *, q, scope: Scope, settings
+                    ) -> tuple[Mode, str | None, dict]:
+    """One mode plus its fallback (local->drift when nothing was retrieved;
+    global->local when global grounded nothing), all with the same scope."""
     raw = await _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
                           map_client, map_model, q=q, scope=scope, settings=settings)
     fallback_from: str | None = None
@@ -201,7 +234,4 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         raw = await _dispatch("local", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, scope=scope,
                               settings=settings)
-    env = _normalize(mode, via, fallback_from, raw, q, scope)
-    env["freshness"] = await freshness_mod.freshness(
-        driver, settings.group_id, reports=mode in ("global", "drift"))
-    return env
+    return mode, fallback_from, raw

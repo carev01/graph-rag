@@ -77,10 +77,10 @@ def _patch_modes(monkeypatch):
     monkeypatch.setattr(freshness_mod, "freshness", _fake_freshness)
 
 
-async def _route(mode_override):
+async def _route(mode_override, scope=None):
     return await answer_router(None, None, None, None, "sm", None, "mm", None, "",
                                q="q", mode_override=mode_override,
-                               scope=_SCOPE, settings=_S)
+                               scope=_SCOPE if scope is None else scope, settings=_S)
 
 
 @pytest.mark.parametrize("mode", ["local", "global", "drift", "timeline"])
@@ -133,6 +133,46 @@ async def test_global_with_citations_does_not_fall_back(monkeypatch):
     monkeypatch.setattr(global_mod, "global_search", _global_ok)
     env = await _route("global")
     assert env["mode"] == "global" and env["routing"]["fallback_from"] is None
+
+
+async def test_a_detected_scope_that_grounds_nothing_is_relaxed(monkeypatch):
+    """Detection is a guess: when the scoped path grounds nothing, the router
+    re-runs unscoped rather than refusing where main answered, and says so."""
+    detected = Scope(("Microsoft",), (), "detected")
+    seen: list = []
+
+    async def _local(*a, **k):
+        seen.append(k.get("scope"))
+        empty = not k.get("scope") or k["scope"].is_empty()
+        return ({"query": k["q"], "answer": "ok [1]", "retrieved": 1,
+                 "citations": [{"marker": 1, "fact_uuid": "f", "sources": []}],
+                 "applies_to": []} if empty else
+                {"query": k["q"], "answer": "refusal", "retrieved": 0, "citations": [],
+                 "applies_to": []})
+
+    async def _drift_empty(*a, **k):
+        return {"query": k["q"], "answer": "refusal", "citations": [], "applies_to": []}
+    monkeypatch.setattr(synth_mod, "answer_local", _local)
+    monkeypatch.setattr(drift_mod, "drift_search", _drift_empty)
+    env = await _route("local", scope=detected)
+    assert env["citations"] and env["scope"] == {
+        "vendors": ["Microsoft"], "products": [], "source": "detected-relaxed"}
+    assert seen[-1].is_empty()
+
+
+async def test_an_explicit_scope_is_never_relaxed(monkeypatch):
+    explicit = Scope(("Microsoft",), (), "explicit")
+
+    async def _local_empty(*a, **k):
+        return {"query": k["q"], "answer": "refusal", "retrieved": 0, "citations": [],
+                "applies_to": []}
+
+    async def _drift_empty(*a, **k):
+        return {"query": k["q"], "answer": "refusal", "citations": [], "applies_to": []}
+    monkeypatch.setattr(synth_mod, "answer_local", _local_empty)
+    monkeypatch.setattr(drift_mod, "drift_search", _drift_empty)
+    env = await _route("local", scope=explicit)
+    assert env["scope"]["source"] == "explicit" and env["citations"] == []
 
 
 async def test_envelope_carries_scope_dict():

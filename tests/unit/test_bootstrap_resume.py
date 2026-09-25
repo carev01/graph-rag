@@ -268,3 +268,22 @@ async def test_repeated_clean_eof_without_records_gives_up():
         await core.bootstrap(source_id="21632f3b-5a4c-4c93-9f00-6701d0e9f677")
 
     assert len(requests) == 3
+
+
+async def test_a_resumed_source_shard_refreshes_that_sources_toc():
+    """Articles applied before the crash are not 'touched' by the resuming run, so
+    without this the TOC pass would skip their source entirely."""
+    shard = "21632f3b-5a4c-4c93-9f00-6701d0e9f677"
+    store = _Store({shard: {"shard": shard, "watermark": _ORIGINAL, "last_id": _IDS[-1],
+                            "status": "in_progress"}})
+    repo, requests = _Repo(), []
+    core = _core([lambda: _body([_START, _TERMINAL])], requests, store, repo)
+    refreshed: list[str] = []
+
+    async def _toc(sid):
+        refreshed.append(sid)
+    core.refresh_toc = _toc                      # type: ignore[method-assign]
+
+    await core.bootstrap(source_id=shard)
+
+    assert refreshed == [shard]

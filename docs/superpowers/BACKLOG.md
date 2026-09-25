@@ -1295,7 +1295,7 @@ comes from the harness-only price table in `scripts/chunk_ab.py`. Record per-tie
 prompt/completion tokens in the worker's batch summary (the `UsageTally` already has them)
 and a per-day, per-tier ledger row.
 
-### 52. Global/DRIFT community shortlist is not vendor-aware — **P1 before the full bootstrap, found 2026-09-25**
+### 52. ~~Global/DRIFT community shortlist is not vendor-aware~~ — **DONE 2026-09-25** (found the same day)
 After adding just two sources (Cohesity FortKnox, Veeam VSPC), global grounding on the
 router golden set fell to 0.29: for questions that explicitly name AWS and Azure, 1–2 of
 the 4 shortlisted communities are Cohesity ones, and a community titled *Azure VM Recovery
@@ -1309,6 +1309,29 @@ vendor mix of their cited facts (fact → episode → article → source → ven
 traversal, invariant #2's own chain); or carry a per-community vendor distribution,
 written by `theme-builder`, so the shortlist can filter without a traversal per query.
 Keep unscoped behaviour for genuinely cross-vendor questions ("across cloud vendors").
+
+**Resolution:** shipped as the wider "vendor and product end to end" slice
+(`specs/2026-09-25-vendor-product-end-to-end-design.md`, plan of the same date):
+query-time in-scope share per community (one `resolve_citations` call), out-of-scope
+facts dropped before reduce, `(Vendor · Product)` labels on every LLM fact line,
+`applies_to` in every envelope, scope detection with cross-vendor wording and a soft
+(relaxable) detected scope, global->local fallback when global cites nothing. The
+acceptance measure was re-baselined: grounding is split into scoped (valid) and
+cross-vendor (informational — the golden answers predate the Tier 1 vendors), and
+routing into classifier vs answer path. Tier 1 golden questions remain a follow-up.
+
+### 53. Superseded/removed episodes still count toward vendor/product labels — **P3, found 2026-09-25**
+Spec §1 says applicability excludes superseded/removed episodes, but neither
+`Provenance.resolve_citations` (pre-existing) nor `scope._EPISODES*` filters
+`superseded`/`removed`, so a label can name a vendor whose only support for the fact is
+a superseded episode. Filter `coalesce(he.superseded,false)=false` and
+`coalesce(e.removed,false)=false` in both.
+
+### 54. Generic product names could over-scope detection — **P3, found 2026-09-25**
+Detection matches every structural product name as a whole word. A generically named
+product (a one-word "Cloud"/"Agent"-style name) would scope unrelated questions. Check
+the full catalog's product names before the full bootstrap and add a stop-list (or
+require the vendor name alongside) for generic ones.
 
 ---
 

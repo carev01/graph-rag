@@ -211,6 +211,10 @@ class SyncCore:
         if prior and prior.get("status") == "in_progress" and prior.get("last_id"):
             bootstrap_after, watermark = prior["last_id"], prior.get("watermark")
             log.info("bootstrap %s: resuming in-progress shard after %s", shard, bootstrap_after)
+            if source_id:
+                # Articles applied before the crash are not touched by this run;
+                # keep the TOC pass for their source (final review).
+                res.sources.add(source_id)
         stalls = 0
         while True:
             params = build_delta_params(source_id=source_id, vendor_id=vendor_id,

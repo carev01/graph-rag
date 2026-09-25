@@ -27,6 +27,26 @@ _EPISODES = (
     "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
     "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products) "
     "RETURN collect(DISTINCT e.uuid) AS u")
+# Candidate-bounded (request path): check only the episodes of the retrieved
+# edges, walking UP from each via the Episodic uuid index -- the unbounded form
+# above returns every episode a vendor has (~10^5 at bootstrap scale) per call.
+_EPISODES_AMONG = (
+    "UNWIND $eps AS u "
+    "MATCH (e:Episodic {uuid: u})<-[:HAS_EPISODE]-(:Article)<-[:HAS_ARTICLE]-(:Source)"
+    "<-[:HAS_SOURCE]-(p:Product)<-[:HAS_PRODUCT]-(v:Vendor) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products) "
+    "RETURN collect(DISTINCT u) AS u")
+
+
+# Wording that makes a question explicitly cross-vendor. Such a question stays
+# unscoped even when it names a platform or product: "Which backup vendors can
+# protect Azure VMs?" is about Azure as a WORKLOAD, and scoping it to Microsoft's
+# documentation would drop every other vendor's answer (final review, 2026-09-25).
+_CROSS_VENDOR = re.compile(
+    r"\b(vendors?|across|third[- ]party|"
+    r"(which|what|all|other) (backup )?(products|solutions|tools|options))\b",
+    re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -102,7 +122,7 @@ class ScopeResolver:
         return self._vendor_of.get(product)
 
     def detect(self, q: str) -> Scope:
-        if self._re is None:
+        if self._re is None or _CROSS_VENDOR.search(q):
             return Scope()
         vendors: list[str] = []
         products: list[str] = []
@@ -149,7 +169,8 @@ class ScopeResolver:
         return cls(vendors, pairs, aliases)
 
 
-async def scope_episode_uuids(driver, scope: Scope) -> set[str]:
+async def scope_episode_uuids(driver, scope: Scope,
+                              candidates: list[str] | None = None) -> set[str]:
     """Episode uuids of every article in scope (vendor named directly OR product
     named). Empty scope -> empty set; callers skip filtering on an empty scope.
 
@@ -159,7 +180,16 @@ async def scope_episode_uuids(driver, scope: Scope) -> set[str]:
     match the canonical structural name ("AWS")."""
     if scope.is_empty():
         return set()
-    records, _, _ = await driver.execute_query(
-        _EPISODES, vendors=[v.lower() for v in scope.vendors],
-        products=[p.lower() for p in scope.products])
+    params = {"vendors": [v.lower() for v in scope.vendors],
+              "products": [p.lower() for p in scope.products]}
+    if candidates is not None:
+        # `candidates` bounds the answer: which of THESE episodes are in scope.
+        # Every request-path caller passes its retrieved edges' episodes; only
+        # compat checks ask for the whole scope.
+        if not candidates:
+            return set()
+        records, _, _ = await driver.execute_query(
+            _EPISODES_AMONG, eps=list(dict.fromkeys(candidates)), **params)
+    else:
+        records, _, _ = await driver.execute_query(_EPISODES, **params)
     return set(records[0]["u"]) if records else set()

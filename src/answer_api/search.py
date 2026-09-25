@@ -29,7 +29,8 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
     if not include_invalid:
         edges = [e for e in edges if is_current(getattr(e, "invalid_at", None))]
     if scope is not None and not scope.is_empty():
-        allowed = await scope_episode_uuids(driver, scope)
+        allowed = await scope_episode_uuids(
+            driver, scope, candidates=[u for e in edges for u in (e.episodes or [])])
         edges = [e for e in edges if allowed.intersection(e.episodes or [])]
     edges = edges[:k]
     citations = await Provenance(driver).resolve_citations([e.uuid for e in edges])

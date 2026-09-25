@@ -6,7 +6,7 @@ PRODUCTS = [("AWS Backup", "AWS"), ("Azure Backup", "Microsoft"),
             ("Microsoft 365 Backup", "Microsoft"),
             ("Veeam Backup & Replication", "Veeam"),
             ("Veeam Backup for Microsoft 365", "Veeam"), ("FortKnox", "Cohesity")]
-ALIASES = {"VBR": "Veeam Backup & Replication", "Azure": "Microsoft",
+ALIASES = {"VBR": "Veeam Backup & Replication", "Azure": "Microsoft", "Amazon": "AWS",
            "Ghost": "No Such Product"}
 
 
@@ -97,3 +97,20 @@ def test_explicit_product_param_rejects_an_alias_of_mismatched_kind():
     with pytest.raises(UnknownScopeName) as e:
         _rc().resolve("q", products=["Azure"])
     assert e.value.names == ["Azure"]
+
+
+@pytest.mark.parametrize("q", [
+    "Which backup vendors can protect Azure VMs?",
+    "What options exist to back up Amazon RDS across vendors?",
+    "Which third-party tools back up AWS Backup vaults?",
+])
+def test_cross_vendor_wording_stays_unscoped_even_when_names_appear(q):
+    """A platform the question is ABOUT (Azure VMs, Amazon RDS) is not the vendor
+    whose documentation answers it; narrowing to Microsoft/AWS would drop every
+    other vendor's facts from an explicitly cross-vendor question (final review)."""
+    assert _r().detect(q).is_empty()
+
+
+def test_explicit_params_still_override_cross_vendor_wording():
+    s = _r().resolve("Which vendors support Azure?", vendors=["Veeam"])
+    assert s == Scope(("Veeam",), (), "explicit")

@@ -54,7 +54,8 @@ async def timeline_local(graphiti, driver, *, q, limit=30, scope: Scope | None =
     edges = await _retrieve_edges(graphiti, q, fetch_limit=max(limit * 3, limit),
                                   group_id=group_id)
     if scope is not None and not scope.is_empty():
-        allowed = await scope_episode_uuids(driver, scope)
+        allowed = await scope_episode_uuids(
+            driver, scope, candidates=[u for e in edges for u in (e.episodes or [])])
         edges = [e for e in edges if allowed.intersection(e.episodes or [])]
     # ascending by valid_at (true UTC instant); facts without valid_at sort last
     edges.sort(key=_valid_at_sort_key)
