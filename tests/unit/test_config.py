@@ -116,3 +116,16 @@ def test_a_negative_warmup_is_rejected_not_clamped():
                         docext_read_key="k", neo4j_uri="bolt://x",
                         neo4j_user="u", neo4j_password="p",
                         ingest_warmup_articles=-1)
+
+
+def test_warmup_lock_defaults_to_defer_mode():
+    from graph_sync.config import Settings
+    s = Settings(**_SYNC_MIN)
+    assert s.semantic_warmup_lock_mode == "defer"
+    assert s.semantic_warmup_defer_seconds == 30.0
+
+
+def test_warmup_lock_mode_rejects_unknown_values():
+    from graph_sync.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(**_SYNC_MIN, semantic_warmup_lock_mode="sometimes")
