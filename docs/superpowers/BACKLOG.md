@@ -1221,7 +1221,7 @@ patch version under a live PVC) — pin `16.x-alpine` or a digest. The three Cro
 no `spec.timeZone`, so their schedules are in the controller's zone (UTC on k3s) — set it
 explicitly so `30 3 * * *` means what the runbook reader thinks it means.
 
-### 49. First incremental pull on k3s: `httpx.ReadTimeout` mid-stream after 5,646 jobs — **P2, found 2026-09-24; unbudgeted-lane gap RESOLVED**
+### 49. First incremental pull on k3s: `httpx.ReadTimeout` mid-stream after 5,646 jobs — **P2, found 2026-09-24; unbudgeted-lane gap RESOLVED; bootstrap resume RESOLVED 2026-09-25; incremental still open**
 The cluster's first incremental pull (cursor from 2026-09-03, ~3 weeks of changes) failed
 with `httpx.ReadTimeout` after queueing 5,646 semantic jobs: DocExtractor sent nothing for
 over 300 s mid-stream (the client's read timeout is 300 s, `docext/client.py`). Safe — the
@@ -1230,6 +1230,19 @@ was lost or double-applied — but a delta this long cannot complete in one shot
 server-side before enabling the poller on this cluster: a longer streaming read timeout, or
 a chunked catch-up (resume with `?bootstrap_after=<highest applied id>`-style paging over
 the incremental stream, not just bootstrap). Options unexplored as of this writing.
+
+**2026-09-25 — the same stall hit a bootstrap:** the Veeam vendor-wide structural
+bootstrap died with `ReadTimeout` after 47 min and 9,254 records, and `SyncCore.bootstrap`
+made it worse: it resumed only after a *clean* truncation, so a transport error raised
+straight out with no progress row and every re-run replayed from the first id. Fixed:
+a `httpx.TransportError` mid-stream is a dropped stream and resumes with
+`bootstrap_after=<last applied id>` and the original watermark, with backoff; only
+`BOOTSTRAP_MAX_STALLS` (5) consecutive attempts that apply nothing give up. Progress is
+saved every `BOOTSTRAP_PROGRESS_EVERY` (200) records, and a new run of an `in_progress`
+shard resumes from it (a `complete` shard is still replayed in full — a deliberate
+repair). **Still open:** the incremental stream cannot resume mid-way (its only resume
+point is the same cursor), so a long catch-up delta that always stalls at the same
+point never completes — matters when the poller is enabled.
 
 **Resolution of the separate unbudgeted-incremental-lane gap this pull exposed:** every one
 of those 5,646 jobs landed in the `incremental` lane — unbudgeted and claimed ahead of
