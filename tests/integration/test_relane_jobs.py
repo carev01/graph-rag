@@ -108,6 +108,53 @@ async def test_relane_report_mode_writes_nothing(neo4j_repo, state_store):
         await _mark_done(state_store, "relane-new1")
 
 
+async def test_relane_apply_update_recheck_protects_a_row_claimed_after_the_plan(
+    neo4j_repo, state_store, monkeypatch
+):
+    """The apply UPDATE re-checks `status='pending' AND lane='incremental'` at
+    write time, not just at the read that built the plan. Simulates the race
+    the runbook also warns operators never to create (never run a worker
+    between the first pull and `relane-jobs --apply`): a plan that -- as if
+    computed slightly earlier -- still says "move this job" for one that has,
+    by write time, already been claimed by a worker. That row must be left
+    untouched rather than silently reclassified out from under whatever the
+    worker is doing with it."""
+    from graph_sync import relane as relane_mod
+
+    await neo4j_repo.apply_structural(_write("relane-race", "relane-src-6"))
+    # no episode edge -> a fresh plan would decide to move it
+    await state_store.enqueue_semantic_job("relane-race", "upsert", "h", "incremental")
+    pool = await state_store._get_pool()
+    [job_id] = [r["id"] for r in await pool.fetch(
+        "SELECT id FROM semantic_jobs WHERE article_id='relane-race'")]
+    try:
+        real_plan_relane = relane_mod.plan_relane
+
+        def _stale_plan(jobs, has_episodes):
+            # The real plan, plus this job forced into to_move regardless --
+            # standing in for a plan computed before the claim below happened.
+            plan = real_plan_relane(jobs, has_episodes)
+            if job_id not in plan.to_move:
+                plan.to_move.append(job_id)
+            return plan
+
+        monkeypatch.setattr(relane_mod, "plan_relane", _stale_plan)
+        # A worker claims the job AFTER the (simulated) plan was decided.
+        await pool.execute(
+            "UPDATE semantic_jobs SET status='in_progress', claimed_at=now() WHERE id=$1",
+            job_id)
+
+        report = await relane_incremental_jobs(state_store, neo4j_repo, apply=True)
+
+        row = await pool.fetchrow(
+            "SELECT status, lane FROM semantic_jobs WHERE id=$1", job_id)
+        assert row["status"] == "in_progress" and row["lane"] == "incremental", (
+            "a job claimed after the plan was built must be left untouched")
+        assert report.moved_to_bootstrap == 0
+    finally:
+        await pool.execute("UPDATE semantic_jobs SET status='done' WHERE id=$1", job_id)
+
+
 async def test_relane_apply_mode_moves_exactly_the_no_episode_jobs(neo4j_repo, state_store):
     await neo4j_repo.apply_structural(_write("relane-ext", "relane-src-5"))
     await neo4j_repo.add_episode_edge("relane-ext")  # already extracted -> stays incremental

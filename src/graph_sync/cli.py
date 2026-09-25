@@ -291,7 +291,16 @@ def relane_jobs(
     """One-off repair for `semantic_jobs` rows enqueued before the
     bootstrap-first lane rule and the `source_id` column existed (BACKLOG).
     Neo4j is read-only; Postgres writes happen only under --apply, one
-    transaction per step. See `graph_sync.relane` for the two steps."""
+    transaction per step. See `graph_sync.relane` for the two steps.
+
+    Report mode (the default) performs no DML. It still runs `init_schema()`
+    below, same as every other command here (`worker`, `bootstrap`,
+    `sync-once`, `queue-status`) -- that is idempotent `CREATE ... IF NOT
+    EXISTS` / `ALTER ... ADD COLUMN IF NOT EXISTS` DDL, a no-op after the
+    first sync on this image, chosen over a report-mode-only skip so this
+    command needs no special-cased startup path and works standalone against
+    a freshly migrated database.
+    """
     _configure_logging()
 
     async def _run() -> None:

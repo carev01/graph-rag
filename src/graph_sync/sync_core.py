@@ -55,27 +55,34 @@ class SyncCore:
         # pass (spec §5.3/§7) instead of dropping the trigger.
         self._incremental_dirty = False
 
+    async def _lane(self, res: BootstrapResult | IncrementalResult, article_id: str) -> str:
+        """CLAUDE.md ("incremental updates preempt bootstrap backfill"): the
+        unbudgeted `incremental` lane exists ONLY for updates to articles that
+        have already been semantically extracted. An incremental pull also
+        carries records for articles never ingested before -- brand-new
+        articles, or a changed/removed article from a vendor never
+        bootstrapped -- and those must land in the budgeted `bootstrap` lane
+        like any other backfill, or they bypass `claim_semantic_jobs`'s
+        token-budget gate entirely (`AND ($2 OR lane='incremental')`). This is
+        what queued 5,646 unbudgeted jobs on the cluster's first incremental
+        pull (see BACKLOG). Applies to tombstones too: a remove for an article
+        with no episodes never extracted anything, so it belongs in
+        `bootstrap`.
+
+        Called AFTER the hash gate for content records (an unchanged replay
+        never reaches this) so a no-op replay never pays the `has_episodes`
+        Neo4j round trip; tombstones have no hash gate, so they call it
+        directly.
+        """
+        if isinstance(res, BootstrapResult):
+            return "bootstrap"
+        return "incremental" if await self._repo.has_episodes(article_id) else "bootstrap"
+
     async def _apply_record(
         self, rec: ContentRecord | TombstoneRecord, res: BootstrapResult | IncrementalResult
     ) -> str | None:
-        if isinstance(res, BootstrapResult):
-            lane = "bootstrap"
-        else:
-            # CLAUDE.md ("incremental updates preempt bootstrap backfill"): the
-            # unbudgeted `incremental` lane exists ONLY for updates to articles
-            # that have already been semantically extracted. An incremental
-            # pull also carries records for articles never ingested before --
-            # brand-new articles, or a changed/removed article from a vendor
-            # never bootstrapped -- and those must land in the budgeted
-            # `bootstrap` lane like any other backfill, or they bypass
-            # `claim_semantic_jobs`'s token-budget gate entirely
-            # (`AND ($2 OR lane='incremental')`). This is what queued 5,646
-            # unbudgeted jobs on the cluster's first incremental pull (see
-            # BACKLOG). Applies to tombstones too: a remove for an article with
-            # no episodes never extracted anything, so it belongs in
-            # `bootstrap`.
-            lane = "incremental" if await self._repo.has_episodes(rec.id) else "bootstrap"
         if isinstance(rec, TombstoneRecord):
+            lane = await self._lane(res, rec.id)
             await self._store.enqueue_semantic_job(rec.id, "remove", None, lane, rec.source_id)
             await self._repo.tombstone_article(map_tombstone(rec))
             # BootstrapResult has no `removed` counter (bootstrap streams never emit
@@ -88,6 +95,7 @@ class SyncCore:
         if existing == rec.content_hash:
             res.skipped += 1
             return None
+        lane = await self._lane(res, rec.id)
 
         info = self._catalog.resolve(rec.source_id)
         if info is None:

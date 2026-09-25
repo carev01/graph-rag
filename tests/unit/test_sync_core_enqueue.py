@@ -31,11 +31,13 @@ class _FakeRepo:
         self.structural_calls: list = []
         self.incomplete_calls: list = []
         self.tombstone_calls: list = []
+        self.has_episodes_calls: list[str] = []
 
     async def get_content_hash(self, article_id: str) -> str | None:
         return self._existing_hash
 
     async def has_episodes(self, article_id: str) -> bool:
+        self.has_episodes_calls.append(article_id)
         if isinstance(self._has_episodes, dict):
             return self._has_episodes.get(article_id, False)
         return self._has_episodes
@@ -276,3 +278,23 @@ async def test_unchanged_hash_does_not_enqueue():
     assert store.enqueue_calls == []
     assert len(repo.structural_calls) == 0
     assert len(repo.incomplete_calls) == 0
+
+
+async def test_incremental_unchanged_hash_never_calls_has_episodes():
+    """The lane is computed AFTER the hash gate for content records: an
+    unchanged replay must never pay the `has_episodes` Neo4j round trip -- it
+    is discarded by the hash gate before the lane is even needed."""
+    from graph_sync.models import parse_delta_line
+    import json
+
+    rec = parse_delta_line(json.dumps(
+        _content_record(article_id="a11", source_id="s1", content_hash="same-hash")))
+    store = _FakeStore()
+    repo = _FakeRepo(existing_hash="same-hash", has_episodes=True)  # unchanged
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+
+    res = IncrementalResult()
+    await core._apply_record(rec, res)
+
+    assert store.enqueue_calls == []
+    assert repo.has_episodes_calls == []

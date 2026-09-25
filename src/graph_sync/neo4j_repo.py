@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from neo4j import AsyncGraphDatabase
+from neo4j import READ_ACCESS, AsyncGraphDatabase
 
 from graph_sync.models import StructuralWrite, Tombstone, TocSnapshot
 
@@ -195,8 +195,13 @@ class Neo4jRepo:
         answer ONE id inline in the ingest hot path, this repairs thousands of
         already-queued rows in one pass. Ids with no matching Article, or whose
         Article has no `source_id` yet, are simply absent from the result.
+
+        `default_access_mode=READ_ACCESS` (like `state_crosscheck.py`): the
+        `relane-jobs` repair's contract is "Neo4j is only READ" -- this makes
+        that true at the driver level (routes to a read replica in a clustered
+        deployment) rather than only by never issuing a write statement.
         """
-        async with self._driver.session() as sess:
+        async with self._driver.session(default_access_mode=READ_ACCESS) as sess:
             result = await sess.run(
                 "UNWIND $ids AS id MATCH (a:Article {id:id}) "
                 "WHERE a.source_id IS NOT NULL "
@@ -209,9 +214,9 @@ class Neo4jRepo:
         """Batched `has_episodes`, for the same `relane-jobs` repair's Step B
         (moving pending incremental-lane jobs for never-extracted articles to
         `bootstrap`). See `article_source_ids` for why this is batched rather
-        than looping the single-id check.
+        than looping the single-id check, and for why READ_ACCESS.
         """
-        async with self._driver.session() as sess:
+        async with self._driver.session(default_access_mode=READ_ACCESS) as sess:
             result = await sess.run(
                 "UNWIND $ids AS id MATCH (a:Article {id:id})-[:HAS_EPISODE]->() "
                 "RETURN DISTINCT id",

@@ -92,7 +92,7 @@ def test_relane_jobs_prints_the_formatted_report(monkeypatch, capsys):
     cli.relane_jobs(apply=True)
 
     out = capsys.readouterr().out
-    assert "2 backfilled" in out
+    assert "2 article(s) backfilled" in out
     assert "3 moved to bootstrap" in out
     assert "APPLY" in out
 

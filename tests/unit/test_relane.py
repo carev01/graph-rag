@@ -60,9 +60,11 @@ def test_format_report_report_mode_says_pass_apply():
         RelaneReport(checked=5, kept_incremental=3, moved_to_bootstrap=2),
     )
     assert "REPORT" in text and "--apply" in text
-    assert "8 backfilled" in text
+    assert "8 article(s) backfilled" in text
     assert "2 missing in graph" in text
     assert "2 moved to bootstrap" in text
+    # missing_in_graph > 0 -> the never-structurally-written-remove-job note appears
+    assert "never structurally written" in text
 
 
 def test_format_report_apply_mode_says_apply():
@@ -73,3 +75,5 @@ def test_format_report_apply_mode_says_apply():
     )
     assert "APPLY" in text
     assert "--apply" not in text
+    # nothing missing -> the note is omitted rather than printed unconditionally
+    assert "never structurally written" not in text

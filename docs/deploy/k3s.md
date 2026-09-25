@@ -641,6 +641,15 @@ plain worker run would claim every one of them exactly as before, unbudgeted. Re
 the queue and bootstrap a small, deliberately scoped set of sources before any
 worker runs.
 
+**Never run a worker between the first pull (step 8, above) and `relane-jobs
+--apply` (below).** `relane-jobs`'s apply step re-checks `status='pending' AND
+lane='incremental'` at write time, so it cannot corrupt a row a worker claims or
+completes in between — but a worker running in that window can still claim and
+spend on exactly the unbudgeted, un-relaned rows this rehearsal exists to catch
+before anything is claimed. Worker replicas stay at 0 (installed quiesced, step 4)
+and no one-off `worker`/`smoke` pod is run until after `relane-jobs --apply` and the
+scoping below.
+
 **Report the `relane-jobs` repair first** (one-off pod, step 5's pattern; Neo4j is
 read-only, Postgres is untouched in report mode):
 
@@ -793,11 +802,37 @@ remaining chosen source:
 kubectl -n graph-rag delete pod graph-rag-bootstrap-src
 ```
 
-**Scope the workers to those sources**, before any worker claims a job:
+**Scope the workers to those sources**, before any worker claims a job.
+
+**The comma MUST be escaped.** Helm's `--set`/`--set-string` value parser
+(`strvals`) splits on a bare `,` to separate multiple `key=value` assignments
+*inside the string itself* — quoting the whole flag for the shell is not
+enough, since the shell has already handed Helm one argument by the time
+`strvals` parses it. Unescaped, a two-id value is silently read as a second,
+unrelated assignment with no `=` in it, and Helm refuses the whole command
+outright (`Error: failed parsing --set-string data: key "<the second id>" has
+no value`) — it does not fall back to a truncated single-id scope, so this
+fails loud, but only if you run the real `helm upgrade` to find out. Verify
+locally instead, before ever touching the release.
+
+Escape the comma with a backslash, inside single quotes so the shell passes
+the backslash through unchanged. **Verify locally first** — `helm template` is
+a pure client-side render, it touches nothing in the cluster — that it
+produces exactly the intended comma-joined list before ever running the real
+`helm upgrade`:
+
+```
+helm template t deploy/helm/graph-rag --set image.tag=sha-abc1234 \
+  --set-string 'config.SEMANTIC_CLAIM_SOURCE_IDS=<SOURCE_ID_1>\,<SOURCE_ID_2>' \
+  | grep SEMANTIC_CLAIM_SOURCE_IDS
+# must print exactly:  SEMANTIC_CLAIM_SOURCE_IDS: "<SOURCE_ID_1>,<SOURCE_ID_2>"
+```
+
+Only once that local render matches exactly, run it for real:
 
 ```
 helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
-  --set-string config.SEMANTIC_CLAIM_SOURCE_IDS=<SOURCE_ID_1>,<SOURCE_ID_2>
+  --set-string 'config.SEMANTIC_CLAIM_SOURCE_IDS=<SOURCE_ID_1>\,<SOURCE_ID_2>'
 ```
 
 This changes the `ConfigMap`, which rolls any already-running `sync`/`worker`/
@@ -805,15 +840,24 @@ This changes the `ConfigMap`, which rolls any already-running `sync`/`worker`/
 (`deploy/helm/graph-rag/templates/{worker,sync,answer,cronjobs}.yaml`). A one-off
 pod created *after* this upgrade — the smoke pod in step 9, or a scaled-up worker in
 step 10 — reads the ConfigMap at creation time and so inherits the scope
-automatically; nothing else needs to change. Confirm before proceeding:
+automatically; nothing else needs to change.
+
+**Confirm before proceeding — this gate is binding, not informational:**
 
 ```
 kubectl -n graph-rag get configmap graph-rag-config \
   -o jsonpath='{.data.SEMANTIC_CLAIM_SOURCE_IDS}'
 ```
 
-With the queue relaned and the workers scoped to the chosen sources, the smoke
-ingest below claims only jobs belonging to those sources.
+The printed value must equal the intended comma-joined list **exactly**
+(`<SOURCE_ID_1>,<SOURCE_ID_2>`, no truncation, no missing id, no stray
+backslash). **If it does not match exactly, STOP: do not run the smoke pod in
+step 9 and do not scale any worker.** A silently-wrong or empty scope here
+means the very next worker claims unscoped, at full budget, exactly the
+failure mode this rehearsal exists to prevent.
+
+With the queue relaned, the sources bootstrapped, and the workers scoped and
+confirmed, the smoke ingest below claims only jobs belonging to those sources.
 
 ## 9. One-article smoke ingest (paid: one article)
 
@@ -826,13 +870,24 @@ one-off pod (step 5's pattern) instead; worker replicas stay at 0 throughout.
 **First prove there is something to claim**, or the smoke proves nothing. A worker
 claims `pending` jobs whose `next_attempt_at` has passed — the `incremental` lane always,
 the `bootstrap` lane only while today's `token_ledger` total is below
-`SEMANTIC_DAILY_TOKEN_BUDGET`:
+`SEMANTIC_DAILY_TOKEN_BUDGET`.
+
+**If the bootstrap-first rehearsal above set `SEMANTIC_CLAIM_SOURCE_IDS`, this query
+must be scope-aware too.** A worker scoped to `<SOURCE_ID_1>,<SOURCE_ID_2>` cannot claim
+a `claimable` row for any other source, so counting unscoped here can "prove" work exists
+that the scoped smoke then cannot actually claim — a pass that proves nothing, same
+failure shape as an empty queue. Add the identical `source_id = ANY(...)` filter, same ids
+as the rehearsal's `--set-string`, as its own array literal (a comma-separated Postgres
+array, unrelated to Helm's `strvals` and not subject to its escaping rule above); omit the
+filter (drop the `AND source_id = ANY(...)` clause) only if the workers are unscoped:
 
 ```
 kubectl -n graph-rag exec -i graph-rag-postgres-0 -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
 SELECT count(*) AS done_before FROM semantic_jobs WHERE status = 'done';
 SELECT lane, count(*) AS claimable FROM semantic_jobs
-  WHERE status = 'pending' AND next_attempt_at <= now() GROUP BY 1 ORDER BY 1;
+  WHERE status = 'pending' AND next_attempt_at <= now()
+  AND source_id = ANY('{<SOURCE_ID_1>,<SOURCE_ID_2>}')
+  GROUP BY 1 ORDER BY 1;
 SELECT coalesce((SELECT tokens FROM token_ledger WHERE day = current_date), 0) AS tokens_today;
 SQL
 ```
@@ -883,17 +938,27 @@ kubectl -n graph-rag run graph-rag-smoke --restart=Never \
 
 Wait with `pod=graph-rag-smoke`, `<tries>` = 240 (20 min; one article through the
 extraction pipeline can take several minutes). Then prove the ingest actually engaged —
-all three, not just a zero exit:
+all four (not just three, and not just a zero exit) if a scope is in effect, otherwise
+the first three:
 
 1. `phase=Succeeded`;
 2. the log contains a `semantic batch: jobs=1 …` line (`kubectl -n graph-rag logs
    graph-rag-smoke | grep 'semantic batch:'`). The worker logs it only when it claimed
    a job, so its absence means nothing was claimed; a `semantic job … failed` line means
    the article was claimed and failed;
-3. `SELECT count(*) FROM semantic_jobs WHERE status = 'done';` is `done_before + 1`.
+3. `SELECT count(*) FROM semantic_jobs WHERE status = 'done';` is `done_before + 1`;
+4. **if `SEMANTIC_CLAIM_SOURCE_IDS` was set above**, `kubectl -n graph-rag logs
+   graph-rag-smoke | grep 'semantic worker scope:'` must print exactly
+   `semantic worker scope: <n> source(s): <SOURCE_ID_1>, <SOURCE_ID_2>` (worker CLI
+   startup, `graph_sync.cli.worker`) — with the same ids and the same count `<n>` as the
+   ConfigMap confirmed above. **`semantic worker scope: all sources` here means the scope
+   never reached the pod (a stale ConfigMap, an unset env var, a rollout that did not
+   land) — STOP; this is CLAUDE.md's cost-awareness rule in the flesh: configured,
+   deployed and printed are not evidence a code path consults the value, only a log line
+   naming the actual value the running process holds is.**
 
-Any of the three missing: stop and investigate before step 10. Then clean up — the pod
-does not delete itself:
+Any of the applicable checks missing: stop and investigate before step 10. Then clean
+up — the pod does not delete itself:
 
 ```
 kubectl -n graph-rag delete pod graph-rag-smoke
