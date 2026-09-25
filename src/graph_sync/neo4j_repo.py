@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from neo4j import AsyncGraphDatabase
+from neo4j import READ_ACCESS, AsyncGraphDatabase
 
 from graph_sync.models import StructuralWrite, Tombstone, TocSnapshot
 
@@ -168,6 +168,62 @@ class Neo4jRepo:
             rec = await r.single()
             return rec["h"] if rec else None
 
+    async def has_episodes(self, article_id: str) -> bool:
+        """True iff the article has been semantically extracted at least once
+        (`(:Article)-[:HAS_EPISODE]->()` exists).
+
+        Used by `SyncCore._apply_record`'s lane rule: the unbudgeted
+        `incremental` semantic-job lane is meant only for updates to articles
+        Graphiti has already extracted (CLAUDE.md, "incremental updates
+        preempt bootstrap backfill"). An article with no episodes yet -- new,
+        or changed but never bootstrapped -- must land in the budgeted
+        `bootstrap` lane instead, or it bypasses the daily token budget
+        entirely.
+        """
+        async with self._driver.session() as sess:
+            r = await sess.run(
+                "MATCH (a:Article {id:$id})-[:HAS_EPISODE]->() RETURN a LIMIT 1",
+                id=article_id,
+            )
+            return await r.single() is not None
+
+    async def article_source_ids(self, article_ids: list[str]) -> dict[str, str]:
+        """Batched `Article.source_id` lookup for the `relane-jobs` repair
+        (backfilling `semantic_jobs.source_id` on rows enqueued before that
+        column existed). One `UNWIND` query per caller-chosen batch instead of
+        the per-id round trip `has_episodes`/`get_content_hash` make -- those
+        answer ONE id inline in the ingest hot path, this repairs thousands of
+        already-queued rows in one pass. Ids with no matching Article, or whose
+        Article has no `source_id` yet, are simply absent from the result.
+
+        `default_access_mode=READ_ACCESS` (like `state_crosscheck.py`): the
+        `relane-jobs` repair's contract is "Neo4j is only READ" -- this makes
+        that true at the driver level (routes to a read replica in a clustered
+        deployment) rather than only by never issuing a write statement.
+        """
+        async with self._driver.session(default_access_mode=READ_ACCESS) as sess:
+            result = await sess.run(
+                "UNWIND $ids AS id MATCH (a:Article {id:id}) "
+                "WHERE a.source_id IS NOT NULL "
+                "RETURN a.id AS id, a.source_id AS source_id",
+                ids=article_ids,
+            )
+            return {r["id"]: r["source_id"] async for r in result}
+
+    async def articles_with_episodes(self, article_ids: list[str]) -> set[str]:
+        """Batched `has_episodes`, for the same `relane-jobs` repair's Step B
+        (moving pending incremental-lane jobs for never-extracted articles to
+        `bootstrap`). See `article_source_ids` for why this is batched rather
+        than looping the single-id check, and for why READ_ACCESS.
+        """
+        async with self._driver.session(default_access_mode=READ_ACCESS) as sess:
+            result = await sess.run(
+                "UNWIND $ids AS id MATCH (a:Article {id:id})-[:HAS_EPISODE]->() "
+                "RETURN DISTINCT id",
+                ids=article_ids,
+            )
+            return {r["id"] async for r in result}
+
     async def tombstone_article(self, t: Tombstone) -> None:
         async with self._driver.session() as sess:
             await sess.run(
@@ -265,4 +321,17 @@ class Neo4jRepo:
         async with self._driver.session() as sess:
             await sess.run(
                 "MATCH (a:Article {source_id:$sid}) DETACH DELETE a", sid=source_id
+            )
+
+    async def add_episode_edge(self, article_id: str) -> None:
+        """Test helper: attach a dummy `:Episodic` node via `HAS_EPISODE`, so
+        `has_episodes`/`articles_with_episodes` tests (and the `relane-jobs`
+        repair's integration tests) can mark an article "already extracted"
+        without depending on a real Graphiti run.
+        """
+        async with self._driver.session() as sess:
+            await sess.run(
+                "MERGE (a:Article {id:$id}) "
+                "MERGE (a)-[:HAS_EPISODE]->(:Episodic {id:$id + '-ep'})",
+                id=article_id,
             )

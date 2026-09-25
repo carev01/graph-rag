@@ -98,7 +98,7 @@ have also bypassed everything that path wires up; enumerate what you lost.
 its runner called `run_concurrently(...)` without `is_cold=`, so the warm-up it
 existed to measure never engaged.*
 
-Full bootstrap is ~260M content tokens → ~0.8–1.5B LLM tokens through Graphiti's multi-call extraction pipeline. Use the cheap model tier for extraction, phase the bootstrap vendor-by-vendor in priority order, and meter the `add_episode` work queue against a daily token budget (incremental updates preempt bootstrap backfill). Phase 1 gates full-corpus rollout on a measured cost/quality benchmark over ~200 articles.
+Full bootstrap is ~260M content tokens → ~0.8–1.5B LLM tokens through Graphiti's multi-call extraction pipeline. Use the cheap model tier for extraction, phase the bootstrap vendor-by-vendor in priority order, and meter the `add_episode` work queue against a daily token budget (incremental updates preempt bootstrap backfill). The unbudgeted, claimed-first `incremental` lane is only for updates to articles that already have episodes (`Neo4jRepo.has_episodes`); everything else — new articles, or a changed/removed article from a never-bootstrapped vendor — is `bootstrap`, budgeted like any other backfill (BACKLOG 49). Phase 1 gates full-corpus rollout on a measured cost/quality benchmark over ~200 articles.
 
 ## Scaling ingestion for the bootstrap
 

@@ -20,6 +20,7 @@ from graph_sync.config import Settings, get_settings
 from graph_sync.delta_client import make_client
 from graph_sync.logging_setup import configure_logging as _configure_logging
 from graph_sync.neo4j_repo import Neo4jRepo
+from graph_sync.relane import backfill_source_ids, format_report, relane_incremental_jobs
 from graph_sync.semantic_worker import run_worker
 from graph_sync.state_store import StateStore
 from graph_sync.sync_core import SyncCore
@@ -236,6 +237,17 @@ def worker(
                 WarmupGate(driver, extract.group_id, extract.ingest_warmup_articles)
                 .is_cold_article
                 if extract.ingest_warmup_articles > 0 else None)
+            # Bootstrap-first rehearsal (docs/deploy/k3s.md): scope this
+            # worker's claims to a chosen subset of sources via
+            # `SEMANTIC_CLAIM_SOURCE_IDS`. Logged once at start so a rehearsal
+            # run's scope is visible in `kubectl logs` without inspecting the
+            # ConfigMap.
+            source_ids = settings.semantic_claim_source_id_list
+            if source_ids:
+                logger.info("semantic worker scope: %d source(s): %s",
+                            len(source_ids), ", ".join(source_ids))
+            else:
+                logger.info("semantic worker scope: all sources")
             await run_worker(
                 store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event,
                 max_batches=max_batches,
@@ -256,6 +268,7 @@ def worker(
                         timeout=settings.semantic_warmup_lock_timeout_seconds))
                     if is_cold is not None and settings.semantic_global_warmup_lock
                     else None),
+                source_ids=source_ids,
             )
         finally:
             await store.close()
@@ -264,6 +277,44 @@ def worker(
             await graphiti.close()
             if ingest._cheap is not None:
                 await ingest._cheap.graphiti.close()
+
+    asyncio.run(_run())
+
+
+@app.command("relane-jobs")
+def relane_jobs(
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Perform the writes. Default is report-only: compute and print "
+             "what would change without touching Postgres."),
+) -> None:
+    """One-off repair for `semantic_jobs` rows enqueued before the
+    bootstrap-first lane rule and the `source_id` column existed (BACKLOG).
+    Neo4j is read-only; Postgres writes happen only under --apply, one
+    transaction per step. See `graph_sync.relane` for the two steps.
+
+    Report mode (the default) performs no DML. It still runs `init_schema()`
+    below, same as every other command here (`worker`, `bootstrap`,
+    `sync-once`, `queue-status`) -- that is idempotent `CREATE ... IF NOT
+    EXISTS` / `ALTER ... ADD COLUMN IF NOT EXISTS` DDL, a no-op after the
+    first sync on this image, chosen over a report-mode-only skip so this
+    command needs no special-cased startup path and works standalone against
+    a freshly migrated database.
+    """
+    _configure_logging()
+
+    async def _run() -> None:
+        settings = get_settings()
+        repo = Neo4jRepo(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
+        store = StateStore(settings.postgres_dsn)
+        try:
+            await store.init_schema()
+            backfill = await backfill_source_ids(store, repo, apply=apply)
+            relane = await relane_incremental_jobs(store, repo, apply=apply)
+            typer.echo(format_report(apply, backfill, relane))
+        finally:
+            await repo.close()
+            await store.close()
 
     asyncio.run(_run())
 

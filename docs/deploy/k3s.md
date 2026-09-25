@@ -540,7 +540,7 @@ Nothing needs undoing: the only thing running is the read-only answer API. Resol
 mismatch (right instance, or deliberately reset the state for a fresh bootstrap — a
 separate, reviewed decision) before continuing.
 
-## 8. First pull, then start the poller
+## 8. First pull, then the bootstrap-first rehearsal (poller stays off)
 
 Record the queue by lane before the first pull:
 
@@ -608,25 +608,256 @@ replay 7a exists to prevent — every one of those jobs would be claimed ahead o
 bootstrap lane and outside the daily budget. Nothing spends until a worker runs, so
 stopping here costs nothing.
 
-Only then start the poller and unsuspend the two Neo4j housekeeping CronJobs that the
-quiesced install suspended:
+**`sync.replicas` stays at `0` for now — do not start the poller yet.** It stays
+suspended until the initial bootstrap (the rehearsal below, then the full
+vendor-priority backfill) completes: the cursor from this first pull is already
+stored, so when the poller is eventually enabled its first pull covers everything
+since that cursor in one pass, and the lane rule (`SyncCore._apply_record`,
+`Neo4jRepo.has_episodes`) sends any article without episodes to the budgeted
+`bootstrap` lane rather than the unbudgeted `incremental` one — the gap that queued
+5,646 unbudgeted jobs on this cluster's first pull (BACKLOG). Unsuspend just the two
+Neo4j housekeeping CronJobs now; enabling `sync.replicas=1` is a later runbook step,
+once bootstrap is complete:
 
 ```
 helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
-  --set sync.replicas=1 \
   --set cron.jobs.cleanup.suspend=false \
   --set cron.jobs.maintenance.suspend=false
-kubectl -n graph-rag rollout status deploy/graph-rag-sync --timeout=180s
-kubectl -n graph-rag logs deploy/graph-rag-sync
 ```
 
-**Timing:** the sync app waits a full `POLL_INTERVAL_SECONDS` (6 h, per
-`values.yaml`'s `config.POLL_INTERVAL_SECONDS`) before its *first* poll after every
-start or rollout — it does not poll on boot. A poll that fails (DocExtractor or a store
-unreachable) is logged with a traceback (`poll trigger failed; retrying in …`) and
-retried at the next interval; it does not stop the loop. To pull again immediately, rerun
-the `graph-rag-sync-once` pod above (the advisory lock keeps it single-flight with the
-poller).
+**Timing, for whenever the poller is eventually enabled:** the sync app waits a full
+`POLL_INTERVAL_SECONDS` (6 h, per `values.yaml`'s `config.POLL_INTERVAL_SECONDS`)
+before its *first* poll after every start or rollout — it does not poll on boot. A
+poll that fails (DocExtractor or a store unreachable) is logged with a traceback
+(`poll trigger failed; retrying in …`) and retried at the next interval; it does not
+stop the loop. To pull again immediately, rerun the `graph-rag-sync-once` pod above
+(the advisory lock keeps it single-flight with the poller).
+
+### Bootstrap-first rehearsal: relane the queue, bootstrap a scoped set of sources
+
+The lane query above may already show `incremental`-lane rows that predate this
+change (any pull run before the lane rule and the `source_id` column existed) — a
+plain worker run would claim every one of them exactly as before, unbudgeted. Repair
+the queue and bootstrap a small, deliberately scoped set of sources before any
+worker runs.
+
+**Never run a worker between the first pull (step 8, above) and `relane-jobs
+--apply` (below).** `relane-jobs`'s apply step re-checks `status='pending' AND
+lane='incremental'` at write time, so it cannot corrupt a row a worker claims or
+completes in between — but a worker running in that window can still claim and
+spend on exactly the unbudgeted, un-relaned rows this rehearsal exists to catch
+before anything is claimed. Worker replicas stay at 0 (installed quiesced, step 4)
+and no one-off `worker`/`smoke` pod is run until after `relane-jobs --apply` and the
+scoping below.
+
+**Report the `relane-jobs` repair first** (one-off pod, step 5's pattern; Neo4j is
+read-only, Postgres is untouched in report mode):
+
+```
+ovr=$(cat <<'JSON'
+{
+  "apiVersion": "v1",
+  "spec": {
+    "automountServiceAccountToken": false,
+    "securityContext": {"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
+                        "seccompProfile": {"type": "RuntimeDefault"}},
+    "containers": [{
+      "name": "graph-rag-relane",
+      "image": "ghcr.io/carev01/graph-rag:sha-abc1234",
+      "command": ["python", "-m", "graph_sync.cli", "relane-jobs"],
+      "envFrom": [{"secretRef": {"name": "graph-rag-secret"}},
+                  {"configMapRef": {"name": "graph-rag-config"}}],
+      "resources": {"requests": {"cpu": "100m", "memory": "384Mi"},
+                    "limits": {"cpu": "1", "memory": "1Gi"}},
+      "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
+    }]
+  }
+}
+JSON
+)
+```
+
+```
+kubectl -n graph-rag run graph-rag-relane --restart=Never \
+  --dry-run=client -o yaml \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides="$ovr" \
+  --command -- python -m graph_sync.cli relane-jobs
+```
+
+```
+kubectl -n graph-rag run graph-rag-relane --restart=Never \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides="$ovr" \
+  --command -- python -m graph_sync.cli relane-jobs
+```
+
+Wait with `pod=graph-rag-relane`, `<tries>` = 60 (5 min). Read the printed counts
+(`kubectl -n graph-rag logs graph-rag-relane`) before doing anything else, then
+clean up:
+
+```
+kubectl -n graph-rag delete pod graph-rag-relane
+```
+
+**Then apply it**, as its own separately named pod (a fresh `$ovr`, `--apply`
+appended to the `command` array in both the override and the flags — keep the two
+in sync per the rule above):
+
+```
+ovr=$(cat <<'JSON'
+{
+  "apiVersion": "v1",
+  "spec": {
+    "automountServiceAccountToken": false,
+    "securityContext": {"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
+                        "seccompProfile": {"type": "RuntimeDefault"}},
+    "containers": [{
+      "name": "graph-rag-relane-apply",
+      "image": "ghcr.io/carev01/graph-rag:sha-abc1234",
+      "command": ["python", "-m", "graph_sync.cli", "relane-jobs", "--apply"],
+      "envFrom": [{"secretRef": {"name": "graph-rag-secret"}},
+                  {"configMapRef": {"name": "graph-rag-config"}}],
+      "resources": {"requests": {"cpu": "100m", "memory": "384Mi"},
+                    "limits": {"cpu": "1", "memory": "1Gi"}},
+      "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
+    }]
+  }
+}
+JSON
+)
+```
+
+```
+kubectl -n graph-rag run graph-rag-relane-apply --restart=Never \
+  --dry-run=client -o yaml \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides="$ovr" \
+  --command -- python -m graph_sync.cli relane-jobs --apply
+```
+
+```
+kubectl -n graph-rag run graph-rag-relane-apply --restart=Never \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides="$ovr" \
+  --command -- python -m graph_sync.cli relane-jobs --apply
+```
+
+Wait with `pod=graph-rag-relane-apply`, `<tries>` = 60 (5 min); it must end
+`phase=Succeeded` with the same counts as the report above. Clean up:
+
+```
+kubectl -n graph-rag delete pod graph-rag-relane-apply
+```
+
+**Structural bootstrap of each chosen source**, one at a time, as its own one-off
+pod (same pattern; `<SOURCE_ID>` is a placeholder for a real id from the catalog —
+never guess one). This is structural writes only, no LLM spend, exactly like
+`sync-once`:
+
+```
+ovr=$(cat <<'JSON'
+{
+  "apiVersion": "v1",
+  "spec": {
+    "automountServiceAccountToken": false,
+    "securityContext": {"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
+                        "seccompProfile": {"type": "RuntimeDefault"}},
+    "containers": [{
+      "name": "graph-rag-bootstrap-src",
+      "image": "ghcr.io/carev01/graph-rag:sha-abc1234",
+      "command": ["python", "-m", "graph_sync.cli", "bootstrap", "--source-id", "<SOURCE_ID>"],
+      "envFrom": [{"secretRef": {"name": "graph-rag-secret"}},
+                  {"configMapRef": {"name": "graph-rag-config"}}],
+      "resources": {"requests": {"cpu": "100m", "memory": "384Mi"},
+                    "limits": {"cpu": "1", "memory": "1Gi"}},
+      "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
+    }]
+  }
+}
+JSON
+)
+```
+
+```
+kubectl -n graph-rag run graph-rag-bootstrap-src --restart=Never \
+  --dry-run=client -o yaml \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides="$ovr" \
+  --command -- python -m graph_sync.cli bootstrap --source-id <SOURCE_ID>
+```
+
+```
+kubectl -n graph-rag run graph-rag-bootstrap-src --restart=Never \
+  --image=ghcr.io/carev01/graph-rag:sha-abc1234 \
+  --overrides="$ovr" \
+  --command -- python -m graph_sync.cli bootstrap --source-id <SOURCE_ID>
+```
+
+Wait with `pod=graph-rag-bootstrap-src`, `<tries>` = 120 (10 min per source). Then
+delete the pod, substitute the next `<SOURCE_ID>` into `$ovr`, and repeat for each
+remaining chosen source:
+
+```
+kubectl -n graph-rag delete pod graph-rag-bootstrap-src
+```
+
+**Scope the workers to those sources**, before any worker claims a job.
+
+**The comma MUST be escaped.** Helm's `--set`/`--set-string` value parser
+(`strvals`) splits on a bare `,` to separate multiple `key=value` assignments
+*inside the string itself* — quoting the whole flag for the shell is not
+enough, since the shell has already handed Helm one argument by the time
+`strvals` parses it. Unescaped, a two-id value is silently read as a second,
+unrelated assignment with no `=` in it, and Helm refuses the whole command
+outright (`Error: failed parsing --set-string data: key "<the second id>" has
+no value`) — it does not fall back to a truncated single-id scope, so this
+fails loud, but only if you run the real `helm upgrade` to find out. Verify
+locally instead, before ever touching the release.
+
+Escape the comma with a backslash, inside single quotes so the shell passes
+the backslash through unchanged. **Verify locally first** — `helm template` is
+a pure client-side render, it touches nothing in the cluster — that it
+produces exactly the intended comma-joined list before ever running the real
+`helm upgrade`:
+
+```
+helm template t deploy/helm/graph-rag --set image.tag=sha-abc1234 \
+  --set-string 'config.SEMANTIC_CLAIM_SOURCE_IDS=<SOURCE_ID_1>\,<SOURCE_ID_2>' \
+  | grep SEMANTIC_CLAIM_SOURCE_IDS
+# must print exactly:  SEMANTIC_CLAIM_SOURCE_IDS: "<SOURCE_ID_1>,<SOURCE_ID_2>"
+```
+
+Only once that local render matches exactly, run it for real:
+
+```
+helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
+  --set-string 'config.SEMANTIC_CLAIM_SOURCE_IDS=<SOURCE_ID_1>\,<SOURCE_ID_2>'
+```
+
+This changes the `ConfigMap`, which rolls any already-running `sync`/`worker`/
+`answer` pods via their `checksum/config` annotation
+(`deploy/helm/graph-rag/templates/{worker,sync,answer,cronjobs}.yaml`). A one-off
+pod created *after* this upgrade — the smoke pod in step 9, or a scaled-up worker in
+step 10 — reads the ConfigMap at creation time and so inherits the scope
+automatically; nothing else needs to change.
+
+**Confirm before proceeding — this gate is binding, not informational:**
+
+```
+kubectl -n graph-rag get configmap graph-rag-config \
+  -o jsonpath='{.data.SEMANTIC_CLAIM_SOURCE_IDS}'
+```
+
+The printed value must equal the intended comma-joined list **exactly**
+(`<SOURCE_ID_1>,<SOURCE_ID_2>`, no truncation, no missing id, no stray
+backslash). **If it does not match exactly, STOP: do not run the smoke pod in
+step 9 and do not scale any worker.** A silently-wrong or empty scope here
+means the very next worker claims unscoped, at full budget, exactly the
+failure mode this rehearsal exists to prevent.
+
+With the queue relaned, the sources bootstrapped, and the workers scoped and
+confirmed, the smoke ingest below claims only jobs belonging to those sources.
 
 ## 9. One-article smoke ingest (paid: one article)
 
@@ -639,13 +870,24 @@ one-off pod (step 5's pattern) instead; worker replicas stay at 0 throughout.
 **First prove there is something to claim**, or the smoke proves nothing. A worker
 claims `pending` jobs whose `next_attempt_at` has passed — the `incremental` lane always,
 the `bootstrap` lane only while today's `token_ledger` total is below
-`SEMANTIC_DAILY_TOKEN_BUDGET`:
+`SEMANTIC_DAILY_TOKEN_BUDGET`.
+
+**If the bootstrap-first rehearsal above set `SEMANTIC_CLAIM_SOURCE_IDS`, this query
+must be scope-aware too.** A worker scoped to `<SOURCE_ID_1>,<SOURCE_ID_2>` cannot claim
+a `claimable` row for any other source, so counting unscoped here can "prove" work exists
+that the scoped smoke then cannot actually claim — a pass that proves nothing, same
+failure shape as an empty queue. Add the identical `source_id = ANY(...)` filter, same ids
+as the rehearsal's `--set-string`, as its own array literal (a comma-separated Postgres
+array, unrelated to Helm's `strvals` and not subject to its escaping rule above); omit the
+filter (drop the `AND source_id = ANY(...)` clause) only if the workers are unscoped:
 
 ```
 kubectl -n graph-rag exec -i graph-rag-postgres-0 -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
 SELECT count(*) AS done_before FROM semantic_jobs WHERE status = 'done';
 SELECT lane, count(*) AS claimable FROM semantic_jobs
-  WHERE status = 'pending' AND next_attempt_at <= now() GROUP BY 1 ORDER BY 1;
+  WHERE status = 'pending' AND next_attempt_at <= now()
+  AND source_id = ANY('{<SOURCE_ID_1>,<SOURCE_ID_2>}')
+  GROUP BY 1 ORDER BY 1;
 SELECT coalesce((SELECT tokens FROM token_ledger WHERE day = current_date), 0) AS tokens_today;
 SQL
 ```
@@ -696,17 +938,27 @@ kubectl -n graph-rag run graph-rag-smoke --restart=Never \
 
 Wait with `pod=graph-rag-smoke`, `<tries>` = 240 (20 min; one article through the
 extraction pipeline can take several minutes). Then prove the ingest actually engaged —
-all three, not just a zero exit:
+all four (not just three, and not just a zero exit) if a scope is in effect, otherwise
+the first three:
 
 1. `phase=Succeeded`;
 2. the log contains a `semantic batch: jobs=1 …` line (`kubectl -n graph-rag logs
    graph-rag-smoke | grep 'semantic batch:'`). The worker logs it only when it claimed
    a job, so its absence means nothing was claimed; a `semantic job … failed` line means
    the article was claimed and failed;
-3. `SELECT count(*) FROM semantic_jobs WHERE status = 'done';` is `done_before + 1`.
+3. `SELECT count(*) FROM semantic_jobs WHERE status = 'done';` is `done_before + 1`;
+4. **if `SEMANTIC_CLAIM_SOURCE_IDS` was set above**, `kubectl -n graph-rag logs
+   graph-rag-smoke | grep 'semantic worker scope:'` must print exactly
+   `semantic worker scope: <n> source(s): <SOURCE_ID_1>, <SOURCE_ID_2>` (worker CLI
+   startup, `graph_sync.cli.worker`) — with the same ids and the same count `<n>` as the
+   ConfigMap confirmed above. **`semantic worker scope: all sources` here means the scope
+   never reached the pod (a stale ConfigMap, an unset env var, a rollout that did not
+   land) — STOP; this is CLAUDE.md's cost-awareness rule in the flesh: configured,
+   deployed and printed are not evidence a code path consults the value, only a log line
+   naming the actual value the running process holds is.**
 
-Any of the three missing: stop and investigate before step 10. Then clean up — the pod
-does not delete itself:
+Any of the applicable checks missing: stop and investigate before step 10. Then clean
+up — the pod does not delete itself:
 
 ```
 kubectl -n graph-rag delete pod graph-rag-smoke

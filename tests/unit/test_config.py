@@ -18,6 +18,26 @@ def test_settings_load_from_env(monkeypatch):
     assert s.poll_interval_seconds == 1800
 
 
+_SYNC_MIN = dict(
+    _env_file=None, docext_base_url="http://x", docext_read_key="k",
+    neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+    postgres_dsn="postgresql://x",
+)
+
+
+def test_semantic_claim_source_ids_default_is_unscoped():
+    from graph_sync.config import Settings
+    s = Settings(**_SYNC_MIN)
+    assert s.semantic_claim_source_ids == ""
+    assert s.semantic_claim_source_id_list == []
+
+
+def test_semantic_claim_source_id_list_parses_and_strips():
+    from graph_sync.config import Settings
+    s = Settings(**_SYNC_MIN, semantic_claim_source_ids=" s1, s2 ,,s3")
+    assert s.semantic_claim_source_id_list == ["s1", "s2", "s3"]
+
+
 _MIN = dict(docext_base_url="http://x", docext_read_key="k", neo4j_uri="bolt://x",
             neo4j_user="u", neo4j_password="p")
 

@@ -25,6 +25,7 @@ async def run_worker_once(
     concurrency: int = 1,
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
     cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
+    source_ids: list[str] | None = None,
 ) -> int:
     # Everything the ingest driver measures is per-article and was being DISCARDED
     # here: `ingest_article` returns dedup counters, the reference-time basis and
@@ -36,7 +37,10 @@ async def run_worker_once(
     basis_counts: Counter[str] = Counter()
     await store.reap_stale_jobs(lease, max_attempts)
     include_bootstrap = await store.today_token_total() < budget
-    jobs = await store.claim_semantic_jobs(batch, include_bootstrap)
+    # `source_ids` scopes this worker to a subset of sources (the k3s
+    # bootstrap-first rehearsal, `SEMANTIC_CLAIM_SOURCE_IDS`); `None`/empty is
+    # unscoped -- today's default behaviour.
+    jobs = await store.claim_semantic_jobs(batch, include_bootstrap, source_ids)
 
     async def _run_job(job) -> None:
         # The job's spend is read from a scope opened for THIS job, not as a
@@ -215,6 +219,7 @@ async def run_worker(
     lease: float, max_batches: int | None = None, concurrency: int = 1,
     cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
+    source_ids: list[str] | None = None,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
 
@@ -231,7 +236,8 @@ async def run_worker(
         n = await run_worker_once(
             store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
             backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
-            concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock)
+            concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock,
+            source_ids=source_ids)
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

@@ -161,6 +161,48 @@ async def test_stale_worker_cannot_complete_after_reap(state_store):
         assert await c.fetchval("SELECT status FROM semantic_jobs WHERE id=$1", j["id"]) == "done"
 
 
+async def test_scoped_claim_returns_only_the_scoped_source(state_store):
+    """The k3s bootstrap-first rehearsal scopes a worker's claim to a chosen
+    subset of sources (SEMANTIC_CLAIM_SOURCE_IDS -> claim_semantic_jobs'
+    source_ids)."""
+    await state_store.enqueue_semantic_job("scoped-a1", "upsert", "h", "incremental", "src-A")
+    await state_store.enqueue_semantic_job("scoped-b1", "upsert", "h", "incremental", "src-B")
+    scoped = await state_store.claim_semantic_jobs(10, True, ["src-A"])
+    assert [j["article_id"] for j in scoped] == ["scoped-a1"]
+    # drain the un-scoped one (src-B) so it doesn't leak into a later test
+    rest = await state_store.claim_semantic_jobs(10, True)
+    assert [j["article_id"] for j in rest] == ["scoped-b1"]
+
+
+async def test_unscoped_claim_returns_jobs_from_every_source(state_store):
+    await state_store.enqueue_semantic_job("unscoped-a1", "upsert", "h", "incremental", "src-A")
+    await state_store.enqueue_semantic_job("unscoped-b1", "upsert", "h", "incremental", "src-B")
+    unscoped = await state_store.claim_semantic_jobs(10, True)
+    assert {j["article_id"] for j in unscoped} == {"unscoped-a1", "unscoped-b1"}
+
+
+async def test_scoped_claim_still_gates_bootstrap_lane_on_budget(state_store):
+    """Scoping to a source must not bypass the daily-token-budget gate on the
+    bootstrap lane -- the two filters are independent (AND, not OR)."""
+    await state_store.enqueue_semantic_job("scoped-boot", "upsert", "h", "bootstrap", "src-A")
+    assert await state_store.claim_semantic_jobs(10, False, ["src-A"]) == []  # budget excludes it
+    claimed = await state_store.claim_semantic_jobs(10, True, ["src-A"])
+    assert [j["article_id"] for j in claimed] == ["scoped-boot"]
+
+
+async def test_scoped_claim_excludes_a_different_source_even_under_budget(state_store):
+    await state_store.enqueue_semantic_job("other-src-boot", "upsert", "h", "bootstrap", "src-B")
+    assert await state_store.claim_semantic_jobs(10, True, ["src-A"]) == []  # wrong source
+    drained = await state_store.claim_semantic_jobs(10, True)
+    assert [j["article_id"] for j in drained] == ["other-src-boot"]
+
+
+async def test_empty_scope_list_is_unscoped(state_store):
+    await state_store.enqueue_semantic_job("emptylist-a1", "upsert", "h", "incremental", "src-A")
+    claimed = await state_store.claim_semantic_jobs(10, True, [])
+    assert [j["article_id"] for j in claimed] == ["emptylist-a1"]
+
+
 # NOTE: this test DROPs and recreates the shared semantic_jobs table, so it must
 # run LAST in this module -- every other test above relies on the module-scoped
 # state_store fixture's table (and, in the reaper test's case, on leaked rows
@@ -177,8 +219,14 @@ async def test_migration_adds_columns_to_existing_table(state_store):
         await c.execute("INSERT INTO semantic_jobs (article_id, op) VALUES ('old', 'upsert')")
     await state_store.init_schema()                       # runs the ALTERs
     async with pool.acquire() as c:
-        row = await c.fetchrow("SELECT lane, next_attempt_at FROM semantic_jobs WHERE article_id='old'")
+        row = await c.fetchrow(
+            "SELECT lane, next_attempt_at, source_id FROM semantic_jobs WHERE article_id='old'")
     assert row["lane"] == "incremental" and row["next_attempt_at"] is not None
-    # round-trip still works post-migration
-    await state_store.enqueue_semantic_job("mig1", "upsert", "h", "bootstrap")
-    assert any(j["article_id"] == "mig1" for j in await state_store.claim_semantic_jobs(10, True))
+    assert row["source_id"] is None  # column added, pre-existing row left NULL for relane-jobs
+    # round-trip still works post-migration, including the new source_id column
+    await state_store.enqueue_semantic_job("mig1", "upsert", "h", "bootstrap", "src-mig")
+    [mig] = [j for j in await state_store.claim_semantic_jobs(10, True) if j["article_id"] == "mig1"]
+    assert mig["article_id"] == "mig1"
+    async with pool.acquire() as c:
+        assert await c.fetchval(
+            "SELECT source_id FROM semantic_jobs WHERE article_id='mig1'") == "src-mig"
