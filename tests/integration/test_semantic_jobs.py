@@ -312,7 +312,8 @@ async def test_defer_when_a_newer_pending_twin_exists_retires_the_old_job(state_
     """While the job was claimed, the article was enqueued again (a newer
     content hash). Putting the old job back to pending would violate the
     one-pending-per-article index; the twin already covers the article, so the
-    deferred job is retired as done, saying why."""
+    deferred job is DELETED -- not marked done, which state_crosscheck's sample
+    of done upserts would read as "extracted" and fail on (no episodes)."""
     pool = await state_store._get_pool()
     await pool.execute("DELETE FROM semantic_jobs")
     await state_store.enqueue_semantic_job("df-3", "upsert", "old", "bootstrap", "s1")
@@ -321,7 +322,6 @@ async def test_defer_when_a_newer_pending_twin_exists_retires_the_old_job(state_
 
     assert await state_store.defer_semantic_job(job["id"], job["claimed_at"], 30.0) is True
 
-    rows = await pool.fetch("SELECT id, status, content_hash, last_error FROM semantic_jobs "
+    rows = await pool.fetch("SELECT status, content_hash FROM semantic_jobs "
                             "WHERE article_id='df-3' ORDER BY id")
-    assert [(r["status"], r["content_hash"]) for r in rows] == [("done", "old"), ("pending", "new")]
-    assert "superseded" in rows[0]["last_error"]
+    assert [(r["status"], r["content_hash"]) for r in rows] == [("pending", "new")]

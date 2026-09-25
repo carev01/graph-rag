@@ -229,11 +229,11 @@ class StateStore:
 
         If the article was enqueued again while this job was claimed, a newer
         `pending` twin exists and `ux_semantic_jobs_pending` forbids a second
-        one; the twin covers the article, so this job is retired as `done`
-        with a note instead."""
+        one; the twin covers the article, so this job is DELETED. Not marked
+        `done`: `state_crosscheck` samples done upserts and expects episodes, so
+        a done-but-never-extracted row would read as a lost article."""
         retire = (
-            "UPDATE semantic_jobs SET status='done', updated_at=now(), "
-            "last_error='superseded by a newer pending job while deferred' "
+            "DELETE FROM semantic_jobs "
             "WHERE id=$1 AND claimed_at=$2 AND status='in_progress'")
         pool = await self._get_pool()
         async with pool.acquire() as conn, conn.transaction():
@@ -255,7 +255,7 @@ class StateStore:
                 except asyncpg.UniqueViolationError:
                     # The twin was enqueued between the check and the update.
                     result = await conn.execute(retire, job_id, claimed_at)
-        return result == "UPDATE 1"
+        return result in ("UPDATE 1", "DELETE 1")
 
     async def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> int:
         pool = await self._get_pool()

@@ -219,3 +219,20 @@ async def test_wait_mode_still_runs_a_cold_article_without_the_lock():
     n = await _run(store._jobs, cold_articles={"cold"}, log=log,
                    cold_lock=_lock_factory(log, busy=True), store=store, defer_seconds=None)
     assert "start-cold" in log and store.deferred == [] and n == 1
+
+
+async def test_a_defer_lost_to_another_claimer_is_neither_counted_nor_logged(caplog):
+    """defer_semantic_job returns False when the job was reaped and reclaimed in
+    between: this worker neither ran nor deferred it."""
+    class _LostStore(_Store):
+        async def defer_semantic_job(self, jid, claimed_at, delay):
+            return False
+
+    log: list[str] = []
+    store = _LostStore([_job(1, "cold")])
+    with caplog.at_level(logging.DEBUG, logger="graph_sync.semantic_worker"):
+        n = await _run(store._jobs, cold_articles={"cold"}, log=log,
+                       cold_lock=_lock_factory(log, busy=True), store=store,
+                       defer_seconds=30.0)
+    assert n == 0
+    assert not any("deferred cold article" in r.getMessage() for r in caplog.records)

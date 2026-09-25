@@ -126,6 +126,7 @@ async def run_worker_once(
     # the time the task runs.
     cold_ids: set[str] = set()
     deferred: list[int] = []
+    not_ours: list[int] = []
 
     async def _run_group(group) -> None:
         nonlocal escaped_early
@@ -143,11 +144,19 @@ async def run_worker_once(
                     waited_from = time.monotonic()
                     held = await stack.enter_async_context(cold_lock())
                     if defer_seconds is not None and not held:
-                        for job in group:
-                            if await store.defer_semantic_job(
-                                    job["id"], job["claimed_at"], defer_seconds):
-                                deferred.append(job["id"])
-                        _note_deferral(group[0]["article_id"], len(group))
+                        # A job whose defer returns False was reaped and
+                        # reclaimed meanwhile: not ours to count either way.
+                        ours = [job for job in group if await store.defer_semantic_job(
+                            job["id"], job["claimed_at"], defer_seconds)]
+                        lost = len(group) - len(ours)
+                        deferred.extend(job["id"] for job in ours)
+                        not_ours.extend(job["id"] for job in group if job not in ours)
+                        if ours:
+                            _note_deferral(group[0]["article_id"], len(ours))
+                        if lost:
+                            logger.warning("%d job(s) for article %s were reclaimed by "
+                                           "another worker before they could be deferred",
+                                           lost, group[0]["article_id"])
                         return
                     # The only direct evidence the cross-process barrier fired
                     # (CLAUDE.md, cost awareness); without it, engagement can
@@ -233,7 +242,7 @@ async def run_worker_once(
     # The batch summary below comes BEFORE the escaped exception propagates:
     # every group that ran has finished, and raising first would drop the
     # dedup/basis summary and the timing report for the whole batch.
-    processed = len(jobs) - len(deferred)
+    processed = len(jobs) - len(deferred) - len(not_ours)
     if processed:
         logger.info("semantic batch: jobs=%d deferred=%d reference_basis=%s dedup: %s",
                     processed, len(deferred), dict(basis_counts), batch_dedup.summary())
