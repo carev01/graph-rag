@@ -442,10 +442,14 @@ _STEP6_DELETE = "MATCH (l:Entity {uuid:$loser, group_id:$g}) DELETE l RETURN cou
 # s.summary)` keeps the survivor's summary unless the caller chose a loser's
 # (only when the survivor's is empty). The label promotion clause is appended
 # only when there is something to promote.
+# `merged_at` is an ISO-8601 STRING, not a Neo4j datetime: graphiti passes an
+# Entity's custom properties to its prompts as `attributes`, and its
+# `to_prompt_json` cannot serialise a DateTime -- a datetime here made every
+# later episode that met the survivor as a dedup candidate fail (2026-09-25).
 _STEP7_STAMP = (
     "MATCH (s:Entity {uuid:$survivor, group_id:$g, name:$name}) "
     "SET s.merged_from = coalesce(s.merged_from, []) + $merged_from, "
-    "    s.merged_at = datetime(), "
+    "    s.merged_at = toString(datetime()), "
     "    s.summary = coalesce($summary, s.summary) "
 )
 _STEP7_PROMOTE = (

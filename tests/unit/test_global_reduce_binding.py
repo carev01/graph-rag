@@ -96,7 +96,7 @@ async def _run(monkeypatch, maps: dict[str, tuple[list[str], list[str]]], texts,
     hits = [_hit(cid, f"Title {cid}", fids) for cid, (_, fids) in maps.items()]
 
     async def _shortlist(driver, embedder, q, *, level, k, group_id, rating_boost=0.1,
-                         settings=None, stats=None):
+                         settings=None, stats=None, scope=None):
         return hits
 
     async def _map(client, model, q, hit):

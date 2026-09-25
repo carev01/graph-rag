@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
+from answer_api.scope import Scope
 from answer_api.search import search_local
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content, answer_local,
@@ -62,9 +64,11 @@ _PRIMER_PROMPT = (
 
 
 async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
-                  max_followups, group_id, settings, stats: RerankStats | None = None):
+                  max_followups, group_id, settings, stats: RerankStats | None = None,
+                  scope: Scope | None = None):
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
-                                       group_id=group_id, settings=settings, stats=stats)
+                                       group_id=group_id, settings=settings, stats=stats,
+                                       scope=scope)
     if not hits:
         return None
     blocks = "\n".join(f'- {h.community_id} "{h.title}": {h.summary}' for h in hits)
@@ -98,10 +102,11 @@ async def _top_member_entity(driver, group_id, community_id) -> str | None:
         return rec["uuid"] if rec else None
 
 
-async def _run_followup(graphiti, driver, fu: FollowUp, *, k, group_id) -> list[dict]:
+async def _run_followup(graphiti, driver, fu: FollowUp, *, k, group_id,
+                        scope: Scope | None = None) -> list[dict]:
     center = (await _top_member_entity(driver, group_id, fu.community_id)
               if fu.community_id else None)
-    res = await search_local(graphiti, driver, q=fu.query, k=k,
+    res = await search_local(graphiti, driver, q=fu.query, k=k, scope=scope,
                              center_node_uuid=center, group_id=group_id)
     return res["results"]
 
@@ -138,7 +143,8 @@ _SYNTH_PROMPT = (
     "the facts support it. Cite every claim inline with its [N] marker. Do NOT use "
     "outside knowledge. Do NOT write any URL. If the facts do not answer the "
     "question, reply exactly: \"{refusal}\"\n\n"
-    "QUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
+    + ATTRIBUTION_RULES +
+    "\nQUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
 )
 
 
@@ -157,7 +163,8 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
                       facts) -> tuple[str, list[dict]]:
     facts = _dedup_facts(facts)
     marker_map = {i: f for i, f in enumerate(facts, 1)}
-    facts_block = "\n".join(f"[{i}] {f['fact']}" for i, f in marker_map.items())
+    facts_block = "\n".join(
+        fact_line(i, f["fact"], f.get("sources", [])) for i, f in marker_map.items())
     raw = await _complete_or_none(
         synth_client, synth_model,
         _SYNTH_PROMPT.format(refusal=_REFUSAL, q=q, draft=preliminary_answer or "(none)",
@@ -174,15 +181,16 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
 
 async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                        q, level, iterations, primer_k, max_followups, followup_k,
-                       group_id, settings) -> dict:
+                       group_id, settings, scope: Scope | None = None) -> dict:
     rounds = max(1, min(iterations, 2))
     stats = RerankStats()
     primed = await _primer(embedder, synth_client, synth_model, driver, q=q,
                            level=level, k=primer_k, max_followups=max_followups,
-                           group_id=group_id, settings=settings, stats=stats)
+                           group_id=group_id, settings=settings, stats=stats,
+                           scope=scope)
     if primed is None:
         res = await answer_local(graphiti, driver, synth_client, synth_model,
-                                 q=q, group_id=group_id)
+                                 q=q, group_id=group_id, scope=scope)
         res["degraded"] = "no-primer-communities"
         return res
     preliminary, followups, hits = primed
@@ -192,7 +200,7 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
     for fu in followups:
         try:
             facts.extend(await _run_followup(graphiti, driver, fu, k=followup_k,
-                                             group_id=group_id))
+                                             group_id=group_id, scope=scope))
         except Exception:
             logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
         executed.append(fu)
@@ -204,7 +212,7 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
         for fu in refined:
             try:
                 facts.extend(await _run_followup(graphiti, driver, fu, k=followup_k,
-                                                 group_id=group_id))
+                                                 group_id=group_id, scope=scope))
             except Exception:
                 logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
             executed.append(fu)
@@ -215,7 +223,7 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
     if not deduped:
         return {"query": q, "answer": _REFUSAL, "citations": [],
                 "follow_ups": follow_ups_meta, "communities_used": communities_used,
-                "degraded": stats.degraded}
+                "degraded": stats.degraded, "applies_to": []}
     answer, citations = await _synthesize(synth_client, synth_model, driver, q=q,
                                           preliminary_answer=preliminary, facts=deduped)
     # Guard against _with_disclaimer's own refusal check, which compares against
@@ -226,4 +234,4 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
         answer = _with_disclaimer(answer, stats.degraded)
     return {"query": q, "answer": answer, "citations": citations,
             "follow_ups": follow_ups_meta, "communities_used": communities_used,
-            "degraded": stats.degraded}
+            "degraded": stats.degraded, "applies_to": applies_to(citations)}

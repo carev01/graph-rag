@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 from dataclasses import dataclass, field
 import httpx
@@ -174,33 +175,103 @@ class SyncCore:
         except Exception:  # decoupled: TOC failures never block article sync
             log.exception("TOC refresh failed for source %s", source_id)
 
+    # Dropped-stream handling (CLIENT-USAGE-GUIDE §6; BACKLOG 49). Class attributes
+    # rather than settings so tests can tighten them per instance.
+    BOOTSTRAP_MAX_STALLS = 5          # consecutive dropped attempts with no new record
+    BOOTSTRAP_BACKOFF_SECONDS = 5.0   # x attempt number, capped below
+    BOOTSTRAP_BACKOFF_CAP_SECONDS = 60.0
+    BOOTSTRAP_PROGRESS_EVERY = 200    # applied records between in-stream progress saves
+    _sleep = staticmethod(asyncio.sleep)
+
     async def bootstrap(self, *, source_id: str | None = None,
                         vendor_id: str | None = None) -> BootstrapResult:
+        """Stream a shard's bootstrap, resuming a dropped stream from the highest
+        applied id with the ORIGINAL watermark (CLIENT-USAGE-GUIDE §6).
+
+        A dropped stream is one that ends without the terminal cursor line --
+        cleanly truncated, cut by a transport error (a ReadTimeout when
+        DocExtractor goes silent mid-stream; BACKLOG 49), or refused with a 5xx
+        or 429. Any other 4xx fails immediately. Either way it resumes
+        with `bootstrap_after=<last applied id>`; only BOOTSTRAP_MAX_STALLS
+        consecutive attempts that apply nothing new give up, re-raising.
+
+        `last_id` means "every id up to here is applied" because the stream is
+        consumed in order and each record is applied before it is counted
+        (CLAUDE.md, sync correctness). Progress is saved every
+        BOOTSTRAP_PROGRESS_EVERY records as well as at the end of each attempt, so
+        a killed process loses at most that many; the next run of an
+        `in_progress` shard resumes from it. A `complete` shard is replayed from
+        the start: re-running one is a deliberate repair (BACKLOG 50).
+        """
         res = BootstrapResult()
+        shard = source_id or vendor_id or "global"
         bootstrap_after: str | None = None
         watermark: str | None = None
-        shard = source_id or vendor_id or "global"
+        prior = await self._store.get_bootstrap(shard)
+        if prior and prior.get("status") == "in_progress" and prior.get("last_id"):
+            bootstrap_after, watermark = prior["last_id"], prior.get("watermark")
+            log.info("bootstrap %s: resuming in-progress shard after %s", shard, bootstrap_after)
+            if source_id:
+                # Articles applied before the crash are not touched by this run;
+                # keep the TOC pass for their source (final review).
+                res.sources.add(source_id)
+        stalls = 0
         while True:
             params = build_delta_params(source_id=source_id, vendor_id=vendor_id,
                                         bootstrap_after=bootstrap_after)
             stream = DeltaStream(self._client, params)
             last_id: str | None = None
-            async for rec in stream.records():
-                touched = await self._apply_record(rec, res)
-                if touched:
-                    res.sources.add(touched)
-                if isinstance(rec, ContentRecord):
-                    last_id = rec.id
+            since_save = 0
+            error: httpx.HTTPError | None = None
+            try:
+                async for rec in stream.records():
+                    if watermark is None:
+                        # Keep the ORIGINAL first-attempt watermark across resumes;
+                        # a resumed stream's own bootstrap_start is not adopted.
+                        watermark = stream.bootstrap_start_since
+                    touched = await self._apply_record(rec, res)
+                    if touched:
+                        res.sources.add(touched)
+                    if isinstance(rec, ContentRecord):
+                        last_id = rec.id
+                        since_save += 1
+                        if since_save >= self.BOOTSTRAP_PROGRESS_EVERY:
+                            await self._store.upsert_bootstrap(
+                                shard, watermark, last_id, "in_progress")
+                            since_save = 0
+            except httpx.TransportError as exc:
+                error = exc
+            except httpx.HTTPStatusError as exc:
+                # raise_for_status() is not a TransportError. A 5xx or 429 from the
+                # ingress is transient -- a dropped stream; any other 4xx (bad key,
+                # unknown id) will not fix itself and fails now.
+                if exc.response.status_code < 500 and exc.response.status_code != 429:
+                    raise
+                error = exc
             if watermark is None:
-                # Keep the ORIGINAL first-attempt watermark across resumes; a
-                # truncated stream's own bootstrap_start is not recomputed.
                 watermark = stream.bootstrap_start_since
+            resume_from = last_id or bootstrap_after
             await self._store.upsert_bootstrap(
-                shard, watermark, last_id,
+                shard, watermark, resume_from,
                 "complete" if stream.terminated_clean else "in_progress")
             if stream.terminated_clean:
                 break
-            bootstrap_after = last_id  # resume from where the stream dropped
+            stalls = 0 if last_id else stalls + 1
+            if stalls >= self.BOOTSTRAP_MAX_STALLS:
+                log.error("bootstrap %s: %d consecutive dropped attempts with no progress "
+                          "after %s; giving up (progress saved -- rerun resumes)",
+                          shard, stalls, resume_from)
+                if error is not None:
+                    raise error
+                raise RuntimeError(f"bootstrap {shard}: stream keeps ending without its "
+                                   f"terminal cursor line after {resume_from}")
+            delay = min(self.BOOTSTRAP_BACKOFF_SECONDS * max(stalls, 1),
+                        self.BOOTSTRAP_BACKOFF_CAP_SECONDS)
+            log.warning("bootstrap %s: stream dropped (%s) after %s; resuming in %.0fs",
+                        shard, type(error).__name__ if error else "no terminal line",
+                        resume_from, delay)
+            await self._sleep(delay)
+            bootstrap_after = resume_from  # resume from where the stream dropped
         for sid in res.sources:
             await self.refresh_toc(sid)
         marks = await self._store.all_bootstrap_watermarks()

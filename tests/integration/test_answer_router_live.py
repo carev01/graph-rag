@@ -10,6 +10,7 @@ async def test_answer_router_live(live_extract_driver):
     from answer_api.synthesize import _synthesis_client_and_model
     from answer_api.global_search import _map_client_and_model
     from answer_api.router import answer_router, _cheap_classify_client
+    from answer_api.scope import Scope
     s = get_extract_settings()
     graphiti = build_graphiti(s)
     emb = build_embedder(s)
@@ -21,7 +22,7 @@ async def test_answer_router_live(live_extract_driver):
         env = await answer_router(
             graphiti, live_extract_driver, emb, sc, sm, mc, mm, cc, cmodel,
             q="How has AWS Backup vault lock changed over time?",
-            mode_override=None, vendor=None, settings=s)
+            mode_override=None, scope=Scope(), settings=s)
         assert env["mode"] == "timeline"
         assert env["routing"]["via"] == "heuristic"
         assert "http" not in env["answer"]                    # timeline render authored no URL

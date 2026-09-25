@@ -45,7 +45,7 @@ E2E_ARTICLE_ID = "compat-check-article-e2e"
 ARTICLE_URL = "https://example.invalid/compat-check/vault-lock"
 E2E_ARTICLE_URL = "https://example.invalid/compat-check/e2e"
 HEADING_PATH = "Retention"
-VENDOR_NAME = "AWS"          # _vendor_episode_uuids(driver, "AWS") must find this
+VENDOR_NAME = "AWS"          # scope_episode_uuids(driver, Scope(("AWS",))) must find this
 PRODUCT_NAME = "AWS Backup"
 
 # An episode deliberately NEVER linked to an :Article, plus a fact supported only by
@@ -566,9 +566,9 @@ async def _resolve_citations(ctx: CheckContext) -> str:
 
 
 async def _vendor_scope(ctx: CheckContext) -> str:
-    from answer_api.search import _vendor_episode_uuids
+    from answer_api.scope import Scope, scope_episode_uuids
 
-    uuids = await _vendor_episode_uuids(ctx.driver, VENDOR_NAME)
+    uuids = await scope_episode_uuids(ctx.driver, Scope((VENDOR_NAME,), (), "explicit"))
     if EP_UUID not in uuids:
         raise RuntimeError(f"vendor scope for {VENDOR_NAME!r} did not find {EP_UUID}; "
                            f"got {sorted(uuids)}")

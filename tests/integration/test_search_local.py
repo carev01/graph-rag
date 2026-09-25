@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from answer_api.scope import Scope
+
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 GROUP_ID = "backup-docs"
@@ -75,18 +77,21 @@ async def test_search_local_vendor_scope(extract_driver):
 
     async with extract_driver.session() as s:
         await s.run(
-            "CREATE (:Vendor {name:'AWS'})-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)"
+            "CREATE (:Vendor {id:'v-aws', name:'AWS'})-[:HAS_PRODUCT]->"
+            "(:Product {id:'p-aws'})-[:HAS_SOURCE]->(:Source)"
             "-[:HAS_ARTICLE]->(:Article {id:'art_vendor'})-[:HAS_EPISODE]->(:Episodic {uuid:'ep_vendor'})")
         await s.run(
             "CREATE (x:Entity)-[:RELATES_TO {group_id:$g, uuid:'f_vendor', episodes:['ep_vendor']}]->(y:Entity)",
             g=GROUP_ID)
     g = _StubGraphiti([_Edge("f_vendor", "vendor scoped fact", ["ep_vendor"])])
 
-    out_aws = await search_local(g, extract_driver, q="q", k=10, group_id=GROUP_ID, vendor="AWS")
+    out_aws = await search_local(g, extract_driver, q="q", k=10, group_id=GROUP_ID,
+                                 scope=Scope(("AWS",), (), "explicit"))
     facts_aws = {r["fact_uuid"] for r in out_aws["results"]}
     assert "f_vendor" in facts_aws
 
-    out_ms = await search_local(g, extract_driver, q="q", k=10, group_id=GROUP_ID, vendor="Microsoft")
+    out_ms = await search_local(g, extract_driver, q="q", k=10, group_id=GROUP_ID,
+                                scope=Scope(("Microsoft",), (), "explicit"))
     facts_ms = {r["fact_uuid"] for r in out_ms["results"]}
     assert "f_vendor" not in facts_ms
 

@@ -46,6 +46,9 @@ class _FakeStore:
         self.set_cursor_calls.append(c)
         self._cursor = c
 
+    async def get_bootstrap(self, shard):
+        return None  # no prior progress: a fresh bootstrap
+
     async def upsert_bootstrap(self, *a) -> None:
         pass
 

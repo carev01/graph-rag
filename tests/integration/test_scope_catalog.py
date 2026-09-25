@@ -1,0 +1,56 @@
+"""ScopeResolver.load must read only the STRUCTURAL Vendor/Product catalog --
+graphiti-extracted :Entity nodes carry the same :Vendor/:Product labels but have
+no `id` and no HAS_PRODUCT edge to a structural node, and must never be detected
+or scoped."""
+import pytest
+from neo4j import AsyncGraphDatabase
+
+from answer_api.scope import Scope, ScopeResolver, scope_episode_uuids
+
+pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+
+async def test_load_reads_only_structural_catalog_and_scopes_episodes(extract_neo4j):
+    uri, user, password = extract_neo4j
+    driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    try:
+        await driver.execute_query("MATCH (n) DETACH DELETE n")
+        await driver.execute_query("""
+            CREATE (:Vendor {id:'v1', name:'Veeam'})
+                   -[:HAS_PRODUCT]->(:Product {id:'p1', name:'Veeam ONE'})
+                   -[:HAS_SOURCE]->(:Source {id:'s1'})
+                   -[:HAS_ARTICLE]->(:Article {id:'a1'})
+                   -[:HAS_EPISODE]->(:Episodic {uuid:'e1'})
+            CREATE (:Entity:Vendor {uuid:'x', name:'Fake Vendor'})
+            CREATE (:Entity:Product {uuid:'y', name:'Cohesity Copilot'})
+        """)
+
+        resolver = await ScopeResolver.load(driver)
+
+        detected = resolver.detect("How do I configure Veeam ONE?")
+        assert detected.products == ("Veeam ONE",)
+        assert resolver.detect("Fake Vendor").is_empty()
+        assert resolver.detect("Cohesity Copilot").is_empty()
+
+        assert await scope_episode_uuids(driver, Scope(("Veeam",), (), "x")) == {"e1"}
+        assert await scope_episode_uuids(driver, Scope((), ("Veeam ONE",), "x")) == {"e1"}
+
+        # Case-insensitive (R3): a lower/mixed-cased vendor/product name (as a
+        # query param like ?vendor=veeam would arrive) must still match the
+        # canonically-cased structural name.
+        assert await scope_episode_uuids(driver, Scope(("veeam",), (), "x")) == {"e1"}
+        assert await scope_episode_uuids(driver, Scope((), ("VEEAM one",), "x")) == {"e1"}
+
+        # Candidate-bounded (final review): only the given episodes are checked,
+        # so the result never exceeds the candidates -- the request path passes
+        # the retrieved edges' episodes, not "every episode the vendor has".
+        await driver.execute_query(
+            "MATCH (a:Article {id:'a1'}) CREATE (a)-[:HAS_EPISODE]->(:Episodic {uuid:'e2'})")
+        await driver.execute_query("CREATE (:Episodic {uuid:'orphan'})")
+        v = Scope(("Veeam",), (), "x")
+        assert await scope_episode_uuids(driver, v, candidates=["e2", "orphan", "nope"]) == {"e2"}
+        assert await scope_episode_uuids(driver, v, candidates=[]) == set()
+        assert await scope_episode_uuids(driver, v) == {"e1", "e2"}   # no list: whole scope
+    finally:
+        await driver.execute_query("MATCH (n) DETACH DELETE n")
+        await driver.close()

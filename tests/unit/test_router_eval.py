@@ -1,5 +1,6 @@
 from answer_api.router_eval import (
-    aggregate, bag_share, markers_per_sentence, _parse_judge_score, routing_hit,
+    aggregate, bag_share, markers_per_sentence, _parse_attribution, _parse_judge_score,
+    routing_hit,
 )
 
 
@@ -127,6 +128,35 @@ def test_aggregate_core_metrics():
     assert s["comparative"] is None                 # no comparative blocks
 
 
+# --- attribution check -------------------------------------------------------
+
+def test_parse_attribution():
+    assert _parse_attribution("2") == 2
+    assert _parse_attribution("0") == 0
+    assert _parse_attribution("none") is None
+    assert _parse_attribution("") is None
+    assert _parse_attribution(None) is None
+    assert _parse_attribution("Count: 3 claims") == 3
+
+
+def test_aggregate_sums_misattributed_over_scored_answers_and_counts_unscored():
+    pq = [
+        {"question": "a", "intent": "local", "chosen": "local",
+         "routing_hit": True, "grounding_hit": True, "faithfulness": 5,
+         "misattributed": 0},
+        {"question": "b", "intent": "local", "chosen": "local",
+         "routing_hit": True, "grounding_hit": True, "faithfulness": 4,
+         "misattributed": 2},
+        {"question": "c", "intent": "global", "chosen": "global",
+         "routing_hit": True, "grounding_hit": None, "faithfulness": 3,
+         "misattributed": None},
+    ]
+    s = aggregate(pq)
+    assert s["misattributed_total"] == 2                # sum([0, 2]), None excluded
+    assert s["misattributed_answers"] == 1               # only 'b' is > 0
+    assert s["misattributed_unscored"] == 1              # only 'c' is None
+
+
 def test_aggregate_comparative_drift_wins():
     def broad(qid, comp):
         return {"question": qid, "intent": "drift", "chosen": "drift",
@@ -142,3 +172,33 @@ def test_aggregate_comparative_drift_wins():
         "global": {"grounding_hit": None, "faithfulness": 5},
         "drift": {"grounding_hit": None, "faithfulness": 3}})]
     assert aggregate(lose)["drift_wins"] is False
+
+
+def _q(**kw):
+    base = {"intent": "global", "chosen": "global", "routing_hit": True, "grounding_hit": True,
+            "faithfulness": 5, "failed": False}
+    base.update(kw)
+    return base
+
+
+def test_grounding_is_split_into_scoped_and_cross_vendor():
+    """The golden set's expected articles are AWS/Azure only; once other vendors
+    are ingested, an UNSCOPED cross-vendor question legitimately cites them. The
+    scoped figure is the acceptance measure; cross-vendor is informational."""
+    from answer_api.router_eval import aggregate
+    s = aggregate([_q(scoped=True, grounding_hit=True), _q(scoped=True, grounding_hit=False),
+                   _q(scoped=False, grounding_hit=False), _q(grounding_hit=True)])  # no key
+    assert s["grounding_scoped"] == 0.5 and s["grounding_scoped_n"] == 2
+    assert s["grounding_cross_vendor"] == 0.0 and s["grounding_cross_vendor_n"] == 1
+
+
+def test_classifier_routing_counts_the_mode_chosen_before_a_fallback():
+    """A global question the classifier sent to global, answered by local after
+    the global->local fallback, is a correct routing decision (answer-path
+    routing still reports it as a miss)."""
+    from answer_api.router_eval import aggregate
+    s = aggregate([_q(chosen="local", routing_hit=False, classifier_hit=True),
+                   _q(chosen="global", routing_hit=True, classifier_hit=True),
+                   _q(chosen="local", routing_hit=False)])   # old record: falls back to routing_hit
+    assert s["routing_accuracy"] == 1 / 3
+    assert s["classifier_routing_accuracy"] == 2 / 3
