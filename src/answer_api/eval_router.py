@@ -279,8 +279,12 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             # mass sits in those bags. Half the global-mode answers carried a
             # >=8-marker sentence and all of them scored 4-5.
             mps = markers_per_sentence(env["answer"])
+            scope_d = env.get("scope") or {}
+            classifier_mode = env["routing"].get("fallback_from") or chosen
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
+                         "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),
+                         "scoped": bool(scope_d.get("vendors") or scope_d.get("products")),
                          "grounding_hit": ghit, "faithfulness": faith,
                          "cited": len(env["citations"]),
                          "ranges": len(_range_markers(env["answer"])),
@@ -348,9 +352,15 @@ def format_report(summary: dict) -> str:
     faith_mean_str = f"{faith_mean:.2f}" if faith_mean is not None else "N/A"
     lines = ["# /answer Router Golden-Set Eval\n",
              f"Questions: {summary['n']} (failed: {summary['questions_failed']})\n",
-             f"**Routing accuracy: {summary['routing_accuracy']:.2f}**",
+             f"**Routing accuracy: {summary['routing_accuracy']:.2f}** (answer path); "
+             f"classifier: {summary.get('classifier_routing_accuracy', 0.0):.2f}",
              f"by intent: {summary['routing_by_intent']}",
              f"Grounding precision: {summary['grounding_precision']}",
+             f"**Grounding, scoped questions: {summary.get('grounding_scoped')} "
+             f"(n={summary.get('grounding_scoped_n')})** | cross-vendor, informational "
+             f"(golden answers predate the Tier 1 vendors): "
+             f"{summary.get('grounding_cross_vendor')} "
+             f"(n={summary.get('grounding_cross_vendor_n')})",
              f"by mode: {summary['grounding_by_mode']}",
              f"Faithfulness mean: {faith_mean_str} "
              f"(unscored: {summary['faithfulness_unscored']}/{summary['n']})",

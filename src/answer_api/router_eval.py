@@ -149,6 +149,23 @@ def aggregate(per_question: list[dict]) -> dict:
     misattributed_total = sum(misattributed_scored)
     misattributed_answers = sum(1 for x in misattributed_scored if x > 0)
 
+    # Grounding split by scope (2026-09-25 re-baseline): the golden set expects
+    # AWS/Azure articles only, so once other vendors are ingested an UNSCOPED
+    # cross-vendor question legitimately cites them and its grounding stops
+    # measuring retrieval quality. Scoped questions stay a valid measure.
+    # Records without the key (older runs) are in neither bucket.
+    scoped_g = [r for r in grounded if r.get("scoped") is True]
+    cross_g = [r for r in grounded if r.get("scoped") is False]
+
+    def _precision(rows: list[dict]) -> float | None:
+        return (sum(1 for r in rows if r["grounding_hit"]) / len(rows)) if rows else None
+
+    # Classifier routing: the mode the classifier picked, before any
+    # global->local / local->drift fallback. Answer-path routing
+    # (`routing_accuracy`) counts a fallback as a miss even when the
+    # classification was right. Older records fall back to `routing_hit`.
+    classifier_hits = [bool(r.get("classifier_hit", r["routing_hit"])) for r in ran]
+
     comp_rows = [r for r in per_question if "comparative" in r]
     comparative: dict | None = None
     drift_wins: bool | None = None
@@ -178,6 +195,12 @@ def aggregate(per_question: list[dict]) -> dict:
         "questions_failed": n - len(ran),
         "routing_accuracy": (sum(1 for r in ran if r["routing_hit"]) / len(ran)) if ran else 0.0,
         "routing_by_intent": {k: sum(v) / len(v) for k, v in by_intent.items()},
+        "classifier_routing_accuracy": (sum(classifier_hits) / len(classifier_hits)
+                                        if classifier_hits else 0.0),
+        "grounding_scoped": _precision(scoped_g),
+        "grounding_scoped_n": len(scoped_g),
+        "grounding_cross_vendor": _precision(cross_g),
+        "grounding_cross_vendor_n": len(cross_g),
         "grounding_precision": (sum(1 for r in grounded if r["grounding_hit"]) / len(grounded)
                                 if grounded else None),
         "grounding_by_mode": {k: sum(v) / len(v) for k, v in ground_by_mode.items()},
