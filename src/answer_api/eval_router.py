@@ -45,11 +45,23 @@ _JUDGE_PROMPT = (
     "integer.\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
 
+# Calibrated on scripts/calibrate_attribution_judge.py (known-count probes). The
+# first cut ("attributes something to a vendor or product not among the labels")
+# counted every component, workload or tool a correctly labelled fact names --
+# Backup center, Azure Files, PowerShell, MABS -- as a misattribution: 6 on a
+# deterministic Azure Backup timeline render. A misattribution is a claim moved
+# to a DIFFERENT vendor/product line than its fact's label.
 _ATTRIBUTION_PROMPT = (
-    "Count the claims in the ANSWER that attribute something to a vendor or product "
-    "that is NOT among the (Vendor · Product) labels of the facts that claim cites. "
-    "Reply with ONLY the integer (0 if none).\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\n"
-    "CITED FACTS:\n{facts}"
+    "Each cited fact is labelled (Vendor · Product) with the vendor and product whose "
+    "documentation states it. Count the claims in the ANSWER that credit a vendor or "
+    "product with something its cited fact states for a DIFFERENT vendor or product -- "
+    "e.g. a fact labelled (AWS · AWS Backup) presented as true of Azure Backup, or "
+    "presented as true of both. Naming components, features, workloads, tools, services "
+    "or platforms that the cited fact itself mentions (a console, a storage service, a "
+    "database, a CLI) is NOT a misattribution. Check every sentence against the labels "
+    "of the markers it cites and count each misattributed claim separately. Reply with "
+    "ONLY the integer (0 if none)."
+    "\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
 
 
