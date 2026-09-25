@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from answer_api import drift as drift_mod
@@ -13,7 +14,7 @@ from answer_api import router as router_mod
 from answer_api import search as search_mod
 from answer_api import timeline as timeline_mod
 from answer_api.router import Mode
-from answer_api.scope import Scope
+from answer_api.scope import Scope, ScopeResolver, UnknownScopeName
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graph_extract.vector_search import ensure_vector_indexes
@@ -48,6 +49,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         driver = await _build_driver(settings)
     except Exception:
         await graphiti.close()
+        raise
+    # Same guard: the ScopeResolver is loaded from the structural layer over
+    # the just-built driver, so a failure here closes both already-built
+    # resources before re-raising.
+    try:
+        scope_resolver = await ScopeResolver.load(driver)
+    except Exception:
+        await graphiti.close()
+        await driver.close()
         raise
     # Verify (and on a fresh database create) the tuned vector indexes before
     # serving: a mismatch refuses to start rather than serving full scans.
@@ -95,6 +105,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.graphiti = graphiti
     app.state.driver = driver
+    app.state.scope_resolver = scope_resolver
+    app.state.scope_loaded_at = time.monotonic()
     app.state.synth_client = synth_client
     app.state.synth_model = synth_model
     app.state.embedder = embedder
@@ -121,6 +133,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.exception("error closing %s during shutdown", name)
 
 
+async def _resolve_scope(app: FastAPI, q: str, vendor: list[str] | None,
+                         product: list[str] | None, scope_mode: str) -> Scope:
+    """Resolve once, at the route boundary, then pass the same Scope to every
+    mode. The resolver reloads lazily on use when older than
+    `settings.scope_reload_seconds` (plan ruling 4) rather than on a timer, so
+    an idle service never reloads and a busy one reloads at most once per TTL.
+    """
+    settings = app.state.settings
+    now = time.monotonic()
+    if now - app.state.scope_loaded_at > settings.scope_reload_seconds:
+        app.state.scope_resolver = await ScopeResolver.load(app.state.driver)
+        app.state.scope_loaded_at = now
+    try:
+        return app.state.scope_resolver.resolve(
+            q, vendors=vendor, products=product, disabled=(scope_mode == "none"))
+    except UnknownScopeName as e:
+        raise HTTPException(422, detail={"unknown": e.names}) from e
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="answer-api", lifespan=_lifespan)
 
@@ -130,29 +161,36 @@ def create_app() -> FastAPI:
 
     @app.get("/search/local")
     async def search_local(
-        q: str, k: int = Query(10, ge=1), vendor: str | None = None,
+        q: str, k: int = Query(10, ge=1),
+        vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        scope: Literal["auto", "none"] = "auto",
         include_invalid: bool = False
     ) -> dict[str, Any]:
-        scope = Scope((vendor,), (), "explicit") if vendor else None
-        return await search_mod.search_local(
+        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        result = await search_mod.search_local(
             app.state.graphiti,
             app.state.driver,
             q=q,
             k=k,
-            scope=scope,
+            scope=resolved,
             include_invalid=include_invalid,
             group_id=app.state.settings.group_id,
         )
+        result["scope"] = resolved.as_dict()
+        return result
 
     @app.get("/answer")
     async def answer(
-        q: str, mode: Mode | None = None, vendor: str | None = None
+        q: str, mode: Mode | None = None,
+        vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
         st = app.state
+        resolved = await _resolve_scope(app, q, vendor, product, scope)
         return await router_mod.answer_router(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             st.map_client, st.map_model, st.cheap_client, st.cheap_model,
-            q=q, mode_override=mode, vendor=vendor, settings=st.settings)
+            q=q, mode_override=mode, scope=resolved, settings=st.settings)
 
     @app.get(
         "/search/global",
@@ -162,16 +200,21 @@ def create_app() -> FastAPI:
         "reach the map step, not `k`.",
     )
     async def search_global(
-        q: str, level: int | None = Query(None, ge=0), k: int | None = Query(None, ge=1)
+        q: str, level: int | None = Query(None, ge=0), k: int | None = Query(None, ge=1),
+        vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
         st = app.state
-        return await global_mod.global_search(
+        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        result = await global_mod.global_search(
             st.driver, st.embedder, st.map_client, st.map_model,
             st.synth_client, st.synth_model,
             q=q, level=st.settings.global_default_level if level is None else level,
             k=st.settings.global_shortlist_k if k is None else k,
             group_id=st.settings.group_id,
-            settings=st.settings)
+            settings=st.settings, scope=resolved)
+        result["scope"] = resolved.as_dict()
+        return result
 
     @app.get(
         "/search/drift",
@@ -182,31 +225,41 @@ def create_app() -> FastAPI:
     )
     async def search_drift(
         q: str, level: int | None = Query(None, ge=0),
-        iterations: int | None = Query(None, ge=1, le=2)
+        iterations: int | None = Query(None, ge=1, le=2),
+        vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
         st = app.state
         s = st.settings
-        return await drift_mod.drift_search(
+        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        result = await drift_mod.drift_search(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             q=q,
             level=s.drift_primer_level if level is None else level,
             iterations=s.drift_iterations if iterations is None else iterations,
             primer_k=s.drift_primer_k, max_followups=s.drift_max_followups,
-            followup_k=s.drift_followup_k, group_id=s.group_id, settings=s)
+            followup_k=s.drift_followup_k, group_id=s.group_id, settings=s,
+            scope=resolved)
+        result["scope"] = resolved.as_dict()
+        return result
 
     @app.get("/timeline")
     async def timeline(
-        q: str, limit: int = Query(30, ge=1), vendor: str | None = None
+        q: str, limit: int = Query(30, ge=1),
+        vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
-        scope = Scope((vendor,), (), "explicit") if vendor else None
-        return await timeline_mod.timeline_local(
+        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        result = await timeline_mod.timeline_local(
             app.state.graphiti,
             app.state.driver,
             q=q,
             limit=limit,
-            scope=scope,
+            scope=resolved,
             group_id=app.state.settings.group_id,
         )
+        result["scope"] = resolved.as_dict()
+        return result
 
     return app
 

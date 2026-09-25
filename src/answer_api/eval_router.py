@@ -25,6 +25,7 @@ from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
     BAG_MARKERS, _parse_judge_score, aggregate, bag_share, markers_per_sentence, routing_hit,
 )
+from answer_api.scope import ScopeResolver
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -147,11 +148,12 @@ async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
         return [rec["fact"] async for rec in r]
 
 
-async def _score_one(clients, q, mode_override, settings):
+async def _score_one(clients, q, mode_override, settings, resolver):
     graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
+    scope = resolver.resolve(q["question"])
     env = await router_mod.answer_router(
         graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel,
-        q=q["question"], mode_override=mode_override, vendor=None, settings=settings)
+        q=q["question"], mode_override=mode_override, scope=scope, settings=settings)
     ghit = (precision_at_k(env["citations"], q["expected_article_ids"])
             if q["expected_article_ids"] else None)
     facts = await _cited_fact_texts(driver, settings.group_id,
@@ -160,7 +162,7 @@ async def _score_one(clients, q, mode_override, settings):
     return env, ghit, faith, facts
 
 
-async def run_eval(clients, questions, settings) -> dict:
+async def run_eval(clients, questions, settings, resolver) -> dict:
     per_question: list[dict] = []
     # Every scored column this harness has gained -- `cited`, `ranges`, `mps`,
     # `bag_share` -- cost a full paid eval run to observe, because the harness
@@ -172,7 +174,7 @@ async def run_eval(clients, questions, settings) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts = await _score_one(clients, q, None, settings)
+            env, ghit, faith, facts = await _score_one(clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
             # conditioned on (BACKLOG 0d): the judge sees only the cited facts,
@@ -201,7 +203,7 @@ async def run_eval(clients, questions, settings) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts = await _score_one(clients, q, m, settings)
+                    _e, _g, _f, _facts = await _score_one(clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
                                 "chosen": f"comparative:{m}", "answer": _e["answer"],
@@ -300,8 +302,9 @@ async def main() -> None:
     mc, mm = _map_client_and_model(settings)
     cc, cmodel = _cheap_classify_client(settings)
     clients = (graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm)
+    resolver = await ScopeResolver.load(driver)
     try:
-        summary = await run_eval(clients, questions, settings)
+        summary = await run_eval(clients, questions, settings, resolver)
         report = format_report(summary)
         docs = Path(__file__).resolve().parents[2] / "docs" / "superpowers"
         (docs / "router-eval-report.md").write_text(report)
