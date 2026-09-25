@@ -107,6 +107,34 @@ async def test_global_to_local_fallback_reuses_same_scope(monkeypatch):
     assert _captured["local"] == _SCOPE
 
 
+async def test_global_that_cites_nothing_falls_back_to_scoped_local(monkeypatch):
+    """Communities fed the reduce step but it refused (e.g. a scoped comparison
+    whose second vendor's community failed to map): the answer grounds nothing,
+    so the router must try local with the SAME scope rather than serve the
+    refusal (2026-09-25 acceptance run: 2 of 5 scoped comparisons)."""
+    async def _global_refused(*a, **k):
+        _captured["global"] = k.get("scope")
+        return {"query": k["q"], "answer": "refusal", "citations": [],
+                "communities_used": [{"community_id": "c1", "title": "t", "relevance": None}],
+                "applies_to": []}
+    monkeypatch.setattr(global_mod, "global_search", _global_refused)
+    env = await _route("global")
+    assert env["mode"] == "local"
+    assert env["routing"]["fallback_from"] == "global"
+    assert _captured["local"] == _SCOPE
+
+
+async def test_global_with_citations_does_not_fall_back(monkeypatch):
+    async def _global_ok(*a, **k):
+        return {"query": k["q"], "answer": "ok [1]",
+                "citations": [{"marker": 1, "fact_uuid": "f", "sources": []}],
+                "communities_used": [{"community_id": "c1", "title": "t", "relevance": None}],
+                "applies_to": []}
+    monkeypatch.setattr(global_mod, "global_search", _global_ok)
+    env = await _route("global")
+    assert env["mode"] == "global" and env["routing"]["fallback_from"] is None
+
+
 async def test_envelope_carries_scope_dict():
     env = await _route("local")
     assert env["scope"] == _SCOPE.as_dict()

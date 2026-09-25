@@ -191,7 +191,11 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         raw = await _dispatch("drift", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, scope=scope,
                               settings=settings)
-    elif mode == "global" and not raw.get("communities_used"):
+    # Global falls back to local when it grounded nothing: no community used, OR
+    # communities used but no citation (the reduce step refused -- e.g. a scoped
+    # comparison whose second vendor's community failed to map). Local runs with
+    # the same scope and answers such questions from facts directly.
+    elif mode == "global" and (not raw.get("communities_used") or not raw.get("citations")):
         fallback_from = "global"
         mode = "local"
         raw = await _dispatch("local", graphiti, driver, embedder, synth_client,
