@@ -14,6 +14,7 @@ stops the batch instead of quietly proceeding unprotected.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import pytest
@@ -103,6 +104,21 @@ async def test_only_cold_articles_take_the_lock():
     lock_at = log.index("LOCK")
     assert log[lock_at + 1] == "start-a2", (
         f"the lock must wrap the COLD article, not whichever ran next; got {log}")
+
+
+async def test_taking_the_lock_is_logged_per_cold_article(caplog):
+    """The rehearsal could only prove the lock engaged by reconstructing episode
+    timestamps from the graph. CLAUDE.md's cost rule asks for direct evidence that
+    a mechanism fired, so each acquisition leaves one INFO line naming the article
+    and how long it waited -- and a warm article leaves none."""
+    log: list[str] = []
+    with caplog.at_level(logging.INFO, logger="graph_sync.semantic_worker"):
+        await _run([_job(1, "a1"), _job(2, "a2"), _job(3, "a3")],
+                   cold_articles={"a2"}, log=log, cold_lock=_lock_factory(log))
+    held = [r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("warm-up lock held")]
+    assert len(held) == 1, held
+    assert "a2" in held[0] and "waited" in held[0], held
 
 
 async def test_the_lock_is_held_for_the_whole_article_not_just_acquired():

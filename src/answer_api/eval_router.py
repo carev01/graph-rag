@@ -279,6 +279,15 @@ def format_report(summary: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _raw_json(raw: object) -> str:
+    """The scored answers as JSON. Answers carry `datetime`s (a fact's `valid_at`),
+    which `json.dumps` rejects -- and this is the LAST write of a paid run, after
+    the report, so a crash here silently threw away the only copy of the answers
+    (2026-09-25). ISO-8601, like everything else the API returns."""
+    return json.dumps(raw, indent=2, ensure_ascii=False,
+                      default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o))
+
+
 async def main() -> None:
     settings = get_extract_settings()
     questions = json.loads(_QUESTIONS.read_text())
@@ -299,8 +308,7 @@ async def main() -> None:
         # The answers this run scored, so a new metric can be computed from a
         # past run instead of buying another one. Not committed -- it is run
         # output, and it is large.
-        (docs / "router-eval-raw.json").write_text(
-            json.dumps(summary["raw"], indent=2, ensure_ascii=False))
+        (docs / "router-eval-raw.json").write_text(_raw_json(summary["raw"]))
         print(report)
     finally:
         await graphiti.close()
