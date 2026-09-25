@@ -1246,7 +1246,7 @@ repair (`python -m graph_sync.cli relane-jobs [--apply]`) backfills `semantic_jo
 `pending`/`incremental` job with no episodes to `bootstrap`. See `docs/deploy/k3s.md` §8 for
 the rehearsal runbook.
 
-### 50. `bootstrap` never re-queues a structurally present, never-extracted article — **P2, found 2026-09-25**
+### 50. ~~`bootstrap` never re-queues a structurally present, never-extracted article~~ — **DONE 2026-09-25** (found the same day)
 `SyncCore._apply_record` skips a record whose `content_hash` equals the stored one
 *before* it enqueues anything, so a bootstrap only queues semantic work for articles that
 are new or changed in the graph. That is right while Postgres and Neo4j agree, and wrong
@@ -1260,6 +1260,17 @@ structural. Fix options: on a hash-gate skip, enqueue anyway when the article ha
 episodes and no pending/done job (one extra read on the skip path, bootstrap only), or a
 `requeue-unextracted --source-id` repair that diffs Articles-without-episodes against
 `semantic_jobs`. Either way, add the check to `state_crosscheck`.
+
+**Resolution:** the first option, in the skip path itself
+(`SyncCore._requeue_unextracted`). An unchanged record whose article has no
+`semantic_jobs` row in ANY status (`StateStore.has_semantic_job`, served by the new
+unfiltered `ix_semantic_jobs_article`) and no episodes is re-queued in the `bootstrap`
+lane and counted as `requeued=` in the `bootstrap complete:` / `sync-once complete:`
+line; any job row (a `done` navigation page, a `dead` job) is trusted, and an article
+with episodes is left alone. The common skip path costs one indexed Postgres read and
+no Neo4j round trip. A plain re-run of `bootstrap --source-id` is therefore the repair.
+`state_crosscheck` now FAILs on any Article with content, no episodes and no job row,
+per source, naming that repair (content-less TOC placeholders excluded).
 
 ### 51. No dollar accounting for semantic ingest — **P3, found 2026-09-25**
 `token_ledger` holds one total per day: no prompt/completion split and no tier, so a run's

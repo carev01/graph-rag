@@ -37,6 +37,7 @@ ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS lane text NOT NULL DEFAULT 'i
 ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
 ALTER TABLE semantic_jobs ADD COLUMN IF NOT EXISTS source_id text;
 CREATE INDEX IF NOT EXISTS ix_semantic_jobs_source ON semantic_jobs(source_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS ix_semantic_jobs_article ON semantic_jobs(article_id);
 CREATE TABLE IF NOT EXISTS token_ledger (day date PRIMARY KEY, tokens bigint NOT NULL DEFAULT 0);
 """
 _LOCK_KEY = 911_222_333
@@ -147,6 +148,14 @@ class StateStore:
             "source_id=coalesce(excluded.source_id, semantic_jobs.source_id), "
             "enqueued_at=now(), updated_at=now()",
             article_id, op, content_hash, lane, source_id)
+
+    async def has_semantic_job(self, article_id: str) -> bool:
+        """Whether the article has EVER had a semantic job, in any status (the hash
+        gate's requeue check, `SyncCore._requeue_unextracted`). Served by
+        `ix_semantic_jobs_article`; `ux_semantic_jobs_pending` only covers pending."""
+        pool = await self._get_pool()
+        return bool(await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM semantic_jobs WHERE article_id=$1)", article_id))
 
     async def claim_semantic_jobs(
         self, batch: int, include_bootstrap: bool, source_ids: list[str] | None = None

@@ -137,6 +137,7 @@ def bootstrap(
             res = await core.bootstrap(source_id=source_id, vendor_id=vendor_id)
             typer.echo(
                 f"bootstrap complete: applied={res.applied} skipped={res.skipped} "
+                f"requeued={res.requeued} "
                 f"sources={len(res.sources)}"
             )
         finally:
@@ -158,7 +159,8 @@ def sync_once() -> None:
             res = await core.run_incremental()
             typer.echo(
                 f"sync-once complete: applied={res.applied} removed={res.removed} "
-                f"skipped={res.skipped} advanced={res.advanced} sources={len(res.sources)}"
+                f"skipped={res.skipped} requeued={res.requeued} advanced={res.advanced} "
+                f"sources={len(res.sources)}"
             )
         finally:
             await repo.close()

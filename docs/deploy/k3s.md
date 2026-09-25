@@ -490,6 +490,11 @@ Postgres transaction and a READ-access Neo4j session:
   `upsert`, and checks each article exists and has at least one `HAS_EPISODE` edge.
   Navigation pages (`is_navigation_article`: release notes, "what's new", link farms)
   are completed without extraction by design and are reported separately, not failed.
+- every `:Article` with content (`content_hash` set, not removed) that has no
+  `HAS_EPISODE` edge, and checks it has at least one `semantic_jobs` row in any
+  status. One with neither was never extracted and nothing would ever queue it (a
+  state reset, a lost row — BACKLOG 50); the line names each affected source, and
+  re-running `bootstrap --source-id <id>` for it re-queues exactly those articles.
 
 It prints only shard/article ids and counts. Override and dry-run:
 

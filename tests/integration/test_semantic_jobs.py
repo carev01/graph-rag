@@ -230,3 +230,18 @@ async def test_migration_adds_columns_to_existing_table(state_store):
     async with pool.acquire() as c:
         assert await c.fetchval(
             "SELECT source_id FROM semantic_jobs WHERE article_id='mig1'") == "src-mig"
+
+
+async def test_has_semantic_job_sees_every_status(state_store):
+    """The hash gate's requeue check (BACKLOG 50) must treat a done or dead job as
+    'accounted for', not only a pending one."""
+    pool = await state_store._get_pool()
+    for status in ("pending", "in_progress", "done", "dead"):
+        await pool.execute(
+            "INSERT INTO semantic_jobs (article_id, op, status, lane) "
+            "VALUES ($1, 'upsert', $2, 'bootstrap')", f"hsj-{status}", status)
+        assert await state_store.has_semantic_job(f"hsj-{status}"), status
+    assert not await state_store.has_semantic_job("hsj-never")
+    idx = await pool.fetchval(
+        "SELECT indexdef FROM pg_indexes WHERE indexname='ix_semantic_jobs_article'")
+    assert idx is not None and "WHERE" not in idx, "the check needs an unfiltered index"

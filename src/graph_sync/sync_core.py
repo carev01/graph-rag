@@ -21,6 +21,7 @@ log = logging.getLogger("graph_sync.sync")
 class BootstrapResult:
     applied: int = 0
     skipped: int = 0
+    requeued: int = 0
     sources: set[str] = field(default_factory=set)
 
 
@@ -29,6 +30,7 @@ class IncrementalResult:
     applied: int = 0
     removed: int = 0
     skipped: int = 0
+    requeued: int = 0
     advanced: bool = False
     sources: set[str] = field(default_factory=set)
 
@@ -78,6 +80,35 @@ class SyncCore:
             return "bootstrap"
         return "incremental" if await self._repo.has_episodes(article_id) else "bootstrap"
 
+    async def _requeue_unextracted(self, rec: ContentRecord) -> bool:
+        """Re-queue an unchanged article that was never extracted (BACKLOG 50).
+
+        The hash gate skips an unchanged record before anything is enqueued, which
+        is right only while Postgres and Neo4j agree. After a state reset, a lost
+        `semantic_jobs` row, or one store restored without the other, every article
+        already written structurally would be skipped forever -- no job, no
+        episodes, no error. A plain re-run of `bootstrap --source-id` now repairs it.
+
+        Any job row, in ANY status, means the article is accounted for: `done` with
+        no episodes is legitimate (navigation pages, zero-chunk articles complete
+        that way), and a `dead` job stays dead -- retrying those is a separate
+        decision. Only with no row at all is Neo4j asked; if the article has
+        episodes the graph is ahead of Postgres and redoing it would only cost.
+        The common skip path therefore pays one indexed Postgres read and no Neo4j
+        round trip.
+
+        The lane is `bootstrap` by construction: the lane rule (`_lane`) sends an
+        article without episodes there from either stream.
+        """
+        if await self._store.has_semantic_job(rec.id):
+            return False
+        if await self._repo.has_episodes(rec.id):
+            return False
+        await self._store.enqueue_semantic_job(
+            rec.id, "upsert", rec.content_hash, "bootstrap", rec.source_id)
+        log.info("re-queued unextracted article %s (no job row, no episodes)", rec.id)
+        return True
+
     async def _apply_record(
         self, rec: ContentRecord | TombstoneRecord, res: BootstrapResult | IncrementalResult
     ) -> str | None:
@@ -93,7 +124,11 @@ class SyncCore:
 
         existing = await self._repo.get_content_hash(rec.id)
         if existing == rec.content_hash:
-            res.skipped += 1
+            if await self._requeue_unextracted(rec):
+                res.requeued += 1
+            else:
+                res.skipped += 1
+            # Nothing structural changed either way: not a touched source.
             return None
         lane = await self._lane(res, rec.id)
 

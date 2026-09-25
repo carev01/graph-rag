@@ -35,3 +35,22 @@ def test_a_navigation_page_with_no_episodes_is_expected_not_a_failure():
     lines, ok = evaluate({}, [DoneJob("nav", True, "Release notes 12.1", 0)])
     assert ok
     assert any("1 navigation" in line for line in lines)
+
+
+def test_no_stranded_articles_passes():
+    lines, ok = evaluate({}, [], stranded={})
+    assert ok
+    assert any(line.startswith("OK") and "0 stranded" in line for line in lines)
+
+
+def test_stranded_articles_fail_per_source_and_name_the_repair():
+    """BACKLOG 50: a graph Article with content, no episodes and NO job row of any
+    status was never extracted and never will be unless re-queued. The line must
+    say which sources, and that re-running their bootstrap is the repair."""
+    lines, ok = evaluate({}, [], stranded={"src-1": ["a", "b"], "src-2": ["c"]})
+    assert not ok
+    fail = [line for line in lines if line.startswith("FAIL")]
+    assert fail and "3 stranded" in fail[0]
+    text = "\n".join(lines)
+    assert "src-1: 2" in text and "src-2: 1" in text
+    assert "bootstrap --source-id" in text

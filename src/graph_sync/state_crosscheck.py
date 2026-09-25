@@ -16,6 +16,11 @@ before the poller is allowed to act on it:
   each have an `:Article` with at least one `HAS_EPISODE` edge -- except
   navigation pages, which the ingest driver completes without extracting
   (`graph_extract.article_filter.is_navigation_article`).
+* no `:Article` with content (`content_hash` set, not removed) may have neither a
+  `HAS_EPISODE` edge nor ANY `semantic_jobs` row: such an article was never
+  extracted and nothing will ever queue it (BACKLOG 50 -- a state reset, a lost
+  row). Re-running `bootstrap --source-id` for its source re-queues it. Content-
+  less TOC placeholder Articles are excluded; they are not ingestable yet.
 
 Exit status is non-zero on any mismatch. Output holds only shard/article ids and
 counts -- no credential.
@@ -47,6 +52,17 @@ OPTIONAL MATCH (a:Article {id: id})
 OPTIONAL MATCH (a)-[r:HAS_EPISODE]->()
 RETURN id, a IS NOT NULL AS found, a.title AS title, count(r) AS episodes
 """
+_UNEXTRACTED = """
+MATCH (a:Article)
+WHERE a.content_hash IS NOT NULL AND coalesce(a.removed, false) = false
+  AND NOT EXISTS { (a)-[:HAS_EPISODE]->() }
+RETURN a.id AS id, a.source_id AS source_id
+"""
+_NO_JOB_ROW = (
+    "SELECT x AS article_id FROM unnest($1::text[]) AS x "
+    "WHERE NOT EXISTS (SELECT 1 FROM semantic_jobs j WHERE j.article_id = x)"
+)
+_CHUNK = 5000
 
 
 @dataclass
@@ -57,8 +73,12 @@ class DoneJob:
     episodes: int
 
 
-def evaluate(shard_counts: dict[str, int], done: list[DoneJob]) -> tuple[list[str], bool]:
-    """Pure verdict over what was read; kept separate so it is unit-testable."""
+def evaluate(shard_counts: dict[str, int], done: list[DoneJob], *,
+             stranded: dict[str, list[str]] | None = None) -> tuple[list[str], bool]:
+    """Pure verdict over what was read; kept separate so it is unit-testable.
+
+    `stranded` maps source id -> article ids with content, no episodes and no job
+    row of any status; `None` means the check was not run."""
     lines: list[str] = []
     ok = True
     for shard, n in sorted(shard_counts.items()):
@@ -78,10 +98,20 @@ def evaluate(shard_counts: dict[str, int], done: list[DoneJob]) -> tuple[list[st
                  f"{len(no_ep)} without HAS_EPISODE, {len(nav)} navigation (expected 0 episodes)")
     lines += [f"      missing :Article {d.article_id}" for d in missing]
     lines += [f"      no HAS_EPISODE   {d.article_id}" for d in no_ep]
+    if stranded is not None:
+        n = sum(len(v) for v in stranded.values())
+        ok &= n == 0
+        lines.append(f"{'OK  ' if n == 0 else 'FAIL'}  {n} stranded :Article (content, "
+                     f"no episodes, no semantic_jobs row) across {len(stranded)} source(s)")
+        for sid, ids in sorted(stranded.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"      {sid}: {len(ids)} (e.g. {', '.join(ids[:3])})")
+        if n:
+            lines.append("      repair: re-run `python -m graph_sync.cli bootstrap "
+                         "--source-id <id>` for each source above (re-queues them)")
     return lines, ok
 
 
-async def _read(sample: int) -> tuple[dict[str, int], list[DoneJob]]:
+async def _read(sample: int) -> tuple[dict[str, int], list[DoneJob], dict[str, list[str]]]:
     s = get_settings()
     conn = await asyncpg.connect(s.postgres_dsn, timeout=15)
     try:
@@ -107,16 +137,32 @@ async def _read(sample: int) -> tuple[dict[str, int], list[DoneJob]]:
                 counts[shard] = max(rec["by_source"], rec["by_vendor"]) if rec else 0
             done = [DoneJob(r["id"], r["found"], r["title"], r["episodes"])
                     async for r in await session.run(_EPISODES, ids=ids)]
+            unextracted = {r["id"]: r["source_id"]
+                           async for r in await session.run(_UNEXTRACTED)}
     finally:
         await driver.close()
-    return counts, done
+
+    stranded: dict[str, list[str]] = {}
+    if unextracted:
+        conn = await asyncpg.connect(s.postgres_dsn, timeout=15)
+        try:
+            async with conn.transaction(readonly=True):
+                all_ids = sorted(unextracted)
+                for i in range(0, len(all_ids), _CHUNK):
+                    for r in await conn.fetch(_NO_JOB_ROW, all_ids[i:i + _CHUNK]):
+                        aid = r["article_id"]
+                        stranded.setdefault(unextracted[aid] or "<no source_id>", []).append(aid)
+        finally:
+            await conn.close()
+    return counts, done, stranded
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Read-only cross-check of migrated sync state.")
     ap.add_argument("--sample", type=int, default=50)
     args = ap.parse_args()
-    lines, ok = evaluate(*asyncio.run(_read(args.sample)))
+    counts, done, stranded = asyncio.run(_read(args.sample))
+    lines, ok = evaluate(counts, done, stranded=stranded)
     print("\n".join(lines))
     sys.exit(0 if ok else 1)
 

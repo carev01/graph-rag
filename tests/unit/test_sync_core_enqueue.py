@@ -11,8 +11,16 @@ pytestmark = pytest.mark.asyncio
 
 
 class _FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, *, has_job: bool = True) -> None:
         self.enqueue_calls: list[tuple[str, str, str | None, str, str | None]] = []
+        # Default True: in normal operation every structurally written article has
+        # a semantic_jobs row. False models a reset / lost row (BACKLOG 50).
+        self._has_job = has_job
+        self.has_job_calls: list[str] = []
+
+    async def has_semantic_job(self, article_id: str) -> bool:
+        self.has_job_calls.append(article_id)
+        return self._has_job
 
     async def enqueue_semantic_job(
         self, article_id: str, op: str, content_hash: str | None, lane: str,
@@ -298,3 +306,79 @@ async def test_incremental_unchanged_hash_never_calls_has_episodes():
 
     assert store.enqueue_calls == []
     assert repo.has_episodes_calls == []
+
+
+# --- BACKLOG 50: an unchanged article with NO job row and NO episodes was never
+# extracted (state reset, lost row, one store restored without the other). The
+# hash gate used to strand it forever; it is now re-queued.
+
+def _unchanged(article_id: str):
+    from graph_sync.models import parse_delta_line
+    import json
+    return parse_delta_line(json.dumps(
+        _content_record(article_id=article_id, source_id="s1", content_hash="same-hash")))
+
+
+@pytest.mark.parametrize("res_type", [BootstrapResult, IncrementalResult])
+async def test_unchanged_article_with_no_job_and_no_episodes_is_requeued(res_type):
+    store = _FakeStore(has_job=False)
+    repo = _FakeRepo(existing_hash="same-hash", has_episodes=False)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+    res = res_type()
+
+    touched = await core._apply_record(_unchanged("a20"), res)
+
+    # Never extracted -> the budgeted bootstrap lane, whatever stream it came from.
+    assert store.enqueue_calls == [("a20", "upsert", "same-hash", "bootstrap", "s1")]
+    assert res.requeued == 1 and res.skipped == 0
+    # Nothing structural changed: no structural write, no TOC refresh trigger.
+    assert repo.structural_calls == [] and touched is None
+
+
+async def test_unchanged_article_with_no_job_but_episodes_is_left_alone():
+    """The graph is AHEAD of Postgres (e.g. the state was restored from an older
+    backup): the article is extracted; re-queueing would pay to redo it."""
+    store = _FakeStore(has_job=False)
+    repo = _FakeRepo(existing_hash="same-hash", has_episodes=True)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+    res = BootstrapResult()
+
+    await core._apply_record(_unchanged("a21"), res)
+
+    assert store.enqueue_calls == []
+    assert res.skipped == 1 and res.requeued == 0
+
+
+async def test_unchanged_article_with_any_job_row_is_trusted_without_a_neo4j_read():
+    """Any row -- pending, in_progress, done (navigation pages and zero-chunk
+    articles complete with no episodes, by design) or dead (retrying those is a
+    separate decision) -- means the article is accounted for. One Postgres read,
+    no Neo4j round trip: this is the common skip path of every re-run."""
+    store = _FakeStore(has_job=True)
+    repo = _FakeRepo(existing_hash="same-hash", has_episodes=False)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+    res = BootstrapResult()
+
+    await core._apply_record(_unchanged("a22"), res)
+
+    assert store.enqueue_calls == []
+    assert store.has_job_calls == ["a22"]
+    assert repo.has_episodes_calls == []
+    assert res.skipped == 1 and res.requeued == 0
+
+
+async def test_changed_article_never_consults_the_job_table():
+    """The requeue check is on the skip path only; a changed article is enqueued
+    exactly as before."""
+    from graph_sync.models import parse_delta_line
+    import json
+    rec = parse_delta_line(json.dumps(
+        _content_record(article_id="a23", source_id="s1", content_hash="new-hash")))
+    store = _FakeStore(has_job=False)
+    repo = _FakeRepo(existing_hash="old-hash", has_episodes=False)
+    core = SyncCore(object(), _catalog_with_source("s1"), repo, store, object())
+
+    await core._apply_record(rec, BootstrapResult())
+
+    assert store.has_job_calls == []
+    assert [c[:2] for c in store.enqueue_calls] == [("a23", "upsert")]
