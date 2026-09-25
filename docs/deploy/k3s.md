@@ -344,6 +344,10 @@ meaningless:
 pgrep -fl 'graph_sync|graph_extract|theme_builder|uvicorn' || echo "nothing running"
 ```
 
+Run it directly in your shell. Wrapped in `bash -c '…'` (or `ssh host '…'`), the
+wrapper's own command line contains the pattern, so `pgrep -f` matches itself and
+reports a writer that does not exist; confirm any hit by PID with `ps -o pid,args -p <pid>`.
+
 On the dev host, the stopped `graphrag-postgres` container holds the sync cursor,
 bootstrap progress, and token ledger built so far. Start it and wait for it to
 actually accept connections — `docker start` returns as soon as the container
@@ -539,6 +543,13 @@ already been lost once when the Neo4j instance moved), or the wrong dump was res
 Nothing needs undoing: the only thing running is the read-only answer API. Resolve the
 mismatch (right instance, or deliberately reset the state for a fresh bootstrap — a
 separate, reviewed decision) before continuing.
+
+Two causes produce a `FAIL` with nothing wrong, so rule them out before suspecting the
+instance or the dump: a whole source deleted upstream (its Articles are
+`DETACH DELETE`d from the graph, while its `complete` `bootstrap_progress` row and its
+`done` upsert jobs stay in Postgres), and a `done` article that legitimately produced no
+episodes (empty markdown, zero chunks). Check the failing ids against the DocExtractor
+catalog and the article's content before treating it as a mismatch.
 
 ## 8. First pull, then the bootstrap-first rehearsal (poller stays off)
 
@@ -1036,8 +1047,9 @@ If you cannot be sure the checkout matches, skip the reconcile and pass
 ### Rollback
 
 First check what the target revision's values will bring back —
-`helm get values graph-rag -n graph-rag --revision <revision>` — then roll back and
-immediately re-apply the stop:
+`helm get values graph-rag -n graph-rag --revision <revision>`. **If it had workers
+above 0, run the emergency stop above *before* the rollback**, so they are not started
+only to be stopped. Then roll back and immediately re-apply the stop:
 
 ```
 helm rollback graph-rag <revision> -n graph-rag
@@ -1050,9 +1062,7 @@ which may not be 0. The stop after it is `kubectl scale`, **not** `helm upgrade
 local checkout — the very templates you just rolled back away from — and would undo the
 rollback in the same breath. The price is drift: the release now stores the rolled-back
 replica count, so every later `helm upgrade` must pass `--set worker.replicas=…`
-explicitly until the stored value is 0 again. If the target revision had workers above
-0, run the emergency stop *before* the rollback too, so they are not started only to be
-stopped.
+explicitly until the stored value is 0 again.
 
 The Postgres PVC survives a `helm uninstall` and is covered by the namespace's Kasten
 backup policy (step 2).

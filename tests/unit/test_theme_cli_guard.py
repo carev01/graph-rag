@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -156,4 +157,5 @@ def test_verify_pending_is_not_gated_by_the_duplicate_guard(monkeypatch, hermeti
 def test_theme_build_help_offers_the_override():
     result = CliRunner().invoke(theme_app, ["theme-build", "--help"])
     assert result.exit_code == 0
-    assert "--allow-duplicates" in result.stdout
+    # rich styles help on CI (GITHUB_ACTIONS); compare the text, not the escapes.
+    assert "--allow-duplicates" in click.unstyle(result.stdout)

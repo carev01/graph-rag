@@ -20,15 +20,12 @@ from graphiti_core.search.search import search as _defining_module_search
 from graphiti_core.search import search_utils
 from graphiti_core.utils.maintenance import edge_operations, node_operations
 
-from graph_extract.config import ExtractSettings
 from graph_extract.vector_search import _ORIG_EDGE, _ORIG_NODE
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_settings_env(monkeypatch):
-    for field in ExtractSettings.model_fields:
-        monkeypatch.delenv(field.upper(), raising=False)
-        monkeypatch.delenv(field, raising=False)
+# The settings-environment stripping that used to live here moved to
+# tests/conftest.py (`_no_dotenv_file`), which also stops `.env` FILE reads and
+# covers the integration suite.
 
 
 # Every graphiti attribute this codebase patches PROCESS-WIDE, with the pristine

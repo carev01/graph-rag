@@ -34,7 +34,10 @@ packages = ["src/graph_sync", "src/graph_extract", "src/docext", "src/answer_api
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-markers = ["live: hits the real DocExtractor cluster (opt-in)"]
+markers = [
+    "live: hits the real DocExtractor cluster (opt-in)",
+    "real_endpoints: non-live, but deliberately uses .env's LLM/embedder endpoints when reachable (skips its endpoint checks when not)",
+]
 addopts = "-m 'not live'"
 testpaths = ["tests"]
 pythonpath = ["."]
