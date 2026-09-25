@@ -123,7 +123,10 @@ async def test_a_mid_stream_timeout_resumes_from_the_last_applied_id():
     store, repo, requests = _Store(), _Repo(), []
     responses = [
         lambda: _body([_START] + _RECORDS, stall_after=5),        # start + 4 records, then stall
-        lambda: _body([_START] + _RECORDS[4:] + [_TERMINAL]),
+        # The resumed stream announces its own, NEWER bootstrap_start: it must not
+        # be adopted (CLIENT-USAGE-GUIDE §6 keeps the original watermark).
+        lambda: _body([json.dumps({"control": "bootstrap_start", "next_since": _NEWER})]
+                      + _RECORDS[4:] + [_TERMINAL]),
     ]
     core = _core(responses, requests, store, repo)
 
@@ -208,3 +211,60 @@ async def test_progress_is_saved_while_the_stream_runs():
     assert store.progress["21632f3b-5a4c-4c93-9f00-6701d0e9f677"] == {
         "shard": "21632f3b-5a4c-4c93-9f00-6701d0e9f677", "watermark": _WATERMARK,
         "last_id": _IDS[5], "status": "in_progress"}
+
+
+def _status_core(statuses: list[int], requests: list, store: _Store, repo: _Repo) -> SyncCore:
+    """Each request answers with the next status; a 200 serves the whole stream."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        requests.append(dict(req.url.params))
+        code = statuses.pop(0)
+        if code != 200:
+            return httpx.Response(code, text="upstream unhappy")
+        return httpx.Response(200, content=_body([_START] + _RECORDS + [_TERMINAL]))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://x")
+    core = SyncCore(client, _catalog(), repo, store, object())
+    core._sleep = _no_sleep                      # type: ignore[method-assign]
+
+    async def _no_toc(sid):
+        return None
+    core.refresh_toc = _no_toc                   # type: ignore[method-assign]
+    return core
+
+
+@pytest.mark.parametrize("code", [429, 502, 503, 504])
+async def test_a_transient_http_status_is_retried(code):
+    """raise_for_status() raises HTTPStatusError, which is NOT a TransportError: a
+    502 from the ingress mid-bootstrap must be retried like a dropped stream."""
+    store, repo, requests = _Store(), _Repo(), []
+    core = _status_core([code, 200], requests, store, repo)
+
+    res = await core.bootstrap(source_id="21632f3b-5a4c-4c93-9f00-6701d0e9f677")
+
+    assert len(requests) == 2 and res.applied == 10
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+async def test_a_client_error_fails_immediately(code):
+    """A bad key or a wrong source id will not fix itself: no retry, no backoff."""
+    store, repo, requests = _Store(), _Repo(), []
+    core = _status_core([code, 200], requests, store, repo)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await core.bootstrap(source_id="21632f3b-5a4c-4c93-9f00-6701d0e9f677")
+
+    assert len(requests) == 1
+
+
+async def test_repeated_clean_eof_without_records_gives_up():
+    """A body that ends cleanly with no records and no terminal line (e.g. a
+    connection-close-terminated response cut early) never raises: the stall
+    counter alone must stop it."""
+    store, repo, requests = _Store(), _Repo(), []
+    responses = [lambda: _body([_START])] * 10
+    core = _core(responses, requests, store, repo)
+    core.BOOTSTRAP_MAX_STALLS = 3
+
+    with pytest.raises(RuntimeError, match="terminal cursor line"):
+        await core.bootstrap(source_id="21632f3b-5a4c-4c93-9f00-6701d0e9f677")
+
+    assert len(requests) == 3

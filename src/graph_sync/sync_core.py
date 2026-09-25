@@ -189,8 +189,9 @@ class SyncCore:
         applied id with the ORIGINAL watermark (CLIENT-USAGE-GUIDE §6).
 
         A dropped stream is one that ends without the terminal cursor line --
-        cleanly truncated, or cut by a transport error (a ReadTimeout when
-        DocExtractor goes silent mid-stream; BACKLOG 49). Either way it resumes
+        cleanly truncated, cut by a transport error (a ReadTimeout when
+        DocExtractor goes silent mid-stream; BACKLOG 49), or refused with a 5xx
+        or 429. Any other 4xx fails immediately. Either way it resumes
         with `bootstrap_after=<last applied id>`; only BOOTSTRAP_MAX_STALLS
         consecutive attempts that apply nothing new give up, re-raising.
 
@@ -217,7 +218,7 @@ class SyncCore:
             stream = DeltaStream(self._client, params)
             last_id: str | None = None
             since_save = 0
-            error: httpx.TransportError | None = None
+            error: httpx.HTTPError | None = None
             try:
                 async for rec in stream.records():
                     if watermark is None:
@@ -235,6 +236,13 @@ class SyncCore:
                                 shard, watermark, last_id, "in_progress")
                             since_save = 0
             except httpx.TransportError as exc:
+                error = exc
+            except httpx.HTTPStatusError as exc:
+                # raise_for_status() is not a TransportError. A 5xx or 429 from the
+                # ingress is transient -- a dropped stream; any other 4xx (bad key,
+                # unknown id) will not fix itself and fails now.
+                if exc.response.status_code < 500 and exc.response.status_code != 429:
+                    raise
                 error = exc
             if watermark is None:
                 watermark = stream.bootstrap_start_since

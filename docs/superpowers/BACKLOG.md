@@ -1235,7 +1235,8 @@ the incremental stream, not just bootstrap). Options unexplored as of this writi
 bootstrap died with `ReadTimeout` after 47 min and 9,254 records, and `SyncCore.bootstrap`
 made it worse: it resumed only after a *clean* truncation, so a transport error raised
 straight out with no progress row and every re-run replayed from the first id. Fixed:
-a `httpx.TransportError` mid-stream is a dropped stream and resumes with
+a `httpx.TransportError` mid-stream, or a 5xx/429 response, is a dropped stream (other
+4xx fail immediately) and resumes with
 `bootstrap_after=<last applied id>` and the original watermark, with backoff; only
 `BOOTSTRAP_MAX_STALLS` (5) consecutive attempts that apply nothing give up. Progress is
 saved every `BOOTSTRAP_PROGRESS_EVERY` (200) records, and a new run of an `in_progress`
