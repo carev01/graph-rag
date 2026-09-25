@@ -61,6 +61,8 @@ async def run_worker_once(
     # measurements built to ride on a real ingest were invisible exactly where it
     # matters. Accumulated and logged per batch below.
     batch_dedup = DedupIndexStats()
+    # Summed per-job spend: prompt / cached / completion tokens for the batch line.
+    batch_tokens = UsageTally()
     basis_counts: Counter[str] = Counter()
     await store.reap_stale_jobs(lease, max_attempts)
     include_bootstrap = await store.today_token_total() < budget
@@ -103,6 +105,8 @@ async def run_worker_once(
                 claimed_at=job["claimed_at"])
         finally:
             CURRENT_USAGE_TALLY.reset(scope)
+            batch_tokens.add("llm", prompt=spent.prompt_tokens,
+                             completion=spent.completion_tokens, cached=spent.cached_tokens)
             delta = spent.prompt_tokens + spent.completion_tokens
             if delta:
                 await store.record_tokens(delta)
@@ -248,6 +252,11 @@ async def run_worker_once(
                     processed, len(deferred), dict(basis_counts), batch_dedup.summary())
         # Phase B: per-batch proof the index path engaged; reset so each batch
         # reports its own counts.
+        pt = batch_tokens.prompt_tokens
+        logger.info("semantic batch llm tokens: prompt=%d cached=%d (%d%%) completion=%d",
+                    pt, batch_tokens.cached_tokens,
+                    round(100 * batch_tokens.cached_tokens / pt) if pt else 0,
+                    batch_tokens.completion_tokens)
         logger.info("semantic batch vector search: %s", vector_search.stats_summary())
         vector_search.reset_stats()
         fallbacks = basis_counts.get(CRAWL_FALLBACK, 0)

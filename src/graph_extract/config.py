@@ -81,6 +81,11 @@ class ExtractSettings(BaseSettings):
     # cap is inert for a well-behaved model but makes the ascending-integer runaway
     # unrepresentable. 0 disables the bound.
     llm_max_index_array: int = 25
+    # Move each prompt type's static user-message tail into the system message so a
+    # provider prefix cache can serve it (graph_extract.cache_layout). OpenAI-compatible
+    # chat.completions path only (the Azure Responses path is untouched). Off until
+    # the A/B shows cache hits up and extraction unchanged.
+    llm_cache_layout: bool = False
     # When the CHEAP tier answers graphiti's edge-dedup prompt with an out-of-range
     # candidate index (graphiti drops it silently: a missed dedup or a missed
     # invalidation), re-issue that one prompt on the strong tier and use its reply.
@@ -302,6 +307,9 @@ class ExtractSettings(BaseSettings):
     cheap_llm_api_key: str = ""
     cheap_llm_client_mode: Literal[
         "structured", "generic_json_schema", "generic_json_object"] = "generic_json_schema"
+    # The cheap tier's own cache-layout switch (mapped onto llm_cache_layout for the
+    # cheap client view). Cached input on solar-pro4 bills $0.018/M vs $0.09/M.
+    cheap_llm_cache_layout: bool = False
     cheap_max_chunk_tokens: int = 900   # smaller chunks for the verbose cheap model
     # Route an article to the STRONG tier when it is a dense table:
     dense_table_line_ratio: float = 0.25

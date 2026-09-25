@@ -108,3 +108,21 @@ async def test_a_driver_returning_none_does_not_fail_the_job(caplog):
     store = _Store([_job(1, "a1")])
     assert await run_worker_once(store, _NullIngest(), **_KW) == 1
     assert store.completed == ["j1"], "the job must complete, not fail"
+
+
+async def test_the_batch_reports_prompt_and_cached_tokens(caplog):
+    """The prompt cache layout is only worth what the provider actually serves from
+    cache: the batch line must say how many prompt tokens were cached, summed over
+    the batch's jobs, so production can prove it engaged (CLAUDE.md cost rule)."""
+    from graph_extract.usage import record
+
+    class _Spending(_Ingest):
+        async def ingest_article(self, article_id):
+            record("llm", prompt=100, completion=10, cached=60)
+            return self._results[article_id]
+
+    store = _Store([_job(1, "a1"), _job(2, "a2")])
+    ingest = _Spending({"a1": _result("a1", basis="exact"), "a2": _result("a2", basis="exact")})
+    with caplog.at_level(logging.INFO, logger="graph_sync.semantic_worker"):
+        await run_worker_once(store, ingest, **_KW)
+    assert "llm tokens: prompt=200 cached=120 (60%) completion=20" in caplog.text
