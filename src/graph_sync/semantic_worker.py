@@ -16,6 +16,20 @@ from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally
 logger = logging.getLogger(__name__)
 
 
+_deferrals = 0
+
+
+def _note_deferral(article_id: str, n_jobs: int) -> None:
+    """INFO on the first deferral (proof the mechanism engaged -- CLAUDE.md, cost
+    awareness) and every 100th after, DEBUG otherwise: with 8 workers the busy
+    case repeats every few seconds and would drown the batch lines."""
+    global _deferrals
+    _deferrals += 1
+    level = logging.INFO if _deferrals == 1 or _deferrals % 100 == 0 else logging.DEBUG
+    logger.log(level, "deferred cold article %s (%d job(s)): warm-up lock busy in another "
+               "worker; %d deferral(s) so far in this process", article_id, n_jobs, _deferrals)
+
+
 def exp_backoff(attempts: int, *, base: float, cap: float) -> float:
     return min(base * (2 ** (attempts - 1)), cap)
 
@@ -27,7 +41,19 @@ async def run_worker_once(
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
     cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
     source_ids: list[str] | None = None,
+    defer_seconds: float | None = None,
 ) -> int:
+    """Claim and run one batch; returns the number of jobs PROCESSED.
+
+    `defer_seconds` switches the global warm-up lock to defer mode: `cold_lock()`
+    is expected to try once (`StateStore.warmup_lock(wait=False)`), and a cold
+    article whose lock is held by another process is handed back with
+    `defer_semantic_job` (no attempt spent) so this worker can claim warm work
+    instead of idling. Deferred jobs do not count as processed: a batch that only
+    deferred returns 0, and `run_worker` then sleeps its poll interval before the
+    next claim -- which is what keeps an all-cold queue from becoming a busy
+    loop. `None` keeps the waiting behaviour (and its give-up-and-run timeout).
+    """
     # Everything the ingest driver measures is per-article and was being DISCARDED
     # here: `ingest_article` returns dedup counters, the reference-time basis and
     # (on the driver) per-prompt timings, and the production worker is the path
@@ -99,6 +125,8 @@ async def run_worker_once(
     # before it launches the item's task, so the verdict is always recorded by
     # the time the task runs.
     cold_ids: set[str] = set()
+    deferred: list[int] = []
+    not_ours: list[int] = []
 
     async def _run_group(group) -> None:
         nonlocal escaped_early
@@ -114,7 +142,22 @@ async def run_worker_once(
                     # the batch stops rather than ingesting at full LLM cost with
                     # nowhere to record completion.
                     waited_from = time.monotonic()
-                    await stack.enter_async_context(cold_lock())
+                    held = await stack.enter_async_context(cold_lock())
+                    if defer_seconds is not None and not held:
+                        # A job whose defer returns False was reaped and
+                        # reclaimed meanwhile: not ours to count either way.
+                        ours = [job for job in group if await store.defer_semantic_job(
+                            job["id"], job["claimed_at"], defer_seconds)]
+                        lost = len(group) - len(ours)
+                        deferred.extend(job["id"] for job in ours)
+                        not_ours.extend(job["id"] for job in group if job not in ours)
+                        if ours:
+                            _note_deferral(group[0]["article_id"], len(ours))
+                        if lost:
+                            logger.warning("%d job(s) for article %s were reclaimed by "
+                                           "another worker before they could be deferred",
+                                           lost, group[0]["article_id"])
+                        return
                     # The only direct evidence the cross-process barrier fired
                     # (CLAUDE.md, cost awareness); without it, engagement can
                     # only be reconstructed from episode timestamps afterwards.
@@ -199,9 +242,10 @@ async def run_worker_once(
     # The batch summary below comes BEFORE the escaped exception propagates:
     # every group that ran has finished, and raising first would drop the
     # dedup/basis summary and the timing report for the whole batch.
-    if jobs:
-        logger.info("semantic batch: jobs=%d reference_basis=%s dedup: %s",
-                    len(jobs), dict(basis_counts), batch_dedup.summary())
+    processed = len(jobs) - len(deferred) - len(not_ours)
+    if processed:
+        logger.info("semantic batch: jobs=%d deferred=%d reference_basis=%s dedup: %s",
+                    processed, len(deferred), dict(basis_counts), batch_dedup.summary())
         # Phase B: per-batch proof the index path engaged; reset so each batch
         # reports its own counts.
         logger.info("semantic batch vector search: %s", vector_search.stats_summary())
@@ -211,13 +255,13 @@ async def run_worker_once(
             logger.warning(
                 "%d of %d articles had no usable content_changed_at and were ordered "
                 "by crawl time -- their facts cannot be trusted for temporal ordering",
-                fallbacks, len(jobs))
+                fallbacks, processed)
         timings = getattr(ingest, "timings", None)
         if timings is not None and timings.by_prompt:
             logger.info("%s", timings.report())
     if escaped:
         raise escaped[0]
-    return len(jobs)
+    return processed
 
 
 async def run_worker(
@@ -227,6 +271,7 @@ async def run_worker(
     cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
     source_ids: list[str] | None = None,
+    defer_seconds: float | None = None,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
 
@@ -244,7 +289,7 @@ async def run_worker(
             store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
             backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
             concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock,
-            source_ids=source_ids)
+            source_ids=source_ids, defer_seconds=defer_seconds)
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

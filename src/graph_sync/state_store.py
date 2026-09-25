@@ -218,6 +218,45 @@ class StateStore:
             "WHERE id=$1 AND claimed_at=$5 AND status='in_progress'",
             job_id, error, max_attempts, retry_delay_seconds, claimed_at)
 
+    async def defer_semantic_job(
+        self, job_id: int, claimed_at: datetime | None, delay_seconds: float
+    ) -> bool:
+        """Return a claimed job to `pending`, `delay_seconds` later, WITHOUT
+        spending an attempt: the worker could not take the global warm-up lock
+        for a cold article and does other work instead. Returns whether this
+        claimer still owned the job (the `claimed_at` guard, as in
+        complete/fail: a reaped-and-reclaimed job belongs to someone else).
+
+        If the article was enqueued again while this job was claimed, a newer
+        `pending` twin exists and `ux_semantic_jobs_pending` forbids a second
+        one; the twin covers the article, so this job is DELETED. Not marked
+        `done`: `state_crosscheck` samples done upserts and expects episodes, so
+        a done-but-never-extracted row would read as a lost article."""
+        retire = (
+            "DELETE FROM semantic_jobs "
+            "WHERE id=$1 AND claimed_at=$2 AND status='in_progress'")
+        pool = await self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            twin = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM semantic_jobs t, semantic_jobs j "
+                "WHERE j.id=$1 AND t.article_id=j.article_id AND t.status='pending')",
+                job_id)
+            if twin:
+                result = await conn.execute(retire, job_id, claimed_at)
+            else:
+                try:
+                    async with conn.transaction():      # savepoint
+                        result = await conn.execute(
+                            "UPDATE semantic_jobs SET status='pending', claimed_at=NULL, "
+                            "next_attempt_at=now() + make_interval(secs => $3), "
+                            "updated_at=now() "
+                            "WHERE id=$1 AND claimed_at=$2 AND status='in_progress'",
+                            job_id, claimed_at, delay_seconds)
+                except asyncpg.UniqueViolationError:
+                    # The twin was enqueued between the check and the update.
+                    result = await conn.execute(retire, job_id, claimed_at)
+        return result in ("UPDATE 1", "DELETE 1")
+
     async def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> int:
         pool = await self._get_pool()
         res = await pool.execute(
@@ -249,7 +288,7 @@ class StateStore:
             "SELECT COALESCE((SELECT tokens FROM token_ledger WHERE day=current_date), 0)")
 
     @asynccontextmanager
-    async def warmup_lock(self, *, timeout: float, poll: float = 5.0):
+    async def warmup_lock(self, *, timeout: float, poll: float = 5.0, wait: bool = True):
         """Serialise warm-up articles across worker PROCESSES. Yields True if held.
 
         `run_concurrently`'s barrier only serialises cold articles within ONE
@@ -278,6 +317,12 @@ class StateStore:
         the `if held` guard only avoids a Postgres warning for unlocking a lock
         we never took.
 
+        `wait=False` makes one attempt and yields False at once if another
+        process holds the lock, quietly: the worker then DEFERS the cold article
+        (`defer_semantic_job`) and claims other work, instead of idling for up to
+        `timeout` -- with N workers and many cold sources, waiting left all but
+        one worker idle (2026-09-25 Veeam run: 6 of 8).
+
         On timeout it logs and yields False rather than blocking forever: a
         wedged holder must not stall a multi-week bootstrap. That trades the
         guarantee for progress, so it is loud, and the duplicates it admits are
@@ -290,10 +335,10 @@ class StateStore:
             while True:
                 held = await conn.fetchval(
                     "SELECT pg_try_advisory_lock($1)", _WARMUP_LOCK_KEY)
-                if held or time.monotonic() >= deadline:
+                if held or not wait or time.monotonic() >= deadline:
                     break
                 await asyncio.sleep(poll)
-            if not held:
+            if not held and wait:
                 logger.warning(
                     "warm-up lock not acquired after %.0fs; proceeding WITHOUT it. "
                     "Another worker is holding it for longer than one article "

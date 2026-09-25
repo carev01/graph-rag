@@ -250,6 +250,15 @@ def worker(
                             len(source_ids), ", ".join(source_ids))
             else:
                 logger.info("semantic worker scope: all sources")
+            use_lock = is_cold is not None and settings.semantic_global_warmup_lock
+            defer = use_lock and settings.semantic_warmup_lock_mode == "defer"
+            # Logged once at start, like the scope: which lock behaviour the
+            # running process actually holds (CLAUDE.md, cost awareness).
+            logger.info(
+                "semantic worker warm-up lock: %s",
+                "off" if not use_lock else
+                f"defer ({settings.semantic_warmup_defer_seconds:.0f}s)" if defer else
+                f"wait (up to {settings.semantic_warmup_lock_timeout_seconds:.0f}s)")
             await run_worker(
                 store, ingest, batch=batch, poll_seconds=poll_seconds, stop_event=stop_event,
                 max_batches=max_batches,
@@ -267,10 +276,13 @@ def worker(
                 # cold articles to serialise.
                 cold_lock=(
                     (lambda: store.warmup_lock(
-                        timeout=settings.semantic_warmup_lock_timeout_seconds))
-                    if is_cold is not None and settings.semantic_global_warmup_lock
-                    else None),
+                        timeout=settings.semantic_warmup_lock_timeout_seconds,
+                        wait=not defer))
+                    if use_lock else None),
                 source_ids=source_ids,
+                # Defer mode: a busy lock hands the cold article back instead of
+                # idling this worker (semantic_worker.run_worker_once).
+                defer_seconds=settings.semantic_warmup_defer_seconds if defer else None,
             )
         finally:
             await store.close()

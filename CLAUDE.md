@@ -120,6 +120,11 @@ of 2+ sources carry **20.7% of all duplicate risk weight**, and they are the gra
 biggest hubs (`Azure Backup` k=55, `Backup vault` k=33), i.e. exactly the cross-vendor
 entities invariant #4 exists to unify. `SEMANTIC_GLOBAL_WARMUP_LOCK` (default **on**)
 restores it with a Postgres advisory lock held for the duration of each cold article.
+By default (`SEMANTIC_WARMUP_LOCK_MODE=defer`) a worker whose cold article finds the lock
+busy hands the job back for `SEMANTIC_WARMUP_DEFER_SECONDS` (no attempt spent, logged as
+`deferred=` in the batch line) and claims other work, so the lock serialises cold articles
+without idling the other workers; `wait` restores the blocking behaviour, which left 6 of
+8 workers idle while 24 of Veeam's 38 sources were cold (2026-09-25).
 
 That lock is also a floor: 280 sources × `INGEST_WARMUP_ARTICLES` articles run strictly
 one at a time globally (~8 days at W=8), which dominates total time past roughly 32-way

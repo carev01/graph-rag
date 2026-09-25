@@ -1,4 +1,6 @@
 from functools import lru_cache
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -35,6 +37,13 @@ class Settings(BaseSettings):
     # defaulting it off would make scaling out silently lose the guarantee.
     semantic_global_warmup_lock: bool = True
     semantic_warmup_lock_timeout_seconds: float = 1800.0
+    # `defer` (default): a cold article whose global lock is held by another
+    # worker is handed back for `semantic_warmup_defer_seconds` (no attempt
+    # spent) and the worker claims other -- usually warm -- work. `wait`: the
+    # original behaviour, block up to the timeout. Waiting idled 6 of 8 workers
+    # in the 2026-09-25 Veeam run while 24 of 38 sources were still cold.
+    semantic_warmup_lock_mode: Literal["defer", "wait"] = "defer"
+    semantic_warmup_defer_seconds: float = 30.0
     # Scopes the worker's `claim_semantic_jobs` to a subset of sources -- the
     # k3s bootstrap-first rehearsal (docs/deploy/k3s.md): comma-separated
     # source ids, e.g. "s1,s2". Empty (the default) is unscoped, i.e. today's
