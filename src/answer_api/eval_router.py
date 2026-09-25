@@ -180,13 +180,15 @@ async def judge_attribution(client, model, q, answer, labelled_facts: str) -> in
     return None
 
 
-def _labelled_facts(citations: list[dict], facts: list[str]) -> str:
-    """One `fact_line` per citation, in citation order, pairing each citation's
-    marker/sources with its fact text from `_cited_fact_texts` (positional --
-    same correspondence the faithfulness judge already relies on for its
-    `cited_facts` list)."""
-    lines = [attribution.fact_line(c["marker"], fact, c.get("sources", []))
-             for c, fact in zip(citations, facts)]
+def _labelled_facts(citations: list[dict], texts: dict[str, str]) -> str:
+    """One `fact_line` per citation, in citation order, paired by `fact_uuid`
+    (R7) -- never by position. `_cited_fact_texts`'s Cypher `IN`-scan row order
+    is not guaranteed to match the requested uuid list, and a fact_uuid shared
+    by two citations would shift a positional pairing for every citation after
+    it. A citation whose uuid has no text (edge gone) is skipped, not
+    mislabeled against a neighbour's fact."""
+    lines = [attribution.fact_line(c["marker"], texts[c["fact_uuid"]], c.get("sources", []))
+             for c in citations if c["fact_uuid"] in texts]
     return "\n".join(lines) or "(none)"
 
 
@@ -200,6 +202,26 @@ async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
         return [rec["fact"] async for rec in r]
 
 
+async def _cited_fact_texts_by_uuid(driver, group_id, fact_uuids) -> dict[str, str]:
+    """Fact text keyed by uuid (R7): `_cited_fact_texts`'s list return is fine
+    for the faithfulness judge, which folds every fact into one unordered bag
+    and never needs a fact tied back to a specific citation. The attribution
+    judge's labelled fact lines DO need that tie -- each citation's own
+    marker/sources must sit beside its own fact text, and Cypher's `IN`-scan
+    row order is not guaranteed to match the requested list (nor survive a
+    fact_uuid shared by two citations). Kept as a sibling function rather than
+    changing `_cited_fact_texts`'s shape: that list is also persisted verbatim
+    into `raw["cited_facts"]` and consumed as a bag by the faithfulness prompt,
+    so reshaping it would ripple beyond this fix."""
+    if not fact_uuids:
+        return {}
+    async with driver.session() as s:
+        r = await s.run(
+            "MATCH ()-[f:RELATES_TO {group_id:$g}]->() WHERE f.uuid IN $u "
+            "RETURN f.uuid AS uuid, f.fact AS fact", g=group_id, u=list(fact_uuids))
+        return {rec["uuid"]: rec["fact"] async for rec in r}
+
+
 async def _score_one(clients, q, mode_override, settings, resolver):
     graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
     scope = resolver.resolve(q["question"])
@@ -211,7 +233,9 @@ async def _score_one(clients, q, mode_override, settings, resolver):
     facts = await _cited_fact_texts(driver, settings.group_id,
                                     [c["fact_uuid"] for c in env["citations"]])
     faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
-    labelled = _labelled_facts(env["citations"], facts)
+    texts = await _cited_fact_texts_by_uuid(driver, settings.group_id,
+                                            [c["fact_uuid"] for c in env["citations"]])
+    labelled = _labelled_facts(env["citations"], texts)
     misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
     return env, ghit, faith, facts, misattributed
 
