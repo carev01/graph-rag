@@ -43,9 +43,16 @@ _EPISODES_AMONG = (
 # unscoped even when it names a platform or product: "Which backup vendors can
 # protect Azure VMs?" is about Azure as a WORKLOAD, and scoping it to Microsoft's
 # documentation would drop every other vendor's answer (final review, 2026-09-25).
+#
+# Deliberately narrow: "across regions/accounts", "a third-party KMS key", "which
+# options in Azure Backup" are everyday SINGLE-vendor wording and must stay scoped
+# (scoped re-review). Only a cross-vendor noun makes it cross-vendor.
 _CROSS_VENDOR = re.compile(
-    r"\b(vendors?|across|third[- ]party|"
-    r"(which|what|all|other) (backup )?(products|solutions|tools|options))\b",
+    r"\bvendors\b"
+    r"|\b(which|what|any|other|different|competing) vendor\b(?!-)"
+    r"|\bacross (\w+ )?(vendors|providers|clouds|platforms|products|solutions)\b"
+    r"|\bthird[- ]party (vendors?|tools|products|solutions|backup)\b"
+    r"|\b(all|other|alternative|competing) (backup )?(products|solutions|vendors)\b",
     re.IGNORECASE)
 
 

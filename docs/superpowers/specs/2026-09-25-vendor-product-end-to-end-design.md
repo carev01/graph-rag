@@ -103,6 +103,16 @@ Query-time computation, not a stored per-community vendor mix: it needs no schem
 addition, no backfill and no rebuild, is always consistent with the current graph, and
 costs one Cypher over ~24 communities × ~20 facts (tens of ms).
 
+**4.4 Detected scope is soft (added after the final review).** Cross-vendor wording
+("vendors", "across clouds/providers", "third-party tools", "all/other products") keeps
+a question unscoped even when it names a platform ("Which backup vendors can protect
+Azure VMs?"). A *detected* scope whose answer grounds nothing is re-run unscoped and
+reported as `scope.source = "detected-relaxed"`; an explicit scope never is. This also
+fires when the scoped path retrieved facts but synthesis correctly refused — the answer
+then comes from other vendors, which the `(Vendor · Product)` labels and `scope.source`
+make visible. Accepted: a question naming a product is better answered with visibly
+labelled neighbouring evidence than refused.
+
 ## 5. Out of scope, deliberately
 
 - **`SAME_AS` links (invariant #5).** Provenance already carries vendor/product for every

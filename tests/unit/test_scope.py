@@ -114,3 +114,21 @@ def test_cross_vendor_wording_stays_unscoped_even_when_names_appear(q):
 def test_explicit_params_still_override_cross_vendor_wording():
     s = _r().resolve("Which vendors support Azure?", vendors=["Veeam"])
     assert s == Scope(("Veeam",), (), "explicit")
+
+
+@pytest.mark.parametrize("q", [
+    "How do I copy backups across regions in AWS Backup?",
+    "How does AWS Backup share recovery points across accounts?",
+    "Can Azure Backup restore across subscriptions?",
+    "How is data replicated across availability zones in Azure Backup?",
+    "How do I configure a third-party KMS key in AWS Backup?",
+    "Which vendor-supplied agents does Veeam Backup & Replication need?",
+    "What tools does AWS Backup provide for vault lock?",
+    "Which options in Azure Backup enable soft delete?",
+    "What backup options does Azure Backup offer for SQL?",
+    "Which products does Veeam offer for Microsoft 365?",
+])
+def test_single_vendor_questions_with_everyday_wording_stay_scoped(q):
+    """Scoped re-review: 'across regions', 'third-party KMS', 'which options' are
+    ordinary single-vendor backup vocabulary, not cross-vendor intent."""
+    assert not _r().detect(q).is_empty(), q
