@@ -1,6 +1,6 @@
 # Vendor and product, end to end — design
 
-**Date:** 2026-09-25. **Status:** draft for review.
+**Date:** 2026-09-25. **Status:** approved 2026-09-25; implemented (plan `plans/2026-09-25-vendor-product-end-to-end.md`).
 **Covers:** BACKLOG 52 (global/DRIFT shortlist not vendor-aware) and the user requirement
 of 2026-09-25: *"We should be able to track vendor and product end-to-end. When producing
 responses it is important to identify which vendors and specific products apply."*
@@ -124,8 +124,14 @@ labelled neighbouring evidence than refused.
 
 ## 6. Evaluation
 
-- AWS/Azure golden set: global grounding back from 0.29 to ≥ 0.8, routing and
-  faithfulness unchanged.
+- AWS/Azure golden set. *Re-baselined after the first acceptance run (user-approved,
+  2026-09-25):* the golden answers expect AWS/Azure articles only, so once other vendors
+  are ingested an unscoped cross-vendor question legitimately cites them. Acceptance:
+  **scoped** grounding ≥ 0.8, **classifier** routing ≥ 0.97 (the mode chosen before a
+  fallback), faithfulness ≥ 4.8. Cross-vendor grounding and answer-path routing are
+  reported as informational. (Original target: global grounding ≥ 0.8 — global
+  answers scoped comparisons from only ~3 AWS/Azure communities, so the router's
+  scoped-local fallback is the right path for them.)
 - New Tier 1 golden questions once Veeam and Commvault are ingested: 6 scoped (one vendor
   or product), 4 comparisons (two named vendors), 2 explicitly cross-vendor (must stay
   unscoped).
