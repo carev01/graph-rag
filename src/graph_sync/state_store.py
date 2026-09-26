@@ -44,6 +44,11 @@ _LOCK_KEY = 911_222_333
 # Distinct from _LOCK_KEY: that one elects a single poller and is taken with
 # try-once semantics; this one is contended and held for a whole article.
 _WARMUP_LOCK_KEY = 911_222_334
+# Serialises `init_schema` across processes: eight workers starting together each
+# ran the DDL at once and two deadlocked in the index statements
+# (DeadlockDetectedError, 2026-09-25 rollout). Transaction-scoped, so it is released
+# at commit and can never outlive the call on a pooled connection.
+_SCHEMA_LOCK_KEY = 911_222_335
 
 
 class StateStore:
@@ -59,7 +64,8 @@ class StateStore:
 
     async def init_schema(self) -> None:
         pool = await self._get_pool()
-        async with pool.acquire() as c:
+        async with pool.acquire() as c, c.transaction():
+            await c.execute("SELECT pg_advisory_xact_lock($1)", _SCHEMA_LOCK_KEY)
             await c.execute(_SCHEMA)
 
     async def close(self) -> None:

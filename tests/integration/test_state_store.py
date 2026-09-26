@@ -124,3 +124,35 @@ async def test_warmup_lock_without_waiting_reports_a_busy_lock_at_once(state_sto
         await other.close()
     async with state_store.warmup_lock(timeout=30.0, wait=False) as held:
         assert held is True, "a free lock is taken on the single attempt"
+
+
+async def test_concurrent_init_schema_on_a_fresh_database_all_succeed(state_store):
+    """Eight workers starting together each run init_schema; on 2026-09-25 two of
+    them deadlocked in the index DDL (DeadlockDetectedError) and one crashed at
+    startup. Schema setup is now serialised by a transaction-scoped advisory lock."""
+    import asyncio
+
+    from graph_sync.state_store import StateStore
+
+    admin = await asyncpg.connect(state_store._dsn)
+    try:
+        await admin.execute("DROP DATABASE IF EXISTS fresh_schema")
+        await admin.execute("CREATE DATABASE fresh_schema")
+    finally:
+        await admin.close()
+    dsn = state_store._dsn.rsplit("/", 1)[0] + "/fresh_schema"
+    stores = [StateStore(dsn) for _ in range(8)]
+    try:
+        await asyncio.gather(*(s.init_schema() for s in stores))
+        conn = await asyncpg.connect(dsn)
+        try:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM pg_indexes WHERE indexname='ix_semantic_jobs_article'") == 1
+            # The lock is transaction-scoped: nothing is left held afterwards.
+            assert await conn.fetchval(
+                "SELECT count(*) FROM pg_locks WHERE locktype='advisory'") == 0
+        finally:
+            await conn.close()
+    finally:
+        for s in stores:
+            await s.close()
