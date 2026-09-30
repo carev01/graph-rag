@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # in the 2026-09-25 Veeam run while 24 of 38 sources were still cold.
     semantic_warmup_lock_mode: Literal["defer", "wait"] = "defer"
     semantic_warmup_defer_seconds: float = 30.0
+    # An LLM account out of credits (HTTP 402) defers the batch without spending
+    # attempts and stops claiming for this long, then retries (semantic_worker).
+    semantic_credit_pause_seconds: float = 300.0
     # Scopes the worker's `claim_semantic_jobs` to a subset of sources -- the
     # k3s bootstrap-first rehearsal (docs/deploy/k3s.md): comma-separated
     # source ids, e.g. "s1,s2". Empty (the default) is unscoped, i.e. today's

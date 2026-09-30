@@ -30,6 +30,32 @@ def _note_deferral(article_id: str, n_jobs: int) -> None:
                "worker; %d deferral(s) so far in this process", article_id, n_jobs, _deferrals)
 
 
+class CreditsExhausted(Exception):
+    """The LLM account is out of credits (HTTP 402). Raised out of
+    `run_worker_once` after the batch's jobs were deferred; `run_worker` stops
+    claiming for `credit_pause_seconds`."""
+
+
+def _is_out_of_credits(exc: BaseException) -> bool:
+    """HTTP 402 / insufficient credits anywhere in the exception chain.
+
+    An empty account fails EVERY job the same way, so treating it as a poison job
+    spends each job's attempts and marches on through the queue (2026-09-26: 155
+    jobs in 15 minutes). graphiti may wrap the provider error, hence the chain walk.
+    """
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen and len(seen) < 10:
+        seen.add(id(e))
+        if getattr(e, "status_code", None) == 402:
+            return True
+        text = str(e).lower()
+        if "error code: 402" in text or ("insufficient" in text and "credit" in text):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
 def exp_backoff(attempts: int, *, base: float, cap: float) -> float:
     return min(base * (2 ** (attempts - 1)), cap)
 
@@ -42,8 +68,14 @@ async def run_worker_once(
     cold_lock: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
     source_ids: list[str] | None = None,
     defer_seconds: float | None = None,
+    credit_pause_seconds: float = 300.0,
 ) -> int:
     """Claim and run one batch; returns the number of jobs PROCESSED.
+
+    A job failing with HTTP 402 (the LLM account is out of credits) is DEFERRED by
+    `credit_pause_seconds` instead of failed -- no attempt spent -- and so is every
+    job of the batch not yet started; `CreditsExhausted` is then raised so
+    `run_worker` stops claiming.
 
     `defer_seconds` switches the global warm-up lock to defer mode: `cold_lock()`
     is expected to try once (`StateStore.warmup_lock(wait=False)`), and a cold
@@ -97,6 +129,11 @@ async def run_worker_once(
                 raise ValueError(f"unknown op {job['op']!r}")
             await store.complete_semantic_job(job["id"], job["claimed_at"])
         except Exception as e:  # a poison job must not block the queue
+            if _is_out_of_credits(e):
+                # Not the article's fault: no attempt spent, and the batch stops.
+                credits_out.append(str(e)[:300])
+                await _defer_for_credits(job)
+                return
             logger.exception("semantic job %s failed", job["id"])
             await store.fail_semantic_job(
                 job["id"], str(e), max_attempts=max_attempts,
@@ -131,10 +168,23 @@ async def run_worker_once(
     cold_ids: set[str] = set()
     deferred: list[int] = []
     not_ours: list[int] = []
+    credits_out: list[str] = []
+
+    async def _defer_for_credits(job) -> None:
+        if await store.defer_semantic_job(job["id"], job["claimed_at"], credit_pause_seconds):
+            deferred.append(job["id"])
+        else:
+            not_ours.append(job["id"])
 
     async def _run_group(group) -> None:
         nonlocal escaped_early
         if escaped_early:
+            return
+        if credits_out:
+            # The account is empty: hand the rest of the batch back unrun rather
+            # than send it to a provider that will refuse it.
+            for job in group:
+                await _defer_for_credits(job)
             return
         try:
             async with AsyncExitStack() as stack:
@@ -270,6 +320,8 @@ async def run_worker_once(
             logger.info("%s", timings.report())
     if escaped:
         raise escaped[0]
+    if credits_out:
+        raise CreditsExhausted(credits_out[0])
     return processed
 
 
@@ -281,6 +333,7 @@ async def run_worker(
     is_cold: Callable[[str], Awaitable[bool]] | None = None,
     source_ids: list[str] | None = None,
     defer_seconds: float | None = None,
+    credit_pause_seconds: float = 300.0,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
 
@@ -294,14 +347,28 @@ async def run_worker(
     """
     batches = 0
     while not stop_event.is_set():
-        n = await run_worker_once(
-            store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
-            backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
-            concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock,
-            source_ids=source_ids, defer_seconds=defer_seconds)
+        pause = 0.0
+        try:
+            n = await run_worker_once(
+                store, ingest, batch=batch, budget=budget, max_attempts=max_attempts,
+                backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
+                concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock,
+                source_ids=source_ids, defer_seconds=defer_seconds,
+                credit_pause_seconds=credit_pause_seconds)
+        except CreditsExhausted as e:
+            logger.error("LLM provider out of credits (HTTP 402); jobs deferred without "
+                         "spending attempts, pausing claims for %.0fs. Top up the account. "
+                         "Provider said: %s", credit_pause_seconds, e)
+            n, pause = 0, credit_pause_seconds
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return
+        if pause:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=pause)
+            except asyncio.TimeoutError:
+                pass
+            continue
         if n == 0:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
