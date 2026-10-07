@@ -144,3 +144,8 @@ def test_prompt_cache_layout_is_off_by_default():
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                         neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
     assert s.llm_cache_layout is False and s.cheap_llm_cache_layout is False
+
+
+def test_credit_pause_default():
+    from graph_sync.config import Settings
+    assert Settings(**_SYNC_MIN).semantic_credit_pause_seconds == 300.0
