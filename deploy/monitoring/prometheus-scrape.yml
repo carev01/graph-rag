@@ -1,0 +1,22 @@
+  # >>> graph-rag ingestion (deploy/monitoring/apply.sh replaces this block) >>>
+  # Queue gauges: semantic_jobs per vendor/product/source/status, OpenRouter balance,
+  # GPU rate (graph-sync metrics-exporter).
+  - job_name: "graph-rag-queue"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["graph-rag-metrics.graph-rag.svc.cluster.local:9108"]
+  # Worker counters, one target per worker pod of BOTH tiers (headless Service).
+  - job_name: "graph-rag-workers"
+    dns_sd_configs:
+      - names: ["graph-rag-worker-metrics.graph-rag.svc.cluster.local"]
+        type: A
+        port: 9109
+        refresh_interval: 30s
+  # vLLM on the vast.ai GPU, through the cluster's SSH tunnel (no key needed for /metrics).
+  - job_name: "vllm-vast"
+    static_configs:
+      - targets: ["graph-rag-vast-tunnel.graph-rag.svc.cluster.local:8000"]
+    relabel_configs:
+      - target_label: model
+        replacement: "qwen35-graphrag"
+  # <<< graph-rag ingestion <<<

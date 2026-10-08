@@ -11,7 +11,9 @@ spec:
     matchLabels: {app: {{ .name }}}
   template:
     metadata:
-      labels: {app: {{ .name }}}
+      # graph-rag/metrics: Prometheus finds every worker pod, both tiers, through the
+      # headless graph-rag-worker-metrics Service (metrics.yaml).
+      labels: {app: {{ .name }}, graph-rag/metrics: worker}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
     spec:
@@ -28,11 +30,15 @@ spec:
           command: ["python", "-m", "graph_sync.cli", "worker"]
           args: {{- toYaml $.Values.worker.args | nindent 12 }}
           {{- include "graph-rag.envFrom" $ | nindent 10 }}
-          {{- if .gpu }}
-          # The cheap extraction tier on the vast.ai vLLM instance, through the tunnel.
-          # `env` overrides envFrom, so only the cheap tier changes; the strong tier,
-          # the embedder and everything else are shared with the API-tier workers.
+          ports: [{containerPort: 9109, name: metrics}]
           env:
+            # Labels every worker metric, so the dashboard compares the tiers.
+            - name: WORKER_TIER
+              value: {{ if .gpu }}gpu{{ else }}api{{ end }}
+          {{- if .gpu }}
+            # The cheap extraction tier on the vast.ai vLLM instance, through the tunnel.
+            # `env` overrides envFrom, so only the cheap tier changes; the strong tier,
+            # the embedder and everything else are shared with the API-tier workers.
             - name: CHEAP_LLM_BASE_URL
               value: "http://graph-rag-vast-tunnel:8000/v1"
             - name: CHEAP_LLM_API_KEY

@@ -21,7 +21,9 @@ from graph_sync.config import Settings
 def _sync_settings() -> Settings:
     return Settings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
-                    postgres_dsn="postgresql://x")
+                    postgres_dsn="postgresql://x",
+                    # Hermetic: the worker command must not bind a real port in tests.
+                    worker_metrics_port=0)
 
 
 def _extract_settings(**kw) -> ExtractSettings:
@@ -282,3 +284,25 @@ def test_worker_command_passes_the_unreachable_pause(monkeypatch):
     cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
 
     assert received["unreachable_pause_seconds"] == 17.0
+
+
+def test_worker_command_starts_metrics_on_the_configured_port(monkeypatch):
+    """Inert-knob guard: the configured port reaches the metrics server."""
+    ports: list[int] = []
+
+    async def _deps(settings):
+        return _Store(), _Ingest(), _Closable(), _Closable(), _Closable()
+
+    async def _fake_run_worker(store_, ingest, **kw):
+        return None
+
+    monkeypatch.setattr(cli, "get_settings", lambda: _sync_settings().model_copy(
+        update={"worker_metrics_port": 19109}))
+    monkeypatch.setattr(cli, "get_extract_settings", lambda: _extract_settings())
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+    monkeypatch.setattr(cli.metrics, "start_worker_metrics", ports.append)
+
+    cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    assert ports == [19109]

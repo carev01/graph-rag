@@ -1,0 +1,54 @@
+{{- if .Values.metrics.enabled }}
+# Ingestion metrics for the Grafana "graph-rag ingestion" dashboard (deploy/monitoring/).
+# The queue exporter turns semantic_jobs into gauges per vendor/product/source/status
+# (read-only against Postgres and Neo4j); workers serve their own counters on :9109.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-rag-metrics
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: graph-rag-metrics}
+  template:
+    metadata:
+      labels: {app: graph-rag-metrics}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+    spec:
+      {{- include "graph-rag.podSecurity" . | nindent 6 }}
+      containers:
+        - name: exporter
+          image: {{ include "graph-rag.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "graph_sync.cli", "metrics-exporter"]
+          {{- include "graph-rag.envFrom" . | nindent 10 }}
+          env:
+            - name: GPU_HOURLY_COST_USD
+              value: {{ .Values.vast.hourlyCostUsd | quote }}
+          ports: [{containerPort: 9108, name: metrics}]
+          readinessProbe: {httpGet: {path: /metrics, port: metrics}, periodSeconds: 30}
+          {{- include "graph-rag.containerSecurity" . | nindent 10 }}
+          resources: {{- toYaml .Values.metrics.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graph-rag-metrics
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  selector: {app: graph-rag-metrics}
+  ports: [{name: metrics, port: 9108, targetPort: metrics}]
+---
+# Headless: one DNS A record per worker pod (both tiers), for Prometheus dns_sd_configs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: graph-rag-worker-metrics
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: {graph-rag/metrics: worker}
+  ports: [{name: metrics, port: 9109, targetPort: 9109}]
+{{- end }}

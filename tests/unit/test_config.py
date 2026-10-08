@@ -154,3 +154,10 @@ def test_credit_pause_default():
 def test_unreachable_pause_default():
     from graph_sync.config import Settings
     assert Settings(**_SYNC_MIN).semantic_unreachable_pause_seconds == 60.0
+
+
+def test_metrics_defaults():
+    from graph_sync.config import Settings
+    s = Settings(**_SYNC_MIN)
+    assert (s.worker_metrics_port, s.exporter_port, s.exporter_interval_seconds,
+            s.gpu_hourly_cost_usd) == (9109, 9108, 30.0, 0.0)

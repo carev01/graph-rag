@@ -9,7 +9,7 @@ import signal
 import httpx
 import typer
 from graphiti_core import Graphiti
-from neo4j import AsyncDriver
+from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from graph_extract.cli import _build_ingest_driver
 from graph_extract.config import get_extract_settings
@@ -17,6 +17,7 @@ from graph_extract.ingest_driver import IngestDriver
 from graph_extract.warmup import WarmupGate
 from graph_sync.catalog import Catalog
 from graph_sync.config import Settings, get_settings
+from graph_sync import metrics
 from graph_sync.delta_client import make_client
 from graph_sync.logging_setup import configure_logging as _configure_logging
 from graph_sync.neo4j_repo import Neo4jRepo
@@ -220,6 +221,7 @@ def worker(
 
     async def _run() -> None:
         settings = get_settings()
+        metrics.start_worker_metrics(settings.worker_metrics_port)
         store, ingest, graphiti, docext, driver = await _build_worker_deps(settings)
         try:
             stop_event = asyncio.Event()
@@ -293,6 +295,39 @@ def worker(
             await graphiti.close()
             if ingest._cheap is not None:
                 await ingest._cheap.graphiti.close()
+
+    asyncio.run(_run())
+
+
+@app.command("metrics-exporter")
+def metrics_exporter() -> None:
+    """Serve the queue gauges for Prometheus (graph_sync.metrics): semantic_jobs per
+    vendor / product / source / status, the OpenRouter balance and the GPU rate.
+    Read-only against Postgres and Neo4j. Runs until SIGINT/SIGTERM."""
+    _configure_logging()
+
+    async def _run() -> None:
+        settings = get_settings()
+        extract = get_extract_settings()
+        store = StateStore(settings.postgres_dsn)
+        driver = AsyncGraphDatabase.driver(
+            settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+        key = extract.cheap_llm_api_key
+        credits = ((lambda: metrics.openrouter_credits(key))
+                   if key and "openrouter.ai" in extract.cheap_llm_base_url else None)
+        try:
+            await metrics.run_exporter(
+                pool=await store._get_pool(), port=settings.exporter_port,
+                interval=settings.exporter_interval_seconds, stop=stop,
+                names_loader=lambda: metrics.load_source_names(driver),
+                credits_loader=credits, gpu_hourly_cost=settings.gpu_hourly_cost_usd)
+        finally:
+            await store.close()
+            await driver.close()
 
     asyncio.run(_run())
 

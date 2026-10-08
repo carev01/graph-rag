@@ -268,6 +268,7 @@ dependencies = [
     { name = "httpx" },
     { name = "neo4j" },
     { name = "openai" },
+    { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "typer" },
@@ -292,6 +293,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "neo4j", specifier = ">=5.22" },
     { name = "openai", specifier = ">=1.40" },
+    { name = "prometheus-client", specifier = ">=0.21" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
@@ -739,6 +741,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/00/4d/a4920cfd08dd376d5faf214665c33b311eafeb92e5410a2a42054adca395/posthog-7.22.2.tar.gz", hash = "sha256:2e7bffa28b0032622f4661be6600f2555aff34da0f2a1cd62f72ec490b574519", size = 330350, upload-time = "2026-07-13T09:01:06.827Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/2e/b6af5e03abf34855e8f2bebf801ea2ac8411772f7479db5f219b66e0d480/posthog-7.22.2-py3-none-any.whl", hash = "sha256:8b1cf21ace6f3a077841a7a900fcfd25c2986b52c2f68eaa98710dcea9f54fd6", size = 396053, upload-time = "2026-07-13T09:01:05.272Z" },
+]
+
+[[package]]
+name = "prometheus-client"
+version = "0.26.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b", size = 92910, upload-time = "2026-07-24T19:36:41.893Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6", size = 64494, upload-time = "2026-07-24T19:36:40.854Z" },
 ]
 
 [[package]]

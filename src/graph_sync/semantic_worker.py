@@ -15,6 +15,7 @@ from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
 from graph_extract.ingest_driver import CRAWL_FALLBACK
 from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally
+from graph_sync import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ async def run_worker_once(
         # try/except/finally so a job that fails still records what it spent.
         spent = UsageTally()
         scope = CURRENT_USAGE_TALLY.set(spent)
+        started = time.monotonic()
         try:
             if job["op"] == "upsert":
                 res = await ingest.ingest_article(job["article_id"])
@@ -217,6 +219,7 @@ async def run_worker_once(
             else:
                 raise ValueError(f"unknown op {job['op']!r}")
             await store.complete_semantic_job(job["id"], job["claimed_at"])
+            metrics.job_outcome("done", time.monotonic() - started)
         except Exception as e:  # a poison job must not block the queue
             halt = "credits" if _is_out_of_credits(e) else None
             if halt is None:
@@ -235,8 +238,11 @@ async def run_worker_once(
                 retry_delay_seconds=exp_backoff(
                     job["attempts"] + 1, base=backoff_base, cap=backoff_cap),
                 claimed_at=job["claimed_at"])
+            metrics.job_outcome("failed", time.monotonic() - started)
         finally:
             CURRENT_USAGE_TALLY.reset(scope)
+            metrics.job_tokens(spent.prompt_tokens, spent.cached_tokens,
+                               spent.completion_tokens)
             batch_tokens.add("llm", prompt=spent.prompt_tokens,
                              completion=spent.completion_tokens, cached=spent.cached_tokens)
             delta = spent.prompt_tokens + spent.completion_tokens
@@ -275,6 +281,7 @@ async def run_worker_once(
         delay = credit_pause_seconds if _halt_kind() == "credits" else unreachable_pause_seconds
         if await store.defer_semantic_job(job["id"], job["claimed_at"], delay):
             deferred.append(job["id"])
+            metrics.job_outcome("deferred_halt")
         else:
             not_ours.append(job["id"])
 
@@ -309,6 +316,8 @@ async def run_worker_once(
                         not_ours.extend(job["id"] for job in group if job not in ours)
                         if ours:
                             _note_deferral(group[0]["article_id"], len(ours))
+                            for _ in ours:
+                                metrics.job_outcome("deferred_lock")
                         if lost:
                             logger.warning("%d job(s) for article %s were reclaimed by "
                                            "another worker before they could be deferred",
@@ -466,12 +475,14 @@ async def run_worker(
                          "spending attempts, pausing claims for %.0fs. Top up the account. "
                          "Provider said: %s", credit_pause_seconds, e)
             n, pause = 0, credit_pause_seconds
+            metrics.pause("credits")
         except ProviderUnreachable as e:
             logger.error("upstream endpoint unreachable (LLM, embedder or DocExtractor); jobs "
                          "deferred without spending attempts, pausing claims for %.0fs. "
                          "Error: %s",
                          unreachable_pause_seconds, e)
             n, pause = 0, unreachable_pause_seconds
+            metrics.pause("unreachable")
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

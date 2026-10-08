@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     # not a timeout) is treated the same way, with a shorter pause: outages of the
     # GPU tier's tunnel are usually minutes (semantic_worker._is_unreachable).
     semantic_unreachable_pause_seconds: float = 60.0
+    # Prometheus metrics (graph_sync.metrics). The worker serves its counters on
+    # worker_metrics_port (0 disables); `graph-sync metrics-exporter` serves the queue
+    # gauges on exporter_port, refreshed every exporter_interval_seconds.
+    # gpu_hourly_cost_usd feeds the dashboard's cost panels (the vast.ai rate).
+    worker_metrics_port: int = 9109
+    exporter_port: int = 9108
+    exporter_interval_seconds: float = 30.0
+    gpu_hourly_cost_usd: float = 0.0
     # Scopes the worker's `claim_semantic_jobs` to a subset of sources -- the
     # k3s bootstrap-first rehearsal (docs/deploy/k3s.md): comma-separated
     # source ids, e.g. "s1,s2". Empty (the default) is unscoped, i.e. today's
