@@ -1,30 +1,53 @@
+{{- define "graph-rag.worker" -}}
+{{- $ := .root -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: graph-rag-worker
-  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+  name: {{ .name }}
+  labels: {{- include "graph-rag.labels" $ | nindent 4 }}
 spec:
-  replicas: {{ .Values.worker.replicas }}
+  replicas: {{ .replicas }}
   selector:
-    matchLabels: {app: graph-rag-worker}
+    matchLabels: {app: {{ .name }}}
   template:
     metadata:
-      labels: {app: graph-rag-worker}
+      labels: {app: {{ .name }}}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
     spec:
-      {{- include "graph-rag.podSecurity" . | nindent 6 }}
+      {{- include "graph-rag.podSecurity" $ | nindent 6 }}
       # On SIGTERM the worker stops claiming new work after its in-flight batch;
       # an article that outlasts terminationGracePeriodSeconds is killed and its
       # job is re-queued by the reaper after SEMANTIC_REAPER_LEASE_SECONDS
       # (re-running is safe: the per-chunk HAS_EPISODE gate makes it idempotent).
-      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ $.Values.worker.terminationGracePeriodSeconds }}
       containers:
         - name: worker
-          image: {{ include "graph-rag.image" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "graph-rag.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
           command: ["python", "-m", "graph_sync.cli", "worker"]
-          args: {{- toYaml .Values.worker.args | nindent 12 }}
-          {{- include "graph-rag.envFrom" . | nindent 10 }}
-          {{- include "graph-rag.containerSecurity" . | nindent 10 }}
-          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+          args: {{- toYaml $.Values.worker.args | nindent 12 }}
+          {{- include "graph-rag.envFrom" $ | nindent 10 }}
+          {{- if .gpu }}
+          # The cheap extraction tier on the vast.ai vLLM instance, through the tunnel.
+          # `env` overrides envFrom, so only the cheap tier changes; the strong tier,
+          # the embedder and everything else are shared with the API-tier workers.
+          env:
+            - name: CHEAP_LLM_BASE_URL
+              value: "http://graph-rag-vast-tunnel:8000/v1"
+            - name: CHEAP_LLM_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ $.Values.vast.secretName }}, key: api_key}}
+            {{- range $k, $v := $.Values.vast.workerConfig }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          {{- include "graph-rag.containerSecurity" $ | nindent 10 }}
+          resources: {{- toYaml $.Values.worker.resources | nindent 12 }}
+{{- end }}
+
+{{- include "graph-rag.worker" (dict "root" $ "name" "graph-rag-worker" "replicas" .Values.worker.replicas "gpu" false) }}
+{{- if .Values.vast.enabled }}
+---
+{{ include "graph-rag.worker" (dict "root" $ "name" "graph-rag-worker-gpu" "replicas" .Values.vast.workerReplicas "gpu" true) }}
+{{- end }}

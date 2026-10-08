@@ -60,3 +60,22 @@ cron:
     cleanup: {schedule: "30 3 * * *", suspend: false, activeDeadlineSeconds: 7200, backoffLimit: 2, command: ["python", "-m", "graph_extract.cli", "cleanup"]}
     maintenance: {schedule: "0 4 * * 0", suspend: false, activeDeadlineSeconds: 14400, backoffLimit: 2, command: ["python", "-m", "graph_extract.cli", "maintenance"]}
     theme-build: {schedule: "0 5 * * 0", suspend: true, activeDeadlineSeconds: 28800, backoffLimit: 0, command: ["python", "-m", "theme_builder.cli", "theme-build"]}
+
+# Cheap extraction tier on a vast.ai GPU running vLLM (docs/deploy/vast-gpu.md).
+# Off by default. When enabled: an SSH-tunnel Deployment + Service, and a second worker
+# Deployment (graph-rag-worker-gpu) whose cheap tier points at the tunnel. Split the
+# worker count between `worker.replicas` (API tier) and `vast.workerReplicas`.
+# Every credential lives in the out-of-band Secret below (scripts/vast/provision.sh).
+vast:
+  enabled: false
+  secretName: graph-rag-vast
+  workerReplicas: 0
+  # alpine/git ships openssh-client and a `nobody` user; pinned by digest.
+  tunnelImage: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+  tunnelResources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 500m, memory: 64Mi}
+  # Non-secret cheap-tier overrides for the GPU workers.
+  workerConfig:
+    CHEAP_LLM_MODEL: qwen35-graphrag
+    CHEAP_LLM_CLIENT_MODE: generic_json_schema

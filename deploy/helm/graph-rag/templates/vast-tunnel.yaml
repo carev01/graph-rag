@@ -1,0 +1,96 @@
+{{- if .Values.vast.enabled }}
+# SSH tunnel to the vast.ai vLLM instance (docs/deploy/vast-gpu.md). The instance serves
+# on its own 127.0.0.1:18000 only; this pod forwards it to a ClusterIP Service so the
+# GPU workers can reach it. The tunnel key is restricted on the instance to forwarding
+# that one port. Host, port, host key and SSH key come from the out-of-band Secret
+# (scripts/vast/provision.sh --cluster), never from this chart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-rag-vast-tunnel
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: graph-rag-vast-tunnel}
+  template:
+    metadata:
+      labels: {app: graph-rag-vast-tunnel}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # 65534 (nobody) exists in the image's passwd; ssh refuses to run as a uid
+        # with no passwd entry.
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: ssh
+          image: {{ .Values.vast.tunnelImage }}
+          command: ["ssh"]
+          args:
+            - "-N"
+            - "-F"
+            - "/dev/null"
+            - "-i"
+            - "/etc/vast/id_ed25519"
+            - "-o"
+            - "IdentitiesOnly=yes"
+            - "-o"
+            - "UserKnownHostsFile=/etc/vast/known_hosts"
+            - "-o"
+            - "StrictHostKeyChecking=yes"
+            - "-o"
+            - "ExitOnForwardFailure=yes"
+            - "-o"
+            - "ServerAliveInterval=15"
+            - "-o"
+            - "ServerAliveCountMax=3"
+            - "-p"
+            - "$(SSH_PORT)"
+            - "-L"
+            - "0.0.0.0:8000:127.0.0.1:18000"
+            - "root@$(SSH_HOST)"
+          env:
+            - name: SSH_HOST
+              valueFrom: {secretKeyRef: {name: {{ .Values.vast.secretName }}, key: ssh_host}}
+            - name: SSH_PORT
+              valueFrom: {secretKeyRef: {name: {{ .Values.vast.secretName }}, key: ssh_port}}
+          ports:
+            - {name: http, containerPort: 8000}
+          # Ready only while the forward actually answers: vLLM's /health needs no key.
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: {port: 8000}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - {name: vast, mountPath: /etc/vast, readOnly: true}
+          {{- include "graph-rag.containerSecurity" . | nindent 10 }}
+          resources: {{- toYaml .Values.vast.tunnelResources | nindent 12 }}
+      volumes:
+        - name: vast
+          secret:
+            secretName: {{ .Values.vast.secretName }}
+            # Root-owned, group-readable via fsGroup: ssh only rejects a group/world
+            # readable key when the key file is owned by the user running ssh.
+            defaultMode: 0440
+            items:
+              - {key: id_ed25519, path: id_ed25519}
+              - {key: known_hosts, path: known_hosts}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graph-rag-vast-tunnel
+  labels: {{- include "graph-rag.labels" . | nindent 4 }}
+spec:
+  selector: {app: graph-rag-vast-tunnel}
+  ports:
+    - {name: http, port: 8000, targetPort: 8000}
+{{- end }}
