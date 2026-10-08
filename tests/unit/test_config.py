@@ -149,3 +149,8 @@ def test_prompt_cache_layout_is_off_by_default():
 def test_credit_pause_default():
     from graph_sync.config import Settings
     assert Settings(**_SYNC_MIN).semantic_credit_pause_seconds == 300.0
+
+
+def test_unreachable_pause_default():
+    from graph_sync.config import Settings
+    assert Settings(**_SYNC_MIN).semantic_unreachable_pause_seconds == 60.0

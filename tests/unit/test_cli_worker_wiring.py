@@ -261,3 +261,24 @@ def test_worker_command_passes_the_credit_pause(monkeypatch):
     cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
 
     assert received["credit_pause_seconds"] == 42.0
+
+
+def test_worker_command_passes_the_unreachable_pause(monkeypatch):
+    """Inert-knob guard: the configured pause must reach run_worker."""
+    received: dict = {}
+
+    async def _deps(settings):
+        return _Store(), _Ingest(), _Closable(), _Closable(), _Closable()
+
+    async def _fake_run_worker(store_, ingest, **kw):
+        received.update(kw)
+
+    monkeypatch.setattr(cli, "get_settings", lambda: _sync_settings().model_copy(
+        update={"semantic_unreachable_pause_seconds": 17.0}))
+    monkeypatch.setattr(cli, "get_extract_settings", lambda: _extract_settings())
+    monkeypatch.setattr(cli, "_build_worker_deps", _deps)
+    monkeypatch.setattr(cli, "run_worker", _fake_run_worker)
+
+    cli.worker(batch=3, poll_seconds=0.01, max_batches=1)
+
+    assert received["unreachable_pause_seconds"] == 17.0

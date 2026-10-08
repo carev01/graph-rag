@@ -61,33 +61,69 @@ def _is_out_of_credits(exc: BaseException) -> bool:
 
 class ProviderUnreachable(Exception):
     """An upstream endpoint -- LLM, embedder or DocExtractor, all httpx-based -- cannot
-    be reached (connection refused, reset or dropped). Raised out of `run_worker_once` after the batch's jobs were deferred;
-    `run_worker` stops claiming for `unreachable_pause_seconds`."""
+    be reached. Raised out of `run_worker_once` after the batch's jobs were deferred;
+    `run_worker` stops claiming for `unreachable_pause_seconds`. Neo4j is out of scope:
+    its driver raises its own exception types."""
 
 
-_UNREACHABLE = (openai.APIConnectionError, httpx.ConnectError, httpx.RemoteProtocolError,
-                ConnectionRefusedError, ConnectionResetError)
+# Failing to CONNECT can never be the article's fault.
+_CONNECT_FAILED = (httpx.ConnectError, httpx.ConnectTimeout, ConnectionRefusedError)
+# A request dropped mid-flight is ambiguous: an endpoint going down, or a proxy (the SSH
+# tunnel, vast.ai's proxy) cutting off one very long request. Settled by a probe.
+_DROPPED = (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError,
+            ConnectionResetError, openai.APIConnectionError)
+_TIMEOUTS = (openai.APITimeoutError, httpx.TimeoutException, TimeoutError)
 
 
-def _is_unreachable(exc: BaseException) -> bool:
-    """A connection failure anywhere in the exception chain, and no timeout.
+def _chain(exc: BaseException) -> list[BaseException]:
+    out: list[BaseException] = []
+    e: BaseException | None = exc
+    while e is not None and e not in out and len(out) < 10:
+        out.append(e)
+        e = e.__cause__ or e.__context__
+    return out
+
+
+def _connection_failure(exc: BaseException) -> str | None:
+    """"connect", "dropped" or None for an exception chain.
 
     An endpoint that is down fails EVERY job the same way, so treating it as a poison
     job spends each job's attempts and marches on through the queue (2026-10-08: the
     GPU tier's tunnel lost vast.ai's SSH proxy for ~10 minutes; 24 jobs in a few
-    minutes). A timeout is excluded -- it can be the article itself (a huge prompt)
-    -- and `openai.APITimeoutError` subclasses `APIConnectionError`, so it is checked
-    first and wins.
+    minutes). A read/write timeout is excluded -- it can be the article itself (a huge
+    prompt) -- and `openai.APITimeoutError` subclasses `APIConnectionError`, so
+    timeouts are checked before the dropped-connection types. A CONNECT timeout is an
+    endpoint that is not answering, so it counts as "connect" (checked first).
     """
-    chain: list[BaseException] = []
-    e: BaseException | None = exc
-    while e is not None and e not in chain and len(chain) < 10:
-        chain.append(e)
-        e = e.__cause__ or e.__context__
-    if any(isinstance(x, (openai.APITimeoutError, httpx.TimeoutException, TimeoutError))
-           for x in chain):
+    chain = _chain(exc)
+    if any(isinstance(x, _CONNECT_FAILED) for x in chain):
+        return "connect"
+    if any(isinstance(x, _TIMEOUTS) for x in chain):
+        return None
+    if any(isinstance(x, _DROPPED) for x in chain):
+        return "dropped"
+    return None
+
+
+def _request_url(exc: BaseException) -> httpx.URL | None:
+    for x in _chain(exc):
+        try:
+            req = getattr(x, "request", None)   # httpx raises if it was never set
+        except RuntimeError:
+            continue
+        if isinstance(req, httpx.Request):
+            return req.url
+    return None
+
+
+async def endpoint_answers(url: httpx.URL) -> bool:
+    """Any HTTP response at all -- a 401 or a 404 included -- means the endpoint is up."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.get(url.copy_with(path="/", query=None, fragment=None))
+        return True
+    except httpx.HTTPError:
         return False
-    return any(isinstance(x, _UNREACHABLE) for x in chain)
 
 
 def exp_backoff(attempts: int, *, base: float, cap: float) -> float:
@@ -104,15 +140,19 @@ async def run_worker_once(
     defer_seconds: float | None = None,
     credit_pause_seconds: float = 300.0,
     unreachable_pause_seconds: float = 60.0,
+    probe: Callable[[httpx.URL], Awaitable[bool]] = endpoint_answers,
 ) -> int:
     """Claim and run one batch; returns the number of jobs PROCESSED.
 
     A job failing with HTTP 402 (the LLM account is out of credits) is DEFERRED by
     `credit_pause_seconds` instead of failed -- no attempt spent -- and so is every
     job of the batch not yet started; `CreditsExhausted` is then raised so
-    `run_worker` stops claiming. A job whose LLM/embedding endpoint cannot be reached
-    (`_is_unreachable`) gets the same treatment with `unreachable_pause_seconds` and
-    `ProviderUnreachable`.
+    `run_worker` stops claiming. A job whose upstream endpoint cannot be reached gets
+    the same treatment with `unreachable_pause_seconds` and `ProviderUnreachable`:
+    always when the connection could not be made, and for a request dropped
+    mid-flight only when `probe` finds the endpoint not answering either --
+    otherwise the drop was this article's doing and the job fails as before, so it
+    can still reach `dead`.
 
     `defer_seconds` switches the global warm-up lock to defer mode: `cold_lock()`
     is expected to try once (`StateStore.warmup_lock(wait=False)`), and a cold
@@ -166,8 +206,12 @@ async def run_worker_once(
                 raise ValueError(f"unknown op {job['op']!r}")
             await store.complete_semantic_job(job["id"], job["claimed_at"])
         except Exception as e:  # a poison job must not block the queue
-            halt = ("credits" if _is_out_of_credits(e)
-                    else "unreachable" if _is_unreachable(e) else None)
+            halt = "credits" if _is_out_of_credits(e) else None
+            if halt is None:
+                kind = _connection_failure(e)
+                url = _request_url(e) if kind == "dropped" else None
+                if kind == "connect" or (url is not None and not await probe(url)):
+                    halt = "unreachable"
             if halt is not None:
                 # Not the article's fault: no attempt spent, and the batch stops.
                 halted.append((halt, f"{type(e).__name__}: {str(e)[:300]}"))
@@ -207,12 +251,16 @@ async def run_worker_once(
     cold_ids: set[str] = set()
     deferred: list[int] = []
     not_ours: list[int] = []
-    # (kind, message) of the first failures that halt the batch: "credits" (HTTP 402)
-    # or "unreachable" (the endpoint is down). The first kind decides the pause.
+    # (kind, message) of the failures that halt the batch: "credits" (HTTP 402) or
+    # "unreachable" (the endpoint is down).
     halted: list[tuple[str, str]] = []
 
+    def _halt_kind() -> str:
+        # Credits win: an empty account needs a human, and its longer pause.
+        return "credits" if any(k == "credits" for k, _ in halted) else "unreachable"
+
     async def _defer_halted(job) -> None:
-        delay = credit_pause_seconds if halted[0][0] == "credits" else unreachable_pause_seconds
+        delay = credit_pause_seconds if _halt_kind() == "credits" else unreachable_pause_seconds
         if await store.defer_semantic_job(job["id"], job["claimed_at"], delay):
             deferred.append(job["id"])
         else:
@@ -363,7 +411,8 @@ async def run_worker_once(
     if escaped:
         raise escaped[0]
     if halted:
-        kind, message = halted[0]
+        kind = _halt_kind()
+        message = next(m for k, m in halted if k == kind)
         raise (CreditsExhausted if kind == "credits" else ProviderUnreachable)(message)
     return processed
 
@@ -407,8 +456,7 @@ async def run_worker(
             n, pause = 0, credit_pause_seconds
         except ProviderUnreachable as e:
             logger.error("upstream endpoint unreachable (LLM, embedder or DocExtractor); jobs "
-                         "deferred without spending attempts, pausing claims for %.0fs. For "
-                         "the GPU tier check the vast instance and graph-rag-vast-tunnel. "
+                         "deferred without spending attempts, pausing claims for %.0fs. "
                          "Error: %s",
                          unreachable_pause_seconds, e)
             n, pause = 0, unreachable_pause_seconds
