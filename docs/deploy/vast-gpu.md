@@ -77,6 +77,12 @@ Deployment. The GPU workers get `CHEAP_LLM_BASE_URL=http://graph-rag-vast-tunnel
 `CHEAP_LLM_API_KEY` from the Secret and `CHEAP_LLM_MODEL=qwen35-graphrag` as `env`, which
 overrides the shared Secret/ConfigMap for those pods only.
 
+**Before scaling GPU workers up, prove the path with a real call** (a failing GPU worker
+spends one of each job's 5 attempts per failure): run a one-off pod with the worker image,
+the same `envFrom`, and the three `env` overrides above, that POSTs one
+`/chat/completions` to `$CHEAP_LLM_BASE_URL` with `$CHEAP_LLM_API_KEY` and expects 200.
+Then scale up and confirm vLLM's `vllm:request_success_total` rises.
+
 ## 3. Moving workers between tiers
 
 Both Deployments claim from the same queue (`FOR UPDATE SKIP LOCKED`), so any split works
@@ -112,6 +118,7 @@ tier back up first, then fix the instance.
 | tunnel pod CrashLoop, `Host key verification failed` | the instance changed (new host/port/host key): re-run §1 with `--cluster` |
 | every login refused after provisioning | an entry got glued onto the last account key (vast writes `authorized_keys` without a final newline; `remote_setup.sh` now adds one first). Fix from the vast console → Jupyter terminal: put your public key back on its own line in `/root/.ssh/authorized_keys` |
 | tunnel pod `Permission denied (publickey)` | the restricted tunnel key is missing from `/root/.ssh/authorized_keys` (vast may rewrite it on recycle): re-run §1 |
+| GPU workers log `Connection error.` but vLLM's request counter does not move | a trailing newline in the Secret's `api_key` (httpx refuses the header and graphiti reports it as a connection error); `provision.sh --cluster` now strips it. Test from a pod before scaling: see §2 |
 | tunnel Ready but workers get 401 | API key mismatch between the Secret and `/workspace/vllm.key`: re-run §1 with `--cluster` |
 | vLLM log: `Mamba cache mode is set to 'align'` | expected: prefix caching on Qwen3.5's linear-attention layers is experimental in vLLM 0.23 |
 | `/workspace` lost after recycle | expected without a vast volume: §1 re-downloads everything |

@@ -9,6 +9,8 @@
 # Keys live OUTSIDE the repo, in $VAST_DIR (default ~/.config/graph-rag/vast, mode 700):
 #   api_key            vLLM API key (generated on first run, reused afterwards)
 #   tunnel_ed25519     the cluster tunnel's SSH key pair (generated on first run)
+# The API key goes into the Secret with no trailing newline: a "\n" in an Authorization
+# header is illegal, httpx refuses to send it and graphiti reports "Connection error".
 # --cluster: refresh the graph-rag-vast Secret (host, port, host key, both keys) and
 # restart the tunnel Deployment. Needs kubectl access to the graph-rag namespace.
 set -euo pipefail
@@ -55,7 +57,7 @@ if [ "$CLUSTER" = "--cluster" ]; then
     --from-file=id_ed25519="$VAST_DIR/tunnel_ed25519" \
     --from-literal=known_hosts="$known" \
     --from-literal=ssh_host="$HOST" --from-literal=ssh_port="$PORT" \
-    --from-file=api_key="$VAST_DIR/api_key" \
+    --from-literal=api_key="$(tr -d '[:space:]' < "$VAST_DIR/api_key")" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   if kubectl -n "$NS" get deploy graph-rag-vast-tunnel >/dev/null 2>&1; then
     kubectl -n "$NS" rollout restart deploy/graph-rag-vast-tunnel >/dev/null
