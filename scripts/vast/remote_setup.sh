@@ -107,3 +107,6 @@ fi
 serving || { tail -30 /workspace/logs/vllm.log; exit 1; }
 grep -E "GPU KV cache size|Maximum concurrency" /workspace/logs/vllm.log | tail -2 | sed 's/^.*\] /   /'
 echo "   vLLM healthy"
+if [ -n "${PUBLIC_IPADDR:-}" ] && [ -n "${VAST_TCP_PORT_22:-}" ]; then
+  echo "   direct ssh (bypasses vast's shared proxy -- use it for --cluster): $PUBLIC_IPADDR $VAST_TCP_PORT_22"
+fi

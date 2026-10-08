@@ -38,10 +38,16 @@ shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
    8 GB, the rest is KV cache). Disk ≥ 24 GB. Make sure **your own SSH public key** is on
    your vast account, then copy the instance's ssh host and port from its card (e.g.
    `ssh -p 16301 root@ssh6.vast.ai`).
+   **Point the cluster at the instance's direct address, not the proxy.** `ssh6.vast.ai`
+   is vast's shared SSH proxy; it went unreachable for ~10 minutes on 2026-10-08 and took
+   both tunnels with it. The direct address is the instance's own `$PUBLIC_IPADDR` and
+   `$VAST_TCP_PORT_22` (the script prints them at the end of its first run). The IP shown
+   on the instance card can differ from `$PUBLIC_IPADDR`; trust the instance's value.
 2. Run, from the repo root:
 
    ```bash
-   scripts/vast/provision.sh ssh6.vast.ai 16301 --cluster
+   scripts/vast/provision.sh ssh6.vast.ai 16301          # first run, via the proxy
+   scripts/vast/provision.sh <PUBLIC_IPADDR> <VAST_TCP_PORT_22> --cluster   # then direct
    ```
 
    It prompts for a Hugging Face token with read access to the model repo (used once on
@@ -68,7 +74,7 @@ root@<host>`, then `scripts/vast/loadtest.py --key-file ~/.config/graph-rag/vast
 ## 2. Enable the tier in the Helm release
 
 ```bash
-helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reuse-values \
+helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reset-then-reuse-values \
   --set image.tag=sha-<deployed> \
   --set vast.enabled=true --set vast.workerReplicas=4 --set worker.replicas=4
 ```
@@ -96,12 +102,17 @@ and changing it never loses work (SIGTERM finishes the in-flight article).
 | back to OpenRouter | 8 | 0 |
 
 ```bash
-kubectl -n graph-rag scale deploy/graph-rag-worker-gpu --replicas=8
-kubectl -n graph-rag scale deploy/graph-rag-worker --replicas=0
+helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reset-then-reuse-values \
+  --set vast.enabled=true --set vast.workerReplicas=8 --set worker.replicas=0
 ```
 
-(`kubectl scale` is quick; record the final split in the Helm values too so the next
-`helm upgrade` does not revert it.)
+**Prefer changing the split through Helm** (`--set worker.replicas=… --set
+vast.workerReplicas=…`). Helm 4 applies server-side: after a `kubectl scale`, kubectl
+owns `.spec.replicas` and the next `helm upgrade` fails with *"conflict with kubectl
+with subresource scale"*. Use `kubectl scale` only in an emergency (e.g. pulling the GPU
+workers), and pass `--force-conflicts` on the next `helm upgrade` to take the field back.
+Always use `--reset-then-reuse-values`, not `--reuse-values`, so new chart defaults
+(`vast.*`) apply.
 
 Compare tiers during a canary from the worker logs: `semantic batch llm tokens` lines per
 pod, jobs done per hour, and `dead` counts in `semantic_jobs`. vLLM's own counters are at
