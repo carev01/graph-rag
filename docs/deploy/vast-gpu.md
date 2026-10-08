@@ -23,9 +23,11 @@ solar-pro4.
 ## When you need this page
 
 - **A new instance** (first rent, or the old one was destroyed/recycled): §1 + §2.
-- **Instance stopped and started again:** the filesystem survives, but nothing restarts
-  vLLM — run §1 again (idempotent; it skips the model download, and restarts vLLM only
-  if the API key or the serve command changed — drain the GPU workers first, §3). The ssh port can change on
+- **Instance stopped and started, or the container restarted:** the filesystem survives
+  and the supervised `vllm` service starts the model by itself (~2 min). Re-run §1 only
+  if the ssh address changed (then with `--cluster`); it is idempotent, skips the
+  download, and restarts vLLM only if the API key or the serve arguments changed — drain
+  the GPU workers first, §3. The ssh port can change on
   restart: if it did, run §1 with `--cluster`.
 - **Switching workers between tiers:** §3.
 
@@ -54,8 +56,11 @@ shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
    the instance, never stored), then:
    - stops the template's stock vLLM (it serves Qwen3.5-9B) and kills the engine process
      it leaves holding ~20 GB of VRAM, and deletes that model's 18 GB download;
-   - downloads `carev01/qwen35-4b-graphrag` and starts vLLM on `127.0.0.1:18000` with an
-     API key, prefix caching, thinking off, vision inputs disabled;
+   - downloads `carev01/qwen35-4b-graphrag` (skipped when already complete on disk) and
+     points the template's **supervised** `vllm` service at it: `VLLM_MODEL`/`VLLM_ARGS` in
+     `/etc/environment`, our flags in `/etc/vllm-args.conf` (localhost:18000, 64k context,
+     prefix caching, thinking off, vision off), the API key in `/workspace/.env` (mode
+     600). Supervised means it comes back by itself after a container restart;
    - installs the cluster's tunnel public key in `/root/.ssh/authorized_keys2` (vast
      rewrites `authorized_keys` from the account keys and would drop it), **restricted to forwarding
      `127.0.0.1:18000`** with no shell (`restrict,port-forwarding,permitopen=…,command="/bin/false"`), and proves the
@@ -127,6 +132,7 @@ tier back up first, then fix the instance.
 
 | symptom | cause / fix |
 |---|---|
+| GPU idle, vLLM down after the container restarted | an instance provisioned before the supervised layout ran vLLM by hand, so nothing restarted it, and the template's stock Qwen3.5-9B service started (and failed) instead. Re-run §1: vLLM now runs as the supervised service |
 | ~20 GB VRAM in use with nothing serving | the stock vLLM's `VLLM::EngineCore` survived `supervisorctl stop`; `pkill -f VLLM::EngineCore` (the script does this) |
 | tunnel pod CrashLoop, `Host key verification failed` | the instance changed (new host/port/host key): re-run §1 with `--cluster` |
 | every login refused after provisioning | an entry got glued onto the last account key (vast writes `authorized_keys` without a final newline; `remote_setup.sh` now adds one first). Fix from the vast console → Jupyter terminal: put your public key back on its own line in `/root/.ssh/authorized_keys` |
@@ -138,8 +144,10 @@ tier back up first, then fix the instance.
 | vLLM log: `Mamba cache mode is set to 'align'` | expected: prefix caching on Qwen3.5's linear-attention layers is experimental in vLLM 0.23 |
 | `/workspace` lost after recycle | expected without a vast volume: §1 re-downloads everything |
 
-The vLLM log is `/workspace/logs/vllm.log` on the instance; the serve command is
-`/workspace/serve.sh` (written by `scripts/vast/remote_setup.sh`).
+vLLM is the template's supervised service: `supervisorctl status|restart vllm`, log
+`/var/log/portal/vllm.log`, configuration in `/etc/environment` (`VLLM_MODEL`,
+`VLLM_ARGS`), `/etc/vllm-args.conf` and `/workspace/.env` (the API key), all written by
+`scripts/vast/remote_setup.sh`.
 
 ## 5. Why the weights were rebuilt (history)
 

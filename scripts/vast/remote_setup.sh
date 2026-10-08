@@ -1,41 +1,52 @@
 #!/bin/bash
 # Runs ON the vast.ai instance (uploaded and invoked by scripts/vast/provision.sh).
 # Reads two lines on stdin -- the Hugging Face token, then the vLLM API key -- so neither
-# ever appears in a process list or a shell history. The API key is stored in
-# /workspace/vllm.key (mode 600); the HF token is used once and never written.
+# ever appears in a process list or a shell history. The HF token is used once (only if
+# the model is not already on disk) and never written.
 #
-# Idempotent: on an instance already serving the model it only re-checks the key, the serve
-# command and the tunnel key (restarting vLLM if the key or serve command changed); it
-# never re-downloads.
+# vLLM runs as the template's own SUPERVISED service (`supervisorctl ... vllm`), pointed at
+# our model, so it comes back by itself after a container restart. (2026-10-08 21:53: the
+# container restarted; a hand-launched vLLM did not return, the template's stock
+# Qwen3.5-9B service started instead and failed, and the GPU tier sat idle.)
+# The service runs `vllm serve $VLLM_MODEL $VLLM_ARGS $(cat /etc/vllm-args.conf)` with
+# /etc/environment and /workspace/.env loaded (/opt/supervisor-scripts/vllm.sh).
+#
+# Idempotent: re-running only restarts vLLM if the API key or the serve arguments changed,
+# and never re-downloads a complete model.
 set -euo pipefail
 
 MODEL_REPO="${MODEL_REPO:-carev01/qwen35-4b-graphrag}"
 MODEL_DIR=/workspace/hf/model
 TUNNEL_PUBKEY="${TUNNEL_PUBKEY:-}"
+ARGS_FILE=/etc/vllm-args.conf
+KEY_ENV=/workspace/.env   # sourced by the supervised service; mode 600
 
 read -r HF_TOKEN
 read -r VLLM_KEY
 source /venv/main/bin/activate
-
 serving() { curl -sf -o /dev/null http://127.0.0.1:18000/health; }
-SERVING=no
-if serving && [ -s "$MODEL_DIR/config.json" ]; then SERVING=yes; fi
 
-if [ "$SERVING" = yes ]; then
-  echo "== 1-2/5 already serving $MODEL_DIR: skipping stop and download"
+echo "== 1/5 model files"
+model_complete() {
+  python - "$MODEL_DIR" <<'EOF'
+import json, os, sys
+d = sys.argv[1]
+try:
+    shards = set(json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"].values())
+    ok = os.path.getsize(os.path.join(d, "config.json")) > 0 and all(
+        os.path.getsize(os.path.join(d, s)) > 0 for s in shards)
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+EOF
+}
+if model_complete; then
+  echo "   $MODEL_DIR is complete: no download"
 else
-echo "== 1/5 stop the template's stock vLLM (it serves Qwen3.5-9B and takes the GPU)"
-supervisorctl stop model-ui vllm >/dev/null 2>&1 || true
-# Stopping the service leaves its engine process holding ~20 GB of VRAM.
-pkill -f "vllm serve" 2>/dev/null || true
-pkill -f "VLLM::EngineCore" 2>/dev/null || true
-sleep 3
-rm -rf /workspace/models/models--Qwen--*     # the stock model's 18 GB download
-echo "   GPU memory in use: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
-
-echo "== 2/5 fetch $MODEL_REPO"
-mkdir -p "$MODEL_DIR" /workspace/logs
-HF_TOKEN="$HF_TOKEN" python - "$MODEL_REPO" "$MODEL_DIR" <<'EOF'
+  [ -n "$HF_TOKEN" ] || { echo "   model missing or incomplete and no HF token given"; exit 1; }
+  echo "   fetching $MODEL_REPO"
+  mkdir -p "$MODEL_DIR"
+  HF_TOKEN="$HF_TOKEN" python - "$MODEL_REPO" "$MODEL_DIR" <<'EOF'
 import os, sys
 from huggingface_hub import snapshot_download
 snapshot_download(sys.argv[1], local_dir=sys.argv[2], token=os.environ["HF_TOKEN"])
@@ -43,30 +54,32 @@ EOF
 fi
 unset HF_TOKEN
 
-echo "== 3/5 API key and serve script"
-umask 077
-KEY_CHANGED=no
-if [ "$(cat /workspace/vllm.key 2>/dev/null)" != "$VLLM_KEY" ]; then KEY_CHANGED=yes; fi
-printf '%s\n' "$VLLM_KEY" > /workspace/vllm.key
-OLD_SERVE=$(sha256sum /workspace/serve.sh 2>/dev/null | cut -d' ' -f1 || true)
-cat > /workspace/serve.sh <<'EOF'
-#!/bin/bash
-# Fine-tuned qwen35-4b-graphrag on vLLM. Localhost only: reached through SSH tunnels.
-source /venv/main/bin/activate
-export VLLM_API_KEY="$(cat /workspace/vllm.key)"
-exec vllm serve /workspace/hf/model \
-  --served-model-name qwen35-graphrag \
-  --host 127.0.0.1 --port 18000 \
-  --max-model-len "${MAX_MODEL_LEN:-65536}" \
-  --max-num-seqs "${MAX_SEQS:-64}" \
-  --gpu-memory-utilization 0.90 \
-  --enable-prefix-caching \
-  --limit-mm-per-prompt '{"image":0,"video":0}' \
-  --default-chat-template-kwargs '{"enable_thinking":false}'
+echo "== 2/5 point the supervised vllm service at the model"
+fingerprint() { { cat /etc/environment "$ARGS_FILE" "$KEY_ENV" 2>/dev/null || true; } | sha256sum | cut -d' ' -f1; }
+BEFORE=$(fingerprint)
+setenv() {   # set KEY="VALUE" in /etc/environment, replacing any existing line
+  grep -v "^$1=" /etc/environment > /etc/environment.new || true
+  printf '%s="%s"\n' "$1" "$2" >> /etc/environment.new
+  chmod 644 /etc/environment.new && mv /etc/environment.new /etc/environment
+}
+setenv VLLM_MODEL "$MODEL_DIR"
+setenv MODEL_NAME "$MODEL_DIR"     # model-ui keys off MODEL_NAME
+setenv VLLM_ARGS ""                # the template's defaults (9B tool/reasoning parsers) do not apply
+# --max-model-len 65536: graphiti asks for max_tokens=16384, so a 32k window overflows on
+# prompts over ~16k tokens. The template's --compilation-config (CUDA graphs for batch
+# sizes 1-8 only) is replaced: we run up to 64 sequences.
+cat > "$ARGS_FILE" <<EOF
+--served-model-name qwen35-graphrag --host 127.0.0.1 --port 18000 --max-model-len ${MAX_MODEL_LEN:-65536} --max-num-seqs ${MAX_SEQS:-64} --gpu-memory-utilization 0.90 --enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0}' --default-chat-template-kwargs '{"enable_thinking":false}'
 EOF
-chmod 700 /workspace/serve.sh
-SERVE_CHANGED=no
-[ "$OLD_SERVE" = "$(sha256sum /workspace/serve.sh | cut -d' ' -f1)" ] || SERVE_CHANGED=yes
+chmod 644 "$ARGS_FILE"
+( umask 077; printf 'VLLM_API_KEY=%s\n' "$VLLM_KEY" > "$KEY_ENV" )
+chmod 600 "$KEY_ENV"
+rm -f /workspace/vllm.key /workspace/serve.sh   # the pre-supervisor layout
+CHANGED=no
+[ "$BEFORE" = "$(fingerprint)" ] || CHANGED=yes
+
+echo "== 3/5 clean up the template's stock model"
+rm -rf /workspace/models/models--Qwen--*     # 18 GB if the stock service ever downloaded it
 
 echo "== 4/5 tunnel key (restricted to forwarding 127.0.0.1:18000)"
 if [ -n "$TUNNEL_PUBKEY" ]; then
@@ -79,9 +92,8 @@ if [ -n "$TUNNEL_PUBKEY" ]; then
   sshd -T 2>/dev/null | grep -qi '^authorizedkeysfile.*authorized_keys2' \
     || echo "   WARNING: sshd does not read authorized_keys2; the tunnel key will not work"
   mkdir -p /root/.ssh
-  printf '%s\n' "restrict,port-forwarding,permitopen=\"127.0.0.1:18000\",command=\"/bin/false\" $TUNNEL_PUBKEY" \
-    > /root/.ssh/authorized_keys2
-  chmod 600 /root/.ssh/authorized_keys2
+  ( umask 077; printf '%s\n' "restrict,port-forwarding,permitopen=\"127.0.0.1:18000\",command=\"/bin/false\" $TUNNEL_PUBKEY" \
+    > /root/.ssh/authorized_keys2 )
   # Remove an entry an older version of this script put in vast's file.
   if grep -qF "$TUNNEL_PUBKEY" /root/.ssh/authorized_keys 2>/dev/null; then
     grep -vF "$TUNNEL_PUBKEY" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.new || true
@@ -89,26 +101,23 @@ if [ -n "$TUNNEL_PUBKEY" ]; then
   fi
 fi
 
-echo "== 5/5 start vLLM"
-if [ "$SERVING" = yes ] && { [ "$KEY_CHANGED" = yes ] || [ "$SERVE_CHANGED" = yes ]; }; then
-  echo "   API key or serve command changed: restarting vLLM (drain the GPU workers first)"
-  pkill -f "vllm serve" || true
-  pkill -f "VLLM::EngineCore" || true
-  for _ in $(seq 1 30); do serving || break; sleep 2; done
-  SERVING=no
-fi
-if [ "$SERVING" = yes ]; then
-  echo "   already serving with this key"
+echo "== 5/5 vLLM"
+# A vLLM launched by hand (the pre-supervisor layout) is not supervised: replace it.
+HAND=$(ps -eo pid=,ppid=,args= | awk '$2 == 1 && /vllm serve \/workspace\/hf\/model/ {print $1}')
+state=$( (supervisorctl status vllm 2>/dev/null || true) | awk '{print $2}')
+if [ -n "$HAND" ] || [ "$state" != RUNNING ] || [ "$CHANGED" = yes ] || ! serving; then
+  echo "   (re)starting the supervised service (drain the GPU workers first if they are busy)"
+  if [ -n "$HAND" ]; then kill $HAND 2>/dev/null || true; fi
+  supervisorctl stop vllm >/dev/null 2>&1 || true
+  pkill -f "VLLM::EngineCore" 2>/dev/null || true
+  sleep 3
+  supervisorctl start vllm >/dev/null
+  for _ in $(seq 1 120); do serving && break; sleep 5; done
 else
-  setsid nohup /workspace/serve.sh > /workspace/logs/vllm.log 2>&1 < /dev/null &
-  for _ in $(seq 1 120); do
-    serving && break
-    sleep 5
-  done
+  echo "   already serving with these settings"
 fi
-serving || { tail -30 /workspace/logs/vllm.log; exit 1; }
-grep -E "GPU KV cache size|Maximum concurrency" /workspace/logs/vllm.log | tail -2 | sed 's/^.*\] /   /'
-echo "   vLLM healthy"
+serving || { supervisorctl status vllm; tail -30 /var/log/portal/vllm.log 2>/dev/null; exit 1; }
+echo "   vLLM healthy ($( (supervisorctl status vllm || true) | awk '{print $1, $2}'))"
 if [ -n "${PUBLIC_IPADDR:-}" ] && [ -n "${VAST_TCP_PORT_22:-}" ]; then
   echo "   direct ssh (bypasses vast's shared proxy -- use it for --cluster): $PUBLIC_IPADDR $VAST_TCP_PORT_22"
 fi
