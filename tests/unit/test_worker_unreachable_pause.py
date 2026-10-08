@@ -23,6 +23,7 @@ import pytest
 from graph_sync.semantic_worker import (
     CreditsExhausted,
     ProviderUnreachable,
+    endpoint_answers,
     run_worker,
     run_worker_once,
 )
@@ -190,3 +191,60 @@ async def test_run_worker_pauses_claims_then_resumes(caplog):
     assert store.claims == 2 and store.completed == [2] and store.failed == []
     assert waited >= 0.05, "the worker must stop claiming for the pause"
     assert any("unreachable" in r.getMessage() for r in caplog.records)
+
+
+def _transport(respond):
+    return httpx.MockTransport(respond)
+
+
+def _status(code):
+    return _transport(lambda req: httpx.Response(code))
+
+
+def _raising(exc_type):
+    def respond(req):
+        raise exc_type("boom", request=req)
+    return _transport(respond)
+
+
+@pytest.mark.parametrize("code", [200, 401, 404, 500])
+async def test_probe_any_response_means_up(code):
+    assert await endpoint_answers(_REQ.url, transport=_status(code)) is True
+
+
+@pytest.mark.parametrize("code", [502, 503, 504])
+async def test_probe_a_gateway_error_means_down(code):
+    assert await endpoint_answers(_REQ.url, transport=_status(code)) is False
+
+
+@pytest.mark.parametrize("exc", [httpx.ConnectError, httpx.ReadError,
+                                 httpx.RemoteProtocolError, httpx.ConnectTimeout])
+async def test_probe_a_transport_failure_means_down(exc):
+    assert await endpoint_answers(_REQ.url, transport=_raising(exc)) is False
+
+
+async def test_probe_something_unexpected_means_up_so_the_job_fails_normally():
+    def respond(req):
+        raise ValueError("not a transport error")
+    assert await endpoint_answers(_REQ.url, transport=_transport(respond)) is True
+
+
+async def test_probe_hits_the_origin_without_verifying_tls(monkeypatch):
+    seen: dict = {}
+    real = httpx.AsyncClient
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", spy)
+    urls: list[str] = []
+
+    def respond(req):
+        urls.append(str(req.url))
+        return httpx.Response(200)
+
+    url = httpx.URL("https://docextractor.k3s.home.lan/api/articles/x?y=1")
+    assert await endpoint_answers(url, transport=_transport(respond)) is True
+    assert seen["verify"] is False, "the private CA must not make a live endpoint look down"
+    assert urls == ["https://docextractor.k3s.home.lan/"]

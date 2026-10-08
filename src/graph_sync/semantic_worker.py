@@ -62,8 +62,9 @@ def _is_out_of_credits(exc: BaseException) -> bool:
 class ProviderUnreachable(Exception):
     """An upstream endpoint -- LLM, embedder or DocExtractor, all httpx-based -- cannot
     be reached. Raised out of `run_worker_once` after the batch's jobs were deferred;
-    `run_worker` stops claiming for `unreachable_pause_seconds`. Neo4j is out of scope:
-    its driver raises its own exception types."""
+    `run_worker` stops claiming for `unreachable_pause_seconds`. A Neo4j connection
+    refused is caught too, through the chain: its driver raises `ServiceUnavailable`
+    from the underlying `ConnectionRefusedError` -- also an outage, so also deferred."""
 
 
 # Failing to CONNECT can never be the article's fault.
@@ -116,14 +117,25 @@ def _request_url(exc: BaseException) -> httpx.URL | None:
     return None
 
 
-async def endpoint_answers(url: httpx.URL) -> bool:
-    """Any HTTP response at all -- a 401 or a 404 included -- means the endpoint is up."""
+async def endpoint_answers(url: httpx.URL,
+                           transport: httpx.AsyncBaseTransport | None = None) -> bool:
+    """Is anything answering at `url`'s origin? Any HTTP response counts -- a 401 or a
+    404 included -- except 502-504: that is a proxy whose backend is gone.
+
+    `verify=False`: DocExtractor sits behind the private CA, and a probe that failed
+    the certificate check would call a live endpoint "down" -- re-creating the
+    infinite deferral this probe exists to prevent. Nothing is sent but a bare GET.
+    Anything unexpected answers "up", so the job fails normally rather than looping
+    or taking the worker down.
+    """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.get(url.copy_with(path="/", query=None, fragment=None))
-        return True
-    except httpx.HTTPError:
+        async with httpx.AsyncClient(timeout=5.0, verify=False, transport=transport) as client:
+            r = await client.get(url.copy_with(path="/", query=None, fragment=None))
+        return r.status_code not in (502, 503, 504)
+    except httpx.TransportError:
         return False
+    except Exception:  # noqa: BLE001 -- see docstring: unknown means fail the job
+        return True
 
 
 def exp_backoff(attempts: int, *, base: float, cap: float) -> float:
