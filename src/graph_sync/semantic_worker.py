@@ -7,6 +7,9 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 
+import httpx
+import openai
+
 from graph_extract import vector_search
 from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
@@ -56,6 +59,37 @@ def _is_out_of_credits(exc: BaseException) -> bool:
     return False
 
 
+class ProviderUnreachable(Exception):
+    """An upstream endpoint -- LLM, embedder or DocExtractor, all httpx-based -- cannot
+    be reached (connection refused, reset or dropped). Raised out of `run_worker_once` after the batch's jobs were deferred;
+    `run_worker` stops claiming for `unreachable_pause_seconds`."""
+
+
+_UNREACHABLE = (openai.APIConnectionError, httpx.ConnectError, httpx.RemoteProtocolError,
+                ConnectionRefusedError, ConnectionResetError)
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """A connection failure anywhere in the exception chain, and no timeout.
+
+    An endpoint that is down fails EVERY job the same way, so treating it as a poison
+    job spends each job's attempts and marches on through the queue (2026-10-08: the
+    GPU tier's tunnel lost vast.ai's SSH proxy for ~10 minutes; 24 jobs in a few
+    minutes). A timeout is excluded -- it can be the article itself (a huge prompt)
+    -- and `openai.APITimeoutError` subclasses `APIConnectionError`, so it is checked
+    first and wins.
+    """
+    chain: list[BaseException] = []
+    e: BaseException | None = exc
+    while e is not None and e not in chain and len(chain) < 10:
+        chain.append(e)
+        e = e.__cause__ or e.__context__
+    if any(isinstance(x, (openai.APITimeoutError, httpx.TimeoutException, TimeoutError))
+           for x in chain):
+        return False
+    return any(isinstance(x, _UNREACHABLE) for x in chain)
+
+
 def exp_backoff(attempts: int, *, base: float, cap: float) -> float:
     return min(base * (2 ** (attempts - 1)), cap)
 
@@ -69,13 +103,16 @@ async def run_worker_once(
     source_ids: list[str] | None = None,
     defer_seconds: float | None = None,
     credit_pause_seconds: float = 300.0,
+    unreachable_pause_seconds: float = 60.0,
 ) -> int:
     """Claim and run one batch; returns the number of jobs PROCESSED.
 
     A job failing with HTTP 402 (the LLM account is out of credits) is DEFERRED by
     `credit_pause_seconds` instead of failed -- no attempt spent -- and so is every
     job of the batch not yet started; `CreditsExhausted` is then raised so
-    `run_worker` stops claiming.
+    `run_worker` stops claiming. A job whose LLM/embedding endpoint cannot be reached
+    (`_is_unreachable`) gets the same treatment with `unreachable_pause_seconds` and
+    `ProviderUnreachable`.
 
     `defer_seconds` switches the global warm-up lock to defer mode: `cold_lock()`
     is expected to try once (`StateStore.warmup_lock(wait=False)`), and a cold
@@ -129,10 +166,12 @@ async def run_worker_once(
                 raise ValueError(f"unknown op {job['op']!r}")
             await store.complete_semantic_job(job["id"], job["claimed_at"])
         except Exception as e:  # a poison job must not block the queue
-            if _is_out_of_credits(e):
+            halt = ("credits" if _is_out_of_credits(e)
+                    else "unreachable" if _is_unreachable(e) else None)
+            if halt is not None:
                 # Not the article's fault: no attempt spent, and the batch stops.
-                credits_out.append(str(e)[:300])
-                await _defer_for_credits(job)
+                halted.append((halt, f"{type(e).__name__}: {str(e)[:300]}"))
+                await _defer_halted(job)
                 return
             logger.exception("semantic job %s failed", job["id"])
             await store.fail_semantic_job(
@@ -168,10 +207,13 @@ async def run_worker_once(
     cold_ids: set[str] = set()
     deferred: list[int] = []
     not_ours: list[int] = []
-    credits_out: list[str] = []
+    # (kind, message) of the first failures that halt the batch: "credits" (HTTP 402)
+    # or "unreachable" (the endpoint is down). The first kind decides the pause.
+    halted: list[tuple[str, str]] = []
 
-    async def _defer_for_credits(job) -> None:
-        if await store.defer_semantic_job(job["id"], job["claimed_at"], credit_pause_seconds):
+    async def _defer_halted(job) -> None:
+        delay = credit_pause_seconds if halted[0][0] == "credits" else unreachable_pause_seconds
+        if await store.defer_semantic_job(job["id"], job["claimed_at"], delay):
             deferred.append(job["id"])
         else:
             not_ours.append(job["id"])
@@ -180,11 +222,11 @@ async def run_worker_once(
         nonlocal escaped_early
         if escaped_early:
             return
-        if credits_out:
-            # The account is empty: hand the rest of the batch back unrun rather
-            # than send it to a provider that will refuse it.
+        if halted:
+            # The account is empty or the endpoint is down: hand the rest of the
+            # batch back unrun rather than send it somewhere that will refuse it.
             for job in group:
-                await _defer_for_credits(job)
+                await _defer_halted(job)
             return
         try:
             async with AsyncExitStack() as stack:
@@ -320,8 +362,9 @@ async def run_worker_once(
             logger.info("%s", timings.report())
     if escaped:
         raise escaped[0]
-    if credits_out:
-        raise CreditsExhausted(credits_out[0])
+    if halted:
+        kind, message = halted[0]
+        raise (CreditsExhausted if kind == "credits" else ProviderUnreachable)(message)
     return processed
 
 
@@ -334,6 +377,7 @@ async def run_worker(
     source_ids: list[str] | None = None,
     defer_seconds: float | None = None,
     credit_pause_seconds: float = 300.0,
+    unreachable_pause_seconds: float = 60.0,
 ) -> None:
     """Drain `semantic_jobs` until stopped.
 
@@ -354,12 +398,20 @@ async def run_worker(
                 backoff_base=backoff_base, backoff_cap=backoff_cap, lease=lease,
                 concurrency=concurrency, is_cold=is_cold, cold_lock=cold_lock,
                 source_ids=source_ids, defer_seconds=defer_seconds,
-                credit_pause_seconds=credit_pause_seconds)
+                credit_pause_seconds=credit_pause_seconds,
+                unreachable_pause_seconds=unreachable_pause_seconds)
         except CreditsExhausted as e:
             logger.error("LLM provider out of credits (HTTP 402); jobs deferred without "
                          "spending attempts, pausing claims for %.0fs. Top up the account. "
                          "Provider said: %s", credit_pause_seconds, e)
             n, pause = 0, credit_pause_seconds
+        except ProviderUnreachable as e:
+            logger.error("upstream endpoint unreachable (LLM, embedder or DocExtractor); jobs "
+                         "deferred without spending attempts, pausing claims for %.0fs. For "
+                         "the GPU tier check the vast instance and graph-rag-vast-tunnel. "
+                         "Error: %s",
+                         unreachable_pause_seconds, e)
+            n, pause = 0, unreachable_pause_seconds
         batches += 1
         if max_batches is not None and batches >= max_batches:
             return

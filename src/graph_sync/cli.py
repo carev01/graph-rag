@@ -284,6 +284,7 @@ def worker(
                 # idling this worker (semantic_worker.run_worker_once).
                 defer_seconds=settings.semantic_warmup_defer_seconds if defer else None,
                 credit_pause_seconds=settings.semantic_credit_pause_seconds,
+                unreachable_pause_seconds=settings.semantic_unreachable_pause_seconds,
             )
         finally:
             await store.close()

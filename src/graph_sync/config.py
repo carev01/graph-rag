@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # An LLM account out of credits (HTTP 402) defers the batch without spending
     # attempts and stops claiming for this long, then retries (semantic_worker).
     semantic_credit_pause_seconds: float = 300.0
+    # An LLM/embedding endpoint that cannot be reached (connection refused/reset --
+    # not a timeout) is treated the same way, with a shorter pause: outages of the
+    # GPU tier's tunnel are usually minutes (semantic_worker._is_unreachable).
+    semantic_unreachable_pause_seconds: float = 60.0
     # Scopes the worker's `claim_semantic_jobs` to a subset of sources -- the
     # k3s bootstrap-first rehearsal (docs/deploy/k3s.md): comma-separated
     # source ids, e.g. "s1,s2". Empty (the default) is unscoped, i.e. today's
