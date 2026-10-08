@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import json
 
-V = 'vendor=~"$vendor"'
+# Exporter series are pinned to its scrape job (Q): never mixed with anything a worker
+# might serve.
+Q = 'job="graph-rag-queue"'
+V = f'{Q},vendor=~"$vendor"'
 REMAINING = f'sum(graphrag_queue_jobs{{status=~"pending|in_progress",{V}}})'
 TOTAL = f"sum(graphrag_queue_jobs{{{V}}})"
 DONE = f'sum(graphrag_queue_jobs{{status="done",{V}}})'
 PER_HOUR = f"sum(graphrag_queue_done_last_hour{{{V}}})"
 GPU_ARTICLE_RATE = 'sum(rate(graphrag_worker_jobs_total{outcome="done",tier="gpu"}[1h])) * 3600'
-OR_SPEND = "clamp_min(-deriv(graphrag_openrouter_credits_remaining_usd[1h]) * 3600, 0)"
+CREDITS = f"max(graphrag_openrouter_credits_remaining_usd{{{Q}}})"
+GPU_RATE = f"max(graphrag_gpu_hourly_cost_usd{{{Q}}})"
+OR_SPEND = f"clamp_min(-deriv(max(graphrag_openrouter_credits_remaining_usd{{{Q}}})[1h:1m]) * 3600, 0)"
 # GPU rent counts only while GPU-tier workers exist (their counters vanish with the pods).
-GPU_RENT = ("scalar(graphrag_gpu_hourly_cost_usd) * "
+GPU_RENT = (f"scalar({GPU_RATE}) * "
             'scalar(clamp_max(count(graphrag_worker_jobs_total{tier="gpu"}) or vector(0), 1))')
 
 _panels: list[dict] = []
@@ -116,9 +121,10 @@ series("Failures, deferrals and pauses (per hour)",
        [('sum by (outcome) (rate(graphrag_worker_jobs_total{outcome!="done"}[15m])) * 3600',
          "{{outcome}}"),
         ("sum by (reason) (rate(graphrag_worker_pauses_total[15m])) * 3600",
-         "pause: {{reason}}"),
-        ("graphrag_queue_retrying_jobs", "pending with spent attempts")], 0, 22,
-       desc="failed spends an attempt; deferred_* and pauses do not")
+         "pause: {{reason}}")], 0, 22, w=8,
+       desc="failed spends an attempt; deferred_* and pauses do not. Empty = none.")
+stat("Pending jobs with spent attempts", f"max(graphrag_queue_retrying_jobs{{{Q}}})", 8, 22,
+     h=8, desc="will retry; a job reaching 5 attempts goes dead")
 series("Median time per article, by tier",
        [('histogram_quantile(0.5, sum by (le, tier) '
          '(rate(graphrag_worker_job_seconds_bucket{outcome="done"}[30m])))', "{{tier}}")],
@@ -135,11 +141,11 @@ stat("KV cache in use", "max(vllm:kv_cache_usage_perc)", 8, 31, unit="percentuni
 stat("Prefix cache hit rate",
      "sum(rate(vllm:prefix_cache_hits_total[15m])) / sum(rate(vllm:prefix_cache_queries_total[15m]))",
      12, 31, unit="percentunit", decimals=1)
-stat("Exporter data age", "time() - graphrag_exporter_last_refresh_timestamp_seconds",
+stat("Exporter data age", f"time() - max(graphrag_exporter_last_refresh_timestamp_seconds{{{Q}}})",
      16, 31, unit="s", thresholds=[{"color": "green", "value": None},
                                    {"color": "red", "value": 300}],
      desc="seconds since the queue gauges were refreshed")
-stat("Tokens today", "graphrag_tokens_today", 20, 31, unit="short")
+stat("Tokens today", f"max(graphrag_tokens_today{{{Q}}})", 20, 31, unit="short")
 series("vLLM requests", [("sum(vllm:num_requests_running)", "running"),
                          ("sum(vllm:num_requests_waiting)", "waiting")], 0, 35)
 series("vLLM tokens per second",
@@ -151,16 +157,16 @@ series("Worker LLM tokens per second, by tier",
 
 # --- Cost --------------------------------------------------------------------------
 row("Cost", 51)
-stat("OpenRouter balance", "graphrag_openrouter_credits_remaining_usd", 0, 52,
+stat("OpenRouter balance", CREDITS, 0, 52,
      unit="currencyUSD", decimals=2,
      thresholds=[{"color": "red", "value": None}, {"color": "orange", "value": 5},
                  {"color": "green", "value": 15}])
 stat("OpenRouter spend / hour", OR_SPEND, 4, 52, unit="currencyUSD", decimals=2,
      desc="from the balance's slope over the last hour")
-stat("GPU rental / hour", "graphrag_gpu_hourly_cost_usd", 8, 52, unit="currencyUSD",
+stat("GPU rental / hour", GPU_RATE, 8, 52, unit="currencyUSD",
      decimals=3)
 stat("GPU cost per article",
-     f"scalar(graphrag_gpu_hourly_cost_usd) / clamp_min({GPU_ARTICLE_RATE}, 1)", 12, 52,
+     f"scalar({GPU_RATE}) / clamp_min({GPU_ARTICLE_RATE}, 1)", 12, 52,
      unit="currencyUSD", decimals=4, desc="rental / GPU-tier articles per hour")
 stat("Estimated cost to finish",
      f"{REMAINING} / clamp_min({PER_HOUR}, 1) * "
@@ -172,7 +178,7 @@ stat("Estimated cost to finish",
 
 dashboard = {
     "uid": "graph-rag-ingestion", "title": "graph-rag ingestion", "tags": ["graph-rag"],
-    "timezone": "browser", "schemaVersion": 39, "version": 1, "refresh": "1m",
+    "timezone": "browser", "schemaVersion": 39, "version": 1, "refresh": "5m",
     "time": {"from": "now-12h", "to": "now"},
     "templating": {"list": [{
         "name": "vendor", "label": "Vendor", "type": "query",

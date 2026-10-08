@@ -7,6 +7,8 @@ import httpx
 import pytest
 from prometheus_client import REGISTRY
 
+from graph_sync.metrics import QUEUE_REGISTRY
+
 from graph_sync import metrics
 from graph_sync.semantic_worker import ProviderUnreachable, run_worker, run_worker_once
 from tests.unit.test_worker_credit_pause import _KW, _Ingest, _job, _Store
@@ -101,7 +103,7 @@ _NAMES = {"s1": ("Veeam", "VBR", "User Guide"), "s2": ("Veeam", "VBR", "Agent Gu
 
 
 def _q(vendor, product, source, status):
-    return REGISTRY.get_sample_value("graphrag_queue_jobs", dict(
+    return QUEUE_REGISTRY.get_sample_value("graphrag_queue_jobs", dict(
         vendor=vendor, product=product, source=source, status=status))
 
 
@@ -120,10 +122,10 @@ async def test_refresh_names_sources_and_maps_the_unknown():
     assert _q("Veeam", "VBR", "User Guide", "pending") == 4
     assert _q("(unknown)", "(unknown)", "zz", "pending") == 2
     assert _q("(no source)", "(no source)", "(no source)", "pending") == 7
-    assert REGISTRY.get_sample_value("graphrag_queue_done_last_hour", {"vendor": "Veeam"}) == 7
-    assert REGISTRY.get_sample_value("graphrag_queue_retrying_jobs") == 3
-    assert REGISTRY.get_sample_value("graphrag_tokens_today") == 12345
-    assert REGISTRY.get_sample_value("graphrag_exporter_last_refresh_timestamp_seconds") > 0
+    assert QUEUE_REGISTRY.get_sample_value("graphrag_queue_done_last_hour", {"vendor": "Veeam"}) == 7
+    assert QUEUE_REGISTRY.get_sample_value("graphrag_queue_retrying_jobs") == 3
+    assert QUEUE_REGISTRY.get_sample_value("graphrag_tokens_today") == 12345
+    assert QUEUE_REGISTRY.get_sample_value("graphrag_exporter_last_refresh_timestamp_seconds") > 0
 
 
 async def test_refresh_drops_label_sets_that_disappeared():
@@ -169,5 +171,19 @@ async def test_exporter_serves_the_last_good_values_when_a_refresh_fails():
     assert calls["n"] == 2, "the failing second names load must have run"
     assert _q("Veeam", "VBR", "User Guide", "done") == 9, \
         "the queue keeps refreshing with the last good names"
-    assert REGISTRY.get_sample_value("graphrag_openrouter_credits_remaining_usd") == 21.5
-    assert REGISTRY.get_sample_value("graphrag_gpu_hourly_cost_usd") == 0.383
+    assert QUEUE_REGISTRY.get_sample_value("graphrag_openrouter_credits_remaining_usd") == 21.5
+    assert QUEUE_REGISTRY.get_sample_value("graphrag_gpu_hourly_cost_usd") == 0.383
+
+
+async def test_workers_never_serve_the_exporter_gauges():
+    """On one shared registry every worker served the queue gauges as 0, and each
+    dashboard panel got 8 bogus zeros beside the exporter's real value."""
+    await metrics.refresh_queue(_Pool([{"source_id": "s1", "status": "done", "n": 9}], []),
+                                _NAMES)
+    worker_names = {m.name for m in REGISTRY.collect()}
+    queue_names = {m.name for m in QUEUE_REGISTRY.collect()}
+    assert queue_names, "the exporter registry must hold the queue gauges"
+    assert not worker_names & queue_names
+    assert not any(n.startswith(("graphrag_queue", "graphrag_openrouter", "graphrag_gpu",
+                                 "graphrag_tokens_today", "graphrag_exporter"))
+                   for n in worker_names)

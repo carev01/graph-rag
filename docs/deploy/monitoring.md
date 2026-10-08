@@ -26,6 +26,14 @@ the total, so a vendor can sit just under 100%.
   (`vast.hourlyCostUsd` in the Helm values). Read-only against Postgres and Neo4j.
 - **vLLM** on the vast.ai GPU: its own `vllm:*` metrics through `graph-rag-vast-tunnel:8000`.
 
+## Grafana sizing
+
+Grafana here runs with 1 CPU / 1 Gi and a 5 s probe timeout (raised 2026-10-08 from 0.5
+CPU / 512 Mi / 1 s: with this dashboard open, queries queued behind Grafana's own
+alerting engine, the 1 s liveness probe failed and the kubelet killed it -- exit 137, the
+dashboard "showing nothing"). Prometheus answers these queries in ~0.25 s; Grafana was the
+bottleneck. The dashboard refreshes every 5 minutes.
+
 ## Changing it
 
 - Panels: edit `deploy/monitoring/build_dashboard.py`, then `deploy/monitoring/apply.sh`.

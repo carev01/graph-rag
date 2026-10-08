@@ -22,7 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 import httpx
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
 
 logger = logging.getLogger(__name__)
 
@@ -73,18 +73,25 @@ def start_worker_metrics(port: int) -> None:
 
 
 # --- queue exporter ---------------------------------------------------------------
+# Its own registry: on the default one, every WORKER process would also serve these
+# gauges -- unset, i.e. 0 -- and each dashboard query got 8 bogus zeros beside the real
+# value (2026-10-08). Workers serve REGISTRY; the exporter serves only QUEUE_REGISTRY.
+QUEUE_REGISTRY = CollectorRegistry()
 QUEUE_JOBS = Gauge("graphrag_queue_jobs", "semantic_jobs rows",
-                   ["vendor", "product", "source", "status"])
+                   ["vendor", "product", "source", "status"], registry=QUEUE_REGISTRY)
 QUEUE_DONE_1H = Gauge("graphrag_queue_done_last_hour", "Jobs completed in the last hour",
-                      ["vendor"])
+                      ["vendor"], registry=QUEUE_REGISTRY)
 QUEUE_RETRYING = Gauge("graphrag_queue_retrying_jobs",
-                       "Pending jobs that have already spent at least one attempt")
-TOKENS_TODAY = Gauge("graphrag_tokens_today", "LLM tokens recorded today (budget gate)")
+                       "Pending jobs that have already spent at least one attempt",
+                       registry=QUEUE_REGISTRY)
+TOKENS_TODAY = Gauge("graphrag_tokens_today", "LLM tokens recorded today (budget gate)",
+                     registry=QUEUE_REGISTRY)
 CREDITS = Gauge("graphrag_openrouter_credits_remaining_usd",
-                "OpenRouter balance (total credits minus usage)")
-GPU_COST = Gauge("graphrag_gpu_hourly_cost_usd", "Configured hourly rate of the GPU instance")
+                "OpenRouter balance (total credits minus usage)", registry=QUEUE_REGISTRY)
+GPU_COST = Gauge("graphrag_gpu_hourly_cost_usd", "Configured hourly rate of the GPU instance",
+                 registry=QUEUE_REGISTRY)
 REFRESHED = Gauge("graphrag_exporter_last_refresh_timestamp_seconds",
-                  "Unix time of the last successful queue refresh")
+                  "Unix time of the last successful queue refresh", registry=QUEUE_REGISTRY)
 
 _COUNTS_SQL = """
 SELECT coalesce(source_id, '') AS source_id, status, count(*) AS n
@@ -175,7 +182,7 @@ async def run_exporter(
     retried next tick: the last good values stay served, and REFRESHED shows how old
     they are."""
     if port:
-        start_http_server(port)
+        start_http_server(port, registry=QUEUE_REGISTRY)
     logger.info("queue exporter on :%d, refresh every %.0fs", port, interval)
     GPU_COST.set(gpu_hourly_cost)
     names: SourceNames = {}
