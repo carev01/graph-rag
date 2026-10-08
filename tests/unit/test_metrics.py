@@ -166,7 +166,8 @@ async def test_exporter_serves_the_last_good_values_when_a_refresh_fails():
         interval=0.01, stop=stop, names_loader=names, credits_loader=credits,
         gpu_hourly_cost=0.383, names_every=0.0, credits_every=0.0)
 
-    assert calls["n"] == 2, "the failing second refresh must have run"
-    assert _q("Veeam", "VBR", "User Guide", "done") == 9
+    assert calls["n"] == 2, "the failing second names load must have run"
+    assert _q("Veeam", "VBR", "User Guide", "done") == 9, \
+        "the queue keeps refreshing with the last good names"
     assert REGISTRY.get_sample_value("graphrag_openrouter_credits_remaining_usd") == 21.5
     assert REGISTRY.get_sample_value("graphrag_gpu_hourly_cost_usd") == 0.383

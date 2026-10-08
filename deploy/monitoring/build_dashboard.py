@@ -16,6 +16,9 @@ DONE = f'sum(graphrag_queue_jobs{{status="done",{V}}})'
 PER_HOUR = f"sum(graphrag_queue_done_last_hour{{{V}}})"
 GPU_ARTICLE_RATE = 'sum(rate(graphrag_worker_jobs_total{outcome="done",tier="gpu"}[1h])) * 3600'
 OR_SPEND = "clamp_min(-deriv(graphrag_openrouter_credits_remaining_usd[1h]) * 3600, 0)"
+# GPU rent counts only while GPU-tier workers exist (their counters vanish with the pods).
+GPU_RENT = ("scalar(graphrag_gpu_hourly_cost_usd) * "
+            'scalar(clamp_max(count(graphrag_worker_jobs_total{tier="gpu"}) or vector(0), 1))')
 
 _panels: list[dict] = []
 _id = 0
@@ -85,7 +88,7 @@ def bars(title, expr, legend, x, y, w=12, h=8, unit="percentunit", desc=""):
 RED_IF_ANY = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
 
 # --- Progress ----------------------------------------------------------------------
-row("Progress ($vendor)", 0)
+row("Progress ($vendor) -- counts are semantic_jobs rows (an updated article adds one)", 0)
 stat("Progress", f"{DONE} / {TOTAL}", 0, 1, unit="percentunit", decimals=1)
 stat("Done", DONE, 4, 1)
 stat("Remaining", REMAINING, 8, 1, desc="pending + in progress")
@@ -157,13 +160,15 @@ stat("OpenRouter spend / hour", OR_SPEND, 4, 52, unit="currencyUSD", decimals=2,
 stat("GPU rental / hour", "graphrag_gpu_hourly_cost_usd", 8, 52, unit="currencyUSD",
      decimals=3)
 stat("GPU cost per article",
-     f"graphrag_gpu_hourly_cost_usd / clamp_min({GPU_ARTICLE_RATE}, 1)", 12, 52,
+     f"scalar(graphrag_gpu_hourly_cost_usd) / clamp_min({GPU_ARTICLE_RATE}, 1)", 12, 52,
      unit="currencyUSD", decimals=4, desc="rental / GPU-tier articles per hour")
 stat("Estimated cost to finish",
      f"{REMAINING} / clamp_min({PER_HOUR}, 1) * "
-     f"(scalar(graphrag_gpu_hourly_cost_usd) + scalar({OR_SPEND}))",
+     f"({GPU_RENT} + scalar({OR_SPEND} or vector(0)))",
      16, 52, w=8, unit="currencyUSD", decimals=2,
-     desc="hours left at last hour's rate x (GPU rental + OpenRouter spend per hour)")
+     desc="hours left for the selected vendor at last hour's rate x (GPU rent while GPU "
+          "workers run + OpenRouter spend per hour). The OpenRouter rate is account-wide, "
+          "so it includes answer-api and other traffic.")
 
 dashboard = {
     "uid": "graph-rag-ingestion", "title": "graph-rag ingestion", "tags": ["graph-rag"],

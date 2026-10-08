@@ -6,6 +6,7 @@ import logging
 import secrets
 import signal
 
+import asyncpg
 import httpx
 import typer
 from graphiti_core import Graphiti
@@ -309,7 +310,9 @@ def metrics_exporter() -> None:
     async def _run() -> None:
         settings = get_settings()
         extract = get_extract_settings()
-        store = StateStore(settings.postgres_dsn)
+        # Its own small pool, not StateStore's default 10: eight workers already hold
+        # most of Postgres's default max_connections.
+        pool = await asyncpg.create_pool(settings.postgres_dsn, min_size=1, max_size=2)
         driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
         stop = asyncio.Event()
@@ -321,12 +324,12 @@ def metrics_exporter() -> None:
                    if key and "openrouter.ai" in extract.cheap_llm_base_url else None)
         try:
             await metrics.run_exporter(
-                pool=await store._get_pool(), port=settings.exporter_port,
+                pool=pool, port=settings.exporter_port,
                 interval=settings.exporter_interval_seconds, stop=stop,
                 names_loader=lambda: metrics.load_source_names(driver),
                 credits_loader=credits, gpu_hourly_cost=settings.gpu_hourly_cost_usd)
         finally:
-            await store.close()
+            await pool.close()
             await driver.close()
 
     asyncio.run(_run())

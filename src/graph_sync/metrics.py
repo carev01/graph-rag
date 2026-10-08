@@ -182,10 +182,13 @@ async def run_exporter(
     names_at = credits_at = float("-inf")
     while not stop.is_set():
         now = time.monotonic()
-        try:
-            if now - names_at >= names_every:
+        if now - names_at >= names_every:
+            try:
                 names = await names_loader()
                 names_at = now
+            except Exception:  # noqa: BLE001 -- Neo4j down: keep the last names
+                logger.exception("source names refresh failed; keeping the last ones")
+        try:
             await refresh_queue(pool, names)
         except Exception:  # noqa: BLE001 -- keep serving the last good values
             logger.exception("queue refresh failed")
