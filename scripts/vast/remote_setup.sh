@@ -4,8 +4,9 @@
 # ever appears in a process list or a shell history. The API key is stored in
 # /workspace/vllm.key (mode 600); the HF token is used once and never written.
 #
-# Idempotent: on an instance already serving the model it only re-checks the key and the
-# tunnel key (restarting vLLM if the API key changed); it never re-downloads.
+# Idempotent: on an instance already serving the model it only re-checks the key, the serve
+# command and the tunnel key (restarting vLLM if the key or serve command changed); it
+# never re-downloads.
 set -euo pipefail
 
 MODEL_REPO="${MODEL_REPO:-carev01/qwen35-4b-graphrag}"
@@ -47,6 +48,7 @@ umask 077
 KEY_CHANGED=no
 if [ "$(cat /workspace/vllm.key 2>/dev/null)" != "$VLLM_KEY" ]; then KEY_CHANGED=yes; fi
 printf '%s\n' "$VLLM_KEY" > /workspace/vllm.key
+OLD_SERVE=$(sha256sum /workspace/serve.sh 2>/dev/null | cut -d' ' -f1 || true)
 cat > /workspace/serve.sh <<'EOF'
 #!/bin/bash
 # Fine-tuned qwen35-4b-graphrag on vLLM. Localhost only: reached through SSH tunnels.
@@ -55,7 +57,7 @@ export VLLM_API_KEY="$(cat /workspace/vllm.key)"
 exec vllm serve /workspace/hf/model \
   --served-model-name qwen35-graphrag \
   --host 127.0.0.1 --port 18000 \
-  --max-model-len 32768 \
+  --max-model-len "${MAX_MODEL_LEN:-65536}" \
   --max-num-seqs "${MAX_SEQS:-64}" \
   --gpu-memory-utilization 0.90 \
   --enable-prefix-caching \
@@ -63,6 +65,8 @@ exec vllm serve /workspace/hf/model \
   --default-chat-template-kwargs '{"enable_thinking":false}'
 EOF
 chmod 700 /workspace/serve.sh
+SERVE_CHANGED=no
+[ "$OLD_SERVE" = "$(sha256sum /workspace/serve.sh | cut -d' ' -f1)" ] || SERVE_CHANGED=yes
 
 echo "== 4/5 tunnel key (restricted to forwarding 127.0.0.1:18000)"
 if [ -n "$TUNNEL_PUBKEY" ]; then
@@ -84,8 +88,8 @@ if [ -n "$TUNNEL_PUBKEY" ]; then
 fi
 
 echo "== 5/5 start vLLM"
-if [ "$SERVING" = yes ] && [ "$KEY_CHANGED" = yes ]; then
-  echo "   API key changed: restarting vLLM"
+if [ "$SERVING" = yes ] && { [ "$KEY_CHANGED" = yes ] || [ "$SERVE_CHANGED" = yes ]; }; then
+  echo "   API key or serve command changed: restarting vLLM (drain the GPU workers first)"
   pkill -f "vllm serve" || true
   pkill -f "VLLM::EngineCore" || true
   for _ in $(seq 1 30); do serving || break; sleep 2; done

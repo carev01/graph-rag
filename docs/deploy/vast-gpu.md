@@ -24,7 +24,8 @@ solar-pro4.
 
 - **A new instance** (first rent, or the old one was destroyed/recycled): §1 + §2.
 - **Instance stopped and started again:** the filesystem survives, but nothing restarts
-  vLLM — run §1 again (idempotent; it skips the model download). The ssh port can change on
+  vLLM — run §1 again (idempotent; it skips the model download, and restarts vLLM only
+  if the API key or the serve command changed — drain the GPU workers first, §3). The ssh port can change on
   restart: if it did, run §1 with `--cluster`.
 - **Switching workers between tiers:** §3.
 
@@ -120,6 +121,7 @@ tier back up first, then fix the instance.
 | tunnel pod `Permission denied (publickey)` | the restricted tunnel key is missing from `/root/.ssh/authorized_keys` (vast may rewrite it on recycle): re-run §1 |
 | GPU workers log `Connection error.` but vLLM's request counter does not move | a trailing newline in the Secret's `api_key` (httpx refuses the header and graphiti reports it as a connection error); `provision.sh --cluster` now strips it. Test from a pod before scaling: see §2 |
 | tunnel Ready but workers get 401 | API key mismatch between the Secret and `/workspace/vllm.key`: re-run §1 with `--cluster` |
+| a job fails with `maximum context length is 32768 tokens. However, you requested 16384 output tokens` | graphiti asks for `max_tokens=16384`, so a prompt over ~16k tokens overflows a 32k window; `serve.sh` uses `--max-model-len 65536` (`MAX_MODEL_LEN`) |
 | vLLM log: `Mamba cache mode is set to 'align'` | expected: prefix caching on Qwen3.5's linear-attention layers is experimental in vLLM 0.23 |
 | `/workspace` lost after recycle | expected without a vast volume: §1 re-downloads everything |
 
