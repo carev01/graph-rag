@@ -70,21 +70,23 @@ SERVE_CHANGED=no
 
 echo "== 4/5 tunnel key (restricted to forwarding 127.0.0.1:18000)"
 if [ -n "$TUNNEL_PUBKEY" ]; then
-  ak=/root/.ssh/authorized_keys
-  mkdir -p /root/.ssh && touch "$ak"
+  # authorized_keys2, never authorized_keys: vast REWRITES authorized_keys from the account
+  # keys (seen 2026-10-08 20:21, silently dropping the tunnel key; the tunnels survived on
+  # open sessions until a network blip, then could not log back in). sshd here reads both
+  # files (`sshd -T`: authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2).
   # restrict = no pty/agent/X11/forwarding; port-forwarding + permitopen re-allow the one
   # forward; command= stops the key running anything (ssh -N never asks to).
-  line="restrict,port-forwarding,permitopen=\"127.0.0.1:18000\",command=\"/bin/false\" $TUNNEL_PUBKEY"
-  if ! grep -qxF "$line" "$ak"; then
-    # vast writes the account keys WITHOUT a trailing newline: appending blindly glues
-    # this entry onto the last key and corrupts it, locking everyone out (2026-10-08).
-    [ -s "$ak" ] && [ -n "$(tail -c 1 "$ak")" ] && echo >> "$ak"
-    grep -vF "$TUNNEL_PUBKEY" "$ak" > "$ak.new" || true     # drop an outdated entry
-    printf '%s\n' "$line" >> "$ak.new"
-    chmod 600 "$ak.new" && mv "$ak.new" "$ak"
+  sshd -T 2>/dev/null | grep -qi '^authorizedkeysfile.*authorized_keys2' \
+    || echo "   WARNING: sshd does not read authorized_keys2; the tunnel key will not work"
+  mkdir -p /root/.ssh
+  printf '%s\n' "restrict,port-forwarding,permitopen=\"127.0.0.1:18000\",command=\"/bin/false\" $TUNNEL_PUBKEY" \
+    > /root/.ssh/authorized_keys2
+  chmod 600 /root/.ssh/authorized_keys2
+  # Remove an entry an older version of this script put in vast's file.
+  if grep -qF "$TUNNEL_PUBKEY" /root/.ssh/authorized_keys 2>/dev/null; then
+    grep -vF "$TUNNEL_PUBKEY" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.new || true
+    chmod 600 /root/.ssh/authorized_keys.new && mv /root/.ssh/authorized_keys.new /root/.ssh/authorized_keys
   fi
-  # Warn if the tunnel entry is the only line (no account key to log in with).
-  grep -q -v -F "$TUNNEL_PUBKEY" "$ak" || echo "   WARNING: $ak holds no key besides the tunnel's"
 fi
 
 echo "== 5/5 start vLLM"

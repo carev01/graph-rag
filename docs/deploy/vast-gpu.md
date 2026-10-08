@@ -56,7 +56,8 @@ shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
      it leaves holding ~20 GB of VRAM, and deletes that model's 18 GB download;
    - downloads `carev01/qwen35-4b-graphrag` and starts vLLM on `127.0.0.1:18000` with an
      API key, prefix caching, thinking off, vision inputs disabled;
-   - installs the cluster's tunnel public key on the instance, **restricted to forwarding
+   - installs the cluster's tunnel public key in `/root/.ssh/authorized_keys2` (vast
+     rewrites `authorized_keys` from the account keys and would drop it), **restricted to forwarding
      `127.0.0.1:18000`** with no shell (`restrict,port-forwarding,permitopen=…,command="/bin/false"`), and proves the
      tunnel key can reach `/v1/models`;
    - with `--cluster`: rewrites the `graph-rag-vast` Secret (ssh host, port, host key,
@@ -129,7 +130,7 @@ tier back up first, then fix the instance.
 | ~20 GB VRAM in use with nothing serving | the stock vLLM's `VLLM::EngineCore` survived `supervisorctl stop`; `pkill -f VLLM::EngineCore` (the script does this) |
 | tunnel pod CrashLoop, `Host key verification failed` | the instance changed (new host/port/host key): re-run §1 with `--cluster` |
 | every login refused after provisioning | an entry got glued onto the last account key (vast writes `authorized_keys` without a final newline; `remote_setup.sh` now adds one first). Fix from the vast console → Jupyter terminal: put your public key back on its own line in `/root/.ssh/authorized_keys` |
-| tunnel pod `Permission denied (publickey)` | the restricted tunnel key is missing from `/root/.ssh/authorized_keys` (vast may rewrite it on recycle): re-run §1 |
+| tunnel pod `Permission denied (publickey)` | the tunnel key is missing from `/root/.ssh/authorized_keys2` (a recycled instance, or provisioned by an older script that used `authorized_keys`, which vast rewrites): re-run §1 |
 | GPU workers log `Connection error.` but vLLM's request counter does not move | a trailing newline in the Secret's `api_key` (httpx refuses the header and graphiti reports it as a connection error); `provision.sh --cluster` now strips it. Test from a pod before scaling: see §2 |
 | GPU workers fail with `httpx.ConnectError: All connection attempts failed`, tunnel pod `Ready=False` | an HTTP readiness probe through the tunnel (~1.2 s round trip) timed out under load and pulled the only tunnel pod from the Service. Readiness is now a TCP check on the local listener, liveness probes `/health` with a 10 s timeout, and there are 2 tunnel replicas (`vast.tunnelReplicas`) |
 | tunnel Ready but workers get 401 | API key mismatch between the Secret and `/workspace/vllm.key`: re-run §1 with `--cluster` |
