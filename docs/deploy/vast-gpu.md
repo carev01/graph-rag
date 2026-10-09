@@ -52,8 +52,8 @@ shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
    scripts/vast/provision.sh <PUBLIC_IPADDR> <VAST_TCP_PORT_22> --cluster   # then direct
    ```
 
-   It prompts for a Hugging Face token with read access to the model repo (used once on
-   the instance, never stored), then:
+   It prompts for a Hugging Face token -- press Enter: the model repo is public since
+   2026-10-09 (a token, if given, is used once on the instance and never stored) -- then:
    - stops the template's stock vLLM (it serves Qwen3.5-9B) and kills the engine process
      it leaves holding ~20 GB of VRAM, and deletes that model's 18 GB download;
    - downloads `carev01/qwen35-4b-graphrag` (skipped when already complete on disk) and
@@ -142,6 +142,7 @@ tier back up first, then fix the instance.
 | tunnel Ready but workers get 401 | API key mismatch between the Secret and `/workspace/vllm.key`: re-run §1 with `--cluster` |
 | a job fails with `maximum context length is 32768 tokens. However, you requested 16384 output tokens` | graphiti asks for `max_tokens=16384`, so a prompt over ~16k tokens overflows a 32k window; `serve.sh` uses `--max-model-len 65536` (`MAX_MODEL_LEN`) |
 | vLLM log: `Mamba cache mode is set to 'align'` | expected: prefix caching on Qwen3.5's linear-attention layers is experimental in vLLM 0.23 |
+| a fresh instance's model download fails with `No space left on device` | the template's supervised vLLM downloads its stock Qwen3.5-9B (18 GB, into `/workspace/models`) at boot; `remote_setup.sh` now stops it and empties that folder before fetching ours |
 | `/workspace` lost after recycle | expected without a vast volume: §1 re-downloads everything |
 
 vLLM is the template's supervised service: `supervisorctl status|restart vllm`, log

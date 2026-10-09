@@ -26,7 +26,20 @@ read -r VLLM_KEY
 source /venv/main/bin/activate
 serving() { curl -sf -o /dev/null http://127.0.0.1:18000/health; }
 
-echo "== 1/5 model files"
+echo "== 1/5 make room: the template's stock vLLM"
+# A fresh instance's supervised vllm service starts downloading the template's stock
+# Qwen3.5-9B (18 GB) at boot; on a 24 GB disk that leaves no room for our 9.3 GB model
+# (2026-10-09: "No space left on device"). Stop it and drop its download BEFORE fetching.
+if ! grep -q "^VLLM_MODEL=\"$MODEL_DIR\"" /etc/environment; then
+  supervisorctl stop vllm model-ui >/dev/null 2>&1 || true
+  pkill -f "VLLM::EngineCore" 2>/dev/null || true
+fi
+# The stock service's --download-dir; its layout varies (models--*/ or bare blobs/), and
+# nothing of ours lives there: empty it.
+find /workspace/models -mindepth 1 -delete 2>/dev/null || true
+echo "   disk free: $(df -h / | awk 'NR==2 {print $4}')"
+
+echo "== 2/5 model files"
 model_complete() {
   python - "$MODEL_DIR" <<'EOF'
 import json, os, sys
@@ -43,18 +56,19 @@ EOF
 if model_complete; then
   echo "   $MODEL_DIR is complete: no download"
 else
-  [ -n "$HF_TOKEN" ] || { echo "   model missing or incomplete and no HF token given"; exit 1; }
-  echo "   fetching $MODEL_REPO"
+  # No token: anonymous download (the model repo is public since 2026-10-09).
+  echo "   fetching $MODEL_REPO ($([ -n "$HF_TOKEN" ] && echo "with token" || echo "anonymous"))"
   mkdir -p "$MODEL_DIR"
   HF_TOKEN="$HF_TOKEN" python - "$MODEL_REPO" "$MODEL_DIR" <<'EOF'
 import os, sys
 from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[1], local_dir=sys.argv[2], token=os.environ["HF_TOKEN"])
+snapshot_download(sys.argv[1], local_dir=sys.argv[2], token=os.environ.get("HF_TOKEN") or False)
 EOF
+  model_complete || { echo "   download incomplete"; exit 1; }
 fi
 unset HF_TOKEN
 
-echo "== 2/5 point the supervised vllm service at the model"
+echo "== 3/5 point the supervised vllm service at the model"
 fingerprint() { { cat /etc/environment "$ARGS_FILE" "$KEY_ENV" 2>/dev/null || true; } | sha256sum | cut -d' ' -f1; }
 BEFORE=$(fingerprint)
 setenv() {   # set KEY="VALUE" in /etc/environment, replacing any existing line
@@ -78,9 +92,6 @@ rm -f /workspace/vllm.key /workspace/serve.sh   # the pre-supervisor layout
 CHANGED=no
 [ "$BEFORE" = "$(fingerprint)" ] || CHANGED=yes
 
-echo "== 3/5 clean up the template's stock model"
-rm -rf /workspace/models/models--Qwen--*     # 18 GB if the stock service ever downloaded it
-
 echo "== 4/5 tunnel key (restricted to forwarding 127.0.0.1:18000)"
 if [ -n "$TUNNEL_PUBKEY" ]; then
   # authorized_keys2, never authorized_keys: vast REWRITES authorized_keys from the account
@@ -89,7 +100,9 @@ if [ -n "$TUNNEL_PUBKEY" ]; then
   # files (`sshd -T`: authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2).
   # restrict = no pty/agent/X11/forwarding; port-forwarding + permitopen re-allow the one
   # forward; command= stops the key running anything (ssh -N never asks to).
-  sshd -T 2>/dev/null | grep -qi '^authorizedkeysfile.*authorized_keys2' \
+  # No `grep -q` under pipefail: it exits on the first match, sshd -T dies of SIGPIPE
+  # and the pipeline "fails" -- a false warning (2026-10-09).
+  /usr/sbin/sshd -T 2>/dev/null | grep -i '^authorizedkeysfile.*authorized_keys2' >/dev/null \
     || echo "   WARNING: sshd does not read authorized_keys2; the tunnel key will not work"
   mkdir -p /root/.ssh
   ( umask 077; printf '%s\n' "restrict,port-forwarding,permitopen=\"127.0.0.1:18000\",command=\"/bin/false\" $TUNNEL_PUBKEY" \

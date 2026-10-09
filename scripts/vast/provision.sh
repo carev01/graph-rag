@@ -32,7 +32,7 @@ mkdir -p "$VAST_DIR"
 echo "== reaching root@$HOST:$PORT (your own SSH key must be on the vast account)"
 "${SSH[@]}" -n true 2>/dev/null || { echo "cannot SSH to the instance"; exit 1; }
 
-read -r -s -p "Hugging Face token (read access to the model repo): " HF_TOKEN; echo
+read -r -s -p "Hugging Face token (Enter for none: the model repo is public): " HF_TOKEN; echo
 scp -q -P "$PORT" "$HERE/remote_setup.sh" "root@$HOST:/workspace/remote_setup.sh"
 printf '%s\n%s\n' "$HF_TOKEN" "$(cat "$VAST_DIR/api_key")" | "${SSH[@]}" \
   "TUNNEL_PUBKEY='$(cat "$VAST_DIR/tunnel_ed25519.pub")' bash /workspace/remote_setup.sh" \
