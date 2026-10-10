@@ -6,6 +6,7 @@ pass, and write docs/superpowers/router-eval-report.md.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -400,8 +401,15 @@ def _raw_json(raw: object) -> str:
 
 
 async def main() -> None:
+    # --questions picks another golden file (e.g. router_golden_tier1.json, the Tier 1
+    # vendor set); its stem's suffix names the report, so runs never overwrite each
+    # other's output: router_golden_tier1.json -> router-eval-report-tier1.md.
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--questions", type=Path, default=_QUESTIONS)
+    args = ap.parse_args()
+    suffix = args.questions.stem.removeprefix("router_golden").replace("_", "-")
     settings = get_extract_settings()
-    questions = json.loads(_QUESTIONS.read_text())
+    questions = json.loads(args.questions.read_text())
     graphiti = build_graphiti(settings)
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
@@ -416,11 +424,11 @@ async def main() -> None:
         summary = await run_eval(clients, questions, settings, resolver)
         report = format_report(summary)
         docs = Path(__file__).resolve().parents[2] / "docs" / "superpowers"
-        (docs / "router-eval-report.md").write_text(report)
+        (docs / f"router-eval-report{suffix}.md").write_text(report)
         # The answers this run scored, so a new metric can be computed from a
         # past run instead of buying another one. Not committed -- it is run
         # output, and it is large.
-        (docs / "router-eval-raw.json").write_text(_raw_json(summary["raw"]))
+        (docs / f"router-eval-raw{suffix}.json").write_text(_raw_json(summary["raw"]))
         print(report)
     finally:
         await graphiti.close()

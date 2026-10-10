@@ -10,7 +10,7 @@ dist/
 build/
 
 # Eval run output: the answers a router-eval run scored (large, regenerated per run).
-docs/superpowers/router-eval-raw.json
+docs/superpowers/router-eval-raw*.json
 
 # Fine-tuning datasets built by scripts/build_extraction_dataset.py. Tens of MiB of
 # vendor documentation verbatim (episode content is embedded in every prompt), and
