@@ -249,6 +249,15 @@ class ExtractSettings(BaseSettings):
     # Community reports generated at once by an incremental theme-build.
     theme_report_concurrency: int = 8
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
+    # Leiden resolution. 5, not GDS's 1.0 (2026-10-10, measured detection-only on the
+    # 45k-entity post-Veeam graph): at 1.0 product hub entities ("Veeam Backup &
+    # Replication": 9,230 neighbours, median degree 2) held one 10,706-entity community at
+    # level 1 (the level global/DRIFT read) -- a quarter of the graph under one report,
+    # and the cause of weak global answers in the Tier 1 eval. 5.0: 295 level-1
+    # communities, largest 2,848, level-0 coverage 32k vs 36k. Capping hub degree split
+    # it further but orphaned the 7-10k entities attached only to a hub; degree-
+    # normalised weights fragmented level 0 and merged levels 1-2 (BACKLOG 57).
+    leiden_gamma: float = 5.0
     # Output cap for a community report. 8000 was measured against GLM-5.2 (3000
     # skipped ~24% of communities, 8000 skipped ~0). GLM-5.3-flash reasons more and
     # truncates at 8000 -- and a truncated report is DROPPED silently, because

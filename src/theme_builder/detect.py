@@ -84,7 +84,8 @@ _DROP_IF_EXISTS = (
 
 
 async def detect_communities(driver: AsyncDriver, group_id: str, *,
-                             min_community_size: int, max_levels: int) -> list[Community]:
+                             min_community_size: int, max_levels: int,
+                             gamma: float = 1.0) -> list[Community]:
     name = f"theme-{group_id}"
     async with driver.session() as s:
         await s.run(_DROP_IF_EXISTS, n=name)   # pre-drop a stale projection
@@ -97,11 +98,15 @@ async def detect_communities(driver: AsyncDriver, group_id: str, *,
                 # unchanged community as unchanged instead of regenerating it on
                 # partition wobble; Jaccard matching still absorbs the real drift
                 # when the graph actually changes.
+                # gamma (resolution): higher splits more. Product hub entities
+                # (e.g. "Veeam Backup & Replication", 9,230 neighbours against a median
+                # of 2) otherwise pull a quarter of the graph into one star community.
                 "CALL gds.leiden.stream($n, {relationshipWeightProperty: 'weight', "
-                "includeIntermediateCommunities: true, randomSeed: 42, concurrency: 1}) "
+                "includeIntermediateCommunities: true, randomSeed: 42, concurrency: 1, "
+                "gamma: $gamma}) "
                 "YIELD nodeId, intermediateCommunityIds "
                 "RETURN gds.util.asNode(nodeId).uuid AS uuid, intermediateCommunityIds AS levels",
-                n=name)
+                n=name, gamma=gamma)
             rows = [{"uuid": rec["uuid"], "levels": list(rec["levels"])} async for rec in r]
         finally:
             await s.run(_DROP_IF_EXISTS, n=name)

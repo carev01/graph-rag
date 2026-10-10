@@ -61,7 +61,7 @@ def _patch(monkeypatch):
     from theme_builder.report import CommunityReport
     calls = {"n": 0}
 
-    async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
+    async def _fake_detect(driver, group_id, *, min_community_size, max_levels, gamma=1.0):
         return [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
 
     async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
@@ -145,7 +145,7 @@ async def test_incremental_stages_an_unverifiable_report_instead_of_destroying_i
     from theme_builder.detect import Community
     from theme_builder.report import CommunityReport
 
-    async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
+    async def _fake_detect(driver, group_id, *, min_community_size, max_levels, gamma=1.0):
         return [Community("hA", 1, ["e1", "e2"], None), Community("hB", 1, ["e3", "e4"], None)]
 
     async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
@@ -232,7 +232,7 @@ def _patch_failing_generation(monkeypatch, communities):
     covers."""
     import theme_builder.cli as cli
 
-    async def _fake_detect(driver, group_id, *, min_community_size, max_levels):
+    async def _fake_detect(driver, group_id, *, min_community_size, max_levels, gamma=1.0):
         return communities
 
     async def _fake_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
@@ -397,7 +397,7 @@ async def test_reports_are_generated_concurrently_up_to_the_limit(extract_driver
     await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")
     comms = [Community(f"h{i}", 0, [f"n{i}a", f"n{i}b"], None) for i in range(6)]
 
-    async def _detect(driver, group_id, *, min_community_size, max_levels):
+    async def _detect(driver, group_id, *, min_community_size, max_levels, gamma=1.0):
         return comms
     state = {"now": 0, "peak": 0}
 
@@ -455,3 +455,19 @@ async def test_draft_store_failures_never_fail_the_build(extract_driver, monkeyp
     res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
 
     assert calls["n"] == 1 and res["reports_regenerated"] == 1
+
+
+async def test_the_configured_leiden_gamma_reaches_detection(extract_driver, monkeypatch):
+    """Inert-knob guard (BACKLOG 57): leiden_gamma must reach detect_communities."""
+    import theme_builder.cli as cli
+    _patch(monkeypatch)
+    seen = {}
+
+    async def _detect(driver, group_id, *, min_community_size, max_levels, gamma=1.0):
+        seen["gamma"] = gamma
+        return []
+    monkeypatch.setattr(cli, "detect_communities", _detect)
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-01-01")
+    await cli._run_theme_build_incremental(_settings().model_copy(update={"leiden_gamma": 7.5}),
+                                           driver=extract_driver)
+    assert seen["gamma"] == 7.5

@@ -94,7 +94,7 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
     communities = await detect_communities(
         driver, settings.group_id,
         min_community_size=settings.leiden_min_community_size,
-        max_levels=settings.leiden_max_levels)
+        max_levels=settings.leiden_max_levels, gamma=settings.leiden_gamma)
     client, model = _report_client_and_model(settings)
     vclient, vmodel = _verify_client_and_model(settings)
 
@@ -229,7 +229,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     communities = await detect_communities(
         driver, settings.group_id,
         min_community_size=settings.leiden_min_community_size,
-        max_levels=settings.leiden_max_levels)
+        max_levels=settings.leiden_max_levels, gamma=settings.leiden_gamma)
     persisted = await load_persisted(driver, settings.group_id)
     prev_cursor = await prev_corpus_cursor(driver, settings.group_id)
     touched = await touched_entities(driver, settings.group_id, prev_cursor)

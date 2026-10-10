@@ -1366,7 +1366,14 @@ model and base-URL host of the call that failed, and the worker's `WORKER_TIER`
 (api/gpu); label `graphrag_worker_jobs_total` by routing tier too, so the dashboard can
 show failures per tier.
 
-### 57. One Leiden community holds a quarter of the graph — **P2, found 2026-10-10**
+### 57. ~~One Leiden community holds a quarter of the graph~~ — **DONE 2026-10-10** (found the same day)
+*Resolved:* `leiden_gamma=5.0` (was GDS's 1.0), chosen from a free detection-only sweep:
+level 1 (what global/DRIFT read) goes from 91 communities / largest 10,706 to 295 /
+largest 2,848, level-0 coverage 32k vs 36k entities. Rejected: capping hub degree (split
+it but orphaned 7-10k hub-only entities) and degree-normalised edge weights (fragmented
+level 0, merged levels 1-2). Cause: product hub entities ("Veeam Backup & Replication",
+9,230 neighbours vs median 2).
+
 Measured on the post-Veeam graph (44,974 entities): the largest community has 10,282
 entities at level 0 and is still 10,710 / 11,442 at levels 1 / 2, so the hierarchy never
 splits it. Its single report cannot summarize that much, and global search over it will
