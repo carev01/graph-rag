@@ -370,8 +370,8 @@ async def test_an_interrupted_build_resumes_from_its_drafts(extract_driver, monk
     from theme_builder.writeback import save_report_draft
     calls = _patch(monkeypatch)
     await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")   # A dirty
-    cursor = await cli._corpus_cursor(extract_driver, G)
-    await save_report_draft(extract_driver, G, f"hA:{cursor}", {
+    # The fixture stubs assemble_context to None, so the key hashes an empty context.
+    await save_report_draft(extract_driver, G, cli._draft_key("hA", None), {
         "title": "FROM DRAFT", "summary": "s", "full_report": "[]", "rating": 7.0,
         "rating_explanation": "", "tags": [], "cited_fact_uuids": [], "embedding": [0.25]})
 
@@ -417,3 +417,41 @@ async def test_reports_are_generated_concurrently_up_to_the_limit(extract_driver
 
     assert res["reports_regenerated"] == 6
     assert state["peak"] == 3, f"expected 3 in flight at most and at least once, got {state}"
+
+
+async def test_an_embedding_failure_stages_the_report_instead_of_aborting(extract_driver,
+                                                                          monkeypatch):
+    import theme_builder.cli as cli
+    calls = _patch(monkeypatch)
+
+    class _BrokenEmbedder(_FakeEmbedder):
+        async def create_batch(self, texts):
+            raise RuntimeError("embedder 429")
+
+    monkeypatch.setattr(cli, "build_embedder", lambda s: _BrokenEmbedder())
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")   # A dirty
+
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert calls["n"] == 1 and res["reports_staged"] == 1 and res["reports_regenerated"] == 0
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH (c:Community {group_id:$g, community_id:'sA'}) "
+                        "RETURN c.pending_summary AS p", g=G)
+        assert (await r.single())["p"] == "NEW", "the paid report is kept, staged"
+
+
+async def test_draft_store_failures_never_fail_the_build(extract_driver, monkeypatch):
+    import theme_builder.cli as cli
+    calls = _patch(monkeypatch)
+
+    async def _boom(*a, **k):
+        raise RuntimeError("neo4j blip")
+
+    monkeypatch.setattr(cli, "load_report_draft", _boom)
+    monkeypatch.setattr(cli, "save_report_draft", _boom)
+    monkeypatch.setattr(cli, "clear_report_drafts", _boom)
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")
+
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert calls["n"] == 1 and res["reports_regenerated"] == 1
