@@ -55,12 +55,13 @@ class Provenance:
                 "OPTIONAL MATCH (a:Article)-[he:HAS_EPISODE]->(e:Episodic) "
                 "  WHERE e.uuid IN f.episodes "
                 "OPTIONAL MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->"
-                "  (:Source)-[:HAS_ARTICLE]->(a) "
+                "  (src:Source)-[:HAS_ARTICLE]->(a) "
                 "WITH f.uuid AS uuid, toString(f.valid_at) AS valid_at, "
                 "     toString(f.invalid_at) AS invalid_at, "
                 "     collect(DISTINCT CASE WHEN a IS NULL THEN NULL ELSE "
                 "       {url:a.source_url, title:a.title, article_id:a.id, "
-                "        section:he.heading_path, vendor:v.name, product:p.name} END) AS raw "
+                "        section:he.heading_path, vendor:v.name, product:p.name, "
+                "        source:src.name} END) AS raw "
                 "RETURN uuid, valid_at, invalid_at, [x IN raw WHERE x IS NOT NULL] AS sources",
                 uuids=fact_uuids)
             return {rec["uuid"]: {"valid_at": rec["valid_at"],

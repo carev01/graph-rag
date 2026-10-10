@@ -54,3 +54,32 @@ async def test_load_reads_only_structural_catalog_and_scopes_episodes(extract_ne
     finally:
         await driver.execute_query("MATCH (n) DETACH DELETE n")
         await driver.close()
+
+
+async def test_a_source_scope_selects_only_that_sources_episodes(extract_neo4j):
+    """Per-source scope (2026-10-10): two document sets under ONE product -- product
+    scoping cannot tell them apart, a source scope must."""
+    uri, user, password = extract_neo4j
+    driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    try:
+        await driver.execute_query("MATCH (n) DETACH DELETE n")
+        await driver.execute_query("""
+            CREATE (v:Vendor {id:'v1', name:'Veeam'})
+                   -[:HAS_PRODUCT]->(p:Product {id:'p1', name:'Veeam Backup & Replication'})
+            CREATE (p)-[:HAS_SOURCE]->(:Source {id:'s1', name:'Veeam Agent for Linux'})
+                   -[:HAS_ARTICLE]->(:Article {id:'a1'})-[:HAS_EPISODE]->(:Episodic {uuid:'linux'})
+            CREATE (p)-[:HAS_SOURCE]->(:Source {id:'s2', name:'User Guide'})
+                   -[:HAS_ARTICLE]->(:Article {id:'a2'})-[:HAS_EPISODE]->(:Episodic {uuid:'ug'})
+        """)
+        resolver = await ScopeResolver.load(driver)
+
+        s = resolver.detect("Does Veeam Agent for Linux support immutability?")
+        assert s.sources == ("Veeam Agent for Linux",)
+        assert resolver.detect("Where is the User Guide?").is_empty()
+        assert await scope_episode_uuids(driver, s) == {"linux"}
+        assert await scope_episode_uuids(driver, s, candidates=["linux", "ug"]) == {"linux"}
+        both = Scope((), ("Veeam Backup & Replication",), "x")
+        assert await scope_episode_uuids(driver, both) == {"linux", "ug"}
+    finally:
+        await driver.execute_query("MATCH (n) DETACH DELETE n")
+        await driver.close()

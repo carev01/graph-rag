@@ -368,7 +368,7 @@ async def test_answer_vendor_and_product_params_reach_router_resolved():
                 ("product", "AWS Backup")])
     assert resp.status_code == 200
     assert resp.json()["scope"] == {
-        "vendors": ["Veeam", "AWS"], "products": ["AWS Backup"], "source": "explicit"}
+        "vendors": ["Veeam", "AWS"], "products": ["AWS Backup"], "sources": [], "source": "explicit"}
 
 
 async def test_scope_none_disables_detection():
@@ -377,7 +377,7 @@ async def test_scope_none_disables_detection():
         async with app.router.lifespan_context(app):
             resp = await c.get("/answer", params={"q": "Veeam retention", "scope": "none"})
     assert resp.status_code == 200
-    assert resp.json()["scope"] == {"vendors": [], "products": [], "source": "none"}
+    assert resp.json()["scope"] == {"vendors": [], "products": [], "sources": [], "source": "none"}
 
 
 async def test_unknown_vendor_name_is_422_with_unknown_names():

@@ -62,7 +62,7 @@ def test_disabled_returns_an_empty_scope():
 def test_as_dict_and_vendor_of():
     r = _r()
     assert Scope(("AWS",), ("FortKnox",), "detected").as_dict() == {
-        "vendors": ["AWS"], "products": ["FortKnox"], "source": "detected"}
+        "vendors": ["AWS"], "products": ["FortKnox"], "sources": [], "source": "detected"}
     assert r.vendor_of("FortKnox") == "Cohesity" and r.vendor_of("x") is None
 
 
@@ -132,3 +132,58 @@ def test_single_vendor_questions_with_everyday_wording_stay_scoped(q):
     """Scoped re-review: 'across regions', 'third-party KMS', 'which options' are
     ordinary single-vendor backup vocabulary, not cross-vendor intent."""
     assert not _r().detect(q).is_empty(), q
+
+
+# --- per-source scope (2026-10-10) ---------------------------------------------------
+SRC_PRODUCTS = PRODUCTS + [("Veeam ONE", "Veeam")]
+SOURCES = [("Veeam Agent for Linux", "Veeam Backup & Replication"),
+           ("Veeam Agent for Microsoft Windows", "Veeam Backup & Replication"),
+           ("User Guide", "Veeam Backup & Replication"), ("User Guide", "Veeam ONE"),
+           ("Cloud Connect Guide", "Veeam Backup & Replication"),
+           ("Veeam App for Splunk", "Veeam Backup & Replication")]
+SRC_ALIASES = {**ALIASES, "Veeam Agent": ["Veeam Agent for Linux",
+                                          "Veeam Agent for Microsoft Windows",
+                                          "Veeam Agent for Mac"]}   # Mac not ingested
+
+
+def _rs():
+    return ScopeResolver(VENDORS, SRC_PRODUCTS, SRC_ALIASES, SOURCES)
+
+
+def test_a_distinctive_source_is_detected():
+    s = _rs().detect("How does Veeam Agent for Linux handle snapshots?")
+    assert s.sources == ("Veeam Agent for Linux",) and s.vendors == () and s.products == ()
+    assert s.source == "detected" and not s.is_empty()
+
+
+def test_generic_source_names_are_never_detected():
+    """'User Guide' (not unique, no vendor name) and 'Cloud Connect Guide' (unique, but
+    without the vendor's name) would scope unrelated questions."""
+    assert _rs().detect("Where is the user guide for backups?").is_empty()
+    assert _rs().detect("What does the Cloud Connect Guide cover?").is_empty()
+
+
+def test_a_multi_target_alias_scopes_every_listed_source_and_beats_the_vendor():
+    s = _rs().detect("What should I consider when enabling immutability for Veeam Agent backups?")
+    assert s.sources == ("Veeam Agent for Linux", "Veeam Agent for Microsoft Windows")
+    assert s.vendors == (), "the longer alias must win over the bare vendor name"
+
+
+def test_explicit_sources_resolve_and_ambiguous_names_are_refused():
+    s = _rs().resolve("q", sources=["veeam app for splunk", "Veeam Agent"])
+    assert s.source == "explicit"
+    assert s.sources == ("Veeam App for Splunk", "Veeam Agent for Linux",
+                         "Veeam Agent for Microsoft Windows")
+    with pytest.raises(UnknownScopeName) as ei:
+        _rs().resolve("q", sources=["User Guide"])      # two sources share the name
+    assert ei.value.names == ["User Guide"]
+
+
+def test_a_source_match_counts_as_in_scope_for_attribution():
+    from answer_api.attribution import in_scope
+    scope = Scope((), (), "detected", ("Veeam Agent for Linux",))
+    linux = [{"vendor": "Veeam", "product": "Veeam Backup & Replication",
+              "source": "Veeam Agent for Linux"}]
+    windows = [{"vendor": "Veeam", "product": "Veeam Backup & Replication",
+                "source": "Veeam Agent for Microsoft Windows"}]
+    assert in_scope(linux, scope) and not in_scope(windows, scope)

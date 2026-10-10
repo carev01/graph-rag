@@ -156,7 +156,7 @@ async def test_a_detected_scope_that_grounds_nothing_is_relaxed(monkeypatch):
     monkeypatch.setattr(drift_mod, "drift_search", _drift_empty)
     env = await _route("local", scope=detected)
     assert env["citations"] and env["scope"] == {
-        "vendors": ["Microsoft"], "products": [], "source": "detected-relaxed"}
+        "vendors": ["Microsoft"], "products": [], "sources": [], "source": "detected-relaxed"}
     assert seen[-1].is_empty()
 
 
@@ -226,4 +226,4 @@ def test_normalize_derives_applies_to_when_raw_has_none():
                          "sources": [{"vendor": "AWS", "product": "AWS Backup"}]}]}
     env = _normalize("timeline", "heuristic", None, raw, "q", scope)
     assert env["applies_to"] == [{"vendor": "AWS", "products": ["AWS Backup"], "facts": 1}]
-    assert env["scope"] == {"vendors": [], "products": [], "source": "none"}
+    assert env["scope"] == {"vendors": [], "products": [], "sources": [], "source": "none"}

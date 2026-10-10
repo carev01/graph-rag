@@ -130,9 +130,11 @@ def _in_scope_ci(sources: list[dict], scope: Scope) -> bool:
     if scope.is_empty():
         return True
     folded_scope = Scope(tuple(v.lower() for v in scope.vendors),
-                         tuple(p.lower() for p in scope.products), scope.source)
+                         tuple(p.lower() for p in scope.products), scope.source,
+                         tuple(x.lower() for x in scope.sources))
     folded_sources = [{"vendor": (s.get("vendor") or "").lower(),
-                       "product": (s.get("product") or "").lower()} for s in sources]
+                       "product": (s.get("product") or "").lower(),
+                       "source": (s.get("source") or "").lower()} for s in sources]
     return in_scope(folded_sources, folded_scope)
 
 

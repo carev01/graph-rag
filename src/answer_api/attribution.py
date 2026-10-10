@@ -52,4 +52,6 @@ def applies_to(citations: list[dict]) -> list[dict]:
 def in_scope(sources: list[dict], scope: Scope) -> bool:
     if scope.is_empty():
         return True
-    return any(v in scope.vendors or p in scope.products for v, p in pairs_of(sources))
+    if any(v in scope.vendors or p in scope.products for v, p in pairs_of(sources)):
+        return True
+    return bool(scope.sources) and any(s.get("source") in scope.sources for s in sources)

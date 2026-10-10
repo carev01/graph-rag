@@ -139,7 +139,8 @@ _SCOPE_RELOAD_BACKOFF_SECONDS = 60
 
 
 async def _resolve_scope(app: FastAPI, q: str, vendor: list[str] | None,
-                         product: list[str] | None, scope_mode: str) -> Scope:
+                         product: list[str] | None, scope_mode: str,
+                         source: list[str] | None = None) -> Scope:
     """Resolve once, at the route boundary, then pass the same Scope to every
     mode. The resolver reloads lazily on use when older than
     `settings.scope_reload_seconds` (plan ruling 4) rather than on a timer, so
@@ -174,7 +175,8 @@ async def _resolve_scope(app: FastAPI, q: str, vendor: list[str] | None,
                         + _SCOPE_RELOAD_BACKOFF_SECONDS)
     try:
         return app.state.scope_resolver.resolve(
-            q, vendors=vendor, products=product, disabled=(scope_mode == "none"))
+            q, vendors=vendor, products=product, sources=source,
+            disabled=(scope_mode == "none"))
     except UnknownScopeName as e:
         raise HTTPException(422, detail={"unknown": e.names}) from e
 
@@ -190,10 +192,11 @@ def create_app() -> FastAPI:
     async def search_local(
         q: str, k: int = Query(10, ge=1),
         vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
         include_invalid: bool = False
     ) -> dict[str, Any]:
-        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
         result = await search_mod.search_local(
             app.state.graphiti,
             app.state.driver,
@@ -210,10 +213,11 @@ def create_app() -> FastAPI:
     async def answer(
         q: str, mode: Mode | None = None,
         vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
         st = app.state
-        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
         return await router_mod.answer_router(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             st.map_client, st.map_model, st.cheap_client, st.cheap_model,
@@ -229,10 +233,11 @@ def create_app() -> FastAPI:
     async def search_global(
         q: str, level: int | None = Query(None, ge=0), k: int | None = Query(None, ge=1),
         vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
         st = app.state
-        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
         result = await global_mod.global_search(
             st.driver, st.embedder, st.map_client, st.map_model,
             st.synth_client, st.synth_model,
@@ -254,11 +259,12 @@ def create_app() -> FastAPI:
         q: str, level: int | None = Query(None, ge=0),
         iterations: int | None = Query(None, ge=1, le=2),
         vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
         st = app.state
         s = st.settings
-        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
         result = await drift_mod.drift_search(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             q=q,
@@ -274,9 +280,10 @@ def create_app() -> FastAPI:
     async def timeline(
         q: str, limit: int = Query(30, ge=1),
         vendor: list[str] | None = Query(None), product: list[str] | None = Query(None),
+        source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
-        resolved = await _resolve_scope(app, q, vendor, product, scope)
+        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
         result = await timeline_mod.timeline_local(
             app.state.graphiti,
             app.state.driver,
