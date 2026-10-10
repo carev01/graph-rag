@@ -1333,6 +1333,29 @@ product (a one-word "Cloud"/"Agent"-style name) would scope unrelated questions.
 the full catalog's product names before the full bootstrap and add a stop-list (or
 require the vendor name alongside) for generic ones.
 
+### 55. One 90 s LLM timeout for every tier starves the GPU tier on long outputs — **P1, found 2026-10-10**
+`graph_extract/graphiti_client.py` hard-codes `timeout=90.0, max_retries=4` for the strong,
+cheap and embedder clients. On the vast.ai GPU tier (vLLM, 8 concurrent sequences, ~47
+generated tokens/s per request) an answer longer than ~4k tokens cannot finish in 90 s.
+Seen on the last ~45 Veeam articles (IAM/plug-in permission lists, 5-10k chars, cheap tier):
+the client gave up, vLLM finished the work anyway (0 aborts, 0 `length` stops in its own
+counters, p99 latency 37 s overall), and every retry failed the same way -- 20 jobs reached
+2-4 of 5 attempts. Finishing needed a manual move of the tail to the faster OpenRouter tier.
+Fix: per-tier timeouts in `ExtractSettings` (`llm_timeout_seconds`,
+`cheap_llm_timeout_seconds`, `embed_timeout_seconds`; defaults keep 90 s) and the GPU
+worker Deployment sets the cheap one to ~300 s through `vast.workerConfig`. Consider
+also: a timeout that hits the cheap tier repeatedly should escalate to the strong tier
+rather than spend the job's attempts (like `dedup_guard`'s retry-on-strong).
+
+### 56. Worker logs do not say which tier or endpoint served an article — **P2, found 2026-10-10**
+Diagnosing #55 took guesswork: the failed-job log shows `openai.APITimeoutError` and
+`Retrying request to /chat/completions` with no model, base URL or tier, and the batch line
+does not record whether the article was routed cheap or strong (`IngestArticleResult.tier`
+exists but is not logged). Add to the per-job log/metrics: the tier (`cheap`/`strong`), the
+model and base-URL host of the call that failed, and the worker's `WORKER_TIER`
+(api/gpu); label `graphrag_worker_jobs_total` by routing tier too, so the dashboard can
+show failures per tier.
+
 ---
 
 ## Next steps, in order
