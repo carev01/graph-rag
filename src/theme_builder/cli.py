@@ -15,6 +15,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder
 from graph_extract.merge_duplicates import DuplicateEntitiesError, assert_no_duplicates
+from graph_sync.logging_setup import configure_logging
 from theme_builder.context import EntityRow, FactRow, assemble_context
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
@@ -533,6 +534,11 @@ def theme_build(
     --allow-duplicates); the check is one aggregation, no LLM, and runs before
     any work in both build modes. `--verify-pending` is not gated (see below).
     """
+    # Without it the root logger stays at WARNING and the build's INFO progress lines
+    # (done/total, ETA) never reach `kubectl logs` -- the first post-Veeam run showed
+    # nothing for 58 minutes (2026-10-10).
+    configure_logging()
+
     async def _main() -> None:
         settings = get_extract_settings()
         driver = AsyncGraphDatabase.driver(
