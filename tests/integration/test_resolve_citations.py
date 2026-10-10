@@ -17,7 +17,7 @@ async def test_resolve_citations_batch(extract_driver):
     out = await Provenance(extract_driver).resolve_citations(["f1", "f2", "f_absent"])
     assert out["f1"]["sources"] == [
         {"url": "https://x/1", "title": "T1", "article_id": "art1",
-         "section": None, "vendor": None, "product": None}]
+         "section": None, "vendor": None, "product": None, "source": None}]
     assert out["f1"]["valid_at"] is None and out["f1"]["invalid_at"] is None
     assert out["f2"] == {"valid_at": None, "invalid_at": None, "sources": []}
     assert "f_absent" not in out          # absent fact stays absent (caller contract)
