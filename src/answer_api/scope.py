@@ -67,6 +67,27 @@ _CROSS_VENDOR = re.compile(
     re.IGNORECASE)
 
 
+# Words that, left over once the vendor's name is removed from a source name, make it
+# generic rather than distinctive: "Keepit Platform" must not narrow "Does the Keepit
+# platform back up Microsoft 365?" from the Keepit vendor to one of its sources (review).
+_GENERIC_SOURCE_WORDS = frozenset({
+    "platform", "docs", "documentation", "doc", "cloud", "console", "portal", "help",
+    "center", "centre", "guide", "guides", "user", "admin", "administrator", "manual",
+    "reference", "kb", "knowledge", "base", "support", "release", "notes", "the", "and"})
+
+_warned_aliases: set[tuple[str, str]] = set()
+
+
+def _distinctive(source: str, vendor: str) -> bool:
+    """A source is detected only if its name carries the vendor's name AND something
+    specific beyond it: "Veeam Agent for Linux" yes, "Keepit Platform" no."""
+    name = source.lower()
+    if not vendor or vendor.lower() not in name:
+        return False
+    rest = re.findall(r"[\w&+.-]+", name.replace(vendor.lower(), " "))
+    return any(w not in _GENERIC_SOURCE_WORDS for w in rest)
+
+
 @dataclass(frozen=True)
 class Scope:
     vendors: tuple[str, ...] = ()
@@ -112,9 +133,8 @@ class ScopeResolver:
         for p, _ in products:
             terms.setdefault(p.lower(), [("product", p)])
         for name, product in sources or []:
-            vendor = self._vendor_of.get(product, "")
-            if (name.lower() in self._sources and vendor
-                    and vendor.lower() in name.lower()):
+            if name.lower() in self._sources and _distinctive(
+                    name, self._vendor_of.get(product, "")):
                 terms.setdefault(name.lower(), [("source", name)])
         self._alias_targets: dict[str, list[tuple[str, str]]] = {}
         for alias, target in aliases.items():
@@ -122,8 +142,12 @@ class ScopeResolver:
             for t in [target] if isinstance(target, str) else target:
                 hit = self._canonical(t)
                 if hit is None:
-                    logger.warning("scope alias %r -> %r: target is not an ingested "
-                                   "vendor/product/source; ignored", alias, t)
+                    # Once per process: the resolver reloads every scope_reload_seconds,
+                    # and an alias may name sources not ingested yet.
+                    if (alias, t) not in _warned_aliases:
+                        _warned_aliases.add((alias, t))
+                        logger.warning("scope alias %r -> %r: target is not an ingested "
+                                       "vendor/product/source; ignored", alias, t)
                 else:
                     hits.append(hit)
             if hits:

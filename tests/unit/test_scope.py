@@ -187,3 +187,14 @@ def test_a_source_match_counts_as_in_scope_for_attribution():
     windows = [{"vendor": "Veeam", "product": "Veeam Backup & Replication",
                 "source": "Veeam Agent for Microsoft Windows"}]
     assert in_scope(linux, scope) and not in_scope(windows, scope)
+
+
+def test_a_source_with_only_a_generic_word_beyond_the_vendor_is_not_detected():
+    """Review: 'Keepit Platform' must not narrow a Keepit-wide question to one source."""
+    r = ScopeResolver(["Keepit"], [("Keepit", "Keepit")], {},
+                      [("Keepit Platform", "Keepit"), ("Microsoft 365", "Keepit"),
+                       ("Keepit Partner Management Console", "Keepit")])
+    s = r.detect("Does the Keepit platform back up Microsoft 365?")
+    assert s.vendors == ("Keepit",) and s.sources == ()
+    assert r.detect("Keepit Partner Management Console roles").sources == (
+        "Keepit Partner Management Console",)
