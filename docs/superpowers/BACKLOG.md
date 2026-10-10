@@ -1366,6 +1366,17 @@ model and base-URL host of the call that failed, and the worker's `WORKER_TIER`
 (api/gpu); label `graphrag_worker_jobs_total` by routing tier too, so the dashboard can
 show failures per tier.
 
+### 57. One Leiden community holds a quarter of the graph — **P2, found 2026-10-10**
+Measured on the post-Veeam graph (44,974 entities): the largest community has 10,282
+entities at level 0 and is still 10,710 / 11,442 at levels 1 / 2, so the hierarchy never
+splits it. Its single report cannot summarize that much, and global search over it will
+be vague. Investigate Leiden's `gamma` (resolution) and/or recursively re-clustering
+communities above a size cap, measured with the same free detection-only pass
+(`detect_communities` with `min_community_size=1`, ~30 s) before any report is paid for.
+The full-rebuild path (`theme-build --full`, `_run_theme_build`) is also still
+sequential and unresumable; the incremental path (the default) got concurrency and
+draft-resume on 2026-10-10.
+
 ---
 
 ## Next steps, in order

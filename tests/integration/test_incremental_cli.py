@@ -360,3 +360,60 @@ async def test_a_failed_regeneration_keeps_a_staged_report_staged(extract_driver
     assert a["ps"] == "PS" and a["pfr"] == '[{"finding":"F"}]', "its pending text is intact"
     assert a["summary"] is None and a["embedding"] is None
     assert a["verified"] is False
+
+
+async def test_an_interrupted_build_resumes_from_its_drafts(extract_driver, monkeypatch):
+    """A run cut short (Job deadline, crash) must not pay twice for reports it already
+    generated: a draft saved for this community and corpus watermark is reused, and
+    the drafts are cleared once the layer is written."""
+    import theme_builder.cli as cli
+    from theme_builder.writeback import save_report_draft
+    calls = _patch(monkeypatch)
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")   # A dirty
+    cursor = await cli._corpus_cursor(extract_driver, G)
+    await save_report_draft(extract_driver, G, f"hA:{cursor}", {
+        "title": "FROM DRAFT", "summary": "s", "full_report": "[]", "rating": 7.0,
+        "rating_explanation": "", "tags": [], "cited_fact_uuids": [], "embedding": [0.25]})
+
+    res = await cli._run_theme_build_incremental(_settings(), driver=extract_driver)
+
+    assert calls["n"] == 0, "the drafted report must not be generated again"
+    assert res["reports_resumed"] == 1 and res["reports_regenerated"] == 0
+    async with extract_driver.session() as s:
+        r = await s.run("MATCH (c:Community {group_id:$g, community_id:'sA'}) RETURN c.title AS t",
+                        g=G)
+        assert (await r.single())["t"] == "FROM DRAFT"
+        r = await s.run("MATCH (d:ThemeReportDraft {group_id:$g}) RETURN count(d) AS n", g=G)
+        assert (await r.single())["n"] == 0, "drafts are cleared after the write"
+
+
+async def test_reports_are_generated_concurrently_up_to_the_limit(extract_driver, monkeypatch):
+    import asyncio
+
+    import theme_builder.cli as cli
+    from theme_builder.detect import Community
+    from theme_builder.report import CommunityReport
+    _patch(monkeypatch)
+    await _seed_persisted_and_entities(extract_driver, e_a_created="2026-04-15")
+    comms = [Community(f"h{i}", 0, [f"n{i}a", f"n{i}b"], None) for i in range(6)]
+
+    async def _detect(driver, group_id, *, min_community_size, max_levels):
+        return comms
+    state = {"now": 0, "peak": 0}
+
+    async def _slow_generate(client, model, ctx, max_tokens, *, verifier=None, stats=None):
+        state["now"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+        await asyncio.sleep(0.05)
+        state["now"] -= 1
+        return CommunityReport(title="T", summary="S", full_report="[]", rating=5.0,
+                               rating_explanation="", tags=[], cited_fact_uuids=[])
+
+    monkeypatch.setattr(cli, "detect_communities", _detect)
+    monkeypatch.setattr(cli, "generate_report", _slow_generate)
+    settings = _settings().model_copy(update={"theme_report_concurrency": 3})
+
+    res = await cli._run_theme_build_incremental(settings, driver=extract_driver)
+
+    assert res["reports_regenerated"] == 6
+    assert state["peak"] == 3, f"expected 3 in flight at most and at least once, got {state}"

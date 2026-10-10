@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 import typer
@@ -21,7 +22,13 @@ from theme_builder.incremental import (
 from theme_builder.report import (ReportStats, _regenerate_summary,
                                   _report_client_and_model, _verify_client_and_model,
                                   generate_report, verify_report)
-from theme_builder.writeback import write_communities, write_communities_incremental
+from theme_builder.writeback import (
+    clear_report_drafts,
+    load_report_draft,
+    save_report_draft,
+    write_communities,
+    write_communities_incremental,
+)
 
 app = typer.Typer()
 logger = logging.getLogger(__name__)
@@ -228,97 +235,140 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
         return await verify_report(vclient, vmodel, findings, summary, fact_texts)
 
     embedder = build_embedder(settings)
-    entries: list[dict] = []
-    regenerated = 0
-    reused = 0
-    skipped = 0
-    staged = 0
-    preserved = 0
-    lost_by_level: dict[int, int] = {}
-    findings_dropped = reverified = unverified = 0
     now = datetime.now(timezone.utc)
-    try:
-        for i, c in enumerate(communities):
-            base = {"community_id": stable_ids[i], "level": c.level,
-                    "member_uuids": c.member_uuids,
-                    "parent_id": id_map.get(c.parent_id) if c.parent_id else None}
-            if i in clean:
-                p = matches[i]
-                assert p is not None
-                entries.append(_carry_over(base, p))
-                reused += 1
-                continue
-            try:
-                members = await _fetch_members(driver, settings.group_id, c.member_uuids)
-                facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
-                ctx = assemble_context(members, facts, top_entities=settings.report_top_entities,
-                                       token_budget=settings.report_token_budget)
-                st = ReportStats()
-                rep = await generate_report(client, model, ctx,
-                                            settings.report_max_tokens,
-                                            verifier=_verifier, stats=st)
-                findings_dropped += st.findings_dropped
-                reverified += 1 if st.reverified else 0
-                unverified += 1 if st.unverified else 0
-                staged_report = st.staged_report
-            except Exception:
-                logger.exception("theme-build: community %s errored; skipping", stable_ids[i])
-                rep = None
-                staged_report = None
-            if rep is None:
-                if staged_report is not None:
-                    # Verification could not COMPLETE. The report is generated and
-                    # paid for; dropping this community from `entries` would let
-                    # write_communities_incremental's DETACH DELETE take the
-                    # community's PREVIOUSLY verified report with it. Stage it
-                    # instead -- no embedding, so it stays unreachable from every
-                    # answering path -- and recover it with --verify-pending.
-                    entries.append({**base, "title": staged_report.title,
-                                    "pending_summary": staged_report.summary,
-                                    "pending_full_report": staged_report.full_report,
-                                    "rating": staged_report.rating,
-                                    "rating_explanation": staged_report.rating_explanation,
-                                    "tags": staged_report.tags,
-                                    "cited_fact_uuids": staged_report.cited_fact_uuids,
-                                    "generated_at": now, "staged": True})
-                    staged += 1
-                    continue
-                # Nothing was staged: generation itself failed (the `except` above,
-                # or `_generate_once` returning None -- measured 3/29 empty-choices
-                # replies on a real run). If this community already HAS a persisted
-                # report, a failed NEW attempt must not take it: carry it over
-                # rather than let the DETACH DELETE rebuild drop it. Only a
-                # community with nothing persisted is a genuine loss.
-                p = matches[i]
-                if p is not None:
-                    entries.append(_carry_over(base, p, stale=True))
-                    logger.warning(
-                        "theme-build: community %s produced no report; carrying over "
-                        "its persisted %s report, flagged stale for the next run",
-                        stable_ids[i], "staged" if p.is_staged else "verified")
-                    if p.is_staged:
-                        staged += 1
-                    else:
-                        preserved += 1
-                    continue
+    counts: dict[str, int] = dict.fromkeys(
+        ("regenerated", "resumed", "skipped", "staged", "preserved", "findings_dropped",
+         "reverified", "unverified"), 0)
+    lost_by_level: dict[int, int] = {}
+
+    async def _build_entry(i: int) -> dict | None:
+        """One dirty community's entry (or None when it is genuinely lost). Runs
+        concurrently with its siblings; only `counts`/`lost_by_level` are shared, and
+        they are updated with no await in between, so the event loop keeps them
+        consistent."""
+        c = communities[i]
+        base = {"community_id": stable_ids[i], "level": c.level,
+                "member_uuids": c.member_uuids,
+                "parent_id": id_map.get(c.parent_id) if c.parent_id else None}
+        # A report already generated by an interrupted run over this same community
+        # and corpus watermark: reuse it instead of paying for it again.
+        draft_key = f"{c.community_id}:{new_cursor}"
+        draft = await load_report_draft(driver, settings.group_id, draft_key)
+        if draft is not None:
+            counts["resumed"] += 1
+            return {**base, **draft, "generated_at": now}
+        try:
+            members = await _fetch_members(driver, settings.group_id, c.member_uuids)
+            facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
+            ctx = assemble_context(members, facts, top_entities=settings.report_top_entities,
+                                   token_budget=settings.report_token_budget)
+            st = ReportStats()
+            rep = await generate_report(client, model, ctx,
+                                        settings.report_max_tokens,
+                                        verifier=_verifier, stats=st)
+            counts["findings_dropped"] += st.findings_dropped
+            counts["reverified"] += 1 if st.reverified else 0
+            counts["unverified"] += 1 if st.unverified else 0
+            staged_report = st.staged_report
+        except Exception:
+            logger.exception("theme-build: community %s errored; skipping", stable_ids[i])
+            rep = None
+            staged_report = None
+        if rep is None:
+            if staged_report is not None:
+                # Verification could not COMPLETE. The report is generated and
+                # paid for; dropping this community from `entries` would let
+                # write_communities_incremental's DETACH DELETE take the
+                # community's PREVIOUSLY verified report with it. Stage it
+                # instead -- no embedding, so it stays unreachable from every
+                # answering path -- and recover it with --verify-pending.
+                counts["staged"] += 1
+                return {**base, "title": staged_report.title,
+                        "pending_summary": staged_report.summary,
+                        "pending_full_report": staged_report.full_report,
+                        "rating": staged_report.rating,
+                        "rating_explanation": staged_report.rating_explanation,
+                        "tags": staged_report.tags,
+                        "cited_fact_uuids": staged_report.cited_fact_uuids,
+                        "generated_at": now, "staged": True}
+            # Nothing was staged: generation itself failed (the `except` above,
+            # or `_generate_once` returning None -- measured 3/29 empty-choices
+            # replies on a real run). If this community already HAS a persisted
+            # report, a failed NEW attempt must not take it: carry it over
+            # rather than let the DETACH DELETE rebuild drop it. Only a
+            # community with nothing persisted is a genuine loss.
+            p = matches[i]
+            if p is not None:
                 logger.warning(
-                    "theme-build: community %s (level %s) produced no report and has "
-                    "nothing persisted; LOST", stable_ids[i], c.level)
-                skipped += 1
-                lost_by_level[c.level] = lost_by_level.get(c.level, 0) + 1
-                continue
-            emb = (await embedder.create_batch([f"{rep.title}\n{rep.summary}"]))[0]
-            entries.append({**base, "title": rep.title, "summary": rep.summary,
-                            "full_report": rep.full_report, "rating": rep.rating,
-                            "rating_explanation": rep.rating_explanation, "tags": rep.tags,
-                            "cited_fact_uuids": rep.cited_fact_uuids,
-                            "embedding": emb, "generated_at": now})
-            regenerated += 1
+                    "theme-build: community %s produced no report; carrying over "
+                    "its persisted %s report, flagged stale for the next run",
+                    stable_ids[i], "staged" if p.is_staged else "verified")
+                counts["staged" if p.is_staged else "preserved"] += 1
+                return _carry_over(base, p, stale=True)
+            logger.warning(
+                "theme-build: community %s (level %s) produced no report and has "
+                "nothing persisted; LOST", stable_ids[i], c.level)
+            counts["skipped"] += 1
+            lost_by_level[c.level] = lost_by_level.get(c.level, 0) + 1
+            return None
+        emb = (await embedder.create_batch([f"{rep.title}\n{rep.summary}"]))[0]
+        fields = {"title": rep.title, "summary": rep.summary,
+                  "full_report": rep.full_report, "rating": rep.rating,
+                  "rating_explanation": rep.rating_explanation, "tags": rep.tags,
+                  "cited_fact_uuids": rep.cited_fact_uuids, "embedding": emb}
+        # Saved the moment it exists: an interrupted run (deadline, crash, restart)
+        # resumes from here instead of regenerating -- and re-paying for -- it.
+        await save_report_draft(driver, settings.group_id, draft_key, fields)
+        counts["regenerated"] += 1
+        return {**base, **fields, "generated_at": now}
+
+    try:
+        entries: list[dict] = []
+        reused = 0
+        for i in clean:
+            p = matches[i]
+            assert p is not None
+            c = communities[i]
+            entries.append(_carry_over({"community_id": stable_ids[i], "level": c.level,
+                                        "member_uuids": c.member_uuids,
+                                        "parent_id": id_map.get(c.parent_id)
+                                        if c.parent_id else None}, p))
+            reused += 1
+        todo = sorted(i for i in range(len(communities)) if i not in clean)
+        logger.info("theme-build: %d communities, %d unchanged, %d to (re)build at "
+                    "concurrency %d", len(communities), reused, len(todo),
+                    settings.theme_report_concurrency)
+        sem = asyncio.Semaphore(settings.theme_report_concurrency)
+        started = time.monotonic()
+        done = 0
+
+        async def _one(i: int) -> dict | None:
+            nonlocal done
+            async with sem:
+                entry = await _build_entry(i)
+            done += 1
+            if done % 10 == 0 or done == len(todo):
+                elapsed = time.monotonic() - started
+                eta = elapsed / done * (len(todo) - done)
+                logger.info("theme-build: %d/%d built (%d regenerated, %d resumed, %d lost) "
+                            "in %.0fs, ETA %.0fs", done, len(todo), counts["regenerated"],
+                            counts["resumed"], counts["skipped"], elapsed, eta)
+            return entry
+
+        built = await asyncio.gather(*(_one(i) for i in todo))
+        entries.extend(e for e in built if e is not None)
+        regenerated, skipped = counts["regenerated"], counts["skipped"]
+        staged, preserved = counts["staged"], counts["preserved"]
+        findings_dropped, reverified = counts["findings_dropped"], counts["reverified"]
+        unverified = counts["unverified"]
         res = await write_communities_incremental(driver, settings.group_id, entries,
                                                   corpus_cursor=new_cursor)
         matched_persisted = sum(1 for i in matches if matches[i] is not None)
+        # The layer is written; the drafts have served their purpose.
+        await clear_report_drafts(driver, settings.group_id)
         res.update({"communities_detected": len(communities),
                     "reports_regenerated": regenerated, "reports_reused": reused,
+                    "reports_resumed": counts["resumed"],
                     "reports_skipped": skipped, "reports_staged": staged,
                     "reports_preserved": preserved, "lost_by_level": lost_by_level,
                     "communities_dissolved": len(persisted) - matched_persisted,

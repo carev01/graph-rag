@@ -2,6 +2,8 @@
 disposable — the theme-builder is the only writer of :Community."""
 from __future__ import annotations
 
+import json
+
 from neo4j import AsyncDriver
 
 from theme_builder.detect import Community
@@ -250,3 +252,40 @@ async def write_communities_incremental(driver: AsyncDriver, group_id: str,
         await s.execute_write(_rebuild)
     return {"reports_written": len(entries) - len(staged), "by_level": by_level,
             "reports_staged": len(staged)}
+
+
+# --- report drafts: resume an interrupted incremental build -------------------------
+# Each regenerated report is saved here the moment it exists, keyed by the community's
+# content hash plus the run's corpus watermark, so a run cut short (Job deadline, crash,
+# restart) re-uses what it already paid for. The final write replaces the layer in one
+# DETACH DELETE rebuild, so drafts cannot be the layer themselves; they are cleared once
+# it is written. A separate label: nothing that answers questions reads it.
+_DRAFT_FIELDS = ("title", "summary", "full_report", "rating", "rating_explanation", "tags",
+                 "cited_fact_uuids")
+
+
+async def load_report_draft(driver, group_id: str, key: str) -> dict | None:
+    async with driver.session() as s:
+        r = await s.run("MATCH (d:ThemeReportDraft {group_id: $g, key: $k}) "
+                        "RETURN d.payload AS payload, d.embedding AS embedding",
+                        g=group_id, k=key)
+        rec = await r.single()
+    if rec is None:
+        return None
+    return {**json.loads(rec["payload"]), "embedding": list(rec["embedding"])}
+
+
+async def save_report_draft(driver, group_id: str, key: str, fields: dict) -> None:
+    payload = json.dumps({k: fields[k] for k in _DRAFT_FIELDS})
+    async with driver.session() as s:
+        await s.run("MERGE (d:ThemeReportDraft {group_id: $g, key: $k}) "
+                    "SET d.payload = $p, d.embedding = $e, d.saved_at = datetime()",
+                    g=group_id, k=key, p=payload, e=list(fields["embedding"]))
+
+
+async def clear_report_drafts(driver, group_id: str) -> int:
+    async with driver.session() as s:
+        r = await s.run("MATCH (d:ThemeReportDraft {group_id: $g}) DETACH DELETE d "
+                        "RETURN count(*) AS n", g=group_id)
+        rec = await r.single()
+    return rec["n"] if rec else 0

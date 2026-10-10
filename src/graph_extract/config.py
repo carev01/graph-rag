@@ -241,7 +241,13 @@ class ExtractSettings(BaseSettings):
     # reasoning entirely; "low" is the floor that keeps the verifier a judge rather
     # than a reflex.
     verify_reasoning_effort: str = "low"
-    leiden_min_community_size: int = 3   # drop dust communities smaller than this
+    # Drop dust communities smaller than this. 10, not 3 (2026-10-10, measured on the
+    # 45k-entity post-Veeam graph): 3 kept 1,717 communities -- ~25 h of one-at-a-time
+    # report writing -- where 10 keeps 284 and still covers 89% of level-0 entities;
+    # the 1,433 communities it drops are 3-9-entity fragments holding ~4,300 entities.
+    leiden_min_community_size: int = 10
+    # Community reports generated at once by an incremental theme-build.
+    theme_report_concurrency: int = 8
     leiden_max_levels: int = 3           # cap on intermediate Leiden levels
     # Output cap for a community report. 8000 was measured against GLM-5.2 (3000
     # skipped ~24% of communities, 8000 skipped ~0). GLM-5.3-flash reasons more and
