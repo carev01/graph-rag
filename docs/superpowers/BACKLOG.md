@@ -1333,7 +1333,12 @@ product (a one-word "Cloud"/"Agent"-style name) would scope unrelated questions.
 the full catalog's product names before the full bootstrap and add a stop-list (or
 require the vendor name alongside) for generic ones.
 
-### 55. One 90 s LLM timeout for every tier starves the GPU tier on long outputs — **P1, found 2026-10-10**
+### 55. ~~One 90 s LLM timeout for every tier starves the GPU tier on long outputs~~ — **DONE 2026-10-10** (found the same day)
+*Resolved:* `llm_timeout_seconds`, `cheap_llm_timeout_seconds` (mapped through the cheap
+view) and `embed_timeout_seconds`, all defaulting to 90 s; the GPU worker Deployment sets
+`CHEAP_LLM_TIMEOUT_SECONDS=300` via `vast.workerConfig`. Escalating a repeatedly timing-out
+cheap call to the strong tier is not done -- reopen if the longer timeout is not enough.
+
 `graph_extract/graphiti_client.py` hard-codes `timeout=90.0, max_retries=4` for the strong,
 cheap and embedder clients. On the vast.ai GPU tier (vLLM, 8 concurrent sequences, ~47
 generated tokens/s per request) an answer longer than ~4k tokens cannot finish in 90 s.
@@ -1347,7 +1352,12 @@ worker Deployment sets the cheap one to ~300 s through `vast.workerConfig`. Cons
 also: a timeout that hits the cheap tier repeatedly should escalate to the strong tier
 rather than spend the job's attempts (like `dedup_guard`'s retry-on-strong).
 
-### 56. Worker logs do not say which tier or endpoint served an article — **P2, found 2026-10-10**
+### 56. ~~Worker logs do not say which tier or endpoint served an article~~ — **DONE 2026-10-10** (found the same day)
+*Resolved:* every job logs `done: article=… tier=… worker_tier=… Ns` or
+`failed: article=… tier=… worker_tier=… call=model@host Ns` (the ingest driver notes the
+routing tier on a failed article's exception: `cheap`/`strong`/`unrouted`), and
+`graphrag_worker_jobs_total` carries a `route` label shown on the dashboard's failures panel.
+
 Diagnosing #55 took guesswork: the failed-job log shows `openai.APITimeoutError` and
 `Retrying request to /chat/completions` with no model, base URL or tier, and the batch line
 does not record whether the article was routed cheap or strong (`IngestArticleResult.tier`

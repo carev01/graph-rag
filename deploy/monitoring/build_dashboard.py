@@ -118,8 +118,8 @@ series("Articles per hour, by tier",
          "{{tier}}")], 0, 14, desc="api = OpenRouter workers, gpu = vast.ai workers")
 series("Remaining over time", [(REMAINING, "remaining")], 12, 14)
 series("Failures, deferrals and pauses (per hour)",
-       [('sum by (outcome) (rate(graphrag_worker_jobs_total{outcome!="done"}[15m])) * 3600',
-         "{{outcome}}"),
+       [('sum by (outcome, route) (rate(graphrag_worker_jobs_total{outcome!="done"}[15m])) * 3600',
+         "{{outcome}} ({{route}})"),
         ("sum by (reason) (rate(graphrag_worker_pauses_total[15m])) * 3600",
          "pause: {{reason}}")], 0, 22, w=8,
        desc="failed spends an attempt; deferred_* and pauses do not. Empty = none.")

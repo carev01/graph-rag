@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import Counter
@@ -139,6 +140,35 @@ async def endpoint_answers(url: httpx.URL,
         return True
 
 
+def _route_of(exc: BaseException) -> str:
+    """The extraction tier the ingest driver noted on a failed article (BACKLOG 56)."""
+    for x in _chain(exc):
+        for note in getattr(x, "__notes__", ()) or ():
+            if note.startswith("graph-rag tier="):
+                return note.split("=", 1)[1]
+    return "-"
+
+
+def _failed_call(exc: BaseException) -> str:
+    """'model@host' of the HTTP call that failed, when the chain carries one."""
+    url = _request_url(exc)
+    if url is None:
+        return "-"
+    model = "?"
+    for x in _chain(exc):
+        try:
+            req = getattr(x, "request", None)
+        except RuntimeError:
+            continue
+        if isinstance(req, httpx.Request):
+            try:
+                model = str(json.loads(req.content or b"{}").get("model") or "?")
+            except (ValueError, AttributeError, httpx.RequestNotRead):
+                pass
+            break
+    return f"{model}@{url.host}"
+
+
 def exp_backoff(attempts: int, *, base: float, cap: float) -> float:
     return min(base * (2 ** (attempts - 1)), cap)
 
@@ -204,6 +234,7 @@ async def run_worker_once(
         spent = UsageTally()
         scope = CURRENT_USAGE_TALLY.set(spent)
         started = time.monotonic()
+        res = None      # stays None for a "remove" job (no extraction, no tier)
         try:
             if job["op"] == "upsert":
                 res = await ingest.ingest_article(job["article_id"])
@@ -219,7 +250,11 @@ async def run_worker_once(
             else:
                 raise ValueError(f"unknown op {job['op']!r}")
             await store.complete_semantic_job(job["id"], job["claimed_at"])
-            metrics.job_outcome("done", time.monotonic() - started)
+            elapsed = time.monotonic() - started
+            route = res.tier if res is not None and getattr(res, "routed", False) else "-"
+            metrics.job_outcome("done", elapsed, route)
+            logger.info("semantic job %s done: article=%s tier=%s worker_tier=%s %.0fs",
+                        job["id"], job["article_id"], route, metrics.TIER, elapsed)
         except Exception as e:  # a poison job must not block the queue
             halt = "credits" if _is_out_of_credits(e) else None
             if halt is None:
@@ -232,13 +267,15 @@ async def run_worker_once(
                 halted.append((halt, f"{type(e).__name__}: {str(e)[:300]}"))
                 await _defer_halted(job)
                 return
-            logger.exception("semantic job %s failed", job["id"])
+            logger.exception("semantic job %s failed: article=%s tier=%s worker_tier=%s "
+                             "call=%s %.0fs", job["id"], job["article_id"], _route_of(e),
+                             metrics.TIER, _failed_call(e), time.monotonic() - started)
             await store.fail_semantic_job(
                 job["id"], str(e), max_attempts=max_attempts,
                 retry_delay_seconds=exp_backoff(
                     job["attempts"] + 1, base=backoff_base, cap=backoff_cap),
                 claimed_at=job["claimed_at"])
-            metrics.job_outcome("failed", time.monotonic() - started)
+            metrics.job_outcome("failed", time.monotonic() - started, _route_of(e))
         finally:
             CURRENT_USAGE_TALLY.reset(scope)
             metrics.job_tokens(spent.prompt_tokens, spent.cached_tokens,

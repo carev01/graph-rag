@@ -41,8 +41,8 @@ class _Delta:
         return [a - b for a, b in zip(self.after, self.before)]
 
 
-def _jobs(outcome):
-    return ("graphrag_worker_jobs_total", {"tier": T, "outcome": outcome})
+def _jobs(outcome, route="-"):
+    return ("graphrag_worker_jobs_total", {"tier": T, "outcome": outcome, "route": route})
 
 
 async def test_done_and_failed_jobs_are_counted_with_their_time():
@@ -187,3 +187,39 @@ async def test_workers_never_serve_the_exporter_gauges():
     assert not any(n.startswith(("graphrag_queue", "graphrag_openrouter", "graphrag_gpu",
                                  "graphrag_tokens_today", "graphrag_exporter"))
                    for n in worker_names)
+
+
+class _RoutedIngest(_Ingest):
+    """Returns results the router has routed, like the real driver."""
+
+    async def ingest_article(self, article_id):
+        res = await super().ingest_article(article_id)
+        res.tier, res.routed = "cheap", True
+        return res
+
+
+async def test_a_done_job_is_counted_under_its_routing_tier(caplog):
+    store = _Store([[_job(1, "a1")]])
+    with _Delta(_jobs("done", "cheap")) as d, caplog.at_level("INFO"):
+        await run_worker_once(store, _RoutedIngest({}), **_KW)
+    assert d.deltas == [1]
+    assert any("done: article=a1 tier=cheap" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_failed_job_logs_its_tier_and_the_call_that_failed(caplog):
+    req = httpx.Request("POST", "http://graph-rag-vast-tunnel:8000/v1/chat/completions",
+                        json={"model": "qwen35-graphrag", "messages": []})
+    try:
+        try:
+            raise httpx.ReadTimeout("timed out", request=req)
+        except httpx.ReadTimeout as inner:
+            raise ValueError("graphiti gave up") from inner
+    except ValueError as e:
+        e.add_note("graph-rag tier=cheap")
+        err = e
+    store = _Store([[_job(1, "a1")]])
+    with _Delta(_jobs("failed", "cheap")) as d, caplog.at_level("ERROR"):
+        await run_worker_once(store, _Ingest({"a1": err}), **_KW)
+    assert d.deltas == [1]
+    msg = next(r.getMessage() for r in caplog.records if "failed:" in r.getMessage())
+    assert "tier=cheap" in msg and "call=qwen35-graphrag@graph-rag-vast-tunnel" in msg

@@ -82,6 +82,9 @@ vast:
   workerConfig:
     CHEAP_LLM_MODEL: qwen35-graphrag
     CHEAP_LLM_CLIENT_MODE: generic_json_schema
+    # ~47 generated tokens/s per request at 8 concurrent: a long answer needs minutes,
+    # not the default 90 s (BACKLOG 55).
+    CHEAP_LLM_TIMEOUT_SECONDS: "300"
 
 # Prometheus metrics: the queue exporter Deployment and the worker-metrics headless
 # Service. Scrape config and the Grafana dashboard: deploy/monitoring/.

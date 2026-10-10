@@ -63,6 +63,9 @@ class IngestArticleResult:
     edges: int = 0
     skipped_navigation: bool = False
     tier: str = "strong"
+    # True once the router has picked `tier` -- a failure before that (fetching the
+    # article) must not be reported as the default "strong" (BACKLOG 56).
+    routed: bool = False
     # Which timestamp the episodes' reference time came from: the upstream
     # content_changed_basis, or CRAWL_FALLBACK when upstream supplied none.
     reference_basis: str = CRAWL_FALLBACK
@@ -162,6 +165,11 @@ class IngestDriver:
         token = CURRENT_DEDUP_STATS.set(res.dedup)
         try:
             return await self._ingest_article(article_id, res)
+        except Exception as e:
+            # The worker logs which tier an article failed on (BACKLOG 56); the
+            # result object is lost with the exception, so the tier rides on it.
+            e.add_note(f"graph-rag tier={res.tier if res.routed else 'unrouted'}")
+            raise
         finally:
             CURRENT_DEDUP_STATS.reset(token)
             if res.dedup.invalid_calls:
@@ -175,6 +183,7 @@ class IngestDriver:
             return res      # navigation page: no chunking, no extraction, 0 tokens
         tier = self._tier_for(art.content_markdown)
         res.tier = tier.name
+        res.routed = True
         ref, res.reference_basis = _reference_time(art)
         # content_hash: reuse the article's stored hash from the graph, else hash markdown
         content_hash = await self._content_hash(article_id) or _sha(art.content_markdown)

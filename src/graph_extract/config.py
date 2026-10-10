@@ -45,6 +45,7 @@ class ExtractSettings(BaseSettings):
     embed_model: str = "jinaai/jina-embeddings-v5-text-nano-retrieval"
     embed_dim: int = 768
     embed_max_batch: int = 32  # TEI/Jina max_client_batch_size; cap embed batches to this
+    embed_timeout_seconds: float = 90.0
     chonkie_base_url: str = "http://srv-llm.home.lan:8084"
     chonkie_model: str = "mirth/chonky_modernbert_base_1"
     group_id: str = "backup-docs"
@@ -86,6 +87,12 @@ class ExtractSettings(BaseSettings):
     # chat.completions path only (the Azure Responses path is untouched). Off until
     # the A/B shows cache hits up and extraction unchanged.
     llm_cache_layout: bool = False
+    # Per-request timeout of the strong-tier client (and, through the cheap view, of the
+    # cheap tier's via cheap_llm_timeout_seconds). One 90 s value for every tier starved
+    # the vast.ai GPU tier: at ~47 generated tokens/s per request an answer over ~4k
+    # tokens cannot finish, so the client gave up and every retry failed the same way
+    # (BACKLOG 55). The GPU worker Deployment raises the cheap one.
+    llm_timeout_seconds: float = 90.0
     # When the CHEAP tier answers graphiti's edge-dedup prompt with an out-of-range
     # candidate index (graphiti drops it silently: a missed dedup or a missed
     # invalidation), re-issue that one prompt on the strong tier and use its reply.
@@ -310,6 +317,7 @@ class ExtractSettings(BaseSettings):
     # The cheap tier's own cache-layout switch (mapped onto llm_cache_layout for the
     # cheap client view). Cached input on solar-pro4 bills $0.018/M vs $0.09/M.
     cheap_llm_cache_layout: bool = False
+    cheap_llm_timeout_seconds: float = 90.0   # mapped onto llm_timeout_seconds (cheap view)
     cheap_max_chunk_tokens: int = 900   # smaller chunks for the verbose cheap model
     # Route an article to the STRONG tier when it is a dense table:
     dense_table_line_ratio: float = 0.25

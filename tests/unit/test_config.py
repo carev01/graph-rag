@@ -161,3 +161,13 @@ def test_metrics_defaults():
     s = Settings(**_SYNC_MIN)
     assert (s.worker_metrics_port, s.exporter_port, s.exporter_interval_seconds,
             s.gpu_hourly_cost_usd) == (9109, 9108, 30.0, 0.0)
+
+
+def test_llm_timeouts_default_to_90s_and_the_cheap_view_uses_its_own():
+    """BACKLOG 55: one 90 s timeout for every tier starved the GPU tier."""
+    from graph_extract.graphiti_client import _cheap_view_settings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                        cheap_llm_timeout_seconds=300.0)
+    assert (s.llm_timeout_seconds, s.embed_timeout_seconds) == (90.0, 90.0)
+    assert _cheap_view_settings(s).llm_timeout_seconds == 300.0

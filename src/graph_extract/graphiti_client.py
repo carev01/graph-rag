@@ -156,12 +156,12 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
         # base_url is the resource endpoint (host); the SDK builds /openai/...
         raw = instrument(AsyncAzureOpenAI(
             azure_endpoint=s.llm_base_url, api_key=s.llm_api_key,
-            api_version=s.llm_api_version, timeout=90.0, max_retries=4),
+            api_version=s.llm_api_version, timeout=s.llm_timeout_seconds, max_retries=4),
             tier=tier, capture_path=s.llm_capture_path)
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
     raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
-                                 timeout=90.0, max_retries=4),
+                                 timeout=s.llm_timeout_seconds, max_retries=4),
                      tier=tier, capture_path=s.llm_capture_path)
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
@@ -231,7 +231,7 @@ def build_graphiti(s: ExtractSettings, *, tier: str = "strong") -> Graphiti:
                           fetch_k=s.vector_search_fetch_k)
     embed_client = _batch_capped_embeddings(
         AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
-                    timeout=90.0, max_retries=4), s.embed_max_batch)
+                    timeout=s.embed_timeout_seconds, max_retries=4), s.embed_max_batch)
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
             api_key="not-needed", embedding_model=s.embed_model,
@@ -266,14 +266,20 @@ def build_graphiti(s: ExtractSettings, *, tier: str = "strong") -> Graphiti:
     g.close = _close  # type: ignore[method-assign]
     return g
 
+def _cheap_view_settings(s: ExtractSettings) -> ExtractSettings:
+    """The strong-tier settings with every LLM field swapped for its cheap_* twin."""
+    return s.model_copy(update=dict(
+        llm_base_url=s.cheap_llm_base_url, llm_model=s.cheap_llm_model,
+        llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode,
+        llm_cache_layout=s.cheap_llm_cache_layout,
+        llm_timeout_seconds=s.cheap_llm_timeout_seconds))
+
+
 def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
     """Build a Graphiti whose LLM points at the cheap model (ling). Reuses
     build_graphiti with a cheap-tier settings view; embedder/reranker/Neo4j and
     the group_id are unchanged, so both tiers share one embedding space."""
-    cheap = s.model_copy(update=dict(
-        llm_base_url=s.cheap_llm_base_url, llm_model=s.cheap_llm_model,
-        llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode,
-        llm_cache_layout=s.cheap_llm_cache_layout))
+    cheap = _cheap_view_settings(s)
     # The reranker built by build_graphiti is harmless here: it is not invoked
     # during add_episode (the cheap client is used for ingestion only).
     return build_graphiti(cheap, tier="cheap")
@@ -284,7 +290,7 @@ def build_embedder(s: ExtractSettings) -> OpenAIEmbedder:
     decision #4)."""
     client = _batch_capped_embeddings(
         AsyncOpenAI(api_key="not-needed", base_url=s.embed_base_url,
-                    timeout=90.0, max_retries=4), s.embed_max_batch)
+                    timeout=s.embed_timeout_seconds, max_retries=4), s.embed_max_batch)
     return OpenAIEmbedder(config=OpenAIEmbedderConfig(
         api_key="not-needed", embedding_model=s.embed_model,
         embedding_dim=s.embed_dim, base_url=s.embed_base_url), client=client)

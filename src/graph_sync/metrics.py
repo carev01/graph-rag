@@ -32,7 +32,8 @@ TIER = os.environ.get("WORKER_TIER", "api")
 JOBS = Counter("graphrag_worker_jobs_total",
                "Semantic jobs handled by this worker, by outcome: done, failed, "
                "deferred_lock (warm-up lock busy), deferred_halt (out of credits or an "
-               "unreachable endpoint)", ["tier", "outcome"])
+               "unreachable endpoint); route = the article's extraction tier (cheap, strong, "
+               "unrouted, or - when not known)", ["tier", "outcome", "route"])
 PAUSES = Counter("graphrag_worker_pauses_total",
                  "Claim pauses: credits (HTTP 402) or unreachable (endpoint down)",
                  ["tier", "reason"])
@@ -44,8 +45,8 @@ JOB_SECONDS = Histogram("graphrag_worker_job_seconds", "Wall time per job, by ou
                         buckets=(10, 30, 60, 120, 300, 600, 1200, 2400, 4800, 9600))
 
 
-def job_outcome(outcome: str, seconds: float | None = None) -> None:
-    JOBS.labels(TIER, outcome).inc()
+def job_outcome(outcome: str, seconds: float | None = None, route: str = "-") -> None:
+    JOBS.labels(TIER, outcome, route).inc()
     if seconds is not None:
         JOB_SECONDS.labels(TIER, outcome).observe(seconds)
 
