@@ -285,7 +285,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
                          "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),
-                         "scoped": bool(scope_d.get("vendors") or scope_d.get("products")),
+                         "scoped": bool(scope_d.get("vendors") or scope_d.get("products")
+                                        or scope_d.get("sources")),
                          "grounding_hit": ghit, "faithfulness": faith,
                          "cited": len(env["citations"]),
                          "ranges": len(_range_markers(env["answer"])),
