@@ -82,9 +82,11 @@ async def test_verify_pending_recovers_staged_reports(extract_driver, monkeypatc
                 {"finding": "Doomed two", "fact_ids": ["f6"]}]))
 
     calls: list[str] = []
+    budgets: set[int] = set()
 
-    async def _fake_verify(client, model, findings, summary, fact_texts):
+    async def _fake_verify(client, model, findings, summary, fact_texts, *, max_tokens):
         calls.append(summary)
+        budgets.add(max_tokens)
         if summary == "Good summary":
             return VerifyResult(unsupported=set(), summary_supported=True)
         if summary == "Two findings summary":
@@ -119,9 +121,11 @@ async def test_verify_pending_recovers_staged_reports(extract_driver, monkeypatc
         async def create_batch(self, texts): return [[0.42] for _ in texts]
     monkeypatch.setattr(tc, "build_embedder", lambda s: _FakeEmb())
 
-    settings = get_extract_settings.__wrapped__().model_copy(update=dict(group_id=g))
+    settings = get_extract_settings.__wrapped__().model_copy(
+        update=dict(group_id=g, verify_max_tokens=7777))
     res = await tc._run_verify_pending(settings, driver=extract_driver)
 
+    assert budgets == {7777}, "verify-pending must pass the configured verifier budget"
     assert res == {"reports_promoted": 3, "reports_rejected": 1,
                    "reports_still_pending": 1, "findings_dropped": 3}
     # the already-verified community was never sent to the verifier
@@ -218,7 +222,7 @@ async def test_verify_pending_tolerates_a_finding_with_no_fact_ids_key(
             "cited_fact_uuids:[], verified:false})",
             g=g, pfr=json.dumps([{"finding": "keyless"}]))
 
-    async def _fake_verify(client, model, findings, summary, fact_texts):
+    async def _fake_verify(client, model, findings, summary, fact_texts, *, max_tokens):
         return VerifyResult(unsupported=set(), summary_supported=True)
     monkeypatch.setattr(tc, "verify_report", _fake_verify)
 

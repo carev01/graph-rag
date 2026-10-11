@@ -119,6 +119,9 @@ class AnthropicChat:
         # A mutable namespace, so `instrument` can wrap `create` like on AsyncOpenAI.
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
+    async def close(self) -> None:
+        await self._client.close()
+
     async def _create(self, *, model: str, messages: list[dict], max_tokens: int,
                       temperature: float | None = None, **ignored: Any) -> ChatResponse:
         if ignored:

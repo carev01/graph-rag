@@ -99,7 +99,8 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
     vclient, vmodel = _verify_client_and_model(settings)
 
     async def _verifier(findings, summary, fact_texts):
-        return await verify_report(vclient, vmodel, findings, summary, fact_texts)
+        return await verify_report(vclient, vmodel, findings, summary, fact_texts,
+                                   max_tokens=settings.verify_max_tokens)
 
     embedder = build_embedder(settings)
     reports: dict = {}
@@ -254,7 +255,8 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     vclient, vmodel = _verify_client_and_model(settings)
 
     async def _verifier(findings, summary, fact_texts):
-        return await verify_report(vclient, vmodel, findings, summary, fact_texts)
+        return await verify_report(vclient, vmodel, findings, summary, fact_texts,
+                                   max_tokens=settings.verify_max_tokens)
 
     embedder = build_embedder(settings)
     now = datetime.now(timezone.utc)
@@ -456,7 +458,8 @@ async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver)
                     g=settings.group_id, u=list(row["cited"]))
                 fact_texts = {x["uuid"]: x["fact"] async for x in fr}
             result = await verify_report(vclient, vmodel, findings,
-                                         row["summary"] or "", fact_texts)
+                                         row["summary"] or "", fact_texts,
+                                         max_tokens=settings.verify_max_tokens)
             if result is None:
                 still_pending += 1
                 continue

@@ -71,3 +71,21 @@ REPORT_REASONING_EFFORT=high      # Claude's default; "low" scored slightly wors
 Any synthesis-side tier built by `bounded_llm_client` (report, verify, map, eval judge,
 synthesis, router classifier) moves to Claude the same way; only the report writer was
 validated here.
+
+## First live build: verifier budget (2026-10-11)
+
+The first incremental build (658 communities) staged 8 of its first 10 reports
+unverified. Cause: DeepSeek's reasoning length depends on the OpenRouter provider
+serving it. Re-measured on one 16-finding report, 4 calls per budget:
+
+| max_tokens | outcome |
+|---|---|
+| 4000 | 4/4 empty (`length`), all Cohere |
+| 8000 | 3/4 verdicts (BaseTen, ~2,600 tokens); Cohere still `length` |
+| 16000 | 4/4 verdicts (Cohere 7,000–9,000 tokens, ignoring `effort: low`) |
+
+Haiku's first drafts carry more findings than GLM's (~12 vs ~9), which pushed Cohere
+past the old 4000/12000 budgets; a GLM report hit the 4000 cap on 1 of 3 calls too.
+`VERIFY_MAX_TOKENS` (default 8000; the retry gets 3x = 24000) replaces the hardcoded
+4000. Only tokens used are billed. The same run exposed `AnthropicChat` lacking
+`close()`, which theme-build calls on exit; both are fixed.

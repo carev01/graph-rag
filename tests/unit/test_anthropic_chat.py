@@ -124,3 +124,15 @@ def test_report_tier_on_claude_with_the_verifier_elsewhere():
     assert isinstance(rclient, AnthropicChat) and rmodel == "claude-haiku-5-5"
     assert not isinstance(vclient, AnthropicChat)
     assert vmodel == "~deepseek/deepseek-v4-flash-latest"
+
+
+def test_close_closes_the_sdk_client():
+    """theme-build closes every tier client on exit; a missing close() crashed it."""
+    closed = []
+
+    async def _close():
+        closed.append(True)
+
+    fake = SimpleNamespace(messages=_FakeMessages(_msg(["x"])), close=_close)
+    asyncio.run(AnthropicChat(api_key="k", client=fake).close())
+    assert closed == [True]

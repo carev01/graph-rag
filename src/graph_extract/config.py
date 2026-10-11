@@ -241,6 +241,14 @@ class ExtractSettings(BaseSettings):
     # reasoning entirely; "low" is the floor that keeps the verifier a judge rather
     # than a reflex.
     verify_reasoning_effort: str = "low"
+    # First-attempt completion budget for the verifier; the retry gets 3x. 4000 (and
+    # its 12000 retry) was right when measured above, but how much a reasoning model
+    # thinks depends on WHICH OpenRouter provider serves it: re-measured 2026-10-11
+    # on one 16-finding report, BaseTen finished in ~2,600 completion tokens while
+    # Cohere needed 7,000-9,000 and ignored `effort: low`. At 4000 every Cohere-routed
+    # call came back empty and most of a theme-build was staged unverified. Only the
+    # tokens actually used are billed, so the headroom costs nothing when unneeded.
+    verify_max_tokens: int = 8000
     # Drop dust communities smaller than this. 10, not 3 (2026-10-10, measured on the
     # 45k-entity post-Veeam graph): 3 kept 1,717 communities -- ~25 h of one-at-a-time
     # report writing -- where 10 keeps 284 and still covers 89% of level-0 entities;
