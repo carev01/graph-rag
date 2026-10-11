@@ -82,9 +82,11 @@ vast:
   workerConfig:
     CHEAP_LLM_MODEL: qwen35-graphrag
     CHEAP_LLM_CLIENT_MODE: generic_json_schema
-    # ~47 generated tokens/s per request at 8 concurrent: a long answer needs minutes,
-    # not the default 90 s (BACKLOG 55).
-    CHEAP_LLM_TIMEOUT_SECONDS: "300"
+    # A long answer needs minutes, not the default 90 s (BACKLOG 55). 900, not 300
+    # (2026-10-10): on vLLM 0.30 a request generates ~25 tokens/s, and the longest Azure
+    # Backup pages need 7k+ output tokens -- 300 s timed them out on every retry
+    # (25 minutes per attempt) while vLLM still finished the work.
+    CHEAP_LLM_TIMEOUT_SECONDS: "900"
 
 # Prometheus metrics: the queue exporter Deployment and the worker-metrics headless
 # Service. Scrape config and the Grafana dashboard: deploy/monitoring/.
