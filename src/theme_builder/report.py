@@ -146,7 +146,7 @@ def _strip(s: str) -> str:
 
 
 async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[dict],
-                              title: str, *, max_tokens: int = 4000) -> str | None:
+                              title: str, *, max_tokens: int = 16000) -> str | None:
     """Rewrite the summary from the findings that survived verification.
 
     The summary is inherently synthetic -- one paragraph generalising a whole
@@ -154,11 +154,12 @@ async def _regenerate_summary(client: AsyncOpenAI, model: str, findings: list[di
     and cost 15 of 41 communities across two rebuilds. Regenerating it from verified
     findings makes it inherit their support instead.
 
-    `max_tokens` matches the rest of this file's headroom (verify_report's 4000, the
-    report writer's 8000+) rather than a tight cap: the report/judge tier is a
-    REASONING model whose thinking tokens count against the same completion budget,
-    so a small cap returns finish_reason='length' with EMPTY content -- which lands
-    in the "keep the original summary" fallback and silently undoes the regeneration.
+    `max_tokens` is generous rather than a tight cap: the report tier is a REASONING
+    model whose thinking counts against the same completion budget, so a small cap
+    returns finish_reason='length' with EMPTY content -- which lands in the "keep the
+    original summary" fallback and silently undoes the regeneration. 4000 was enough
+    for GLM; Claude Haiku 5.5 spent all 4000 thinking (2026-10-11). Only used tokens
+    are billed.
     """
     statements = "\n".join(f"- {f.get('finding', '')}" for f in findings)
     resp = await client.chat.completions.create(

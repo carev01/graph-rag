@@ -64,7 +64,7 @@ each first-pass report verified by DeepSeek and by Sonnet 5.5 on the same findin
 REPORT_LLM_BASE_URL=https://api.anthropic.com
 REPORT_LLM_MODEL=claude-haiku-5-5
 REPORT_LLM_API_KEY=<Anthropic API key>
-REPORT_REASONING_EFFORT=high      # Claude's default; "low" scored slightly worse
+REPORT_REASONING_EFFORT=medium    # see "Effort on hub contexts" below
 REPORT_MAX_TOKENS=64000           # thinking shares the budget: a 776-fact hub report used 47k
 # verifier unchanged: VERIFY_LLM_* unset -> EVAL_JUDGE_* (DeepSeek V4 Flash)
 ```
@@ -106,3 +106,19 @@ The larger contexts produce longer reports, and Haiku's thinking shares
 truncated (unparseable JSON, report carried over). The adapter now streams every
 request and logs a `max_tokens` stop; the hub report used 87k input / 47k output
 tokens (~$0.03).
+
+## Effort on hub contexts (2026-10-11)
+
+At the default effort (high) some large-context reports spent all 64,000 output
+tokens thinking and were lost (4 in the first ~40 of the full regeneration). One
+776-fact hub report, same context:
+
+| effort | output tokens | findings | Vault Lock findings | seconds |
+|---|---|---|---|---|
+| high (default) | 47,374 | 29 | 2 | ~240 |
+| medium | 14,758 | 24 | 2 | 88 |
+| low | 8,234 | 20 | 3 | 48 |
+
+The A/B scored low and high within one judge win of each other; medium is the
+production setting. The summary regeneration call's budget rose from 4000 to 16000
+for the same reason: Haiku spent all 4000 thinking.
