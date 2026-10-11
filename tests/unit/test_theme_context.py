@@ -69,3 +69,56 @@ def test_fact_texts_excludes_facts_dropped_by_the_budget():
     ctx = assemble_context(members, facts, top_entities=1, token_budget=100)
     assert set(ctx.fact_texts) == ctx.fact_uuids
     assert len(ctx.fact_texts) < 10
+
+
+def _edge(u, src, dst, valid="2020"):
+    return FactRow(uuid=u, fact="F" + u, valid_at=valid, invalid_at=None, name="R",
+                   source_uuid=src, target_uuid=dst)
+
+
+def test_a_hub_community_budget_goes_to_the_top_entities_facts():
+    """2026-10-11: a 7,300-fact hub community kept its 42 most RECENT facts and none of
+    the 82 about `AWS Backup Vault Lock`, one of its top-30 entities -- the report
+    never mentioned Vault Lock. Facts touching top entities must come first."""
+    members = [_ent("hub", 50), _ent("minor", 1)]
+    noise = [_edge(f"n{i}", "minor", "x", valid="2026") for i in range(50)]   # newer
+    about_hub = [_edge(f"h{i}", "hub", "y", valid="2020") for i in range(3)]
+    res = assemble_context(members, noise + about_hub, top_entities=1, token_budget=60)
+    assert {"h0", "h1", "h2"} <= res.fact_uuids
+    assert len(res.fact_uuids) < len(noise)          # the budget did bind
+    hub_end = max(res.text.index(f"[h{i}]") for i in range(3))
+    assert all(res.text.index(f"[{u}]") > hub_end
+               for u in res.fact_uuids if u.startswith("n"))
+
+
+def test_top_entities_take_turns_so_one_hub_cannot_fill_the_budget():
+    members = [_ent("a", 90), _ent("b", 80), _ent("c", 70)]
+    facts = ([_edge(f"a{i}", "a", "z") for i in range(40)]
+             + [_edge("b0", "b", "z"), _edge("c0", "z", "c")])
+    res = assemble_context(members, facts, top_entities=3, token_budget=40)
+    assert {"b0", "c0"} <= res.fact_uuids
+    # each top entity's best fact comes before any entity's second
+    assert res.text.index("[c0]") < res.text.index("[a1]")
+
+
+def test_a_fact_between_two_top_entities_appears_once():
+    members = [_ent("a", 9), _ent("b", 8)]
+    res = assemble_context(members, [_edge("ab", "a", "b")], top_entities=2,
+                           token_budget=1000)
+    assert res.text.count("[ab]") == 1
+
+
+def test_leftover_budget_is_filled_by_the_other_facts_in_recency_order():
+    members = [_ent("a", 9)]
+    facts = [_edge("a0", "a", "z"), _edge("o1", "p", "q", valid="2019"),
+             _edge("o2", "p", "q", valid="2024")]
+    res = assemble_context(members, facts, top_entities=1, token_budget=100000)
+    order = [res.text.index(f"[{u}]") for u in ("a0", "o2", "o1")]
+    assert order == sorted(order)
+
+
+def test_context_budget_grows_with_facts_between_base_and_cap():
+    from theme_builder.context import context_budget
+    assert context_budget(10, base=12000, cap=48000) == 12000
+    assert context_budget(300, base=12000, cap=48000) == 24000
+    assert context_budget(7300, base=12000, cap=48000) == 48000

@@ -22,6 +22,11 @@ class FactRow:
     valid_at: str | None
     invalid_at: str | None
     name: str
+    # The fact edge's endpoint entities. Context selection gives the budget to facts
+    # about the community's top entities first; a row without endpoints is still
+    # included, in the recency-ordered fill after them.
+    source_uuid: str = ""
+    target_uuid: str = ""
 
 
 @dataclass
@@ -35,27 +40,72 @@ class ContextResult:
     fact_texts: dict[str, str] = field(default_factory=dict)
 
 
+def _recency_order(facts: list[FactRow]) -> list[FactRow]:
+    """Current facts (invalid_at is None) first, then superseded; each group by
+    valid_at descending. reverse=True puts empty/None valid_at last."""
+    current = sorted((f for f in facts if f.invalid_at is None),
+                     key=lambda f: f.valid_at or "", reverse=True)
+    superseded = sorted((f for f in facts if f.invalid_at is not None),
+                        key=lambda f: f.valid_at or "", reverse=True)
+    return current + superseded
+
+
+def _select_order(top: list[EntityRow], facts: list[FactRow]) -> list[FactRow]:
+    """Facts about the top entities first, the entities taking turns in degree order
+    (each one's facts recency-ordered), then every other fact by recency.
+
+    Recency alone was the order until 2026-10-11, and on a hub community it is
+    effectively random: a 7,300-fact community kept its 42 newest facts and none of
+    the 82 about `AWS Backup Vault Lock`, one of its top-30 entities, so the report --
+    and every global answer built on it -- never mentioned Vault Lock. Taking turns
+    stops one hub entity from spending the whole budget on itself."""
+    ordered = _recency_order(facts)
+    per_entity: dict[str, list[FactRow]] = {e.uuid: [] for e in top}
+    for f in ordered:
+        for end in (f.source_uuid, f.target_uuid):
+            if end in per_entity:
+                per_entity[end].append(f)
+    out: list[FactRow] = []
+    seen: set[str] = set()
+    queues = [per_entity[e.uuid] for e in top]
+    depth = 0
+    while any(depth < len(q) for q in queues):
+        for q in queues:
+            if depth < len(q) and q[depth].uuid not in seen:
+                seen.add(q[depth].uuid)
+                out.append(q[depth])
+        depth += 1
+    out.extend(f for f in ordered if f.uuid not in seen)
+    return out
+
+
+TOKENS_PER_FACT = 80
+
+
+def context_budget(n_facts: int, *, base: int, cap: int) -> int:
+    """Token budget for a community's context: `base`, grown at ~TOKENS_PER_FACT per
+    fact up to `cap`, so a fact-rich community is not squeezed into the budget sized
+    for a small one."""
+    return max(base, min(cap, n_facts * TOKENS_PER_FACT))
+
+
 def assemble_context(members: list[EntityRow], facts: list[FactRow], *,
                      top_entities: int, token_budget: int) -> ContextResult:
-    """Render a community's context: top-degree members, then intra-community
-    facts current-first / recency-desc, each labelled `[uuid]`, truncated to a
-    ~token_budget (approximated as budget*4 chars). Returns the text plus the set
-    of fact UUIDs actually included (the citable universe)."""
+    """Render a community's context: top-degree members, then intra-community facts
+    (`_select_order`: the top members' facts first, taking turns, then the rest by
+    recency), each labelled `[uuid]`, truncated to a ~token_budget (approximated as
+    budget*4 chars). Returns the text plus the set of fact UUIDs actually included
+    (the citable universe)."""
     lines: list[str] = ["ENTITIES:"]
-    for e in sorted(members, key=lambda e: e.degree, reverse=True)[:top_entities]:
+    top = sorted(members, key=lambda e: e.degree, reverse=True)[:top_entities]
+    for e in top:
         lines.append(f"- {e.name} ({e.type}): {e.summary}")
     lines.append("\nFACTS:")
     char_budget = token_budget * 4
     used = len("\n".join(lines))
     included: set[str] = set()
     texts: dict[str, str] = {}
-    # current facts (invalid_at is None) first, then superseded; each group by
-    # valid_at descending (recency). reverse=True puts empty/None valid_at last.
-    current = [f for f in facts if f.invalid_at is None]
-    superseded = [f for f in facts if f.invalid_at is not None]
-    current.sort(key=lambda f: f.valid_at or "", reverse=True)
-    superseded.sort(key=lambda f: f.valid_at or "", reverse=True)
-    for f in current + superseded:
+    for f in _select_order(top, facts):
         suffix = (f" (valid {f.valid_at}" + (f", invalid {f.invalid_at})" if f.invalid_at else ")")) \
             if f.valid_at else ""
         line = f"[{f.uuid}] {f.fact}{suffix}"

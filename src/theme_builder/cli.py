@@ -16,7 +16,7 @@ from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder
 from graph_extract.merge_duplicates import DuplicateEntitiesError, assert_no_duplicates
 from graph_sync.logging_setup import configure_logging
-from theme_builder.context import EntityRow, FactRow, assemble_context
+from theme_builder.context import EntityRow, FactRow, assemble_context, context_budget
 from theme_builder.detect import detect_communities
 from theme_builder.incremental import (
     PersistedCommunity, classify, load_persisted, match_communities, prev_corpus_cursor,
@@ -63,10 +63,18 @@ async def _fetch_facts(driver: AsyncDriver, group_id: str, uuids: list[str]) -> 
             "MATCH (a:Entity {group_id:$g})-[f:RELATES_TO {group_id:$g}]->(b:Entity {group_id:$g}) "
             "WHERE a.uuid IN $uuids AND b.uuid IN $uuids "
             "RETURN f.uuid AS uuid, f.fact AS fact, toString(f.valid_at) AS valid_at, "
-            "toString(f.invalid_at) AS invalid_at, f.name AS name",
+            "toString(f.invalid_at) AS invalid_at, f.name AS name, "
+            "a.uuid AS source_uuid, b.uuid AS target_uuid",
             g=group_id, uuids=uuids)
         return [FactRow(uuid=x["uuid"], fact=x["fact"], valid_at=x["valid_at"],
-                        invalid_at=x["invalid_at"], name=x["name"]) async for x in r]
+                        invalid_at=x["invalid_at"], name=x["name"],
+                        source_uuid=x["source_uuid"], target_uuid=x["target_uuid"])
+                async for x in r]
+
+
+def _budget(settings: ExtractSettings, facts: list[FactRow]) -> int:
+    return context_budget(len(facts), base=settings.report_token_budget,
+                          cap=settings.report_token_budget_max)
 
 
 async def _corpus_cursor(driver: AsyncDriver, group_id: str) -> str | None:
@@ -123,7 +131,7 @@ async def _run_theme_build(settings: ExtractSettings, *, driver: AsyncDriver) ->
                 facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
                 ctx = assemble_context(members, facts,
                                        top_entities=settings.report_top_entities,
-                                       token_budget=settings.report_token_budget)
+                                       token_budget=_budget(settings, facts))
                 st = ReportStats()
                 rep = await generate_report(client, model, ctx,
                                             settings.report_max_tokens,
@@ -278,7 +286,7 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
             members = await _fetch_members(driver, settings.group_id, c.member_uuids)
             facts = await _fetch_facts(driver, settings.group_id, c.member_uuids)
             ctx = assemble_context(members, facts, top_entities=settings.report_top_entities,
-                                   token_budget=settings.report_token_budget)
+                                   token_budget=_budget(settings, facts))
             # A report already generated, by an interrupted run, from this very
             # input: reuse it instead of paying for it again.
             draft_key = _draft_key(c.community_id, ctx)

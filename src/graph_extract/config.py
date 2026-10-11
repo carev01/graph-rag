@@ -278,6 +278,11 @@ class ExtractSettings(BaseSettings):
     # string sends no reasoning parameter at all.
     report_reasoning_effort: str = "low"
     report_token_budget: int = 12000     # per-community context budget (~chars/4)
+    # Ceiling the budget grows to on fact-rich communities (theme_builder.context.
+    # context_budget: ~80 tokens per fact). 12000 fits ~40 facts; a 7,300-fact hub
+    # community then gave each of its 30 top entities about one fact (2026-10-11), too
+    # few for its report to cover them. 48000 fits ~450.
+    report_token_budget_max: int = 48000
     report_top_entities: int = 30        # member entities included in a report's context
     # --- incremental community refresh (design: incremental-community-refresh) ---
     theme_refresh_jaccard_tau: float = 0.5   # min member-set Jaccard to treat a fresh community as the same as a persisted one
