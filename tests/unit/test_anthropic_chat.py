@@ -24,13 +24,27 @@ def _msg(text_blocks, stop="end_turn", **usage):
                            stop_reason=stop, stop_details=None, usage=SimpleNamespace(**u))
 
 
+class _FakeStream:
+    def __init__(self, reply):
+        self.reply = reply
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get_final_message(self):
+        return self.reply
+
+
 class _FakeMessages:
     def __init__(self, reply):
         self.reply, self.seen = reply, None
 
-    async def create(self, **kwargs):
+    def stream(self, **kwargs):
         self.seen = kwargs
-        return self.reply
+        return _FakeStream(self.reply)
 
 
 def _adapter(reply, effort=""):
@@ -136,3 +150,11 @@ def test_close_closes_the_sdk_client():
     fake = SimpleNamespace(messages=_FakeMessages(_msg(["x"])), close=_close)
     asyncio.run(AnthropicChat(api_key="k", client=fake).close())
     assert closed == [True]
+
+
+def test_a_reply_cut_off_at_max_tokens_is_logged(caplog):
+    client, _ = _adapter(_msg(['{"title": "trunc'], stop="max_tokens", output_tokens=16000))
+    with caplog.at_level("WARNING"):
+        resp = _call(client, max_tokens=16000)
+    assert resp.choices[0].finish_reason == "length"
+    assert any("hit max_tokens=16000" in r.getMessage() for r in caplog.records)

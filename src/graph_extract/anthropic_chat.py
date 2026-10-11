@@ -18,6 +18,8 @@ Mapping notes:
   runs the model's default.
 - An empty reply comes back as `content=None`, never "", so `usable_content` sees an
   unusable reply exactly as it would from any other provider.
+- Requests are streamed (large report budgets); a reply cut off at max_tokens is
+  logged, since thinking shares that budget with the answer.
 """
 from __future__ import annotations
 
@@ -132,8 +134,18 @@ class AnthropicChat:
             kwargs["system"] = system
         if self._effort:
             kwargs["output_config"] = {"effort": self._effort}
-        msg = await self._client.messages.create(
-            model=model, max_tokens=max_tokens, messages=msgs, **kwargs)  # type: ignore[arg-type]
+        # Always streamed: report calls carry large max_tokens (thinking + a long JSON
+        # report), and the SDK recommends streaming there to stay clear of HTTP
+        # timeouts. get_final_message() returns the same Message create() would.
+        async with self._client.messages.stream(
+                model=model, max_tokens=max_tokens, messages=msgs,  # type: ignore[arg-type]
+                **kwargs) as stream:
+            msg = await stream.get_final_message()
+        if msg.stop_reason == "max_tokens":
+            # Thinking counts against max_tokens; a report cut off here is unparseable
+            # JSON, and the caller only sees "no usable reply". Say why.
+            logger.warning("claude model %s hit max_tokens=%d (output %d tokens); the "
+                           "reply is truncated", model, max_tokens, msg.usage.output_tokens)
         if msg.stop_reason == "refusal":
             logger.warning("claude model %s refused (category=%s)", model,
                            getattr(getattr(msg, "stop_details", None), "category", None))

@@ -65,6 +65,7 @@ REPORT_LLM_BASE_URL=https://api.anthropic.com
 REPORT_LLM_MODEL=claude-haiku-5-5
 REPORT_LLM_API_KEY=<Anthropic API key>
 REPORT_REASONING_EFFORT=high      # Claude's default; "low" scored slightly worse
+REPORT_MAX_TOKENS=64000           # thinking shares the budget: a 776-fact hub report used 47k
 # verifier unchanged: VERIFY_LLM_* unset -> EVAL_JUDGE_* (DeepSeek V4 Flash)
 ```
 
@@ -89,3 +90,19 @@ past the old 4000/12000 budgets; a GLM report hit the 4000 cap on 1 of 3 calls t
 `VERIFY_MAX_TOKENS` (default 8000; the retry gets 3x = 24000) replaces the hardcoded
 4000. Only tokens used are billed. The same run exposed `AnthropicChat` lacking
 `close()`, which theme-build calls on exit; both are fixed.
+
+## Hub communities: context selection and output budget (2026-10-11)
+
+Tier 1 run 4 (after the AWS/Azure ingest) cited only Veeam sources on every cross-vendor
+global question. The AWS/Azure data sits in one ~2,150–2,400-entity hub community
+(~7,000 facts) at every level, and `assemble_context` kept its 42 most *recent* facts:
+0 of the 82 about `AWS Backup Vault Lock` (a top-30 entity), so no report mentioned
+Vault Lock. Fixed by choosing facts by the top entities (taking turns) and growing
+the context budget with the fact count (12k -> 48k tokens): the hub context now holds
+~776 facts, 26 on Vault Lock, and its report carries two Vault Lock findings.
+
+The larger contexts produce longer reports, and Haiku's thinking shares
+`max_tokens`: at 16000, 37 of the first 80 regenerated communities came back
+truncated (unparseable JSON, report carried over). The adapter now streams every
+request and logs a `max_tokens` stop; the hub report used 87k input / 47k output
+tokens (~$0.03).
