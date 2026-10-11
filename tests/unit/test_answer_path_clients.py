@@ -155,8 +155,15 @@ def test_no_routing_added_for_a_non_openrouter_base(fake_openai):
     assert "extra_body" not in _call(client, model)
 
 
-def test_shared_helper_is_reexported_for_theme_builder():
-    """theme_builder keeps its `_prefer_fast_provider` name so the report and
-    verifier tiers are untouched -- but it must be the SAME object as the shared
-    one, not a fourth copy."""
-    assert report_mod._prefer_fast_provider is usage_mod.prefer_fast_provider
+def test_report_tier_is_built_by_the_shared_helper(fake_openai):
+    """The report writer goes through bounded_llm_client like every other tier --
+    not a copy of its wrapping: the same timeout/retries, and on OpenRouter the
+    throughput routing plus the tier's own reasoning bound."""
+    client, model = report_mod._report_client_and_model(_settings(
+        report_llm_base_url=_OR, report_llm_model="z-ai/glm-5.3-flash",
+        report_llm_api_key="rk", report_reasoning_effort="medium"))
+    assert client.init_kwargs["timeout"] == 180.0
+    assert client.init_kwargs["max_retries"] == 3
+    seen = _call(client, model)
+    assert seen["extra_body"]["provider"]["sort"] == "throughput"
+    assert seen["extra_body"]["reasoning"] == {"effort": "medium"}

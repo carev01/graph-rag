@@ -6,8 +6,11 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import cast
 
 from openai import AsyncOpenAI
+
+from graph_extract.anthropic_chat import AnthropicChat, is_anthropic
 
 logger = logging.getLogger(__name__)
 
@@ -301,11 +304,19 @@ def bounded_llm_client(base_url: str, api_key: str, *, reasoning_effort: str,
     2h09m eval against ~20 min before this), and on OpenRouter, throughput
     routing plus the tier's reasoning bound (see prefer_fast_provider).
     `provider`/`reasoning` are OpenRouter extensions, so another gateway gets
-    a plain request.
+    a plain request. A base URL on api.anthropic.com gets a Claude client instead
+    (graph_extract.anthropic_chat), with the tier's effort as Claude's effort.
 
     This is the fourth place the same fix was needed; it lives here, in the
     layer both answer_api and theme_builder import, so it is not copied again.
     """
+    if is_anthropic(base_url):
+        # Claude via the official Anthropic SDK, behind the same chat-completions
+        # surface (graph_extract.anthropic_chat). Duck-typed, hence the cast.
+        return cast(AsyncOpenAI, instrument(
+            AnthropicChat(api_key=api_key, reasoning_effort=reasoning_effort,
+                          timeout=timeout, max_retries=max_retries),
+            tier=tier, capture_path=capture_path))
     client = instrument(AsyncOpenAI(api_key=api_key or "not-needed", base_url=base_url,
                                     timeout=timeout, max_retries=max_retries),
                        tier=tier, capture_path=capture_path)

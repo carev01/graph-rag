@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-import theme_builder.report as report_mod
+import graph_extract.usage as usage_mod
 from graph_extract.config import ExtractSettings
 from theme_builder.report import _verify_client_and_model
 
@@ -86,7 +86,7 @@ class _FakeAsyncOpenAI:
 
 
 def test_reasoning_bound_applied_for_openrouter(monkeypatch):
-    monkeypatch.setattr(report_mod, "AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr(usage_mod, "AsyncOpenAI", _FakeAsyncOpenAI)
     s = _settings(verify_llm_base_url="https://openrouter.ai/api/v1",
                   verify_llm_model="~deepseek/deepseek-v4-flash-latest",
                   verify_llm_api_key="vk", verify_reasoning_effort="low")
@@ -99,7 +99,7 @@ def test_reasoning_bound_applied_for_openrouter(monkeypatch):
 def test_reasoning_bound_not_applied_for_non_openrouter(monkeypatch):
     """Matching _report_client_and_model's guard: no OpenRouter base, no
     provider/reasoning routing added at all."""
-    monkeypatch.setattr(report_mod, "AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr(usage_mod, "AsyncOpenAI", _FakeAsyncOpenAI)
     s = _settings(verify_llm_base_url="https://verify.example/v1",
                   verify_llm_model="~deepseek/deepseek-v4-flash-latest",
                   verify_llm_api_key="vk", verify_reasoning_effort="low")
@@ -111,7 +111,7 @@ def test_reasoning_bound_not_applied_for_non_openrouter(monkeypatch):
 
 def test_configured_effort_value_is_used_not_hardcoded(monkeypatch):
     """The setting is actually read: a non-default effort must show up verbatim."""
-    monkeypatch.setattr(report_mod, "AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr(usage_mod, "AsyncOpenAI", _FakeAsyncOpenAI)
     s = _settings(verify_llm_base_url="https://openrouter.ai/api/v1",
                   verify_llm_model="~deepseek/deepseek-v4-flash-latest",
                   verify_llm_api_key="vk", verify_reasoning_effort="medium")

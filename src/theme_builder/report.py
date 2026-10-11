@@ -12,12 +12,7 @@ from dataclasses import dataclass, replace
 from openai import AsyncOpenAI
 
 from graph_extract.config import ExtractSettings
-from graph_extract.usage import instrument, usable_content
-# The throughput-routing + reasoning-bound wrapper was written here first and
-# then needed by every answer_api tier too; it now lives in graph_extract.usage
-# (answer_api must not import theme_builder). Re-exported under its old name so
-# the report and verifier tiers are untouched.
-from graph_extract.usage import prefer_fast_provider as _prefer_fast_provider
+from graph_extract.usage import bounded_llm_client, usable_content
 from theme_builder.context import ContextResult
 
 logger = logging.getLogger(__name__)
@@ -94,11 +89,8 @@ def _report_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
     # (see cli.py), so per-call routing luck multiplies across every community --
     # unpinned, a 60-community build is anywhere from 30 minutes to 6 hours. A
     # bounded timeout also stops a bad route from hanging the whole batch.
-    client = instrument(AsyncOpenAI(api_key=key, base_url=base,
-                                    timeout=180.0, max_retries=3))
-    if "openrouter" in base:
-        client = _prefer_fast_provider(client, settings.report_reasoning_effort)
-    return client, model
+    return bounded_llm_client(base, key, reasoning_effort=settings.report_reasoning_effort,
+                              timeout=180.0, max_retries=3, tier="report"), model
 
 
 def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
@@ -128,11 +120,8 @@ def _verify_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, st
             "check its own findings and confirm them. Set VERIFY_LLM_MODEL to a "
             "different model, ideally a different family so the two do not share "
             "failure modes.")
-    client = instrument(AsyncOpenAI(api_key=key, base_url=base,
-                                    timeout=180.0, max_retries=3))
-    if "openrouter" in base:
-        client = _prefer_fast_provider(client, settings.verify_reasoning_effort)
-    return client, model
+    return bounded_llm_client(base, key, reasoning_effort=settings.verify_reasoning_effort,
+                              timeout=180.0, max_retries=3, tier="verify"), model
 
 
 def _extract_json(raw: str) -> dict | None:
