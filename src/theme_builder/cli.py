@@ -234,7 +234,8 @@ def _draft_key(community_id: str, ctx) -> str:
     return f"{community_id}:{hashlib.sha1(text.encode()).hexdigest()[:16]}"
 
 
-async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: AsyncDriver) -> dict:
+async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: AsyncDriver,
+                                       regenerate_all: bool = False) -> dict:
     communities = await detect_communities(
         driver, settings.group_id,
         min_community_size=settings.leiden_min_community_size,
@@ -250,7 +251,10 @@ async def _run_theme_build_incremental(settings: ExtractSettings, *, driver: Asy
     new_cursor = await _corpus_cursor(driver, settings.group_id)
     matches = match_communities(communities, persisted,
                                 tau=settings.theme_refresh_jaccard_tau)
-    dirty, clean = classify(communities, matches, touched)
+    # regenerate_all: every community is dirty (classify's cold-start rule), but the
+    # run keeps this path's concurrency, drafts and carry-over -- `--full` regenerates
+    # one community at a time (~40 h for 883 communities, measured 2026-10-11).
+    dirty, clean = classify(communities, matches, None if regenerate_all else touched)
 
     # stable id per fresh community + content-hash -> stable id map (to remap parents)
     stable_ids = {}
@@ -522,6 +526,12 @@ async def _run_verify_pending(settings: ExtractSettings, *, driver: AsyncDriver)
 def theme_build(
         full: bool = typer.Option(
             False, "--full", help="Full rebuild (regenerate every report) instead of incremental."),
+        regenerate_all: bool = typer.Option(
+            False, "--regenerate-all",
+            help="Regenerate every community's report through the incremental path "
+                 "(concurrent, resumable, a failed regeneration carries the old report "
+                 "over). Use after a change to report context or prompts; --full does "
+                 "the same one community at a time."),
         verify_pending: bool = typer.Option(
             False, "--verify-pending",
             help="Re-verify only reports staged by an earlier run and promote the ones "
@@ -588,8 +598,11 @@ def theme_build(
                         "(--allow-duplicates); the communities and reports below may "
                         "be split along those duplicates.",
                         err=True)
-                runner = _run_theme_build if full else _run_theme_build_incremental
-                res = await runner(settings, driver=driver)
+                if full:
+                    res = await _run_theme_build(settings, driver=driver)
+                else:
+                    res = await _run_theme_build_incremental(
+                        settings, driver=driver, regenerate_all=regenerate_all)
             typer.echo(json.dumps(res, indent=2, default=str))
         finally:
             await driver.close()

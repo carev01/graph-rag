@@ -60,7 +60,7 @@ def hermetic(monkeypatch):
 # pinned ungated below. All three runners are stubbed with the same recorder,
 # so whichever one a mutant routed to would still be seen.
 
-@pytest.mark.parametrize("mode", [[], ["--full"]])
+@pytest.mark.parametrize("mode", [[], ["--full"], ["--regenerate-all"]])
 def test_theme_build_calls_the_guard_before_doing_any_work(monkeypatch, hermetic, mode):
     """Hermetic: every dependency is stubbed, so no LLM call can happen. Proves
     the guard runs BEFORE the build, which is the whole point -- a guard that
@@ -102,7 +102,7 @@ def test_allow_duplicates_reaches_the_guard_and_the_build_follows_it(
         seen.update(driver=driver, group_id=group_id, allow=allow)
         return 2
 
-    async def _fake_build(settings, *, driver):
+    async def _fake_build(settings, *, driver, **_):
         calls.append("build")
         seen["build_driver"] = driver
         return {"communities_detected": 4}
@@ -159,3 +159,27 @@ def test_theme_build_help_offers_the_override():
     assert result.exit_code == 0
     # rich styles help on CI (GITHUB_ACTIONS); compare the text, not the escapes.
     assert "--allow-duplicates" in click.unstyle(result.stdout)
+
+
+@pytest.mark.parametrize("flag, expected", [([], False), (["--regenerate-all"], True)])
+def test_regenerate_all_reaches_the_incremental_runner(monkeypatch, hermetic, flag, expected):
+    """--regenerate-all rebuilds every report through the CONCURRENT incremental
+    path; --full regenerates one at a time (~40 h for 883 communities)."""
+    seen: dict = {}
+
+    async def _ok_guard(driver, group_id, *, allow):
+        return 0
+
+    async def _incremental(settings, *, driver, regenerate_all=False):
+        seen["regenerate_all"] = regenerate_all
+        return {}
+
+    async def _full(*a, **k):
+        raise AssertionError("--regenerate-all must not take the sequential --full path")
+
+    monkeypatch.setattr(theme_cli, "assert_no_duplicates", _ok_guard)
+    monkeypatch.setattr(theme_cli, "_run_theme_build_incremental", _incremental)
+    monkeypatch.setattr(theme_cli, "_run_theme_build", _full)
+    result = CliRunner().invoke(theme_app, ["theme-build", *flag])
+    assert result.exit_code == 0, result.output
+    assert seen == {"regenerate_all": expected}
