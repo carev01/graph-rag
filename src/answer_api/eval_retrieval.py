@@ -1,7 +1,16 @@
 """Free retrieval gate (spec 2026-10-12 §6): per golden question, does per-facet
 retrieval find evidence for every facet, an expected article, and every expected
 vendor? No LLM calls -- the local embedder, Neo4j and the reranker only. Run before
-any paid eval:
+any paid eval.
+
+Single and comparison questions pass when every facet has evidence and (if the
+golden entry lists expected articles) one of them is retrieved. Enumerations pass
+when every `expected_vendors` vendor has evidence (plus the same expected-article
+check); the other content vendors' evidence counts are reported as information
+only, because a vendor that does not document the feature legitimately has none.
+This gate therefore cannot tell whether an enumeration answer is COMPLETE (no
+vendor missing, none extra): only the paid eval's enumeration_completeness metric
+measures that.
 
     uv run python -m answer_api.eval_retrieval --questions src/answer_api/router_golden_tier1.json
 """
@@ -34,12 +43,19 @@ def check_question(q: dict, facet_evidence: list[dict]) -> dict:
     vendors_ok = want is None or all(
         any(e["label"] == v and e["communities"] + e["facts"] > 0 for e in facet_evidence)
         for v in want)
-    return {"question": q["question"], "shape": q.get("_shape"),
-            "expected_hit": expected_hit, "facets_with_evidence": with_ev,
-            "facets": len(facet_evidence), "vendors_found": sorted(vendors),
-            "vendors_expected": want,
-            "pass": with_ev == len(facet_evidence) and expected_hit is not False
-            and vendors_ok}
+    out = {"question": q["question"], "shape": q.get("_shape"),
+           "expected_hit": expected_hit, "facets_with_evidence": with_ev,
+           "facets": len(facet_evidence), "vendors_found": sorted(vendors),
+           "vendors_expected": want}
+    if q.get("_shape") == "enumeration":
+        # Only the expected vendors must have evidence; the rest is information.
+        out["other_vendors"] = {e["label"]: e["communities"] + e["facts"]
+                                for e in facet_evidence if e["label"] not in (want or [])}
+        out["pass"] = vendors_ok and expected_hit is not False
+    else:
+        out["pass"] = (with_ev == len(facet_evidence) and expected_hit is not False
+                       and vendors_ok)
+    return out
 
 
 async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list[dict]:
@@ -89,7 +105,8 @@ async def main() -> int:
             print(f"{'PASS' if r['pass'] else 'FAIL'} {shape.kind:11} "
                   f"facets {r['facets_with_evidence']}/{r['facets']} "
                   f"expected={r['expected_hit']} vendors={r['vendors_found']} "
-                  f"| {q['question']}", flush=True)
+                  + (f"other={r['other_vendors']} " if "other_vendors" in r else "")
+                  + f"| {q['question']}", flush=True)
         passed = sum(r["pass"] for r in results)
         print(f"PASS {passed}/{len(results)}")
         return 0 if passed == len(results) else 1
