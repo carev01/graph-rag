@@ -23,7 +23,7 @@ from answer_api import freshness as freshness_mod
 from answer_api import enumeration as enum_mod
 from answer_api import attribution
 from answer_api.scope import Scope
-from answer_api.shape import QuestionShape
+from answer_api.shape import QuestionShape, could_not_check_note
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +187,13 @@ def _grounded(mode: Mode, raw: dict) -> bool:
     return bool(raw.get("citations"))
 
 
-def _shape_fields(env: dict, shape: QuestionShape | None, raw: dict) -> None:
+def _shape_fields(env: dict, shape: QuestionShape | None, raw: dict,
+                  requested: str) -> None:
+    """`shape`/`facets` describe how the question was ANSWERED (single after an
+    override, relaxation or a timeline run, which ignores facets);
+    `shape_requested` is the classified kind it was asked as."""
     env["shape"] = shape.kind if shape is not None else "single"
+    env["shape_requested"] = requested
     env["facets"] = [{"label": f.label, "scope": f.scope.as_dict()}
                      for f in (shape.facets if shape is not None else ())]
     for key in ("degraded_facets", "checked_vendors", "documented_vendors"):
@@ -203,6 +208,7 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
     mode, via = await classify(q, cheap_client=cheap_client, cheap_model=cheap_model,
                                mode_override=mode_override,
                                default_mode=settings.router_default_mode)
+    requested = shape.kind if shape is not None else "single"
     if shape is not None and shape.kind == "enumeration" and via == "override":
         # An explicit mode is the caller's instruction, like an explicit scope
         # (the eval harness forces each mode in turn): run that mode unfaceted,
@@ -222,7 +228,7 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         label: Mode = "global" if mode == "timeline" else mode
         env = _normalize(label, via, None, raw, q, scope)
         env["routing"]["path"] = "enumeration"
-        _shape_fields(env, shape, raw)
+        _shape_fields(env, shape, raw, requested)
         env["freshness"] = await freshness_mod.freshness(
             driver, settings.group_id, reports=True)
         return env
@@ -233,7 +239,9 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
                                                settings=settings, facets=facets)
     env_scope = scope
     relaxed = False
+    first_degraded: list[str] = []
     if scope.source == "detected" and not _grounded(mode, raw):
+        first_degraded = list(raw.get("degraded_facets") or [])
         # A DETECTED scope is a guess from names in the question; when the scoped
         # path grounds nothing, answer unscoped rather than refuse where the
         # unscoped system would have answered (final review). An explicit scope
@@ -245,7 +253,17 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
     env = _normalize(mode, via, fallback_from, raw, q, env_scope)
     if relaxed:
         env["scope"] = {**scope.as_dict(), "source": "detected-relaxed"}
-    _shape_fields(env, shape if not relaxed else None, raw)
+    # A relaxed re-run, or a timeline run (which ignores facets), never balanced
+    # across facets: report it as the single question it was answered as.
+    answered_as = None if relaxed or mode == "timeline" else shape
+    _shape_fields(env, answered_as, raw, requested)
+    if relaxed and first_degraded:
+        # A failure never reads as absence: the scoped run's could-not-check
+        # facets survive the unscoped re-run.
+        env["degraded_facets"] = first_degraded
+        note = could_not_check_note(first_degraded)
+        if note not in env["answer"]:
+            env["answer"] = f"{env['answer']}\n\n{note}"
     env["freshness"] = await freshness_mod.freshness(
         driver, settings.group_id, reports=mode in ("global", "drift"))
     return env

@@ -54,7 +54,7 @@ async def test_a_comparison_passes_its_facets_to_the_mode(seen):
     env = await _answer(shape, Scope(vendors=("Veeam",), products=("AWS Backup",),
                                      source="detected"))
     assert seen == [("global", (_V, _A))]
-    assert env["shape"] == "comparison"
+    assert env["shape"] == "comparison" and env["shape_requested"] == "comparison"
     assert [f["label"] for f in env["facets"]] == ["Veeam", "AWS Backup"]
 
 
@@ -64,13 +64,14 @@ async def test_an_enumeration_runs_the_enumeration_path(seen):
     assert seen[0][0] == "enumerate"
     assert env["routing"]["path"] == "enumeration"
     assert env["mode"] == "global"
+    assert env["shape_requested"] == "enumeration"
     assert env["checked_vendors"] == ["AWS"] and env["documented_vendors"] == ["AWS"]
 
 
 async def test_no_shape_is_single_and_passes_no_facets(seen):
     env = await _answer(None)
     assert seen == [("global", None)]
-    assert env["shape"] == "single"
+    assert env["shape"] == "single" and env["shape_requested"] == "single"
 
 
 async def test_a_comparison_whose_detected_scope_grounds_nothing_reruns_single(
@@ -105,7 +106,10 @@ async def test_a_comparison_whose_detected_scope_grounds_nothing_reruns_single(
                      ("global", (), None)]
     assert env["scope"]["source"] == "detected-relaxed"
     assert env["shape"] == "single" and env["facets"] == []
-    assert "degraded_facets" not in env
+    assert env["shape_requested"] == "comparison"
+    # The scoped run could not check AWS Backup: relaxation must not hide that.
+    assert env["degraded_facets"] == ["AWS Backup"]
+    assert env["answer"] == "A [1]\n\nCould not check: AWS Backup."
 
 
 async def test_a_temporal_enumeration_keeps_its_answer(seen, monkeypatch):
@@ -143,6 +147,7 @@ async def test_an_override_bypasses_the_enumeration_path(seen, monkeypatch):
     assert seen == [("local", None)]
     assert env["mode"] == "local" and "path" not in env["routing"]
     assert env["shape"] == "single" and env["facets"] == []
+    assert env["shape_requested"] == "enumeration"
     assert "checked_vendors" not in env
 
 
@@ -162,3 +167,74 @@ async def test_an_override_keeps_a_comparisons_facets(seen, monkeypatch):
                                      settings=_S, shape=shape)
     assert seen == [("drift", (_V, _A))]
     assert env["shape"] == "comparison"
+
+
+async def test_relaxation_does_not_duplicate_a_note_the_answer_already_has(monkeypatch):
+    async def _classify(q, **kw):
+        return "local", "heuristic"
+
+    async def _local(*a, scope, facets=None, **kw):
+        if scope.vendors:
+            return {"answer": "", "citations": [], "retrieved": 3,
+                    "degraded_facets": ["AWS Backup"]}
+        return {"answer": "L [1]\n\nCould not check: AWS Backup.", "citations": _CITE,
+                "retrieved": 1}
+
+    async def _fresh(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(router, "classify", _classify)
+    monkeypatch.setattr(router.synth_mod, "answer_local", _local)
+    monkeypatch.setattr(router.freshness_mod, "freshness", _fresh)
+    env = await _answer(QuestionShape("comparison", (_V, _A)),
+                        Scope(vendors=("Veeam",), products=("AWS Backup",),
+                              source="detected"))
+    assert env["answer"].count("Could not check: AWS Backup.") == 1
+    assert env["degraded_facets"] == ["AWS Backup"]
+
+
+async def test_a_relaxation_with_no_degraded_facet_adds_none(monkeypatch):
+    async def _classify(q, **kw):
+        return "local", "heuristic"
+
+    async def _local(*a, scope, facets=None, **kw):
+        if scope.vendors:
+            return {"answer": "", "citations": [], "retrieved": 3, "degraded_facets": []}
+        return {"answer": "L [1]", "citations": _CITE, "retrieved": 1}
+
+    async def _fresh(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(router, "classify", _classify)
+    monkeypatch.setattr(router.synth_mod, "answer_local", _local)
+    monkeypatch.setattr(router.freshness_mod, "freshness", _fresh)
+    env = await _answer(QuestionShape("comparison", (_V, _A)),
+                        Scope(vendors=("Veeam",), products=("AWS Backup",),
+                              source="detected"))
+    assert env["answer"] == "L [1]"
+    assert "degraded_facets" not in env
+
+
+async def test_a_timeline_routed_comparison_reports_single_with_no_facets(monkeypatch):
+    """Timeline ignores facets, so the envelope must not claim a balanced
+    comparison; shape_requested still records what was asked."""
+    async def _classify(q, **kw):
+        return "timeline", "heuristic"
+
+    async def _timeline(*a, **kw):
+        return {"query": "q", "count": 1, "timeline": [
+            {"fact": "F", "fact_uuid": "f", "valid_at": None, "invalid_at": None,
+             "status": "current", "sources": []}]}
+
+    async def _fresh(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(router, "classify", _classify)
+    monkeypatch.setattr(router.timeline_mod, "timeline_local", _timeline)
+    monkeypatch.setattr(router.freshness_mod, "freshness", _fresh)
+    env = await _answer(QuestionShape("comparison", (_V, _A)),
+                        Scope(vendors=("Veeam",), products=("AWS Backup",),
+                              source="detected"))
+    assert env["mode"] == "timeline"
+    assert env["shape"] == "single" and env["facets"] == []
+    assert env["shape_requested"] == "comparison"
