@@ -206,12 +206,16 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
     if shape is not None and shape.kind == "enumeration":
         # The classifier still runs (it labels the envelope's mode), but an
         # enumeration checks every content vendor instead of running that mode.
-        # It has no detected scope, so there is nothing to relax.
+        # It has no detected scope, so there is nothing to relax. Temporal wording
+        # classifies as timeline, but the enumeration's result is a prose answer,
+        # not a timeline -- normalizing it as one would discard the answer -- so
+        # it is labelled global, the map-reduce it most resembles.
         raw = await enum_mod.enumerate_vendors(
             graphiti, driver, embedder, map_client, map_model, synth_client,
             synth_model, q=q, facets=shape.facets, group_id=settings.group_id,
             settings=settings)
-        env = _normalize(mode, via, None, raw, q, scope)
+        label: Mode = "global" if mode == "timeline" else mode
+        env = _normalize(label, via, None, raw, q, scope)
         env["routing"]["path"] = "enumeration"
         _shape_fields(env, shape, raw)
         env["freshness"] = await freshness_mod.freshness(

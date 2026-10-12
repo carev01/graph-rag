@@ -106,3 +106,18 @@ async def test_a_comparison_whose_detected_scope_grounds_nothing_reruns_single(
     assert env["scope"]["source"] == "detected-relaxed"
     assert env["shape"] == "single" and env["facets"] == []
     assert "degraded_facets" not in env
+
+
+async def test_a_temporal_enumeration_keeps_its_answer(seen, monkeypatch):
+    """Temporal wording classifies as timeline, but an enumeration's raw result
+    has no timeline: rendering it as one would replace the answer with
+    'No recorded changes'."""
+    async def _timeline_label(q, **kw):
+        return "timeline", "heuristic"
+
+    monkeypatch.setattr(router, "classify", _timeline_label)
+    shape = QuestionShape("enumeration", (Facet("AWS", Scope(vendors=("AWS",))),))
+    env = await _answer(shape)
+    assert env["answer"] == "E" and env["citations"] == _CITE
+    assert env["mode"] == "global" and env["routing"]["path"] == "enumeration"
+    assert "timeline" not in env
