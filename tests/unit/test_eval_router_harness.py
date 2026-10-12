@@ -178,3 +178,38 @@ async def test_a_forced_mode_cross_vendor_question_does_not_enumerate(monkeypatc
     assert enumerated == []
     assert dispatched == [("local", None)]
     assert env["mode"] == "local" and env["shape"] == "single"
+
+
+async def test_facet_coverage_is_scored_from_the_requested_shape_after_relaxation(
+        monkeypatch):
+    """The router relaxed a comparison to single unscoped and the answer cites
+    one vendor: facet coverage must be False (not None, which drops the
+    question from the metric)."""
+    async def _relaxed_router(*a, q, mode_override, scope, settings, **kw):
+        env = _env("local", "A1")
+        env["citations"][0]["sources"][0]["vendor"] = "Veeam"
+        env.update(shape="single", shape_requested="comparison", facets=[])
+        return env
+
+    monkeypatch.setattr(er.router_mod, "answer_router", _relaxed_router)
+    resolver = ScopeResolver(["Veeam", "AWS"], [], {}, content_vendors=("Veeam", "AWS"))
+    questions = [{"question": "How do Veeam and AWS lock backups?", "intent": "local",
+                  "expected_modes": ["local"], "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S, resolver)
+    assert summary["per_question"][0]["facet_coverage"] is False
+    assert summary["facet_coverage"] == 0.0 and summary["facet_coverage_n"] == 1
+
+
+async def test_report_and_progress_show_facet_and_enumeration_columns(monkeypatch, capsys):
+    questions = [{"question": "loc", "intent": "local", "expected_modes": ["local"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S, _RESOLVER)
+    line = capsys.readouterr().out
+    assert "facet=- enum=-" in line
+    summary["per_question"][0].update(facet_coverage=True, enumeration_complete=False)
+    report = er.format_report(summary).splitlines()
+    header = next(ln for ln in report if ln.startswith("| intent |"))
+    assert "| misattributed | facet_coverage | enumeration_complete | question |" in header
+    assert header.count("|") == next(ln for ln in report if ln.startswith("|---")).count("|")
+    row = next(ln for ln in report if ln.endswith("| loc |"))
+    assert "| True | False | loc |" in row

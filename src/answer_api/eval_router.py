@@ -29,7 +29,7 @@ from answer_api.router_eval import (
     markers_per_sentence, routing_hit,
 )
 from answer_api.scope import Scope, ScopeResolver
-from answer_api.shape import classify_shape
+from answer_api.shape import QuestionShape, classify_shape
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -73,13 +73,23 @@ def _scope_of(d: dict) -> Scope:
                  d.get("source", "none"), tuple(d.get("sources", [])))
 
 
-def facet_coverage_hit(env: dict) -> bool | None:
-    """Comparison only: every facet has a citation from its own side."""
-    if env.get("shape") != "comparison":
-        return None
+def facet_coverage_hit(env: dict, shape: QuestionShape | None = None) -> bool | None:
+    """Comparison only: every facet has a citation from its own side.
+
+    `shape` is the shape the question was ASKED as (classified before the
+    router ran). Scored from it, a comparison the router relaxed to single
+    scores on its citations (False when a side is uncited) instead of dropping
+    out of the metric as None. Without `shape`, falls back to the envelope."""
+    if shape is not None:
+        if shape.kind != "comparison":
+            return None
+        scopes = [f.scope for f in shape.facets]
+    else:
+        if env.get("shape") != "comparison":
+            return None
+        scopes = [_scope_of(f["scope"]) for f in env.get("facets", [])]
     cites = env.get("citations", [])
-    return all(any(in_scope(c.get("sources", []), _scope_of(f["scope"])) for c in cites)
-               for f in env.get("facets", []))
+    return all(any(in_scope(c.get("sources", []), sc) for c in cites) for sc in scopes)
 
 
 def enumeration_hit(env: dict, expected_vendors: list[str] | None) -> bool | None:
@@ -279,7 +289,7 @@ async def _score_one(clients, q, mode_override, settings, resolver):
                                             [c["fact_uuid"] for c in env["citations"]])
     labelled = _labelled_facts(env["citations"], texts)
     misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
-    return env, ghit, faith, facts, misattributed
+    return env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape)
 
 
 async def run_eval(clients, questions, settings, resolver) -> dict:
@@ -294,7 +304,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts, misattributed = await _score_one(
+            env, ghit, faith, facts, misattributed, facet_cov = await _score_one(
                 clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
@@ -323,7 +333,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "mps_max": max(mps) if mps else None,
                          "bag_share": _round_or_none(bag_share(env["answer"])),
                          "misattributed": misattributed,
-                         "facet_coverage": facet_coverage_hit(env),
+                         "facet_coverage": facet_cov,
                          "enumeration_complete": enumeration_hit(
                              env, q.get("expected_vendors")),
                          "failed": False}
@@ -333,7 +343,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts, _mis = await _score_one(
+                    _e, _g, _f, _facts, _mis, _fc = await _score_one(
                         clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
@@ -356,7 +366,9 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
               f"cited={rec['cited']} ranges={rec['ranges']} mps={_mps_cell(rec)} "
               f"bag={_cell(rec.get('bag_share'))} "
-              f"misattributed={_cell(rec.get('misattributed'))} {elapsed:.0f}s", flush=True)
+              f"misattributed={_cell(rec.get('misattributed'))} "
+              f"facet={_cell(rec.get('facet_coverage'))} "
+              f"enum={_cell(rec.get('enumeration_complete'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
     fc = [r["facet_coverage"] for r in per_question if r.get("facet_coverage") is not None]
@@ -421,8 +433,9 @@ def format_report(summary: dict) -> str:
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
-             "| mps | bag | misattributed | question |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| mps | bag | misattributed | facet_coverage | enumeration_complete "
+             "| question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
@@ -432,7 +445,8 @@ def format_report(summary: dict) -> str:
                      f"{r['grounding_hit']} | {faith_cell} | {_cell(r.get('cited'))} | "
                      f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
                      f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
-                     f"{r['question']} |")
+                     f"{_cell(r.get('facet_coverage'))} | "
+                     f"{_cell(r.get('enumeration_complete'))} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 
