@@ -20,6 +20,10 @@ pytestmark = pytest.mark.asyncio
 
 _S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                      neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+# Non-default facet settings, so a test proves they are threaded, not defaulted.
+_S7 = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                      neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                      local_min_per_facet=7, local_scoped_fetch_cap=901)
 
 _SCOPE = Scope(("Veeam",), (), "detected")
 
@@ -107,23 +111,47 @@ async def test_run_followup_passes_scope_to_search_local(monkeypatch):
     captured = {}
 
     async def fake_search_local(graphiti, driver, *, q, k, scope=None,
-                                include_invalid=False, group_id, center_node_uuid=None):
+                                include_invalid=False, group_id, center_node_uuid=None,
+                                fetch_cap=450):
         captured["scope"] = scope
+        captured["fetch_cap"] = fetch_cap
         return {"results": []}
 
     monkeypatch.setattr(drift, "search_local", fake_search_local)
     rows = await drift._run_followup(object(), object(), FollowUp("q", None, 1), k=8,
-                                     group_id="g", scope=_SCOPE)
+                                     group_id="g", scope=_SCOPE, fetch_cap=777)
     assert rows == []
     assert captured["scope"] is _SCOPE
+    assert captured["fetch_cap"] == 777
+
+
+async def test_drift_followups_receive_the_configured_fetch_cap(monkeypatch):
+    seen = []
+
+    async def fake_primer(*a, **k):
+        return "d", [FollowUp("q", "c1", 1)], [_hit()], []
+
+    async def fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                                fetch_cap=450):
+        seen.append(fetch_cap)
+        return []
+
+    monkeypatch.setattr(drift, "_primer", fake_primer)
+    monkeypatch.setattr(drift, "_run_followup", fake_run_followup)
+    await drift.drift_search(object(), object(), object(), object(), "m", q="q",
+                             level=1, iterations=1, primer_k=5, max_followups=4,
+                             followup_k=8, group_id="g", settings=_S7)
+    assert seen == [_S7.local_scoped_fetch_cap]
 
 
 async def test_run_followup_defaults_scope_to_none(monkeypatch):
     captured = {}
 
     async def fake_search_local(graphiti, driver, *, q, k, scope=None,
-                                include_invalid=False, group_id, center_node_uuid=None):
+                                include_invalid=False, group_id, center_node_uuid=None,
+                                fetch_cap=450):
         captured["scope"] = scope
+        captured["fetch_cap"] = fetch_cap
         return {"results": []}
 
     monkeypatch.setattr(drift, "search_local", fake_search_local)
@@ -142,8 +170,11 @@ async def test_drift_search_no_primer_fallback_passes_scope_to_answer_local(monk
         return None
 
     async def fake_answer_local(graphiti, driver, synth_client, synth_model, *,
-                                q, group_id, scope=None, k=15, facets=None):
+                                q, group_id, scope=None, k=15, facets=None,
+                                min_per_facet=6, fetch_cap=450):
         captured["scope"] = scope
+        captured["min_per_facet"] = min_per_facet
+        captured["fetch_cap"] = fetch_cap
         return {"query": q, "answer": "ans", "citations": [], "retrieved": 0,
                 "cited": 0, "applies_to": []}
 
@@ -151,8 +182,10 @@ async def test_drift_search_no_primer_fallback_passes_scope_to_answer_local(monk
     monkeypatch.setattr(drift, "answer_local", fake_answer_local)
     res = await drift.drift_search(object(), object(), object(), object(), "m", q="q",
                                    level=1, iterations=1, primer_k=5, max_followups=4,
-                                   followup_k=8, group_id="g", settings=_S, scope=_SCOPE)
+                                   followup_k=8, group_id="g", settings=_S7, scope=_SCOPE)
     assert captured["scope"] is _SCOPE
+    assert captured["min_per_facet"] == _S7.local_min_per_facet
+    assert captured["fetch_cap"] == _S7.local_scoped_fetch_cap
     assert res["degraded"] == "no-primer-communities"
     assert res["applies_to"] == []
 

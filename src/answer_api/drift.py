@@ -146,11 +146,12 @@ async def _top_member_entity(driver, group_id, community_id) -> str | None:
 
 
 async def _run_followup(graphiti, driver, fu: FollowUp, *, k, group_id,
-                        scope: Scope | None = None) -> list[dict]:
+                        scope: Scope | None = None, fetch_cap: int = 450) -> list[dict]:
     center = (await _top_member_entity(driver, group_id, fu.community_id)
               if fu.community_id else None)
     res = await search_local(graphiti, driver, q=fu.query, k=k, scope=scope,
-                             center_node_uuid=center, group_id=group_id)
+                             center_node_uuid=center, group_id=group_id,
+                             fetch_cap=fetch_cap)
     return res["results"]
 
 
@@ -277,7 +278,9 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                            top_n=settings.global_facet_top_n if multi else None)
     if primed is None:
         res = await answer_local(graphiti, driver, synth_client, synth_model,
-                                 q=q, group_id=group_id, scope=scope, facets=facets)
+                                 q=q, group_id=group_id, scope=scope, facets=facets,
+                                 min_per_facet=settings.local_min_per_facet,
+                                 fetch_cap=settings.local_scoped_fetch_cap)
         res["degraded"] = "no-primer-communities"
         return res
     preliminary, followups, hits, degraded = primed
@@ -291,7 +294,8 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
         try:
             facts.extend(await _run_followup(
                 graphiti, driver, fu, k=followup_k, group_id=group_id,
-                scope=fu.scope if fu.scope is not None else scope))
+                scope=fu.scope if fu.scope is not None else scope,
+                fetch_cap=settings.local_scoped_fetch_cap))
             if fu.scope is not None:
                 worked.add(fu.scope)
         except Exception:

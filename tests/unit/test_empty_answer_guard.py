@@ -239,7 +239,8 @@ async def test_drift_search_end_to_end_refuses_on_unusable_synthesis(monkeypatch
         return ("prelim", [drift_mod.FollowUp(query="q2", community_id="c1", iteration=1)],
                 [hit], [])
 
-    async def _fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450):
         return [{"fact": "AWS Backup uses Vault Lock", "fact_uuid": "f1"}]
 
     monkeypatch.setattr(drift_mod, "_primer", _fake_primer)

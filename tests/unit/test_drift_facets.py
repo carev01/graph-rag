@@ -67,7 +67,8 @@ def stubs(monkeypatch):
                          stats=None, scope=None, top_n=None):
         return [_hit("cv")] if scope == _V.scope else [_hit("ca")]
 
-    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450):
         ran.append((fu.query, scope))
         return [_fact(fu.query, scope)]
 
@@ -100,7 +101,8 @@ async def test_final_synthesis_groups_facts_by_facet(stubs):
 
 
 async def test_facet_that_retrieved_nothing_renders_no_facts(monkeypatch, stubs):
-    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450):
         return [_fact(fu.query, scope)] if scope == _V.scope else []
 
     monkeypatch.setattr(drift, "_run_followup", _followup)
@@ -129,7 +131,8 @@ async def test_primer_failure_degrades_facet(monkeypatch, stubs):
 
 
 async def test_followups_all_failing_for_a_facet_degrade_it(monkeypatch, stubs):
-    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450):
         if scope == _A.scope:
             raise RuntimeError("search down")
         return [_fact(fu.query, scope)]
@@ -145,7 +148,8 @@ async def test_followups_all_failing_for_a_facet_degrade_it(monkeypatch, stubs):
 
 
 async def test_unusable_synthesis_with_degraded_facet_keeps_note(monkeypatch, stubs):
-    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450):
         if scope == _A.scope:
             raise RuntimeError("search down")
         return [_fact(fu.query, scope)]
@@ -158,7 +162,8 @@ async def test_unusable_synthesis_with_degraded_facet_keeps_note(monkeypatch, st
 
 
 async def test_no_facts_refusal_with_degraded_facet_keeps_note(monkeypatch, stubs):
-    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450):
         if scope == _A.scope:
             raise RuntimeError("search down")
         return []
