@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
 from answer_api.scope import Scope
 from answer_api.search import search_local
-from answer_api.shape import Facet, could_not_check_note, group_by_facet
+from answer_api.shape import (Facet, could_not_check_note, group_by_facet,
+                              raise_if_cancelled)
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content, answer_local,
 )
@@ -85,9 +86,10 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
                                   group_id=group_id, settings=settings, stats=stats,
                                   scope=f.scope, top_n=top_n)
             for f in facets], return_exceptions=True)
+        raise_if_cancelled(found)   # cancellation propagates; only an Exception degrades
         hits = []
         for f, fh in zip(facets, found):
-            if isinstance(fh, BaseException):
+            if isinstance(fh, Exception):
                 logger.warning("drift facet %r primer failed: %s", f.label, fh)
                 degraded.append(f.label)
                 continue

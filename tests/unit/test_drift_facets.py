@@ -1,4 +1,5 @@
 """DRIFT primes per facet and keeps each follow-up in its facet (spec §3.3)."""
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -174,3 +175,15 @@ async def test_single_facet_path_unchanged(stubs):
     assert "degraded_facets" not in res
     assert "=== " not in s.prompts[-1]
     assert stubs == [("veeam detail", None)]
+
+
+async def test_a_cancelled_primer_shortlist_propagates_not_degrades(monkeypatch, stubs):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        if scope == _A.scope:
+            raise asyncio.CancelledError()
+        return [_hit("cv")]
+
+    monkeypatch.setattr(drift, "shortlist_communities", _shortlist)
+    with pytest.raises(asyncio.CancelledError):
+        await _run(_Synth())

@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from answer_api import search as search_mod
 from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
 from answer_api.scope import Scope
-from answer_api.shape import Facet, could_not_check_note
+from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import bounded_llm_client, usable_content as _usable_content
 
@@ -303,12 +303,13 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
         search_mod.search_local(graphiti, driver, q=q, k=k_facet, scope=f.scope,
                                 group_id=group_id, fetch_cap=fetch_cap)
         for f in facets], return_exceptions=True)
+    raise_if_cancelled(found)   # cancellation propagates; only an Exception degrades
     marker_map: dict[int, dict] = {}
     seen: set[str] = set()
     groups: list[tuple[str, list[int]]] = []
     degraded: list[str] = []
     for f, res in zip(facets, found):
-        if isinstance(res, BaseException):
+        if isinstance(res, Exception):
             # Never read as absence: the facet is reported, not shown as empty.
             logger.warning("local facet %r retrieval failed: %s", f.label, res)
             degraded.append(f.label)

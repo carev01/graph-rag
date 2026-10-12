@@ -1,4 +1,5 @@
 """Local answers retrieve per facet and group the facts (spec §3.1)."""
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -118,3 +119,14 @@ async def test_single_facet_path_is_unchanged(searches):
     assert searches == [(None, 15)]
     assert "===" not in s.prompts[0]
     assert "degraded_facets" not in res
+
+
+async def test_a_cancelled_facet_search_propagates_not_degrades(monkeypatch):
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, fetch_cap=450, **kw):
+        if scope == _A.scope:
+            raise asyncio.CancelledError()
+        return {"query": q, "count": 1, "results": [_fact("v1", "Veeam", "Veeam ONE")]}
+    monkeypatch.setattr(synth.search_mod, "search_local", _search)
+    with pytest.raises(asyncio.CancelledError):
+        await synth.answer_local(None, None, _Synth(), "m", q="q", group_id="g",
+                                 facets=[_V, _A])

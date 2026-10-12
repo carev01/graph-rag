@@ -1,4 +1,5 @@
 """Global search shortlists per facet and groups the reduce input (spec §3.2)."""
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -152,3 +153,24 @@ async def test_single_facet_is_unchanged(stubs):
     await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1, k=10,
                            group_id="g", settings=_S, facets=[_V])
     assert stubs.shortlist == [(None, None, 10)]
+
+
+async def test_a_cancelled_facet_shortlist_propagates_not_degrades(stubs, monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        if scope == _A.scope:
+            raise asyncio.CancelledError()
+        return [_hit("c1", ["v1"])]
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    with pytest.raises(asyncio.CancelledError):
+        await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1,
+                               k=10, group_id="g", settings=_S, facets=[_V, _A])
+
+
+async def test_a_cancelled_map_propagates_not_degrades(stubs, monkeypatch):
+    async def _map(client, model, q, hit):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(gs, "map_report", _map)
+    with pytest.raises(asyncio.CancelledError):
+        await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1,
+                               k=10, group_id="g", settings=_S, facets=[_V, _A])

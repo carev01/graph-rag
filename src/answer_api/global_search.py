@@ -19,7 +19,7 @@ from graph_extract.usage import bounded_llm_client
 from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line, in_scope
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import Scope
-from answer_api.shape import Facet, could_not_check_note
+from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content,
 )
@@ -548,20 +548,22 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
         shortlist_communities(driver, embedder, q, level=level, k=n, group_id=group_id,
                               settings=settings, stats=stats, scope=f.scope, top_n=n)
         for f in facets], return_exceptions=True)
+    raise_if_cancelled(shortlists)   # cancellation propagates; only an Exception degrades
     # A community shortlisted by several facets serves EVERY one of them (spec
     # §3.2): it is mapped once, then its fact ids are filtered separately by each
     # facet's scope under that facet's heading.
     distinct: dict[str, CommunityHit] = {}
     for hits in shortlists:
-        if not isinstance(hits, BaseException):
+        if not isinstance(hits, Exception):
             for h in hits:
                 distinct.setdefault(h.community_id, h)
     order = list(distinct)
     maps = await asyncio.gather(*[map_report(map_client, map_model, q, distinct[c])
                                   for c in order], return_exceptions=True)
+    raise_if_cancelled(maps)
     mapped: dict[str, MapResult] = {}
     for cid, m in zip(order, maps):
-        if isinstance(m, BaseException):
+        if isinstance(m, Exception):
             logger.warning("global map failed for community %s: %s", cid, m)
         elif m is None:
             logger.warning("global map returned no usable result for community %s", cid)
@@ -576,7 +578,7 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
     degraded: list[str] = []
     facet_results: list[tuple[str, list[MapResult]]] = []
     for f, hits in zip(facets, shortlists):
-        if isinstance(hits, BaseException):
+        if isinstance(hits, Exception):
             logger.warning("global facet %r shortlist failed: %s", f.label, hits)
             degraded.append(f.label)
             continue
