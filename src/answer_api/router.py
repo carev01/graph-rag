@@ -20,8 +20,10 @@ from answer_api import global_search as global_mod
 from answer_api import drift as drift_mod
 from answer_api import timeline as timeline_mod
 from answer_api import freshness as freshness_mod
+from answer_api import enumeration as enum_mod
 from answer_api import attribution
 from answer_api.scope import Scope
+from answer_api.shape import QuestionShape
 
 logger = logging.getLogger(__name__)
 
@@ -155,23 +157,26 @@ def _normalize(mode: Mode, via: str, fallback_from: str | None, raw: dict,
 
 
 async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
-                    map_client, map_model, *, q, scope: Scope, settings) -> dict:
+                    map_client, map_model, *, q, scope: Scope, settings,
+                    facets=None) -> dict:
     g = settings.group_id
     if mode == "local":
         return await synth_mod.answer_local(
-            graphiti, driver, synth_client, synth_model, q=q, scope=scope, group_id=g)
+            graphiti, driver, synth_client, synth_model, q=q, scope=scope, group_id=g,
+            facets=facets, min_per_facet=settings.local_min_per_facet,
+            fetch_cap=settings.local_scoped_fetch_cap)
     if mode == "global":
         return await global_mod.global_search(
             driver, embedder, map_client, map_model, synth_client, synth_model,
             q=q, level=settings.global_default_level, k=settings.global_shortlist_k,
-            group_id=g, settings=settings, scope=scope)
+            group_id=g, settings=settings, scope=scope, facets=facets)
     if mode == "drift":
         return await drift_mod.drift_search(
             graphiti, driver, embedder, synth_client, synth_model, q=q,
             level=settings.drift_primer_level, iterations=settings.drift_iterations,
             primer_k=settings.drift_primer_k, max_followups=settings.drift_max_followups,
             followup_k=settings.drift_followup_k, group_id=g, settings=settings,
-            scope=scope)
+            scope=scope, facets=facets)
     return await timeline_mod.timeline_local(
         graphiti, driver, q=q, scope=scope, group_id=g)
 
@@ -182,48 +187,76 @@ def _grounded(mode: Mode, raw: dict) -> bool:
     return bool(raw.get("citations"))
 
 
+def _shape_fields(env: dict, shape: QuestionShape | None, raw: dict) -> None:
+    env["shape"] = shape.kind if shape is not None else "single"
+    env["facets"] = [{"label": f.label, "scope": f.scope.as_dict()}
+                     for f in (shape.facets if shape is not None else ())]
+    for key in ("degraded_facets", "checked_vendors", "documented_vendors"):
+        if key in raw:
+            env[key] = raw[key]
+
+
 async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
                         map_client, map_model, cheap_client, cheap_model, *,
-                        q, mode_override, scope: Scope, settings) -> dict:
+                        q, mode_override, scope: Scope, settings,
+                        shape: QuestionShape | None = None) -> dict:
     mode, via = await classify(q, cheap_client=cheap_client, cheap_model=cheap_model,
                                mode_override=mode_override,
                                default_mode=settings.router_default_mode)
+    if shape is not None and shape.kind == "enumeration":
+        # The classifier still runs (it labels the envelope's mode), but an
+        # enumeration checks every content vendor instead of running that mode.
+        # It has no detected scope, so there is nothing to relax.
+        raw = await enum_mod.enumerate_vendors(
+            graphiti, driver, embedder, map_client, map_model, synth_client,
+            synth_model, q=q, facets=shape.facets, group_id=settings.group_id,
+            settings=settings)
+        env = _normalize(mode, via, None, raw, q, scope)
+        env["routing"]["path"] = "enumeration"
+        _shape_fields(env, shape, raw)
+        env["freshness"] = await freshness_mod.freshness(
+            driver, settings.group_id, reports=True)
+        return env
+    facets = shape.facets if shape is not None and shape.kind == "comparison" else None
     args = (graphiti, driver, embedder, synth_client, synth_model, map_client, map_model)
     first = mode
     mode, fallback_from, raw = await _run_mode(first, *args, q=q, scope=scope,
-                                               settings=settings)
+                                               settings=settings, facets=facets)
     env_scope = scope
     relaxed = False
     if scope.source == "detected" and not _grounded(mode, raw):
         # A DETECTED scope is a guess from names in the question; when the scoped
         # path grounds nothing, answer unscoped rather than refuse where the
         # unscoped system would have answered (final review). An explicit scope
-        # is the caller's instruction and is never relaxed.
+        # is the caller's instruction and is never relaxed. The re-run is single
+        # and unscoped: the facets were derived from the same detected names.
         mode, fallback_from, raw = await _run_mode(first, *args, q=q, scope=Scope(),
                                                    settings=settings)
         relaxed = True
     env = _normalize(mode, via, fallback_from, raw, q, env_scope)
     if relaxed:
         env["scope"] = {**scope.as_dict(), "source": "detected-relaxed"}
+    _shape_fields(env, shape if not relaxed else None, raw)
     env["freshness"] = await freshness_mod.freshness(
         driver, settings.group_id, reports=mode in ("global", "drift"))
     return env
 
 
 async def _run_mode(mode: Mode, graphiti, driver, embedder, synth_client, synth_model,
-                    map_client, map_model, *, q, scope: Scope, settings
-                    ) -> tuple[Mode, str | None, dict]:
+                    map_client, map_model, *, q, scope: Scope, settings,
+                    facets=None) -> tuple[Mode, str | None, dict]:
     """One mode plus its fallback (local->drift when nothing was retrieved;
     global->local when global grounded nothing), all with the same scope."""
     raw = await _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
-                          map_client, map_model, q=q, scope=scope, settings=settings)
+                          map_client, map_model, q=q, scope=scope, settings=settings,
+                          facets=facets)
     fallback_from: str | None = None
     if mode == "local" and raw.get("retrieved") == 0:
         fallback_from = "local"
         mode = "drift"
         raw = await _dispatch("drift", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, scope=scope,
-                              settings=settings)
+                              settings=settings, facets=facets)
     # Global falls back to local when it grounded nothing: no community used, OR
     # communities used but no citation (the reduce step refused -- e.g. a scoped
     # comparison whose second vendor's community failed to map). Local runs with
@@ -233,5 +266,5 @@ async def _run_mode(mode: Mode, graphiti, driver, embedder, synth_client, synth_
         mode = "local"
         raw = await _dispatch("local", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, scope=scope,
-                              settings=settings)
+                              settings=settings, facets=facets)
     return mode, fallback_from, raw

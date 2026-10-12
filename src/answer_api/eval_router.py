@@ -28,6 +28,7 @@ from answer_api.router_eval import (
     markers_per_sentence, routing_hit,
 )
 from answer_api.scope import ScopeResolver
+from answer_api.shape import classify_shape
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -238,9 +239,11 @@ async def _cited_fact_texts_by_uuid(driver, group_id, fact_uuids) -> dict[str, s
 async def _score_one(clients, q, mode_override, settings, resolver):
     graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
     scope = resolver.resolve(q["question"])
+    shape = classify_shape(q["question"], resolver, scope)
     env = await router_mod.answer_router(
         graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel,
-        q=q["question"], mode_override=mode_override, scope=scope, settings=settings)
+        q=q["question"], mode_override=mode_override, scope=scope, settings=settings,
+        shape=shape)
     ghit = (precision_at_k(env["citations"], q["expected_article_ids"])
             if q["expected_article_ids"] else None)
     facts = await _cited_fact_texts(driver, settings.group_id,

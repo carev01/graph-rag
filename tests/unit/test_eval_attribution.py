@@ -105,7 +105,7 @@ async def test_score_one_builds_labelled_facts_from_citation_sources(monkeypatch
     env = {"mode": "local", "answer": "ans [1] [2].", "citations": _CITATIONS,
            "routing": {"chosen": "local", "via": "llm", "fallback_from": None}}
 
-    async def _fake_router(*a, q, mode_override, scope, settings):
+    async def _fake_router(*a, q, mode_override, scope, settings, **kw):
         return env
 
     async def _fake_facts(driver, g, uuids):
@@ -200,7 +200,7 @@ async def test_score_one_pairs_labelled_facts_by_uuid_despite_reverse_row_order(
            "routing": {"chosen": "local", "via": "llm", "fallback_from": None}}
     driver = _ReverseOrderDriver({"f1": "Veeam fact", "f2": "Rubrik fact"})
 
-    async def _fake_router(*a, q, mode_override, scope, settings):
+    async def _fake_router(*a, q, mode_override, scope, settings, **kw):
         return env
 
     async def _fake_facts(driver, g, uuids):

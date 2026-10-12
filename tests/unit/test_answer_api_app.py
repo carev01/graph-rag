@@ -72,7 +72,7 @@ def _fake_synthesis_client_and_model(settings):
 
 async def _fake_answer_router(graphiti, driver, embedder, synth_client, synth_model,
                               map_client, map_model, cheap_client, cheap_model, *,
-                              q, mode_override, scope, settings):
+                              q, mode_override, scope, settings, **kw):
     return {"mode": mode_override or "drift", "query": q, "answer": "routed answer [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],
@@ -101,7 +101,7 @@ async def _fake_timeline_local(graphiti, driver, *, q, limit=30, scope=None,
 
 async def _fake_global_search(driver, embedder, map_client, map_model, synth_client,
                               synth_model, *, q, level, k, group_id, settings,
-                              scope=None):
+                              scope=None, **kw):
     return {"query": q, "answer": "AWS and Azure both back up S3 [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"article_id": "art1", "source_url": "https://x/art1"}]}],
@@ -110,7 +110,7 @@ async def _fake_global_search(driver, embedder, map_client, map_model, synth_cli
 
 async def _fake_drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                              q, level, iterations, primer_k, max_followups, followup_k,
-                             group_id, settings, scope=None):
+                             group_id, settings, scope=None, **kw):
     return {"query": q, "answer": "cross-vendor DRIFT answer [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],
@@ -524,3 +524,43 @@ async def test_concurrent_stale_requests_reload_the_resolver_once(monkeypatch):
             r1, r2 = await asyncio.gather(t1, t2)
     assert r1.status_code == 200 and r2.status_code == 200
     assert load_calls["n"] == 1
+
+
+async def test_answer_hands_the_router_the_question_shape(monkeypatch):
+    seen = {}
+
+    async def _router(*a, q, mode_override, scope, settings, shape=None, **kw):
+        seen["shape"] = shape
+        return await _fake_answer_router(*a, q=q, mode_override=mode_override,
+                                         scope=scope, settings=settings)
+
+    monkeypatch.setattr(app_mod.router_mod, "answer_router", _router)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/answer", params={"q": "Veeam versus AWS Backup retention"})
+            assert resp.status_code == 200
+            assert seen["shape"].kind == "comparison"
+            resp = await c.get("/answer", params={"q": "Veeam versus AWS Backup",
+                                                  "scope": "none"})
+    assert resp.status_code == 200
+    assert seen["shape"].kind == "single"
+
+
+async def test_search_global_forwards_a_comparisons_facets(monkeypatch):
+    seen = {}
+
+    async def _global(*a, facets=None, **kw):
+        seen["facets"] = facets
+        return await _fake_global_search(*a, **kw)
+
+    monkeypatch.setattr(app_mod.global_mod, "global_search", _global)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/global",
+                               params={"q": "Veeam versus AWS Backup retention"})
+            assert resp.status_code == 200
+            assert [f.label for f in seen["facets"]] == ["Veeam", "AWS Backup"]
+            await c.get("/search/global", params={"q": "Veeam retention"})
+    assert seen["facets"] is None

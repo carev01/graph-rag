@@ -16,6 +16,7 @@ from answer_api import search as search_mod
 from answer_api import timeline as timeline_mod
 from answer_api.router import Mode
 from answer_api.scope import Scope, ScopeResolver, UnknownScopeName
+from answer_api.shape import classify_shape
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graph_extract.vector_search import ensure_vector_indexes
@@ -181,6 +182,15 @@ async def _resolve_scope(app: FastAPI, q: str, vendor: list[str] | None,
         raise HTTPException(422, detail={"unknown": e.names}) from e
 
 
+def _comparison_facets(app: FastAPI, q: str, resolved: Scope, scope_mode: str):
+    """The facets a mode-specific endpoint answers: a comparison's sides, else
+    None. An enumeration keeps the endpoint's own mode (it is mode-specific) and
+    passes no facets; only /answer runs the enumeration path."""
+    shape = classify_shape(q, app.state.scope_resolver, resolved,
+                           scope_disabled=(scope_mode == "none"))
+    return shape.facets if shape.kind == "comparison" else None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="answer-api", lifespan=_lifespan)
 
@@ -218,10 +228,13 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         st = app.state
         resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+        shape = classify_shape(q, st.scope_resolver, resolved,
+                               scope_disabled=(scope == "none"))
         return await router_mod.answer_router(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             st.map_client, st.map_model, st.cheap_client, st.cheap_model,
-            q=q, mode_override=mode, scope=resolved, settings=st.settings)
+            q=q, mode_override=mode, scope=resolved, settings=st.settings,
+            shape=shape)
 
     @app.get(
         "/search/global",
@@ -238,13 +251,14 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         st = app.state
         resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+        facets = _comparison_facets(app, q, resolved, scope)
         result = await global_mod.global_search(
             st.driver, st.embedder, st.map_client, st.map_model,
             st.synth_client, st.synth_model,
             q=q, level=st.settings.global_default_level if level is None else level,
             k=st.settings.global_shortlist_k if k is None else k,
             group_id=st.settings.group_id,
-            settings=st.settings, scope=resolved)
+            settings=st.settings, scope=resolved, facets=facets)
         result["scope"] = resolved.as_dict()
         return result
 
@@ -265,6 +279,7 @@ def create_app() -> FastAPI:
         st = app.state
         s = st.settings
         resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+        facets = _comparison_facets(app, q, resolved, scope)
         result = await drift_mod.drift_search(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             q=q,
@@ -272,7 +287,7 @@ def create_app() -> FastAPI:
             iterations=s.drift_iterations if iterations is None else iterations,
             primer_k=s.drift_primer_k, max_followups=s.drift_max_followups,
             followup_k=s.drift_followup_k, group_id=s.group_id, settings=s,
-            scope=resolved)
+            scope=resolved, facets=facets)
         result["scope"] = resolved.as_dict()
         return result
 

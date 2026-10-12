@@ -20,7 +20,7 @@ def _env(mode, article_id):
 
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
-    async def _fake_router(*a, q, mode_override, scope, settings):
+    async def _fake_router(*a, q, mode_override, scope, settings, **kw):
         if mode_override is not None:
             return _env(mode_override, "A1")          # comparative forced mode
         return _env("local" if q == "loc" else "drift", "A1")
@@ -57,7 +57,7 @@ async def test_per_question_records_cited_count_and_surviving_ranges(monkeypatch
     """BACKLOG 0d follow-through: the harness never persisted answer text, so a
     range-shorthand answer (judged against its two endpoints) was
     indistinguishable from a well-cited one in the report. Record both counts."""
-    async def _range_router(*a, q, mode_override, scope, settings):
+    async def _range_router(*a, q, mode_override, scope, settings, **kw):
         env = _env("global", "A1")
         env["answer"] = "Both encrypt at rest [1]-[26]."
         env["citations"] = [dict(env["citations"][0], marker=m) for m in (1, 26)]
@@ -77,7 +77,7 @@ async def test_per_question_records_bag_share(monkeypatch):
     """Threshold the bag-pasting: `mps` shows a bag exists, `bag` shows how much
     of the answer's citation mass is bag. Here 8 of 9 markers."""
     bag = " ".join(f"[{i}]" for i in range(1, 9))
-    async def _bag_router(*a, q, mode_override, scope, settings):
+    async def _bag_router(*a, q, mode_override, scope, settings, **kw):
         env = _env("global", "A1")
         env["answer"] = f"Both vendors encrypt {bag}. AES [9]."
         env["citations"] = [dict(env["citations"][0], marker=m) for m in range(1, 10)]
@@ -95,7 +95,7 @@ async def test_per_question_records_bag_share(monkeypatch):
 async def test_a_refusal_records_no_bag_share(monkeypatch):
     """0.0 is the best score on this scale; an answer that cited nothing must
     not earn it."""
-    async def _refusal_router(*a, q, mode_override, scope, settings):
+    async def _refusal_router(*a, q, mode_override, scope, settings, **kw):
         env = _env("global", None)
         env["answer"] = "I don't have enough thematic coverage to answer that."
         return env
@@ -130,7 +130,7 @@ async def test_per_question_records_markers_per_sentence(monkeypatch):
     """BACKLOG 0b: 19 markers pasted on one sentence must be distinguishable
     from one marker per claim. Record the per-sentence distribution's mean and
     max and print them as a `mps` column."""
-    async def _bag_router(*a, q, mode_override, scope, settings):
+    async def _bag_router(*a, q, mode_override, scope, settings, **kw):
         env = _env("global", "A1")
         env["answer"] = "KMS keys [1] [2] [3]. AES [4]."
         env["citations"] = [dict(env["citations"][0], marker=m) for m in (1, 2, 3, 4)]
