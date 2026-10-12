@@ -18,6 +18,7 @@ from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 
 from answer_api import attribution, router as router_mod
+from answer_api.attribution import in_scope
 from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
@@ -27,7 +28,7 @@ from answer_api.router_eval import (
     BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
     markers_per_sentence, routing_hit,
 )
-from answer_api.scope import ScopeResolver
+from answer_api.scope import Scope, ScopeResolver
 from answer_api.shape import classify_shape
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
@@ -65,6 +66,31 @@ _ATTRIBUTION_PROMPT = (
     "ONLY the integer (0 if none)."
     "\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
+
+
+def _scope_of(d: dict) -> Scope:
+    return Scope(tuple(d.get("vendors", [])), tuple(d.get("products", [])),
+                 d.get("source", "none"), tuple(d.get("sources", [])))
+
+
+def facet_coverage_hit(env: dict) -> bool | None:
+    """Comparison only: every facet has a citation from its own side."""
+    if env.get("shape") != "comparison":
+        return None
+    cites = env.get("citations", [])
+    return all(any(in_scope(c.get("sources", []), _scope_of(f["scope"])) for c in cites)
+               for f in env.get("facets", []))
+
+
+def enumeration_hit(env: dict, expected_vendors: list[str] | None) -> bool | None:
+    """Enumeration only: exactly the ground-truth vendors, each cited."""
+    if env.get("shape") != "enumeration" or expected_vendors is None:
+        return None
+    documented = env.get("documented_vendors", [])
+    if set(documented) != set(expected_vendors):
+        return False
+    cited = {s.get("vendor") for c in env.get("citations", []) for s in c.get("sources", [])}
+    return all(v in cited for v in documented)
 
 
 def _eval_judge_client_and_model(settings) -> tuple[AsyncOpenAI, str]:
@@ -297,6 +323,9 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "mps_max": max(mps) if mps else None,
                          "bag_share": _round_or_none(bag_share(env["answer"])),
                          "misattributed": misattributed,
+                         "facet_coverage": facet_coverage_hit(env),
+                         "enumeration_complete": enumeration_hit(
+                             env, q.get("expected_vendors")),
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -316,7 +345,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
-                   "bag_share": None, "misattributed": None, "failed": True}
+                   "bag_share": None, "misattributed": None,
+                   "facet_coverage": None, "enumeration_complete": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -329,6 +359,13 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
               f"misattributed={_cell(rec.get('misattributed'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
+    fc = [r["facet_coverage"] for r in per_question if r.get("facet_coverage") is not None]
+    ec = [r["enumeration_complete"] for r in per_question
+          if r.get("enumeration_complete") is not None]
+    summary["facet_coverage"] = round(sum(fc) / len(fc), 2) if fc else None
+    summary["facet_coverage_n"] = len(fc)
+    summary["enumeration_completeness"] = round(sum(ec) / len(ec), 2) if ec else None
+    summary["enumeration_n"] = len(ec)
     summary["raw"] = raw
     return summary
 
@@ -376,6 +413,10 @@ def format_report(summary: dict) -> str:
              f"Misattributed claims: {summary['misattributed_total']} across "
              f"{summary['misattributed_answers']} answers "
              f"(unscored: {summary['misattributed_unscored']})",
+             f"**Facet coverage (comparisons): {summary.get('facet_coverage')} "
+             f"(n={summary.get('facet_coverage_n')})** | **Enumeration completeness: "
+             f"{summary.get('enumeration_completeness')} "
+             f"(n={summary.get('enumeration_n')})**",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",

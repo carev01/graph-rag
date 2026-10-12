@@ -16,6 +16,9 @@ def test_router_golden_schema():
         assert isinstance(e["expected_modes"], list) and e["expected_modes"]
         assert set(e["expected_modes"]) <= _MODES
         assert isinstance(e["expected_article_ids"], list)
+        if "expected_vendors" in e:
+            assert isinstance(e["expected_vendors"], list)
+            assert all(isinstance(v, str) for v in e["expected_vendors"])
         intents.add(e["intent"])
     assert intents == _MODES        # all four intents represented
 
