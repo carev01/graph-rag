@@ -111,6 +111,10 @@ async def test_an_unusable_check_after_retry_is_could_not_check_not_absence():
     res = await _run(c)
     assert "Cohesity" in res["degraded_facets"]
     assert "Could not check: Cohesity." in res["answer"]
+    clause = res["answer"].split(")")[0]
+    assert clause == "None of the checked vendors (AWS, Microsoft, Veeam"
+    assert "Cohesity" not in clause
+    assert res["checked_vendors"] == _VENDORS
 
 
 async def test_none_documented_names_the_checked_vendors():
@@ -142,7 +146,7 @@ async def test_unusable_synthesis_still_reports_the_vendor_that_could_not_be_che
     assert res["degraded_facets"] == ["Cohesity"]
     assert "Could not check: Cohesity." in res["answer"]
     assert res["answer"].endswith(
-        "Checked: AWS, Cohesity, Microsoft, Veeam. Documented for: AWS.")
+        "Checked: AWS, Microsoft, Veeam. Documented for: AWS.")
     assert res["citations"] == []
 
 
@@ -162,3 +166,73 @@ async def test_a_check_that_raises_is_could_not_check_and_the_rest_still_answer(
     assert res["degraded_facets"] == ["Microsoft"]
     assert res["documented_vendors"] == ["AWS"]
     assert "Could not check: Microsoft." in res["answer"]
+
+
+async def test_every_vendor_degraded_is_a_refusal_not_none_documented():
+    res = await _run(_Client({v: "not json" for v in _VENDORS}))
+    assert res["degraded_facets"] == _VENDORS
+    assert "None of the checked vendors" not in res["answer"]
+    assert res["answer"] == (
+        "I don't have enough information to answer that from the available sources. "
+        "Could not check: AWS, Cohesity, Microsoft, Veeam.")
+
+
+def _community(v, fact_id):
+    return gs.CommunityHit(community_id=f"c{v}", title=f"{v} T", summary="s", level=1,
+                           rating=5, cited_fact_uuids=[fact_id],
+                           full_report='[{"finding": "f", "fact_ids": ["%s"]}]' % fact_id,
+                           similarity=0.9)
+
+
+async def test_a_vendor_is_never_documented_on_another_vendors_community_fact(monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        v = scope.vendors[0]
+        return [_community(v, "cf-Veeam" if v == "AWS" else f"cf-{v}")]
+
+    monkeypatch.setattr(en, "shortlist_communities", _shortlist)
+    c = _Client(_checks(AWS='{"documented": true, "points": ["p"], "fact_ids": ["cf-Veeam"]}'))
+    res = await _run(c)
+    aws_prompt = next(p for p in c.prompts if "from AWS's documentation" in p)
+    assert "cf-Veeam" not in aws_prompt
+    assert "AWS" not in res["documented_vendors"]
+    assert res["degraded_facets"] == ["AWS"]
+
+
+async def test_documented_with_no_fact_text_is_could_not_check(monkeypatch):
+    async def _no_texts(driver, group_id, uuids):
+        return {}
+
+    monkeypatch.setattr(en, "_fact_texts", _no_texts)
+    c = _Client(_checks(AWS='{"documented": true, "points": ["p"], "fact_ids": ["lf-AWS"]}',
+                        Veeam='{"documented": true, "points": ["p"], "fact_ids": ["cf-Veeam"]}'))
+    res = await _run(c)
+    assert res["documented_vendors"] == ["AWS"]
+    assert res["degraded_facets"] == ["Veeam"]
+    assert "=== Veeam ===" not in c.prompts[-1]
+    assert res["answer"].endswith(
+        "Could not check: Veeam.\n\nChecked: AWS, Cohesity, Microsoft. Documented for: AWS.")
+
+
+async def test_a_fact_shared_by_two_vendors_renders_under_both_with_one_marker(monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_community(scope.vendors[0], "cf-shared")]
+
+    class _Prov:
+        def __init__(self, driver):
+            pass
+
+        async def resolve_citations(self, uuids):
+            return {u: {"sources": _src("AWS") + _src("Veeam") if u == "cf-shared"
+                        else _src(u.split("-")[1])} for u in uuids}
+
+    monkeypatch.setattr(en, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(en, "Provenance", _Prov)
+    shared = '{"documented": true, "points": ["p"], "fact_ids": ["cf-shared"]}'
+    c = _Client(_checks(AWS=shared, Veeam=shared))
+    res = await _run(c)
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    syn = c.prompts[-1]
+    assert "=== AWS ===\n[1] " in syn
+    assert "=== Veeam ===\n[1] " in syn
