@@ -203,6 +203,11 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
     mode, via = await classify(q, cheap_client=cheap_client, cheap_model=cheap_model,
                                mode_override=mode_override,
                                default_mode=settings.router_default_mode)
+    if shape is not None and shape.kind == "enumeration" and via == "override":
+        # An explicit mode is the caller's instruction, like an explicit scope
+        # (the eval harness forces each mode in turn): run that mode unfaceted,
+        # and report the run as the single question it was answered as.
+        shape = None
     if shape is not None and shape.kind == "enumeration":
         # The classifier still runs (it labels the envelope's mode), but an
         # enumeration checks every content vendor instead of running that mode.

@@ -121,3 +121,44 @@ async def test_a_temporal_enumeration_keeps_its_answer(seen, monkeypatch):
     assert env["answer"] == "E" and env["citations"] == _CITE
     assert env["mode"] == "global" and env["routing"]["path"] == "enumeration"
     assert "timeline" not in env
+
+
+async def _override(q, *, mode_override=None, **kw):
+    return mode_override, "override"
+
+
+async def test_an_override_bypasses_the_enumeration_path(seen, monkeypatch):
+    """An explicit mode is the caller's instruction (the eval harness forces each
+    mode in turn): an enumeration-shaped question runs that mode, unfaceted."""
+    async def _local(*a, facets=None, **kw):
+        seen.append(("local", facets))
+        return {"answer": "L [1]", "citations": _CITE, "retrieved": 3}
+
+    monkeypatch.setattr(router, "classify", _override)
+    monkeypatch.setattr(router.synth_mod, "answer_local", _local)
+    shape = QuestionShape("enumeration", (Facet("AWS", Scope(vendors=("AWS",))),))
+    env = await router.answer_router(None, None, None, None, "s", None, "m", None, "c",
+                                     q="q", mode_override="local", scope=Scope(),
+                                     settings=_S, shape=shape)
+    assert seen == [("local", None)]
+    assert env["mode"] == "local" and "path" not in env["routing"]
+    assert env["shape"] == "single" and env["facets"] == []
+    assert "checked_vendors" not in env
+
+
+async def test_an_override_keeps_a_comparisons_facets(seen, monkeypatch):
+    async def _drift(*a, facets=None, **kw):
+        seen.append(("drift", facets))
+        return {"answer": "D [1]", "citations": _CITE, "applies_to": []}
+
+    monkeypatch.setattr(router, "classify", _override)
+    monkeypatch.setattr(router.drift_mod, "drift_search", _drift)
+    shape = QuestionShape("comparison", (_V, _A))
+    env = await router.answer_router(None, None, None, None, "s", None, "m", None, "c",
+                                     q="q", mode_override="drift",
+                                     scope=Scope(vendors=("Veeam",),
+                                                 products=("AWS Backup",),
+                                                 source="detected"),
+                                     settings=_S, shape=shape)
+    assert seen == [("drift", (_V, _A))]
+    assert env["shape"] == "comparison"

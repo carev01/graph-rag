@@ -9,6 +9,7 @@ pytestmark = pytest.mark.asyncio
 _S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                      neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
 _RESOLVER = ScopeResolver([], [], {})
+_REAL_ROUTER = er.router_mod.answer_router
 
 
 def _env(mode, article_id):
@@ -144,3 +145,36 @@ async def test_per_question_records_markers_per_sentence(monkeypatch):
     row = [ln for ln in er.format_report(summary).splitlines() if "| enc |" in ln][0]
     assert "| 4 | 0 | 2.0/3 |" in row              # cited | ranges | mps columns
     assert "| mps |" in er.format_report(summary)
+
+
+async def test_a_forced_mode_cross_vendor_question_does_not_enumerate(monkeypatch):
+    """The comparative pass forces each mode in turn; an enumeration-shaped
+    question must run that mode, not the same enumeration three times."""
+    enumerated = []
+    dispatched = []
+
+    async def _enum(*a, **kw):
+        enumerated.append(kw["q"])
+        return {"answer": "E", "citations": [], "applies_to": []}
+
+    async def _local(*a, facets=None, **kw):
+        dispatched.append(("local", facets))
+        return {"answer": "L", "retrieved": 1, "applies_to": [],
+                "citations": _env("local", "A1")["citations"]}
+
+    async def _fresh(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(er.router_mod, "answer_router", _REAL_ROUTER)
+    monkeypatch.setattr(er.router_mod.enum_mod, "enumerate_vendors", _enum)
+    monkeypatch.setattr(er.router_mod.synth_mod, "answer_local", _local)
+    monkeypatch.setattr(er.router_mod.freshness_mod, "freshness", _fresh)
+    resolver = ScopeResolver(["Veeam", "AWS"], [], {}, content_vendors=("Veeam", "AWS"))
+    q = {"question": "Which vendors support immutable backups?", "intent": "global",
+         "expected_modes": ["global"], "expected_article_ids": ["A1"]}
+    assert er.classify_shape(q["question"], resolver,
+                             resolver.resolve(q["question"])).kind == "enumeration"
+    env, *_ = await er._score_one((None,) * 11, q, "local", _S, resolver)
+    assert enumerated == []
+    assert dispatched == [("local", None)]
+    assert env["mode"] == "local" and env["shape"] == "single"
