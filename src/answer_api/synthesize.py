@@ -304,13 +304,13 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
         search_mod.search_local(graphiti, driver, q=q, k=k_facet, scope=f.scope,
                                 group_id=group_id, fetch_cap=fetch_cap)
         for f in facets], return_exceptions=True)
-    raise_if_cancelled(found)   # cancellation propagates; only an Exception degrades
+    raise_if_cancelled(found)   # cancellation propagates; only Exceptions remain
     marker_map: dict[int, dict] = {}
     marker_of: dict[str, int] = {}
     groups: list[tuple[str, list[int]]] = []
     degraded: list[str] = []
     for f, res in zip(facets, found):
-        if isinstance(res, Exception):
+        if isinstance(res, BaseException):
             # Never read as absence: the facet is reported, not shown as empty.
             logger.warning("local facet %r retrieval failed: %s", f.label, res)
             degraded.append(f.label)

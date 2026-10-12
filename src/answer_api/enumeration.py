@@ -127,7 +127,7 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
     local_texts: dict[str, str] = {}
 
     # Community-cited ids, resolved ONCE, so each vendor admits only its own.
-    community_ids = sorted({i for got in gathered if not isinstance(got, Exception)
+    community_ids = sorted({i for got in gathered if not isinstance(got, BaseException)
                             for _, ids in _community_ids(got[0]) for i in ids})
     community_sources: dict[str, list] | None = {}
     if community_ids:
@@ -140,7 +140,7 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             community_sources = None
 
     async def _one(f: Facet, got):
-        if isinstance(got, Exception):
+        if isinstance(got, BaseException):
             logger.warning("enumeration gather for %s failed: %s", f.label, got)
             return f, None
         communities, facts = got

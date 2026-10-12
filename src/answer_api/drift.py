@@ -86,10 +86,10 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
                                   group_id=group_id, settings=settings, stats=stats,
                                   scope=f.scope, top_n=top_n)
             for f in facets], return_exceptions=True)
-        raise_if_cancelled(found)   # cancellation propagates; only an Exception degrades
+        raise_if_cancelled(found)   # cancellation propagates; only Exceptions remain
         hits = []
         for f, fh in zip(facets, found):
-            if isinstance(fh, Exception):
+            if isinstance(fh, BaseException):
                 logger.warning("drift facet %r primer failed: %s", f.label, fh)
                 degraded.append(f.label)
                 continue
