@@ -62,7 +62,9 @@ async def test_facts_are_grouped_under_facet_headings_and_deduplicated(searches)
                                    facets=[_V, _A])
     p = s.prompts[0]
     assert p.index("=== Veeam ===") < p.index("[1]") < p.index("=== AWS Backup ===")
-    assert p.count("fact shared") == 1
+    # A fact retrieved for both facets keeps ONE marker and is listed under both.
+    assert p.count("fact shared") == 2
+    assert p.count("[2] ") == 2
     assert "Address EVERY side" in p and "Veeam; AWS Backup" in p
     assert res["retrieved"] == 3 and res["degraded_facets"] == []
 
@@ -130,3 +132,17 @@ async def test_a_cancelled_facet_search_propagates_not_degrades(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await synth.answer_local(None, None, _Synth(), "m", q="q", group_id="g",
                                  facets=[_V, _A])
+
+
+async def test_a_facet_whose_facts_were_all_shared_is_never_rendered_empty(monkeypatch):
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, fetch_cap=450, **kw):
+        return {"query": q, "count": 1, "results": [_fact("same", "Veeam", "Veeam ONE")]}
+    monkeypatch.setattr(synth.search_mod, "search_local", _search)
+    s = _Synth("Both do X [1].")
+    res = await synth.answer_local(None, None, s, "m", q="q", group_id="g",
+                                   facets=[_V, _A])
+    p = s.prompts[0]
+    assert "===\n(no facts retrieved)" not in p
+    assert "=== Veeam ===\n[1] " in p
+    assert "=== AWS Backup ===\n[1] " in p
+    assert res["retrieved"] == 1

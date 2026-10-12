@@ -293,7 +293,8 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
                                group_id, facets: Sequence[Facet], min_per_facet: int,
                                fetch_cap: int) -> dict:
     """Retrieve each facet's facts with its own scope and an equal share of `k`
-    (at least `min_per_facet`), merge in facet order deduplicating by fact_uuid,
+    (at least `min_per_facet`), number facts in facet order (one marker per
+    fact_uuid; a fact shared by facets is listed under each with that marker),
     and group the facts block under one heading per facet so the comparison
     prompt can require every side to be addressed. A facet whose retrieval
     raises is reported in `degraded_facets` -- never silently shown as having
@@ -305,7 +306,7 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
         for f in facets], return_exceptions=True)
     raise_if_cancelled(found)   # cancellation propagates; only an Exception degrades
     marker_map: dict[int, dict] = {}
-    seen: set[str] = set()
+    marker_of: dict[str, int] = {}
     groups: list[tuple[str, list[int]]] = []
     degraded: list[str] = []
     for f, res in zip(facets, found):
@@ -314,14 +315,16 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
             logger.warning("local facet %r retrieval failed: %s", f.label, res)
             degraded.append(f.label)
             continue
-        markers = []
+        markers: list[int] = []
         for r in res["results"]:
-            if r["fact_uuid"] in seen:
-                continue
-            seen.add(r["fact_uuid"])
-            n = len(marker_map) + 1
-            marker_map[n] = r
-            markers.append(n)
+            # A fact numbered under an earlier facet keeps its marker and is listed
+            # under this facet too, so a facet whose facts were all shared is
+            # never rendered as "(no facts retrieved)".
+            if r["fact_uuid"] not in marker_of:
+                marker_of[r["fact_uuid"]] = len(marker_map) + 1
+                marker_map[marker_of[r["fact_uuid"]]] = r
+            if marker_of[r["fact_uuid"]] not in markers:
+                markers.append(marker_of[r["fact_uuid"]])
         groups.append((f.label, markers))
     note = could_not_check_note(degraded)
     if not marker_map:
