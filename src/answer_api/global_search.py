@@ -548,38 +548,57 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
         shortlist_communities(driver, embedder, q, level=level, k=n, group_id=group_id,
                               settings=settings, stats=stats, scope=f.scope, top_n=n)
         for f in facets], return_exceptions=True)
+    # A community shortlisted by several facets serves EVERY one of them (spec
+    # §3.2): it is mapped once, then its fact ids are filtered separately by each
+    # facet's scope under that facet's heading.
+    distinct: dict[str, CommunityHit] = {}
+    for hits in shortlists:
+        if not isinstance(hits, BaseException):
+            for h in hits:
+                distinct.setdefault(h.community_id, h)
+    order = list(distinct)
+    maps = await asyncio.gather(*[map_report(map_client, map_model, q, distinct[c])
+                                  for c in order], return_exceptions=True)
+    mapped: dict[str, MapResult] = {}
+    for cid, m in zip(order, maps):
+        if isinstance(m, BaseException):
+            logger.warning("global map failed for community %s: %s", cid, m)
+        elif m is None:
+            logger.warning("global map returned no usable result for community %s", cid)
+        else:
+            mapped[cid] = m
+    all_ids = sorted({fid for m in mapped.values() for fid in m.fact_ids})
+    resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
+    # A failure never reads as absence: a facet whose shortlist failed, or whose
+    # communities were shortlisted but none mapped usably, is left out of the
+    # prompt and reported as "could not check". A facet whose maps succeeded but
+    # whose facts all fell outside its scope is genuine absence ("(no findings)").
     degraded: list[str] = []
-    taken: set[str] = set()
-    per_facet: list[tuple[Facet, list[CommunityHit]]] = []
+    facet_results: list[tuple[str, list[MapResult]]] = []
     for f, hits in zip(facets, shortlists):
         if isinstance(hits, BaseException):
             logger.warning("global facet %r shortlist failed: %s", f.label, hits)
             degraded.append(f.label)
             continue
-        mine = [h for h in hits if h.community_id not in taken]
-        taken.update(h.community_id for h in mine)
-        per_facet.append((f, mine))
-    flat = [(f, h) for f, hs in per_facet for h in hs]
-    maps = await asyncio.gather(*[map_report(map_client, map_model, q, h)
-                                  for _, h in flat], return_exceptions=True)
-    by_facet: dict[str, list[MapResult]] = {f.label: [] for f, _ in per_facet}
-    for (f, _h), m in zip(flat, maps):
-        if isinstance(m, BaseException):
-            logger.warning("global map failed: %s", m)
-        elif m is not None:
-            by_facet[f.label].append(m)
-    all_ids = sorted({fid for ms in by_facet.values() for m in ms for fid in m.fact_ids})
-    resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
-    facet_results: list[tuple[str, list[MapResult]]] = []
-    for f, _ in per_facet:
+        mine = [mapped[h.community_id] for h in hits if h.community_id in mapped]
+        if hits and not mine:
+            logger.warning("global facet %r: none of its %d communities mapped usably",
+                           f.label, len(hits))
+            degraded.append(f.label)
+            continue
         kept = [replace(m, fact_ids=[
             x for x in m.fact_ids
             if _in_scope_ci(resolved.get(x, {}).get("sources", []), f.scope)])
-            for m in by_facet[f.label]]
+            for m in mine]
         facet_results.append((f.label, [m for m in kept if m.fact_ids]))
-    communities_used = [{"community_id": m.community_id, "title": m.title,
-                         "relevance": m.relevance}
-                        for _, ms in facet_results for m in ms]
+    seen_cids: set[str] = set()
+    communities_used: list[dict] = []
+    for _, ms in facet_results:
+        for m in ms:
+            if m.community_id not in seen_cids:
+                seen_cids.add(m.community_id)
+                communities_used.append({"community_id": m.community_id,
+                                         "title": m.title, "relevance": m.relevance})
     note = could_not_check_note(degraded)
     marker_map: dict[int, dict] = {}
     fact_to_marker: dict[str, int] = {}
