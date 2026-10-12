@@ -243,7 +243,10 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
         candidates = await _keep_in_scope(driver, group_id, candidates, scope_, settings)
     st = stats if stats is not None else RerankStats()
     docs = [f"{h.title}: {h.summary}" for h in candidates]
-    scored = await rerank(q, docs, top_k=settings.rerank_top_n, settings=settings)
+    # Ask the reranker for at least the per-call top_n: top_k=rerank_top_n alone
+    # would silently cap a larger top_n.
+    scored = await rerank(q, docs, top_k=max(settings.rerank_top_n, top_n or 0),
+                          settings=settings)
     return _apply_rerank(candidates, scored,
                          top_n=top_n if top_n is not None else settings.rerank_top_n,
                          floor=settings.rerank_score_floor, stats=st)

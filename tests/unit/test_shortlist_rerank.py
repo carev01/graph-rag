@@ -200,3 +200,41 @@ async def test_shortlist_rerank_not_configured_never_calls_rerank(monkeypatch):
     assert called == []
     assert [h.community_id for h in out] == ["a", "b"]    # plain cosine top-k
     assert all(h.relevance is None for h in out)
+
+
+async def test_shortlist_top_n_above_rerank_top_n_reaches_the_reranker(monkeypatch):
+    """A per-call top_n larger than rerank_top_n is honoured: the reranker is asked
+    for that many, not silently capped at the default."""
+    seen = {}
+
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
+        seen["top_k"] = top_k
+        return [(0, 0.9), (1, 0.8), (2, 0.7)][:top_k]
+
+    monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
+    s = _settings(rerank_base_url="https://rr.example/v1", rerank_model="rerank-3",
+                  rerank_api_key="k", rerank_candidates=10, rerank_top_n=1,
+                  rerank_score_floor=0.5)
+    out = await shortlist_communities(_FakeDriver(_ROWS), _FakeEmbedder([1.0, 0.0]),
+                                      "q", level=1, k=5, group_id="g", settings=s,
+                                      top_n=3)
+    assert seen["top_k"] == 3
+    assert [h.community_id for h in out] == ["a", "b", "c"]
+
+
+async def test_shortlist_top_n_below_rerank_top_n_keeps_the_default_request(monkeypatch):
+    seen = {}
+
+    async def fake_rerank(query, documents, *, top_k, settings, transport=None):
+        seen["top_k"] = top_k
+        return [(0, 0.9), (1, 0.8)]
+
+    monkeypatch.setattr(global_search_mod, "rerank", fake_rerank)
+    s = _settings(rerank_base_url="https://rr.example/v1", rerank_model="rerank-3",
+                  rerank_api_key="k", rerank_candidates=10, rerank_top_n=5,
+                  rerank_score_floor=0.5)
+    out = await shortlist_communities(_FakeDriver(_ROWS), _FakeEmbedder([1.0, 0.0]),
+                                      "q", level=1, k=5, group_id="g", settings=s,
+                                      top_n=1)
+    assert seen["top_k"] == 5
+    assert [h.community_id for h in out] == ["a"]
