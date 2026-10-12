@@ -320,6 +320,17 @@ class ExtractSettings(BaseSettings):
     # trace to the scope's vendor(s)/product(s) -- see design spec §4.3 step 3
     # for the measured Azure/AWS example this threshold was picked against.
     global_scope_min_share: float = 0.5
+    # --- facet-balanced answers (spec 2026-10-12) ---
+    # Comparison: each facet's local search gets max(this, ceil(k / facets)) facts.
+    local_min_per_facet: int = 6
+    # Scoped local search re-fetches at k*3, k*10, k*30 until k edges survive the
+    # scope filter, never above this (the Veeam Agent scope kept 7 of 45, 2026-10-12).
+    local_scoped_fetch_cap: int = 450
+    # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
+    global_facet_top_n: int = 3
+    # Enumeration: evidence gathered per content vendor before its cheap check.
+    enum_communities_per_vendor: int = 2
+    enum_facts_per_vendor: int = 8
     # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
     # older than this (plan ruling 4 -- no separate freshness module exists).
     scope_reload_seconds: int = 3600
