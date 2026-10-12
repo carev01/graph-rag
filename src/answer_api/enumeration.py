@@ -16,7 +16,7 @@ from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
 from answer_api.global_search import (_extract_json, _fact_texts, _in_scope_ci,
                                       shortlist_communities)
 from answer_api.search import search_local
-from answer_api.shape import Facet, could_not_check_note
+from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from answer_api.synthesize import (_REFUSAL, _build_citations, _complete_or_none,
                                    _finalize_answer, _usable_content)
 from graph_extract.provenance import Provenance
@@ -104,11 +104,11 @@ async def _check(client, model, *, q, vendor, evidence, valid) -> list[str] | No
             if not obj["documented"]:
                 return []
             ids = [i for i in obj.get("fact_ids") or [] if i in valid]
-            if not ids:
-                logger.warning("enumeration check for %s claimed documented with no "
-                               "fact id from its evidence", vendor)
-                return None
-            return ids
+            if ids:
+                return ids
+            # Invented ids are an unusable reply, like unparseable JSON: retry.
+            logger.warning("enumeration check for %s claimed documented with no "
+                           "fact id from its evidence", vendor)
     logger.warning("enumeration check for %s returned no usable verdict", vendor)
     return None
 
@@ -120,16 +120,14 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
     gathered = await asyncio.gather(*[
         _gather(graphiti, driver, embedder, q=q, facet=f, group_id=group_id,
                 settings=settings) for f in facets], return_exceptions=True)
-    for got in gathered:
-        if isinstance(got, BaseException) and not isinstance(got, Exception):
-            raise got   # cancellation: propagate, never a degraded vendor
+    raise_if_cancelled(gathered)   # cancellation propagates, never a degraded vendor
     degraded: set[str] = set()
     supported: dict[str, list[str]] = {}
     communities_used: list[dict] = []
     local_texts: dict[str, str] = {}
 
     # Community-cited ids, resolved ONCE, so each vendor admits only its own.
-    community_ids = sorted({i for got in gathered if not isinstance(got, BaseException)
+    community_ids = sorted({i for got in gathered if not isinstance(got, Exception)
                             for _, ids in _community_ids(got[0]) for i in ids})
     community_sources: dict[str, list] | None = {}
     if community_ids:
@@ -142,7 +140,7 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             community_sources = None
 
     async def _one(f: Facet, got):
-        if isinstance(got, BaseException):
+        if isinstance(got, Exception):
             logger.warning("enumeration gather for %s failed: %s", f.label, got)
             return f, None
         communities, facts = got
@@ -190,7 +188,9 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
     checked = [v for v in attempted if v not in degraded]
     documented = [v for v in checked if v in supported]
     note = could_not_check_note(degraded_list)
-    base = {"query": q, "checked_vendors": attempted, "documented_vendors": documented,
+    # checked_vendors agrees with the closing "Checked:" line; the vendors that
+    # could not be checked are in degraded_facets.
+    base = {"query": q, "checked_vendors": checked, "documented_vendors": documented,
             "degraded_facets": degraded_list, "communities_used": communities_used}
     if not checked:
         return {**base, "answer": f"{_REFUSAL} {note}", "citations": [],

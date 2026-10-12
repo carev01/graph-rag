@@ -1,7 +1,11 @@
 """Question shape and facets (spec §2)."""
+import asyncio
+
+import pytest
+
 from answer_api.scope import Scope, ScopeResolver
 from answer_api.shape import (Facet, classify_shape, could_not_check_note,
-                              group_by_facet)
+                              group_by_facet, raise_if_cancelled)
 
 _PRODUCTS = [("Veeam Backup & Replication", "Veeam"), ("Veeam ONE", "Veeam"),
              ("Veeam Backup for Microsoft 365", "Veeam"), ("AWS Backup", "AWS"),
@@ -117,3 +121,13 @@ def test_group_by_facet_assigns_each_item_to_its_first_matching_facet():
 def test_could_not_check_note():
     assert could_not_check_note([]) == ""
     assert could_not_check_note(["Cohesity", "AWS"]) == "Could not check: Cohesity, AWS."
+
+
+def test_raise_if_cancelled_reraises_a_cancellation_among_results():
+    with pytest.raises(asyncio.CancelledError):
+        raise_if_cancelled([{"ok": 1}, RuntimeError("x"), asyncio.CancelledError()])
+
+
+def test_raise_if_cancelled_leaves_ordinary_exceptions_and_values_alone():
+    raise_if_cancelled([{"ok": 1}, RuntimeError("x"), None])
+    raise_if_cancelled([])

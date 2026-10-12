@@ -7,7 +7,7 @@ every retrieval mode balances across facets. Deterministic: no LLM.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -84,3 +84,13 @@ def group_by_facet(items: list[dict], facets: Sequence[Facet]
 
 def could_not_check_note(labels: Sequence[str]) -> str:
     return f"Could not check: {', '.join(labels)}." if labels else ""
+
+
+def raise_if_cancelled(results: Iterable[object]) -> None:
+    """After `asyncio.gather(..., return_exceptions=True)`: re-raise the first
+    result that is a BaseException but not an Exception (CancelledError,
+    KeyboardInterrupt, ...). Cancellation propagates; it is never a degraded facet.
+    Callers then treat only `Exception` instances as degraded."""
+    for r in results:
+        if isinstance(r, BaseException) and not isinstance(r, Exception):
+            raise r

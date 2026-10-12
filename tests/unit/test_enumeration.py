@@ -36,6 +36,8 @@ class _Client:
         if p.startswith("Decide whether"):
             vendor = next(v for v in _VENDORS if f"from {v}'s documentation" in p)
             text = self.checks[vendor]
+            if isinstance(text, list):   # a sequence of replies, one per call
+                text = text.pop(0)
         else:
             text = "AWS locks vaults [1]. Veeam hardens repos [2]."
         return SimpleNamespace(choices=[SimpleNamespace(
@@ -99,9 +101,26 @@ async def test_every_vendor_is_checked_and_documented_ones_are_listed():
     assert {x["fact_uuid"] for x in res["citations"]} == {"lf-AWS", "cf-Veeam"}
 
 
-async def test_fact_ids_outside_the_evidence_are_dropped_and_unverifiable_is_degraded():
-    c = _Client(_checks(AWS='{"documented": true, "points": ["p"], "fact_ids": ["made-up"]}'))
+_INVENTED = '{"documented": true, "points": ["p"], "fact_ids": ["made-up"]}'
+_GOOD_AWS = '{"documented": true, "points": ["p"], "fact_ids": ["lf-AWS"]}'
+
+
+def _aws_checks(c):
+    return sum(1 for p in c.prompts if "from AWS's documentation" in p)
+
+
+async def test_invented_fact_ids_take_the_retry_and_a_good_second_reply_documents():
+    c = _Client(_checks(AWS=[_INVENTED, _GOOD_AWS]))
     res = await _run(c)
+    assert _aws_checks(c) == 2
+    assert res["documented_vendors"] == ["AWS"]
+    assert res["degraded_facets"] == []
+
+
+async def test_invented_fact_ids_twice_is_degraded_not_absence():
+    c = _Client(_checks(AWS=[_INVENTED, _INVENTED]))
+    res = await _run(c)
+    assert _aws_checks(c) == 2
     assert res["documented_vendors"] == []
     assert res["degraded_facets"] == ["AWS"]
 
@@ -114,7 +133,7 @@ async def test_an_unusable_check_after_retry_is_could_not_check_not_absence():
     clause = res["answer"].split(")")[0]
     assert clause == "None of the checked vendors (AWS, Microsoft, Veeam"
     assert "Cohesity" not in clause
-    assert res["checked_vendors"] == _VENDORS
+    assert res["checked_vendors"] == ["AWS", "Microsoft", "Veeam"]
 
 
 async def test_none_documented_names_the_checked_vendors():
