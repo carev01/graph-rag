@@ -90,6 +90,27 @@ async def test_a_failed_facet_is_reported_never_read_as_absence(monkeypatch):
     assert "=== AWS Backup ===" not in s.prompts[0]
 
 
+async def test_a_failed_facet_note_survives_an_unusable_synthesis_reply(monkeypatch):
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, fetch_cap=450, **kw):
+        if scope == _A.scope:
+            raise RuntimeError("neo4j down")
+        return {"query": q, "count": 1, "results": [_fact("v1", "Veeam", "Veeam ONE")]}
+    monkeypatch.setattr(synth.search_mod, "search_local", _search)
+
+    class _EmptySynth:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=None), finish_reason="length")])
+
+    res = await synth.answer_local(None, None, _EmptySynth(), "m", q="q", group_id="g",
+                                   facets=[_V, _A])
+    assert res["degraded_facets"] == ["AWS Backup"]
+    assert "Could not check: AWS Backup." in res["answer"]
+
+
 async def test_single_facet_path_is_unchanged(searches):
     s = _Synth("Answer [1].")
     res = await synth.answer_local(None, None, s, "m", q="q", group_id="g",

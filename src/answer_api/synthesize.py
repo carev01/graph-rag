@@ -331,9 +331,9 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
                                   facts=_facet_facts_block(groups, marker_map), q=q)
     raw = await _complete_or_none(synth_client, synth_model, prompt, max_tokens=3000)
     if raw is None:
-        return {"query": q, "answer": _REFUSAL, "citations": [],
-                "retrieved": len(marker_map), "cited": 0, "applies_to": [],
-                "degraded_facets": degraded}
+        return {"query": q, "answer": (_REFUSAL + (" " + note if note else "")),
+                "citations": [], "retrieved": len(marker_map), "cited": 0,
+                "applies_to": [], "degraded_facets": degraded}
     answer, cited = _finalize_answer(raw, marker_map)
     if note:
         answer = f"{answer}\n\n{note}"
