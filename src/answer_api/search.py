@@ -22,16 +22,29 @@ async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id,
 
 
 async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
-                       include_invalid=False, group_id, center_node_uuid=None):
-    # Over-fetch so post-filters (validity, scope) still leave ~k results.
-    edges = await _retrieve_edges(graphiti, q, fetch_limit=max(k * 3, k),
-                                  group_id=group_id, center_node_uuid=center_node_uuid)
-    if not include_invalid:
-        edges = [e for e in edges if is_current(getattr(e, "invalid_at", None))]
-    if scope is not None and not scope.is_empty():
-        allowed = await scope_episode_uuids(
-            driver, scope, candidates=[u for e in edges for u in (e.episodes or [])])
-        edges = [e for e in edges if allowed.intersection(e.episodes or [])]
+                       include_invalid=False, group_id, center_node_uuid=None,
+                       fetch_cap: int = 450):
+    scoped = scope is not None and not scope.is_empty()
+    # Over-fetch so post-filters (validity, scope) still leave ~k results. A narrow
+    # scope can filter out most of one fetch (the six Veeam Agent guides kept 7 of
+    # 45, 2026-10-12), so a scoped search re-fetches wider until k survive.
+    first = max(k * 3, k)
+    limits = [first] if not scoped else list(dict.fromkeys(
+        min(n, fetch_cap) for n in (first, k * 10, k * 30)))
+    edges: list = []
+    for limit in limits:
+        edges = await _retrieve_edges(graphiti, q, fetch_limit=limit,
+                                      group_id=group_id,
+                                      center_node_uuid=center_node_uuid)
+        if not include_invalid:
+            edges = [e for e in edges if is_current(getattr(e, "invalid_at", None))]
+        if scoped:
+            assert scope is not None
+            allowed = await scope_episode_uuids(
+                driver, scope, candidates=[u for e in edges for u in (e.episodes or [])])
+            edges = [e for e in edges if allowed.intersection(e.episodes or [])]
+        if len(edges) >= k:
+            break
     edges = edges[:k]
     citations = await Provenance(driver).resolve_citations([e.uuid for e in edges])
     return {
