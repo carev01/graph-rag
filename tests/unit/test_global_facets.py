@@ -1,0 +1,110 @@
+"""Global search shortlists per facet and groups the reduce input (spec §3.2)."""
+from types import SimpleNamespace
+
+import pytest
+
+import answer_api.global_search as gs
+from answer_api.scope import Scope
+from answer_api.shape import Facet
+from graph_extract.config import ExtractSettings
+
+pytestmark = pytest.mark.asyncio
+
+_V = Facet("Veeam", Scope(vendors=("Veeam",)))
+_A = Facet("AWS Backup", Scope(products=("AWS Backup",)))
+_S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+
+
+def _hit(cid, facts):
+    return gs.CommunityHit(community_id=cid, title=f"T{cid}", summary="s", level=1,
+                           rating=5.0, cited_fact_uuids=facts, full_report="[]",
+                           similarity=0.9)
+
+
+_SRC = {"v1": [{"vendor": "Veeam", "product": "Veeam ONE", "article_id": "a"}],
+        "a1": [{"vendor": "AWS", "product": "AWS Backup", "article_id": "b"}]}
+
+
+class _Reducer:
+    def __init__(self):
+        self.prompts = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kw):
+        self.prompts.append(kw["messages"][0]["content"])
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Veeam X [1]. AWS Y [2]."), finish_reason="stop")])
+
+
+@pytest.fixture
+def stubs(monkeypatch):
+    calls = []
+
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        calls.append((scope, top_n, k))
+        if scope == _V.scope:
+            return [_hit("c1", ["v1", "a1"]), _hit("shared", ["v1"])]
+        return [_hit("shared", ["v1"]), _hit("c2", ["a1"])]
+
+    async def _map(client, model, q, hit):
+        return gs.MapResult(community_id=hit.community_id, title=hit.title,
+                            relevance=None, key_points=["p"],
+                            fact_ids=list(hit.cited_fact_uuids))
+
+    class _Prov:
+        def __init__(self, driver):
+            pass
+
+        async def resolve_citations(self, uuids):
+            return {u: {"sources": _SRC[u]} for u in uuids if u in _SRC}
+
+    async def _texts(driver, group_id, uuids):
+        return {u: f"text {u}" for u in uuids}
+
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(gs, "map_report", _map)
+    monkeypatch.setattr(gs, "Provenance", _Prov)
+    monkeypatch.setattr(gs, "_fact_texts", _texts)
+    return calls
+
+
+async def test_each_facet_gets_its_own_shortlist(stubs):
+    await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1, k=10,
+                           group_id="g", settings=_S, facets=[_V, _A])
+    assert stubs == [(_V.scope, 3, 3), (_A.scope, 3, 3)]
+
+
+async def test_map_output_is_filtered_by_its_own_facet_and_communities_dedup(stubs):
+    r = _Reducer()
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A])
+    p = r.prompts[0]
+    # c1 (Veeam facet) keeps only its Veeam fact; "shared" is taken by Veeam first.
+    assert p.index("=== Veeam ===") < p.index("=== AWS Backup ===")
+    veeam_part, aws_part = p.split("=== AWS Backup ===")
+    assert "text v1" in veeam_part and "text a1" not in veeam_part
+    assert "text a1" in aws_part
+    assert [c["community_id"] for c in res["communities_used"]] == ["c1", "shared", "c2"]
+    assert "Address EVERY side" in p
+    assert res["degraded_facets"] == []
+
+
+async def test_a_facet_whose_shortlist_fails_is_reported(stubs, monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        if scope == _A.scope:
+            raise RuntimeError("rerank down")
+        return [_hit("c1", ["v1"])]
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    res = await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1,
+                                 k=10, group_id="g", settings=_S, facets=[_V, _A])
+    assert res["degraded_facets"] == ["AWS Backup"]
+    assert res["answer"].endswith("Could not check: AWS Backup.")
+
+
+async def test_single_facet_is_unchanged(stubs):
+    await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1, k=10,
+                           group_id="g", settings=_S, facets=[_V])
+    assert stubs == [(None, None, 10)]

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from openai import AsyncOpenAI
@@ -18,6 +19,7 @@ from graph_extract.usage import bounded_llm_client
 from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line, in_scope
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import Scope
+from answer_api.shape import Facet, could_not_check_note
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content,
 )
@@ -202,7 +204,12 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
                                 group_id: str, rating_boost: float = 0.1,
                                 settings: ExtractSettings | None = None,
                                 stats: RerankStats | None = None,
-                                scope: Scope | None = None) -> list[CommunityHit]:
+                                scope: Scope | None = None,
+                                top_n: int | None = None) -> list[CommunityHit]:
+    # `top_n` (spec 2026-10-12 §3.2) overrides BOTH cut sizes -- rerank_top_n on
+    # the reranked path and k on the unreranked one -- so a per-facet caller gets
+    # the same depth whichever path the deployment takes.
+    k_eff = top_n if top_n is not None else k
     query_vec = (await embedder.create_batch([q]))[0]
     async with driver.session() as s:
         r = await s.run(
@@ -222,11 +229,12 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
     # is set to, or it silently under-returns (finding: rerank_candidates < k) --
     # so only widen the pre-cut pool once we know it will actually be reranked.
     if settings is None or not rerank_configured(settings):
-        pool_k = max(k, settings.global_scope_candidates) if (scoped and settings) else k
+        pool_k = (max(k_eff, settings.global_scope_candidates) if (scoped and settings)
+                  else k_eff)
         candidates = _rank_hits(query_vec, rows, k=pool_k, rating_boost=rating_boost)
         if scope_ is not None:
             candidates = await _keep_in_scope(driver, group_id, candidates, scope_, settings)
-        return candidates[:k]
+        return candidates[:k_eff]
     pool_k = settings.rerank_candidates
     if scoped:
         pool_k = max(pool_k, settings.global_scope_candidates)
@@ -236,7 +244,8 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
     st = stats if stats is not None else RerankStats()
     docs = [f"{h.title}: {h.summary}" for h in candidates]
     scored = await rerank(q, docs, top_k=settings.rerank_top_n, settings=settings)
-    return _apply_rerank(candidates, scored, top_n=settings.rerank_top_n,
+    return _apply_rerank(candidates, scored,
+                         top_n=top_n if top_n is not None else settings.rerank_top_n,
                          floor=settings.rerank_score_floor, stats=st)
 
 
@@ -388,11 +397,50 @@ _REDUCE_PROMPT = (
 )
 
 
+# Comparison reducer (spec 2026-10-12 §3.2). Same rules as _REDUCE_PROMPT, except a
+# side with no findings MUST be named as uncovered: a comparison that silently drops
+# one side reads as complete.
+_REDUCE_FACETS_PROMPT = (
+    "Answer the QUESTION by synthesizing these community findings, which are grouped "
+    "under a heading for each side of the question. Each finding is shown as a marker "
+    "[N] followed by the fact it refers to.\n"
+    + ATTRIBUTION_RULES +
+    "Rules:\n"
+    "- The question has these sides: {labels}. Address EVERY side, in that order. If a "
+    "side shows \"(no findings)\", say in one sentence that the retrieved "
+    "documentation does not cover it, and do not guess.\n"
+    "- Cite every claim with the [N] marker of the fact it rests on. A sentence with "
+    "no marker is not allowed.\n"
+    "- Write each marker individually: [1] [2] [3]. Never write a range or span such "
+    "as [1]-[3]; only the markers you write out are cited.\n"
+    "- Use ONLY these findings. Do NOT use outside knowledge.\n"
+    "- Do NOT write any URL.\n"
+    "- Let the evidence set the length. Say what the findings support and then stop.\n"
+    "- If no side has findings that support an answer, reply exactly: "
+    "\"" + _REFUSAL + "\"\n\nQUESTION: {q}\n\nFINDINGS:\n{blocks}\n\nAnswer:"
+)
+
+
+def _render_facet_blocks(facet_results: list[tuple[str, list[MapResult]]],
+                         fact_to_marker: dict[str, int], texts: dict[str, str],
+                         sources: dict[str, list[dict]]) -> str:
+    parts = []
+    for label, results in facet_results:
+        blocks = _render_blocks(results, fact_to_marker, texts, sources)
+        parts.append(f"=== {label} ===\n" + ("\n\n".join(blocks) or "(no findings)"))
+    return "\n\n".join(parts)
+
+
 async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: str,
                         synth_client: AsyncOpenAI, synth_model: str, *, q: str,
                         level: int, k: int, group_id: str,
                         settings: ExtractSettings,
-                        scope: Scope | None = None) -> dict:
+                        scope: Scope | None = None,
+                        facets: Sequence[Facet] | None = None) -> dict:
+    if facets is not None and len(facets) >= 2:
+        return await _global_search_facets(
+            driver, embedder, map_client, map_model, synth_client, synth_model, q=q,
+            level=level, group_id=group_id, settings=settings, facets=facets)
     stats = RerankStats()
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
                                        group_id=group_id, settings=settings, stats=stats,
@@ -489,3 +537,85 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
     return {"query": q, "answer": answer, "citations": citations,
             "degraded": stats.degraded, "communities_used": communities_used,
             "applies_to": applies_to(citations)}
+
+
+async def _global_search_facets(driver, embedder, map_client, map_model, synth_client,
+                                synth_model, *, q, level, group_id, settings,
+                                facets: Sequence[Facet]) -> dict:
+    stats = RerankStats()
+    n = settings.global_facet_top_n
+    shortlists = await asyncio.gather(*[
+        shortlist_communities(driver, embedder, q, level=level, k=n, group_id=group_id,
+                              settings=settings, stats=stats, scope=f.scope, top_n=n)
+        for f in facets], return_exceptions=True)
+    degraded: list[str] = []
+    taken: set[str] = set()
+    per_facet: list[tuple[Facet, list[CommunityHit]]] = []
+    for f, hits in zip(facets, shortlists):
+        if isinstance(hits, BaseException):
+            logger.warning("global facet %r shortlist failed: %s", f.label, hits)
+            degraded.append(f.label)
+            continue
+        mine = [h for h in hits if h.community_id not in taken]
+        taken.update(h.community_id for h in mine)
+        per_facet.append((f, mine))
+    flat = [(f, h) for f, hs in per_facet for h in hs]
+    maps = await asyncio.gather(*[map_report(map_client, map_model, q, h)
+                                  for _, h in flat], return_exceptions=True)
+    by_facet: dict[str, list[MapResult]] = {f.label: [] for f, _ in per_facet}
+    for (f, _h), m in zip(flat, maps):
+        if isinstance(m, BaseException):
+            logger.warning("global map failed: %s", m)
+        elif m is not None:
+            by_facet[f.label].append(m)
+    all_ids = sorted({fid for ms in by_facet.values() for m in ms for fid in m.fact_ids})
+    resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
+    facet_results: list[tuple[str, list[MapResult]]] = []
+    for f, _ in per_facet:
+        kept = [replace(m, fact_ids=[
+            x for x in m.fact_ids
+            if _in_scope_ci(resolved.get(x, {}).get("sources", []), f.scope)])
+            for m in by_facet[f.label]]
+        facet_results.append((f.label, [m for m in kept if m.fact_ids]))
+    communities_used = [{"community_id": m.community_id, "title": m.title,
+                         "relevance": m.relevance}
+                        for _, ms in facet_results for m in ms]
+    note = could_not_check_note(degraded)
+    marker_map: dict[int, dict] = {}
+    fact_to_marker: dict[str, int] = {}
+    for _, ms in facet_results:
+        for m in ms:
+            for fid in m.fact_ids:
+                if fid not in fact_to_marker:
+                    fact_to_marker[fid] = len(fact_to_marker) + 1
+                    marker_map[fact_to_marker[fid]] = {"fact_uuid": fid}
+    texts = await _fact_texts(driver, group_id, list(fact_to_marker))
+    missing = [fid for fid in fact_to_marker if fid not in texts]
+    if missing:
+        # Same rule as the single-facet path: never drop a marker silently.
+        logger.warning(
+            "global facet reduce: %d of %d selected facts have no readable text and "
+            "were dropped from the findings: %s", len(missing), len(fact_to_marker),
+            missing)
+    marker_map = {k: v for k, v in marker_map.items() if v["fact_uuid"] in texts}
+    refusal = {"query": q, "answer": _REFUSAL + (" " + note if note else ""),
+               "citations": [], "communities_used": communities_used,
+               "degraded": stats.degraded, "applies_to": [], "degraded_facets": degraded}
+    if not marker_map:
+        return refusal
+    sources_by_fact = {fid: resolved.get(fid, {}).get("sources", []) for fid in fact_to_marker}
+    blocks = _render_facet_blocks(facet_results, fact_to_marker, texts, sources_by_fact)
+    raw = await _complete_or_none(
+        synth_client, synth_model,
+        _REDUCE_FACETS_PROMPT.format(labels="; ".join(lab for lab, _ in facet_results),
+                                     q=q, blocks=blocks), max_tokens=3000)
+    if raw is None:
+        return refusal
+    answer, cited = _finalize_answer(raw, marker_map)
+    citations = _build_citations(cited, marker_map, resolved)
+    answer = _with_disclaimer(answer, stats.degraded)
+    if note:
+        answer = f"{answer}\n\n{note}"
+    return {"query": q, "answer": answer, "citations": citations,
+            "degraded": stats.degraded, "communities_used": communities_used,
+            "applies_to": applies_to(citations), "degraded_facets": degraded}
