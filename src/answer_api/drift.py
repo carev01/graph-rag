@@ -5,12 +5,15 @@ Citations are graph traversal (design decision #2): the LLM emits only [N]
 markers / fact UUIDs, never a URL."""
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
 from answer_api.scope import Scope
 from answer_api.search import search_local
+from answer_api.shape import Facet, could_not_check_note, group_by_facet
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content, answer_local,
 )
@@ -29,6 +32,7 @@ class FollowUp:
     query: str
     community_id: str | None
     iteration: int = 1
+    scope: Scope | None = None   # the facet scope that runs it; None = request scope
 
 
 def _parse_followups(obj: dict, hit_ids: set[str], max_followups: int,
@@ -65,10 +69,36 @@ _PRIMER_PROMPT = (
 
 async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
                   max_followups, group_id, settings, stats: RerankStats | None = None,
-                  scope: Scope | None = None):
-    hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
-                                       group_id=group_id, settings=settings, stats=stats,
-                                       scope=scope)
+                  scope: Scope | None = None, facets: Sequence[Facet] | None = None,
+                  top_n: int | None = None):
+    """Shortlist communities and draft follow-ups. Returns `None` (no communities)
+    or `(preliminary, follow_ups, hits, degraded)`. With >= 2 facets each facet
+    shortlists in its own scope; a follow-up drawn from a facet's community runs in
+    that facet's scope, and a facet left without a follow-up gets the original
+    question scoped to it. A facet whose shortlist raised is listed in `degraded`
+    (never treated as having nothing to say) and gets no follow-up."""
+    facet_of: dict[str, Facet] = {}
+    degraded: list[str] = []
+    if facets is not None and len(facets) >= 2:
+        found = await asyncio.gather(*[
+            shortlist_communities(driver, embedder, q, level=level, k=k,
+                                  group_id=group_id, settings=settings, stats=stats,
+                                  scope=f.scope, top_n=top_n)
+            for f in facets], return_exceptions=True)
+        hits = []
+        for f, fh in zip(facets, found):
+            if isinstance(fh, BaseException):
+                logger.warning("drift facet %r primer failed: %s", f.label, fh)
+                degraded.append(f.label)
+                continue
+            for h in fh:
+                if h.community_id not in facet_of:
+                    facet_of[h.community_id] = f
+                    hits.append(h)
+    else:
+        hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
+                                           group_id=group_id, settings=settings,
+                                           stats=stats, scope=scope)
     if not hits:
         return None
     blocks = "\n".join(f'- {h.community_id} "{h.title}": {h.summary}' for h in hits)
@@ -83,12 +113,23 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
             break
     hit_ids = {h.community_id for h in hits}
     if obj is None:
-        return "", [FollowUp(query=q, community_id=None, iteration=1)], hits
-    preliminary = str(obj.get("preliminary_answer", "")).strip()
-    fus = _parse_followups(obj, hit_ids, max_followups, iteration=1)
-    if not fus:
         fus = [FollowUp(query=q, community_id=None, iteration=1)]
-    return preliminary, fus, hits
+        preliminary = ""
+    else:
+        preliminary = str(obj.get("preliminary_answer", "")).strip()
+        fus = _parse_followups(obj, hit_ids, max_followups, iteration=1) \
+            or [FollowUp(query=q, community_id=None, iteration=1)]
+    if facet_of:
+        fus = [FollowUp(query=fu.query, community_id=fu.community_id,
+                        iteration=fu.iteration,
+                        scope=facet_of[fu.community_id].scope
+                        if fu.community_id in facet_of else None) for fu in fus]
+        covered = {fu.scope for fu in fus if fu.scope is not None}
+        for f in facets or []:
+            if f.label not in degraded and f.scope not in covered:
+                fus.append(FollowUp(query=q, community_id=None, iteration=1,
+                                    scope=f.scope))
+    return preliminary, fus, hits, degraded
 
 
 async def _top_member_entity(driver, group_id, community_id) -> str | None:
@@ -147,6 +188,18 @@ _SYNTH_PROMPT = (
     "\nQUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
 )
 
+_SYNTH_FACETS_PROMPT = (
+    "Answer the QUESTION using ONLY the numbered FACTS, which are grouped under a "
+    "heading for each side of the question, refining the DRAFT where the facts support "
+    "it. The question has these sides: {labels}. Address EVERY side, in that order. If "
+    "a side shows \"(no facts retrieved)\", say in one sentence that the retrieved "
+    "documentation does not cover it, and do not guess. Cite every claim inline with "
+    "its [N] marker. Do NOT use outside knowledge. Do NOT write any URL. If no side has "
+    "facts that answer the question, reply exactly: \"{refusal}\"\n\n"
+    + ATTRIBUTION_RULES +
+    "\nQUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
+)
+
 
 def _dedup_facts(facts: list[dict]) -> list[dict]:
     seen: set[str] = set()
@@ -160,16 +213,40 @@ def _dedup_facts(facts: list[dict]) -> list[dict]:
 
 
 async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answer,
-                      facts) -> tuple[str, list[dict]]:
+                      facts, facets: Sequence[Facet] | None = None
+                      ) -> tuple[str, list[dict]]:
+    """With >= 2 `facets`, facts are grouped under one heading per facet (in facet
+    order; a facet with none shows "(no facts retrieved)", unmatched facts go under
+    "Other") and the prompt requires every side to be addressed. Callers pass only
+    facets whose retrieval worked -- a degraded facet must not get a heading."""
     facts = _dedup_facts(facts)
-    marker_map = {i: f for i, f in enumerate(facts, 1)}
-    facts_block = "\n".join(
-        fact_line(i, f["fact"], f.get("sources", [])) for i, f in marker_map.items())
-    raw = await _complete_or_none(
-        synth_client, synth_model,
-        _SYNTH_PROMPT.format(refusal=_REFUSAL, q=q, draft=preliminary_answer or "(none)",
-                             facts=facts_block),
-        max_tokens=3000)
+    if facets is not None and len(facets) >= 2:
+        groups = group_by_facet(facts, facets)
+        grouped_ids = {f["fact_uuid"] for _, xs in groups for f in xs}
+        ordered = [f for _, xs in groups for f in xs]
+        rest = [f for f in facts if f["fact_uuid"] not in grouped_ids]
+        marker_map = {i: f for i, f in enumerate(ordered + rest, 1)}
+        index = {f["fact_uuid"]: i for i, f in marker_map.items()}
+        parts = []
+        for facet, xs in groups:
+            lines = [fact_line(index[f["fact_uuid"]], f["fact"], f.get("sources", []))
+                     for f in xs] or ["(no facts retrieved)"]
+            parts.append(f"=== {facet.label} ===\n" + "\n".join(lines))
+        if rest:
+            parts.append("=== Other ===\n" + "\n".join(
+                fact_line(index[f["fact_uuid"]], f["fact"], f.get("sources", []))
+                for f in rest))
+        prompt = _SYNTH_FACETS_PROMPT.format(
+            labels="; ".join(f.label for f in facets), refusal=_REFUSAL, q=q,
+            draft=preliminary_answer or "(none)", facts="\n\n".join(parts))
+    else:
+        marker_map = {i: f for i, f in enumerate(facts, 1)}
+        facts_block = "\n".join(
+            fact_line(i, f["fact"], f.get("sources", [])) for i, f in marker_map.items())
+        prompt = _SYNTH_PROMPT.format(refusal=_REFUSAL, q=q,
+                                      draft=preliminary_answer or "(none)",
+                                      facts=facts_block)
+    raw = await _complete_or_none(synth_client, synth_model, prompt, max_tokens=3000)
     if raw is None:
         return _REFUSAL, []
     answer, cited = _finalize_answer(raw, marker_map)
@@ -181,57 +258,93 @@ async def _synthesize(synth_client, synth_model, driver, *, q, preliminary_answe
 
 async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                        q, level, iterations, primer_k, max_followups, followup_k,
-                       group_id, settings, scope: Scope | None = None) -> dict:
+                       group_id, settings, scope: Scope | None = None,
+                       facets: Sequence[Facet] | None = None) -> dict:
+    """With >= 2 `facets` the primer shortlists per facet and every follow-up runs
+    in its facet's scope (see `_primer`). A facet is reported in `degraded_facets`
+    -- never rendered as having no facts -- when its primer shortlist raised or
+    when every follow-up that ran in its scope raised; the "Could not check" note
+    is appended to the answer on every return path. Fewer than 2 facets: unchanged."""
+    multi = facets is not None and len(facets) >= 2
     rounds = max(1, min(iterations, 2))
     stats = RerankStats()
     primed = await _primer(embedder, synth_client, synth_model, driver, q=q,
                            level=level, k=primer_k, max_followups=max_followups,
                            group_id=group_id, settings=settings, stats=stats,
-                           scope=scope)
+                           scope=scope, facets=facets,
+                           top_n=settings.global_facet_top_n if multi else None)
     if primed is None:
         res = await answer_local(graphiti, driver, synth_client, synth_model,
-                                 q=q, group_id=group_id, scope=scope)
+                                 q=q, group_id=group_id, scope=scope, facets=facets)
         res["degraded"] = "no-primer-communities"
         return res
-    preliminary, followups, hits = primed
+    preliminary, followups, hits, degraded = primed
     hit_ids = {h.community_id for h in hits}
     facts: list[dict] = []
     executed: list[FollowUp] = []
-    for fu in followups:
+    tried: set[Scope] = set()       # facet scopes that ran at least one follow-up
+    worked: set[Scope] = set()      # facet scopes with at least one follow-up that returned
+
+    async def _execute(fu: FollowUp) -> None:
         try:
-            facts.extend(await _run_followup(graphiti, driver, fu, k=followup_k,
-                                             group_id=group_id, scope=scope))
+            facts.extend(await _run_followup(
+                graphiti, driver, fu, k=followup_k, group_id=group_id,
+                scope=fu.scope if fu.scope is not None else scope))
+            if fu.scope is not None:
+                worked.add(fu.scope)
         except Exception:
             logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
+        if fu.scope is not None:
+            tried.add(fu.scope)
         executed.append(fu)
+
+    for fu in followups:
+        await _execute(fu)
     round1_facts = _dedup_facts(facts)
     if rounds == 2 and round1_facts:
         refined = await _refine_followups(synth_client, synth_model, q=q,
                                           facts=round1_facts,
                                           max_followups=max_followups, hit_ids=hit_ids)
+        # A refined follow-up drawn from a facet's community stays in that facet.
+        scope_of = {fu.community_id: fu.scope for fu in followups
+                    if fu.community_id is not None and fu.scope is not None}
         for fu in refined:
-            try:
-                facts.extend(await _run_followup(graphiti, driver, fu, k=followup_k,
-                                                 group_id=group_id, scope=scope))
-            except Exception:
-                logger.warning("drift follow-up failed: %s", fu.query, exc_info=True)
-            executed.append(fu)
+            if fu.community_id in scope_of:
+                fu.scope = scope_of[fu.community_id]
+            await _execute(fu)
+    live_facets: list[Facet] | None = None
+    if multi:
+        assert facets is not None
+        for f in facets:
+            if f.label not in degraded and f.scope in tried and f.scope not in worked:
+                logger.warning("drift facet %r: every follow-up failed", f.label)
+                degraded.append(f.label)
+        degraded = [f.label for f in facets if f.label in degraded]
+        live_facets = [f for f in facets if f.label not in degraded]
+    note = could_not_check_note(degraded)
+    extra: dict = {"degraded_facets": degraded} if multi else {}
     follow_ups_meta = [{"query": fu.query, "community_id": fu.community_id,
                         "iteration": fu.iteration} for fu in executed]
     communities_used = [{"community_id": h.community_id, "title": h.title} for h in hits]
     deduped = _dedup_facts(facts)
     if not deduped:
-        return {"query": q, "answer": _REFUSAL, "citations": [],
+        return {"query": q, "answer": _REFUSAL + (" " + note if note else ""),
+                "citations": [],
                 "follow_ups": follow_ups_meta, "communities_used": communities_used,
-                "degraded": stats.degraded, "applies_to": []}
+                "degraded": stats.degraded, "applies_to": [], **extra}
     answer, citations = await _synthesize(synth_client, synth_model, driver, q=q,
-                                          preliminary_answer=preliminary, facts=deduped)
+                                          preliminary_answer=preliminary, facts=deduped,
+                                          facets=live_facets)
     # Guard against _with_disclaimer's own refusal check, which compares against
     # global_search's _REFUSAL string -- textually distinct from ours. Checking
     # against OUR _REFUSAL here (not global_search's) is what keeps a DRIFT
     # refusal from silently picking up a disclaimer.
     if answer != _REFUSAL:
         answer = _with_disclaimer(answer, stats.degraded)
+        if note:
+            answer = f"{answer}\n\n{note}"
+    elif note:
+        answer = f"{answer} {note}"
     return {"query": q, "answer": answer, "citations": citations,
             "follow_ups": follow_ups_meta, "communities_used": communities_used,
-            "degraded": stats.degraded, "applies_to": applies_to(citations)}
+            "degraded": stats.degraded, "applies_to": applies_to(citations), **extra}

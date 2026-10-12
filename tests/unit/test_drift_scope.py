@@ -142,7 +142,7 @@ async def test_drift_search_no_primer_fallback_passes_scope_to_answer_local(monk
         return None
 
     async def fake_answer_local(graphiti, driver, synth_client, synth_model, *,
-                                q, group_id, scope=None, k=15):
+                                q, group_id, scope=None, k=15, facets=None):
         captured["scope"] = scope
         return {"query": q, "answer": "ans", "citations": [], "retrieved": 0,
                 "cited": 0, "applies_to": []}
@@ -193,7 +193,7 @@ async def test_synthesize_facts_without_sources_render_unlabelled(monkeypatch):
 
 async def test_drift_search_zero_facts_refusal_has_empty_applies_to(monkeypatch):
     async def fake_primer(*a, **k):
-        return "d", [FollowUp("q", "c1", 1)], [_hit()]
+        return "d", [FollowUp("q", "c1", 1)], [_hit()], []
 
     async def fake_run_followup(*a, **k):
         return []
@@ -209,7 +209,7 @@ async def test_drift_search_zero_facts_refusal_has_empty_applies_to(monkeypatch)
 
 async def test_drift_search_success_returns_applies_to_from_citations(monkeypatch):
     async def fake_primer(*a, **k):
-        return "d", [FollowUp("q", "c1", 1)], [_hit()]
+        return "d", [FollowUp("q", "c1", 1)], [_hit()], []
 
     fact = {"fact": "AWS Backup supports S3", "fact_uuid": "f1",
            "sources": [{"vendor": "Veeam", "product": "VBR", "article_id": "a1",

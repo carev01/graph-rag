@@ -52,7 +52,8 @@ async def test_primer_shortlists_and_budgets(extract_driver):
                         q="retention", level=1, k=5, max_followups=1, group_id=GROUP_ID,
                         settings=_S)
     assert out is not None
-    preliminary, fus, hits = out
+    preliminary, fus, hits, degraded = out
+    assert degraded == []
     assert preliminary == "draft"
     assert [f.query for f in fus] == ["how retained"]     # budgeted to 1
     assert fus[0].community_id == "c1"
@@ -76,7 +77,8 @@ async def test_primer_bad_json_falls_back_to_single_query(extract_driver):
                         extract_driver, q="original q", level=1, k=5, max_followups=4,
                         group_id=GROUP_ID, settings=_S)
     assert out is not None
-    preliminary, fus, hits = out
+    preliminary, fus, hits, degraded = out
+    assert degraded == []
     assert preliminary == ""                              # unparseable -> empty draft
     assert [(f.query, f.community_id) for f in fus] == [("original q", None)]   # single fallback
 
@@ -93,7 +95,8 @@ async def test_primer_zero_valid_followups_falls_back_keeping_preliminary(extrac
                         q="original q", level=1, k=5, max_followups=4, group_id=GROUP_ID,
                         settings=_S)
     assert out is not None
-    preliminary, fus, hits = out
+    preliminary, fus, hits, degraded = out
+    assert degraded == []
     assert preliminary == "kept draft"                    # parsed draft kept, not blanked
     assert [(f.query, f.community_id) for f in fus] == [("original q", None)]   # single fallback
 
