@@ -2404,3 +2404,47 @@ comparison sentence cited both vendors together (judge: 1 misattribution). User 
 6. Tests: `products_of`; enumeration facets carry products, comparison facets do not;
    `facet_queries` renders products in the SIDES list and keeps label keys; the new prompt
    rules are present; golden schema still passes.
+
+### Task 17: Scan candidates in every scannable pool; named-subject "vendors" questions are single (run 8 fixes)
+
+Run 8 (paid, $0.20): enumeration 2/3 — restore verification documented Microsoft and Veeam but
+not AWS; the probe "Which vendors does Veeam integrate with?" (faithfulness 0) was classified as
+an enumeration and answered with each vendor's own integrations.
+
+Measured (free): for "How does AWS Backup verify that backups can actually be restored?" the
+pooled AWS search returns no "Restore testing" fact at k=8, 15 or 25 — the candidates come from a
+corpus-wide hybrid search post-filtered to AWS, and those facts never enter it; the scope-internal
+scan (cosine over AWS's own facts, then rerank) ranks "Restore testing runs restore jobs …" first.
+
+**Files:** `src/answer_api/search.py`, `src/answer_api/shape.py`, `src/answer_api/scope.py`
+(only if a helper is needed), tests; spec §2 gets one paragraph (below).
+
+1. `search_local` pooled path (rerank_pool > 0 and a reranker configured): when the scope is
+   scannable (its episode count ≤ `local_scoped_scan_max_episodes`), ALWAYS add the scoped
+   scan's cosine candidates (`_scoped_scan(..., k=settings.local_scoped_scan_candidates,
+   rerank=False)`, excluding uuids already in the pool) to the pool before the single rerank —
+   not only when the post-filter came up short. Scopes above the cap skip the scan (as today).
+   Non-pooled and unscoped paths unchanged. A scan failure keeps the post-filter pool (warning).
+   Tests: a pooled search in a scannable scope merges scan candidates even when the post-filter
+   filled the pool, then reranks once; an over-cap scope does not scan; non-pooled unchanged.
+2. Named-subject cross-vendor questions → `single`, scoped to the named entity. In
+   `classify_shape`, before the enumeration branch: if `_CROSS_VENDOR` matches AND the question
+   matches `\b(which|what)\s+(\w+\s+){0,2}vendors?\s+(does|do|did|can|could|is|are|was|were|has|have|will|would)\s+<mention>`
+   where `<mention>` is a mention found by `resolver.detect_mentions(q)` starting right at that
+   position (case-insensitive), return `QuestionShape("single", (Facet(label, mention_scope),))`
+   with `mention_scope.source == "detected"`. Otherwise behaviour is unchanged. Implement the
+   check against the mention spans (extend `detect_mentions` to also return match start offsets,
+   or add a sibling that does — keep `detect_mentions`' existing return shape for callers).
+   The app/eval must then retrieve with that scope: since `resolver.resolve(q)` returns an empty
+   Scope for cross-vendor wording, the router/app must use the facet's scope for a single shape
+   whose facet scope is non-empty while the request scope is empty — wire this in `app.py`
+   `/answer` (and `eval_router._score_one`): `scope = shape.facets[0].scope` in that case.
+   Tests: "Which vendors does Veeam integrate with?" → single, Veeam-scoped; "What vendors can
+   Veeam back up?" → single; "Which vendors integrate with Veeam?" → enumeration; "Which vendors
+   can protect Azure Backup vaults?" → enumeration; "Which backup vendors support immutable
+   backups?" → enumeration; an explicit scope still wins; scope=none still single unscoped.
+3. Spec §2 (shape table) — add after the enumeration row's rule: "A cross-vendor question whose
+   grammatical subject is a named vendor or product (\"Which vendors does Veeam integrate
+   with?\") is **single**, scoped to that entity; a named entity in any other position (object,
+   workload) leaves the question an enumeration." Edit
+   `docs/superpowers/specs/2026-10-12-facet-balanced-answers-design.md` accordingly.
