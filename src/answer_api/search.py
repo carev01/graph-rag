@@ -170,8 +170,10 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
     reranker: gather up to max(k, rerank_pool) edges the same way (adaptive limits
     and scan fallback aimed at the pool size) and return the cross-encoder's best k
     of them -- the hybrid order alone ranked large scopes poorly (gate run 2,
-    2026-10-13). A failed rerank returns the original top k. 0 (the default) leaves
-    the search exactly as it was."""
+    2026-10-13). A scoped pool within `scan_max_episodes` also always gets the
+    scope's own top `local_scoped_scan_candidates` facts by cosine before that
+    rerank (task 17). A failed rerank returns the original top k. 0 (the default)
+    leaves the search exactly as it was."""
     scoped = scope is not None and not scope.is_empty()
     pooled = rerank_pool > 0 and settings is not None and rerank_configured(settings)
     target = max(k, rerank_pool) if pooled else k
@@ -196,28 +198,39 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
         if len(edges) >= target:
             break
     edges = edges[:target]
-    if scoped and len(edges) < target:
+    if scoped and (pooled or len(edges) < target):
         # The corpus-wide top-N can hold none of a small scope's facts next to a
         # huge one (Cohesity's 29 DataLock/FortKnox facts vs Veeam's 20k articles,
         # 2026-10-12): rank the scope's own facts and append them after the
-        # post-filter's. A failure keeps what the post-filter found -- never raised,
-        # which would empty the facet.
+        # post-filter's. A pooled search ALWAYS adds the scope's own cosine
+        # candidates (a scope over the episode cap returns none), even when the
+        # post-filter filled the pool: AWS's "Restore testing" facts never entered
+        # the corpus-wide search at any k, yet the scope scan ranks them first (run
+        # 8, task 17); the pool's single rerank below orders the merged candidates.
+        # A failure keeps what the post-filter found -- never raised, which would
+        # empty the facet.
         assert scope is not None
         seen = {e.uuid for e in edges}
+        if pooled:
+            assert settings is not None
+            scan_k = settings.local_scoped_scan_candidates
+            cap = len(edges) + scan_k
+        else:
+            scan_k = target - len(edges)
+            cap = target
         try:
             extra = await _scoped_scan(
-                graphiti, driver, q=q, scope=scope, k=target - len(edges),
+                graphiti, driver, q=q, scope=scope, k=scan_k,
                 group_id=group_id,
                 exclude=seen, include_invalid=include_invalid,
                 max_episodes=scan_max_episodes, settings=settings,
-                # The pool's single rerank below orders the merged candidates.
                 rerank=not pooled)
         except Exception as exc:
             logger.warning("scoped scan failed for scope %s: %s; keeping %d "
                            "post-filter results", scope.as_dict(), exc, len(edges))
             extra = []
         for e in extra:
-            if len(edges) >= target:
+            if len(edges) >= cap:
                 break
             if e.uuid not in seen:
                 seen.add(e.uuid)

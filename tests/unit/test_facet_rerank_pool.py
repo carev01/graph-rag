@@ -105,7 +105,11 @@ async def test_scoped_pool_raises_the_adaptive_target_to_the_pool(monkeypatch):
     async def _rerank(query, documents, *, top_k, settings):
         return [(i, 1.0) for i in reversed(range(len(documents)))][:top_k]
 
+    async def _scan(*a, **kw):
+        return []
+
     monkeypatch.setattr(search_mod, "rerank", _rerank)
+    monkeypatch.setattr(search_mod, "_scoped_scan", _scan)
     g = _Graph(500)
     res = await search_mod.search_local(g, None, q="q", k=2, group_id="g",
                                         scope=_V.scope, rerank_pool=40,
@@ -173,8 +177,9 @@ async def test_pool_scan_fallback_targets_the_pool(monkeypatch):
     monkeypatch.setattr(search_mod, "rerank", _rerank)
     res = await search_mod.search_local(_Graph(2), None, q="q", k=3, group_id="g",
                                         scope=_V.scope, rerank_pool=10,
-                                        settings=_settings(**_RERANK))
-    assert scans == [8]                    # pool 10 minus the 2 post-filter edges
+                                        settings=_settings(**_RERANK,
+                                                           local_scoped_scan_candidates=8))
+    assert scans == [8]                    # local_scoped_scan_candidates (task 17)
     assert _uuids(res) == ["s7", "e0", "e1"]
 
 
@@ -216,9 +221,9 @@ async def test_a_pooled_search_that_falls_back_to_the_scan_reranks_once(monkeypa
     res = await search_mod.search_local(_ScanGraph(2), driver, q="q", k=3, group_id="g",
                                         scope=_V.scope, rerank_pool=10,
                                         settings=_settings(**_RERANK))
-    assert calls == [(10, 3)]          # the pool's single rerank over 2 + 8 merged
-    assert driver.ks == [8]            # cosine top-N, no 200-candidate fetch
-    assert _uuids(res) == ["s7", "e0", "e1"]
+    assert calls == [(202, 3)]         # the pool's single rerank over 2 + 200 merged
+    assert driver.ks == [200]          # cosine top local_scoped_scan_candidates, once
+    assert _uuids(res) == ["s199", "e0", "e1"]
 
 
 async def test_a_non_pooled_scoped_search_keeps_the_scans_rerank(monkeypatch):
@@ -364,3 +369,115 @@ async def test_eval_evidence_passes_the_pool_for_facet_shapes(monkeypatch, kind,
     await er._evidence(None, None, None, _settings(local_facet_rerank_pool=19), "q",
                        QuestionShape(kind, facets))
     assert calls and all(c.get("rerank_pool") == pool for c in calls)
+
+
+# --- task 17: a scannable scope's own candidates always join the pool ---------------
+
+class _CapDriver(_ScanDriver):
+    """The scan query reporting `n` scope episodes (n > max_episodes = over the cap)."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.n = n
+
+    async def execute_query(self, query, **kw):
+        if self.n > kw["max_episodes"]:
+            self.ks.append(kw["k"])
+            return [{"n": self.n, "uuid": None, "fact": None, "episodes": None,
+                     "valid_at": None, "invalid_at": None}], None, None
+        return await super().execute_query(query, **kw)
+
+
+async def test_a_pooled_scannable_scope_merges_scan_candidates_into_a_full_pool(
+        monkeypatch):
+    # Run 8: AWS's "Restore testing" facts never entered the corpus-wide hybrid
+    # search, so the post-filter filled the pool without them; the scope's own
+    # cosine candidates must join the pool before the single rerank.
+    calls = []
+
+    async def _rerank(query, documents, *, top_k, settings):
+        calls.append((list(documents), top_k))
+        return [(documents.index("fact s3"), 1.0)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    driver = _CapDriver(n=10)
+    g = _ScanGraph(100)                    # the post-filter alone fills the pool
+    res = await search_mod.search_local(
+        g, driver, q="q", k=2, group_id="g", scope=_A.scope, rerank_pool=10,
+        settings=_settings(**_RERANK, local_scoped_scan_candidates=5))
+    assert driver.ks == [5]                # scanned although the pool was full
+    assert len(calls) == 1                 # one rerank over the merged pool
+    docs, top_k = calls[0]
+    assert top_k == 2
+    assert docs == [f"fact e{i}" for i in range(10)] + [f"fact s{i}" for i in range(5)]
+    assert _uuids(res) == ["s3", "e0"]
+
+
+async def test_pooled_scan_excludes_uuids_already_in_the_pool(monkeypatch):
+    seen = {}
+
+    async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
+                    include_invalid=False, max_episodes=6000, settings=None,
+                    rerank=True):
+        seen.update(k=k, exclude=set(exclude), rerank=rerank)
+        return [_edge("e1"), _edge("s0")]
+
+    async def _rerank(query, documents, *, top_k, settings):
+        seen["docs"] = list(documents)
+        return []
+
+    monkeypatch.setattr(search_mod, "_scoped_scan", _scan)
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    await search_mod.search_local(_Graph(100), None, q="q", k=2, group_id="g",
+                                  scope=_A.scope, rerank_pool=3,
+                                  settings=_settings(**_RERANK))
+    assert seen["k"] == 200 and seen["rerank"] is False
+    assert seen["exclude"] == {"e0", "e1", "e2"}
+    assert seen["docs"] == ["fact e0", "fact e1", "fact e2", "fact s0"]
+
+
+async def test_a_pooled_over_cap_scope_does_not_scan(monkeypatch):
+    calls = []
+
+    async def _rerank(query, documents, *, top_k, settings):
+        calls.append(len(documents))
+        return [(0, 1.0)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    driver = _CapDriver(n=7000)
+    res = await search_mod.search_local(
+        _ScanGraph(100), driver, q="q", k=2, group_id="g", scope=_V.scope,
+        rerank_pool=10, scan_max_episodes=6000, settings=_settings(**_RERANK))
+    assert calls == [10]                   # the post-filter pool only
+    assert _uuids(res) == ["e0", "e1"]
+
+
+async def test_a_pooled_scan_failure_keeps_the_post_filter_pool(monkeypatch, caplog):
+    async def _boom(*a, **kw):
+        raise RuntimeError("neo4j down")
+
+    calls = []
+
+    async def _rerank(query, documents, *, top_k, settings):
+        calls.append(len(documents))
+        return [(4, 1.0), (1, 0.5)]
+
+    monkeypatch.setattr(search_mod, "_scoped_scan", _boom)
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    with caplog.at_level(logging.WARNING, logger="answer_api.search"):
+        res = await search_mod.search_local(_Graph(100), None, q="q", k=2, group_id="g",
+                                            scope=_A.scope, rerank_pool=10,
+                                            settings=_settings(**_RERANK))
+    assert "scoped scan failed" in caplog.text
+    assert calls == [10]
+    assert _uuids(res) == ["e4", "e1"]
+
+
+async def test_a_non_pooled_full_scoped_search_still_does_not_scan(monkeypatch):
+    async def _scan(*a, **kw):
+        raise AssertionError("must not scan")
+
+    monkeypatch.setattr(search_mod, "_scoped_scan", _scan)
+    res = await search_mod.search_local(_Graph(100), None, q="q", k=3, group_id="g",
+                                        scope=_A.scope, settings=_settings(**_RERANK))
+    assert _uuids(res) == ["e0", "e1", "e2"]
