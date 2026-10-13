@@ -632,48 +632,53 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
     all_ids = sorted({fid for m in mapped.values() for fid in m.fact_ids}
                      | {x for ids in own_facts for x in ids})
     resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
-    # A failure never reads as absence: a facet whose shortlist failed, or whose
-    # communities were shortlisted but none mapped usably, is left out of the
-    # prompt and reported as "could not check". A facet whose maps succeeded but
-    # whose facts all fell outside its scope, and whose local supplement found
-    # nothing, is genuine absence ("(no findings)"). A failed supplement on a facet
-    # with no community findings is a failure too, never absence.
-    degraded: list[str] = []
+    # A failure never reads as absence. Per facet, the community side FAILED when its
+    # shortlist raised or none of its shortlisted communities mapped usably; such a
+    # facet answers from its in-scope local facts alone when it has any, and is
+    # "could not check" (left out of the prompt) only when its supplement also
+    # returned nothing, raised, or was skipped. A failed supplement degrades a facet
+    # only when it has no community findings. A facet with community findings or
+    # local facts none of which has readable text is "could not check" too (below).
+    # Genuine absence ("(no findings)") is a facet whose community side succeeded
+    # with no in-scope fact and whose supplement succeeded with no in-scope fact.
+    degraded_set: set[str] = set()
     facet_results: list[tuple[str, list[MapResult], list[str]]] = []
     for f, fq, hits, sup, own in zip(facets, fqs, shortlists, supplements, own_facts):
-        if isinstance(hits, BaseException):
-            logger.warning("global facet %r shortlist failed: %s", f.label, hits)
-            degraded.append(f.label)
-            continue
-        mine = [mapped[(h.community_id, fq)] for h in hits
-                if (h.community_id, fq) in mapped]
-        if hits and not mine:
-            logger.warning("global facet %r: none of its %d communities mapped usably",
-                           f.label, len(hits))
-            degraded.append(f.label)
-            continue
-        kept = [replace(m, fact_ids=[
-            x for x in m.fact_ids
-            if _in_scope_ci(resolved.get(x, {}).get("sources", []), f.scope)])
-            for m in mine]
-        kept = [m for m in kept if m.fact_ids]
         if isinstance(sup, Exception):
             logger.warning("global facet %r local supplement failed: %s", f.label, sup)
-            if not kept:
-                degraded.append(f.label)
+        # Local facts are kept only with resolved provenance inside the facet scope.
+        own = [x for x in own if resolved.get(x, {}).get("sources")
+               and _in_scope_ci(resolved[x]["sources"], f.scope)]
+        community_failure: str | None = None
+        kept: list[MapResult] = []
+        if isinstance(hits, BaseException):
+            community_failure = f"shortlist failed: {hits}"
+        else:
+            mine = [mapped[(h.community_id, fq)] for h in hits
+                    if (h.community_id, fq) in mapped]
+            if hits and not mine:
+                community_failure = (f"none of its {len(hits)} communities mapped "
+                                     "usably")
+            kept = [replace(m, fact_ids=[
+                x for x in m.fact_ids
+                if _in_scope_ci(resolved.get(x, {}).get("sources", []), f.scope)])
+                for m in mine]
+            kept = [m for m in kept if m.fact_ids]
+        if community_failure is not None:
+            if own:
+                logger.warning("global facet %r %s; answering from its %d local facts",
+                               f.label, community_failure, len(own))
+            else:
+                logger.warning("global facet %r %s, and its local supplement returned "
+                               "nothing", f.label, community_failure)
+                degraded_set.add(f.label)
                 continue
+        elif isinstance(sup, Exception) and not kept:
+            degraded_set.add(f.label)
+            continue
         community_facts = {x for m in kept for x in m.fact_ids}
         facet_results.append((f.label, kept,
                               [x for x in own if x not in community_facts]))
-    seen_cids: set[str] = set()
-    communities_used: list[dict] = []
-    for _, ms, _own in facet_results:
-        for m in ms:
-            if m.community_id not in seen_cids:
-                seen_cids.add(m.community_id)
-                communities_used.append({"community_id": m.community_id,
-                                         "title": m.title, "relevance": m.relevance})
-    note = could_not_check_note(degraded)
     marker_map: dict[int, dict] = {}
     fact_to_marker: dict[str, int] = {}
     for _, ms, own in facet_results:
@@ -694,6 +699,27 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
             "were dropped from the findings: %s", len(missing), len(fact_to_marker),
             missing)
     marker_map = {k: v for k, v in marker_map.items() if v["fact_uuid"] in texts}
+    # Findings existed but none can be shown: a failure, never "(no findings)".
+    renderable = []
+    for label, ms, own in facet_results:
+        ids = [x for m in ms for x in m.fact_ids] + own
+        if ids and not any(x in texts for x in ids):
+            logger.warning("global facet %r: none of its %d facts has readable text",
+                           label, len(ids))
+            degraded_set.add(label)
+        else:
+            renderable.append((label, ms, own))
+    facet_results = renderable
+    degraded = [f.label for f in facets if f.label in degraded_set]
+    seen_cids: set[str] = set()
+    communities_used: list[dict] = []
+    for _, ms, _own in facet_results:
+        for m in ms:
+            if m.community_id not in seen_cids:
+                seen_cids.add(m.community_id)
+                communities_used.append({"community_id": m.community_id,
+                                         "title": m.title, "relevance": m.relevance})
+    note = could_not_check_note(degraded)
     refusal = {"query": q, "answer": _REFUSAL + (" " + note if note else ""),
                "citations": [], "communities_used": communities_used,
                "degraded": stats.degraded, "applies_to": [], "degraded_facets": degraded}

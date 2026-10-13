@@ -215,7 +215,10 @@ async def test_each_facet_shortlists_and_maps_with_its_own_question(stubs, monke
 _G = object()   # a graphiti handle; the stubbed search_local never touches it
 _LSRC = {"lv": [{"vendor": "Veeam", "product": "Veeam Backup & Replication",
                  "article_id": "lva"}],
-         "la": [{"vendor": "AWS", "product": "AWS Backup", "article_id": "laa"}]}
+         "la": [{"vendor": "AWS", "product": "AWS Backup", "article_id": "laa"}],
+         "both": [{"vendor": "Veeam", "product": "Veeam Backup & Replication",
+                   "article_id": "b1"},
+                  {"vendor": "AWS", "product": "AWS Backup", "article_id": "b2"}]}
 
 
 def _local_fact(uuid):
@@ -310,21 +313,22 @@ async def test_supplement_renders_after_community_blocks_and_cites_via_markers(s
 
 
 async def test_a_shared_fact_keeps_one_marker(stubs, local):
-    # AWS's local search returns a1 (already a community fact under AWS) and v1
-    # (already numbered under Veeam): neither gets a second marker.
-    local.facts[_A.scope] = ["a1", "v1", "la"]
+    # "both" is documented by Veeam AND AWS: both facets' local searches return it
+    # and it keeps one marker under both headings. AWS's search also returns a1 (a
+    # community fact under AWS already): not repeated in AWS's own-facts block.
+    local.facts[_V.scope] = ["lv", "both"]
+    local.facts[_A.scope] = ["a1", "both", "la"]
     r = _Reducer()
     await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
                            group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
     p = r.prompts[0]
-    _, aws_part = p.split("=== AWS Backup ===")
+    veeam_part, aws_part = p.split("=== AWS Backup ===")
     lines = p.split("FINDINGS:\n", 1)[1].splitlines()
-    a1_lines = [ln for ln in lines if ln.endswith(" a1")]
-    assert a1_lines == ["[3] (AWS · AWS Backup) local a1"]   # not repeated under AWS
-    v1_lines = [ln for ln in lines if ln.endswith(" v1")]
-    assert len(v1_lines) >= 2 and all(ln.startswith("[1] ") for ln in v1_lines)
-    assert "[1] (Veeam · Veeam ONE) local v1" in aws_part   # v1 keeps marker 1
-    assert "[4] (AWS · AWS Backup) local la" in aws_part
+    assert [ln for ln in lines if ln.endswith(" a1")] == ["[4] (AWS · AWS Backup) local a1"]
+    both = [ln for ln in lines if ln.endswith(" both")]
+    assert len(both) == 2 and all(ln.startswith("[3] ") for ln in both)
+    assert "local both" in veeam_part and "local both" in aws_part
+    assert "v1" not in aws_part   # a Veeam-only fact never renders under AWS
 
 
 async def test_a_facet_with_no_communities_uses_its_local_facts(stubs, local,
@@ -403,18 +407,107 @@ async def test_supplement_failure_without_communities_degrades_never_absent(
     assert res["answer"].endswith("Could not check: AWS Backup.")
 
 
-async def test_a_degraded_facet_gets_no_supplement_block(stubs, local, monkeypatch):
+def _failing_community(kind):
+    """Shortlist/map stubs where the AWS facet's community side fails."""
     async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
                          stats=None, scope=None, top_n=None):
         if scope == _A.scope:
-            raise RuntimeError("rerank down")
+            if kind == "shortlist":
+                raise RuntimeError("rerank down")
+            return [_hit("c2", ["a1"])]
         return [_hit("c1", ["v1"])]
+
+    async def _map(client, model, q, hit):
+        if hit.community_id == "c2":
+            raise RuntimeError("map down")
+        return gs.MapResult(community_id=hit.community_id, title=hit.title,
+                            relevance=None, key_points=["p"],
+                            fact_ids=list(hit.cited_fact_uuids))
+    return _shortlist, _map
+
+
+@pytest.mark.parametrize("kind", ["shortlist", "maps"])
+async def test_a_failed_community_side_answers_from_local_facts(stubs, local,
+                                                                monkeypatch, caplog,
+                                                                kind):
+    _shortlist, _map = _failing_community(kind)
     monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(gs, "map_report", _map)
+    r = _Reducer()
+    with caplog.at_level("WARNING"):
+        res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1,
+                                     k=10, group_id="g", settings=_S, facets=[_V, _A],
+                                     graphiti=_G)
+    _, aws_part = r.prompts[0].split("=== AWS Backup ===")
+    assert "COMMUNITY" not in aws_part
+    assert "FACTS FROM AWS Backup DOCUMENTATION:\n[3] (AWS · AWS Backup) local la" in aws_part
+    assert res["degraded_facets"] == []
+    assert "Could not check" not in res["answer"]
+    assert [c["community_id"] for c in res["communities_used"]] == ["c1"]
+    assert any("AWS Backup" in rec.getMessage() and "local" in rec.getMessage()
+               for rec in caplog.records)
+
+
+@pytest.mark.parametrize("kind", ["shortlist", "maps"])
+@pytest.mark.parametrize("supplement", ["empty", "raise", "skipped"])
+async def test_a_failed_community_side_without_local_facts_degrades(stubs, local,
+                                                                    monkeypatch, kind,
+                                                                    supplement):
+    _shortlist, _map = _failing_community(kind)
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(gs, "map_report", _map)
+    if supplement == "empty":
+        local.facts[_A.scope] = []
+    elif supplement == "raise":
+        local.raise_for = {_A.scope}
+    r = _Reducer()
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A],
+                                 graphiti=None if supplement == "skipped" else _G)
+    assert "=== AWS Backup ===" not in r.prompts[0]
+    assert res["degraded_facets"] == ["AWS Backup"]
+    assert res["answer"].endswith("Could not check: AWS Backup.")
+
+
+async def test_out_of_scope_and_unresolved_local_facts_are_dropped(stubs, local):
+    # AWS's local search returns a Veeam fact (v1) and a fact with no provenance.
+    local.facts[_A.scope] = ["v1", "nosrc", "la"]
+    r = _Reducer()
+    await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                           group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    _, aws_part = r.prompts[0].split("=== AWS Backup ===")
+    assert "v1" not in aws_part and "nosrc" not in r.prompts[0]
+    assert "local la" in aws_part
+
+
+@pytest.mark.parametrize("with_local", [False, True])
+async def test_a_facet_whose_findings_have_no_text_degrades(stubs, local, monkeypatch,
+                                                            with_local):
+    # AWS's only community fact (a1) has no readable text. Without local facts that
+    # facet had findings but can show none: could not check, never "(no findings)".
+    async def _texts(driver, group_id, uuids):
+        return {u: f"text {u}" for u in uuids if u != "a1"}
+
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_hit("c1", ["v1"])] if scope == _V.scope else [_hit("c2", ["a1"])]
+
+    monkeypatch.setattr(gs, "_fact_texts", _texts)
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    local.facts = {_V.scope: [], _A.scope: ["la"] if with_local else []}
     r = _Reducer()
     res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
                                  group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
-    assert "local la" not in r.prompts[0]
-    assert res["degraded_facets"] == ["AWS Backup"]
+    if with_local:
+        _, aws_part = r.prompts[0].split("=== AWS Backup ===")
+        assert "local la" in aws_part and "a1" not in aws_part
+        assert res["degraded_facets"] == []
+    else:
+        assert "=== AWS Backup ===" not in r.prompts[0]
+        assert "\n(no findings)" not in r.prompts[0]
+        assert res["degraded_facets"] == ["AWS Backup"]
+        assert res["answer"].endswith("Could not check: AWS Backup.")
+        assert [c["community_id"] for c in res["communities_used"]] == ["c1"]
 
 
 async def test_a_cancelled_supplement_propagates(stubs, local, monkeypatch):
