@@ -310,7 +310,9 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
         search_mod.search_local(graphiti, driver, q=f.query or q, k=k_facet,
                                 scope=f.scope,
                                 group_id=group_id, fetch_cap=fetch_cap,
-                                scan_max_episodes=scan_max_episodes, settings=settings)
+                                scan_max_episodes=scan_max_episodes, settings=settings,
+                                rerank_pool=settings.local_facet_rerank_pool
+                                if settings is not None else 0)
         for f in facets], return_exceptions=True)
     raise_if_cancelled(found)   # cancellation propagates; only Exceptions remain
     marker_map: dict[int, dict] = {}

@@ -1,0 +1,306 @@
+"""Facet searches rerank a larger candidate pool; side questions are vendor-subject.
+
+Gate run 2 (amendment 2, task 14): large scopes (Veeam, Microsoft) filled k from the
+corpus-wide hybrid search with poor ranking, and the cheap model kept cross-vendor
+wording in the side questions. A cross-encoder rerank of a wider pool and a
+vendor-subject rewrite prompt fixed both when measured."""
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+import answer_api.drift as drift
+import answer_api.enumeration as en
+import answer_api.eval_retrieval as er
+import answer_api.search as search_mod
+import answer_api.synthesize as synth
+from answer_api.scope import Scope
+from answer_api.shape import _FACET_QUERIES_PROMPT, Facet, QuestionShape
+from graph_extract.config import ExtractSettings
+
+pytestmark = pytest.mark.asyncio
+
+_RERANK = dict(rerank_base_url="http://rr", rerank_model="rerank-x")
+_V = Facet("Veeam", Scope(vendors=("Veeam",)))
+_A = Facet("AWS Backup", Scope(products=("AWS Backup",)))
+
+
+def _settings(**kw):
+    base = dict(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    base.update(kw)
+    return ExtractSettings(**base)
+
+
+def _edge(uuid):
+    return SimpleNamespace(uuid=uuid, fact=f"fact {uuid}", invalid_at=None, valid_at=None,
+                           episodes=["in"])
+
+
+class _Graph:
+    def __init__(self, n):
+        self.edges = [_edge(f"e{i}") for i in range(n)]
+        self.limits = []
+
+    async def _search(self, q, config, group_ids, center_node_uuid=None):
+        self.limits.append(config.limit)
+        return SimpleNamespace(edges=self.edges[:config.limit])
+
+
+@pytest.fixture(autouse=True)
+def _prov(monkeypatch):
+    class _Prov:
+        def __init__(self, driver):
+            pass
+
+        async def resolve_citations(self, uuids):
+            return {}
+
+    async def _allowed(driver, scope, candidates=None):
+        return set(candidates or [])
+
+    monkeypatch.setattr(search_mod, "Provenance", _Prov)
+    monkeypatch.setattr(search_mod, "scope_episode_uuids", _allowed)
+
+
+def _uuids(res):
+    return [r["fact_uuid"] for r in res["results"]]
+
+
+# --- the side-question prompt --------------------------------------------------------
+
+async def test_side_prompt_makes_each_side_the_subject_and_drops_cross_vendor_wording():
+    p = _FACET_QUERIES_PROMPT
+    assert p.startswith("Each SIDE below is a vendor or product whose OWN documentation")
+    assert "start with the side's name as the subject" in p
+    assert '"How does <side> ...", "Does <side> ..."' in p
+    assert ('Drop cross-vendor wording such as "which vendors", "compare", "differ" '
+            'or "each"') in p
+    assert "do not mention any other side or vendor" in p
+    out = p.format(sides="- Veeam", q="Q?")
+    assert out.endswith("SIDES:\n- Veeam\n\nQUESTION: Q?\nJSON:")
+    assert '{"<label>": "<question>", ...}' in out
+
+
+# --- search_local(rerank_pool=...) ---------------------------------------------------
+
+async def test_pool_reranks_a_wider_candidate_set_and_returns_k(monkeypatch):
+    seen = {}
+
+    async def _rerank(query, documents, *, top_k, settings):
+        seen.update(query=query, n=len(documents), top_k=top_k)
+        return [(30, 0.9), (2, 0.8), (17, 0.7)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    g = _Graph(100)
+    res = await search_mod.search_local(g, None, q="ransomware", k=3, group_id="g",
+                                        rerank_pool=40, settings=_settings(**_RERANK))
+    assert g.limits == [120]                       # over-fetch scales with the pool
+    assert seen == {"query": "ransomware", "n": 40, "top_k": 3}
+    assert _uuids(res) == ["e30", "e2", "e17"]
+    assert res["count"] == 3
+
+
+async def test_scoped_pool_raises_the_adaptive_target_to_the_pool(monkeypatch):
+    async def _rerank(query, documents, *, top_k, settings):
+        return [(i, 1.0) for i in reversed(range(len(documents)))][:top_k]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    g = _Graph(500)
+    res = await search_mod.search_local(g, None, q="q", k=2, group_id="g",
+                                        scope=_V.scope, rerank_pool=40,
+                                        settings=_settings(**_RERANK))
+    assert g.limits == [120]
+    assert _uuids(res) == ["e39", "e38"]
+
+
+async def test_pool_pads_a_short_rerank_from_the_original_order(monkeypatch):
+    async def _rerank(query, documents, *, top_k, settings):
+        return [(5, 0.9)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    res = await search_mod.search_local(_Graph(50), None, q="q", k=3, group_id="g",
+                                        rerank_pool=40, settings=_settings(**_RERANK))
+    assert _uuids(res) == ["e5", "e0", "e1"]
+
+
+@pytest.mark.parametrize("outcome", ["none", "raise", "empty"])
+async def test_pool_rerank_failure_returns_the_original_top_k(monkeypatch, caplog, outcome):
+    async def _rerank(*a, **kw):
+        if outcome == "raise":
+            raise RuntimeError("voyage down")
+        return None if outcome == "none" else []
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    with caplog.at_level(logging.WARNING, logger="answer_api.search"):
+        res = await search_mod.search_local(_Graph(50), None, q="q", k=3, group_id="g",
+                                            rerank_pool=40, settings=_settings(**_RERANK))
+    assert _uuids(res) == ["e0", "e1", "e2"]
+    if outcome != "empty":
+        assert "original order" in caplog.text
+
+
+@pytest.mark.parametrize("kw", [
+    {},                                                    # pool 0 (default)
+    {"rerank_pool": 0, "settings": _settings(**_RERANK)},  # explicit 0
+    {"rerank_pool": 40, "settings": _settings()},          # no reranker configured
+    {"rerank_pool": 40},                                   # no settings
+])
+async def test_no_pool_leaves_the_call_path_unchanged(monkeypatch, kw):
+    async def _rerank(*a, **k):
+        raise AssertionError("rerank must not be called")
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    g = _Graph(100)
+    res = await search_mod.search_local(g, None, q="q", k=5, group_id="g", **kw)
+    assert g.limits == [15]
+    assert _uuids(res) == [f"e{i}" for i in range(5)]
+
+
+async def test_pool_scan_fallback_targets_the_pool(monkeypatch):
+    scans = []
+
+    async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
+                    include_invalid=False, max_episodes=6000, settings=None):
+        scans.append(k)
+        return [_edge(f"s{i}") for i in range(k)]
+
+    async def _rerank(query, documents, *, top_k, settings):
+        return [(len(documents) - 1, 1.0)]
+
+    monkeypatch.setattr(search_mod, "_scoped_scan", _scan)
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    res = await search_mod.search_local(_Graph(2), None, q="q", k=3, group_id="g",
+                                        scope=_V.scope, rerank_pool=10,
+                                        settings=_settings(**_RERANK))
+    assert scans == [8]                    # pool 10 minus the 2 post-filter edges
+    assert _uuids(res) == ["s7", "e0", "e1"]
+
+
+# --- facet callers pass the pool; single callers do not -----------------------------
+
+async def test_default_facet_rerank_pool():
+    assert _settings().local_facet_rerank_pool == 40
+
+
+class _Synth:
+    def __init__(self, reply="X [1]."):
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+        self.reply = reply
+
+    async def _create(self, **kw):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=self.reply), finish_reason="stop")])
+
+
+async def test_local_facets_pass_the_pool_and_single_does_not(monkeypatch):
+    calls = []
+
+    async def _search(graphiti, driver, **kw):
+        calls.append(kw)
+        return {"query": kw["q"], "count": 0, "results": []}
+
+    monkeypatch.setattr(synth.search_mod, "search_local", _search)
+    s = _settings(local_facet_rerank_pool=33)
+    await synth.answer_local(None, None, _Synth(), "m", q="q", group_id="g",
+                             facets=[_V, _A], settings=s)
+    assert [c.get("rerank_pool") for c in calls] == [33, 33]
+    assert all(c["settings"] is s for c in calls)
+    calls.clear()
+    await synth.answer_local(None, None, _Synth(), "m", q="q", group_id="g", settings=s)
+    assert len(calls) == 1 and "rerank_pool" not in calls[0]
+
+
+async def test_drift_followup_forwards_the_pool_only_when_given(monkeypatch):
+    calls = []
+
+    async def _search(graphiti, driver, **kw):
+        calls.append(kw)
+        return {"results": []}
+
+    monkeypatch.setattr(drift, "search_local", _search)
+    fu = drift.FollowUp(query="q", community_id=None, iteration=1)
+    await drift._run_followup(None, None, fu, k=5, group_id="g", rerank_pool=12)
+    await drift._run_followup(None, None, fu, k=5, group_id="g")
+    assert calls[0]["rerank_pool"] == 12
+    assert "rerank_pool" not in calls[1]
+
+
+async def test_drift_facet_scoped_followups_pass_the_pool(monkeypatch):
+    import answer_api.global_search as gs
+
+    ran = []
+
+    def _hit(cid):
+        return gs.CommunityHit(community_id=cid, title=cid, summary="s", level=1,
+                               rating=5, cited_fact_uuids=[], full_report="[]",
+                               similarity=0.9)
+
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_hit("cv")] if scope == _V.scope else [_hit("ca")]
+
+    async def _followup(graphiti, driver, fu, *, k, group_id, scope=None, **kw):
+        ran.append((fu.query, scope, kw.get("rerank_pool")))
+        return []
+
+    class _PrimerSynth(_Synth):
+        async def _create(self, **kw):
+            p = kw["messages"][0]["content"]
+            text = ('{"preliminary_answer": "d", "follow_ups": [{"query": "veeam detail",'
+                    ' "community_id": "cv", "relevance": 9}]}'
+                    if "follow-up questions" in p else "x")
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=text), finish_reason="stop")])
+
+    monkeypatch.setattr(drift, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(drift, "_run_followup", _followup)
+    s = _settings(local_facet_rerank_pool=21)
+    await drift.drift_search(None, None, None, _PrimerSynth(), "m", q="compare", level=1,
+                             iterations=1, primer_k=5, max_followups=4, followup_k=8,
+                             group_id="g", settings=s, facets=[_V, _A])
+    # The Veeam-community follow-up and the AWS coverage follow-up are both facet-scoped.
+    assert ("veeam detail", _V.scope, 21) in ran
+    assert ("compare", _A.scope, 21) in ran
+    ran.clear()
+    await drift.drift_search(None, None, None, _PrimerSynth(), "m", q="single", level=1,
+                             iterations=1, primer_k=5, max_followups=4, followup_k=8,
+                             group_id="g", settings=s)
+    assert ran and all(pool is None for _, _, pool in ran)
+
+
+async def test_enumeration_gather_passes_the_pool(monkeypatch):
+    calls = []
+
+    async def _search(graphiti, driver, **kw):
+        calls.append(kw)
+        return {"results": []}
+
+    async def _shortlist(*a, **kw):
+        return []
+
+    monkeypatch.setattr(en, "search_local", _search)
+    monkeypatch.setattr(en, "shortlist_communities", _shortlist)
+    s = _settings(local_facet_rerank_pool=17)
+    await en._gather(None, None, None, q="q", facet=_V, group_id="g", settings=s)
+    assert calls[0]["rerank_pool"] == 17 and calls[0]["settings"] is s
+
+
+@pytest.mark.parametrize("kind,pool", [("comparison", 19), ("enumeration", 19),
+                                       ("single", None)])
+async def test_eval_evidence_passes_the_pool_for_facet_shapes(monkeypatch, kind, pool):
+    calls = []
+
+    async def _search(graphiti, driver, **kw):
+        calls.append(kw)
+        return {"results": [], "count": 0}
+
+    async def _shortlist(*a, **kw):
+        return []
+
+    monkeypatch.setattr(er, "search_local", _search)
+    monkeypatch.setattr(er, "shortlist_communities", _shortlist)
+    facets = (_V, _A) if kind != "single" else (Facet("", Scope()),)
+    await er._evidence(None, None, None, _settings(local_facet_rerank_pool=19), "q",
+                       QuestionShape(kind, facets))
+    assert calls and all(c.get("rerank_pool") == pool for c in calls)

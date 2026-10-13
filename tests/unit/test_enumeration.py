@@ -54,7 +54,8 @@ def stubs(monkeypatch):
                                 full_report='[{"finding": "f", "fact_ids": ["cf-%s"]}]' % v,
                                 similarity=0.9)]
 
-    async def _search(graphiti, driver, *, q, k, scope=None, group_id, fetch_cap=450, scan_max_episodes=6000, settings=None):
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, fetch_cap=450, scan_max_episodes=6000, settings=None,
+                      rerank_pool=0):
         v = scope.vendors[0]
         return {"results": [{"fact": f"{v} fact", "fact_uuid": f"lf-{v}",
                              "valid_at": None, "invalid_at": None, "sources": _src(v)}]}

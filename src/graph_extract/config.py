@@ -338,6 +338,13 @@ class ExtractSettings(BaseSettings):
     # vendors support immutable backups?"; reranking the top 200 put DataLock/WORM at
     # rank 1 (and top 3 for "Does Cohesity support immutable backups?", 2026-10-13).
     local_scoped_scan_candidates: int = 200
+    # Facet searches (comparison/enumeration sides, facet-scoped DRIFT follow-ups) pull
+    # this many candidates and rerank them with the cross-encoder down to k: gate run 2
+    # showed large scopes (Veeam, Microsoft) filling k from the corpus-wide hybrid
+    # search with poor ranking ("PostgreSQL WAL Files Backup" for a ransomware
+    # question); reranking a 40-fact pool put the relevant facts on top (2026-10-13).
+    # Single-shape searches never rerank this way.
+    local_facet_rerank_pool: int = 40
     # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
     global_facet_top_n: int = 3
     # Enumeration: evidence gathered per content vendor before its cheap check.

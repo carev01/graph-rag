@@ -127,20 +127,30 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
     if not use_rerank:
         logger.warning("scoped scan: no reranker configured; returning cosine order")
         return cands[:k]
+    return await _rerank_top(q, cands, k=k, settings=settings, what="scoped scan",
+                             order_name="cosine order")
+
+
+async def _rerank_top(q: str, cands: list, *, k: int, settings: ExtractSettings,
+                      what: str, order_name: str) -> list:
+    """The best `k` of `cands` for `q` by the cross-encoder. A short (or empty)
+    rerank reply is padded from `cands` in their given order; a failed one (None or
+    an exception) logs a warning and returns `cands[:k]` -- never empty because of
+    the reranker."""
     if not cands:
         return []
     try:
         ranked = await rerank(q, [e.fact for e in cands], top_k=k, settings=settings)
     except Exception as exc:
-        logger.warning("scoped scan rerank failed (%s); returning cosine order", exc)
+        logger.warning("%s rerank failed (%s); returning %s", what, exc, order_name)
         return cands[:k]
     if ranked is None:
-        logger.warning("scoped scan rerank unavailable; returning cosine order")
+        logger.warning("%s rerank unavailable; returning %s", what, order_name)
         return cands[:k]
     order = list(dict.fromkeys(i for i, _ in ranked if 0 <= i < len(cands)))
     if len(order) < k:
         # A short (or empty) rerank reply still returns k: pad from the
-        # cosine-ordered candidates not already chosen, in cosine order.
+        # candidates not already chosen, in their given order.
         chosen = set(order)
         order += [i for i in range(len(cands)) if i not in chosen]
     return [cands[i] for i in order][:k]
@@ -149,16 +159,25 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
 async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
                        include_invalid=False, group_id, center_node_uuid=None,
                        fetch_cap: int = 450, scan_max_episodes: int = 6000,
-                       settings: ExtractSettings | None = None):
+                       settings: ExtractSettings | None = None, rerank_pool: int = 0):
     """`settings` enables the cross-encoder rerank of the scoped scan's candidates;
-    None keeps the scan in cosine order."""
+    None keeps the scan in cosine order.
+
+    `rerank_pool` > 0 (facet searches only), with `settings` and a configured
+    reranker: gather up to max(k, rerank_pool) edges the same way (adaptive limits
+    and scan fallback aimed at the pool size) and return the cross-encoder's best k
+    of them -- the hybrid order alone ranked large scopes poorly (gate run 2,
+    2026-10-13). A failed rerank returns the original top k. 0 (the default) leaves
+    the search exactly as it was."""
     scoped = scope is not None and not scope.is_empty()
-    # Over-fetch so post-filters (validity, scope) still leave ~k results. A narrow
-    # scope can filter out most of one fetch (the six Veeam Agent guides kept 7 of
-    # 45, 2026-10-12), so a scoped search re-fetches wider until k survive.
-    first = max(k * 3, k)
+    pooled = rerank_pool > 0 and settings is not None and rerank_configured(settings)
+    target = max(k, rerank_pool) if pooled else k
+    # Over-fetch so post-filters (validity, scope) still leave ~target results. A
+    # narrow scope can filter out most of one fetch (the six Veeam Agent guides kept
+    # 7 of 45, 2026-10-12), so a scoped search re-fetches wider until target survive.
+    first = max(target * 3, target)
     limits = [first] if not scoped else list(dict.fromkeys(
-        min(n, fetch_cap) for n in (first, k * 10, k * 30)))
+        min(n, fetch_cap) for n in (first, target * 10, target * 30)))
     edges: list = []
     for limit in limits:
         edges = await _retrieve_edges(graphiti, q, fetch_limit=limit,
@@ -171,10 +190,10 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
             allowed = await scope_episode_uuids(
                 driver, scope, candidates=[u for e in edges for u in (e.episodes or [])])
             edges = [e for e in edges if allowed.intersection(e.episodes or [])]
-        if len(edges) >= k:
+        if len(edges) >= target:
             break
-    edges = edges[:k]
-    if scoped and len(edges) < k:
+    edges = edges[:target]
+    if scoped and len(edges) < target:
         # The corpus-wide top-N can hold none of a small scope's facts next to a
         # huge one (Cohesity's 29 DataLock/FortKnox facts vs Veeam's 20k articles,
         # 2026-10-12): rank the scope's own facts and append them after the
@@ -184,7 +203,8 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
         seen = {e.uuid for e in edges}
         try:
             extra = await _scoped_scan(
-                graphiti, driver, q=q, scope=scope, k=k - len(edges), group_id=group_id,
+                graphiti, driver, q=q, scope=scope, k=target - len(edges),
+                group_id=group_id,
                 exclude=seen, include_invalid=include_invalid,
                 max_episodes=scan_max_episodes, settings=settings)
         except Exception as exc:
@@ -192,11 +212,15 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
                            "post-filter results", scope.as_dict(), exc, len(edges))
             extra = []
         for e in extra:
-            if len(edges) >= k:
+            if len(edges) >= target:
                 break
             if e.uuid not in seen:
                 seen.add(e.uuid)
                 edges.append(e)
+    if pooled:
+        assert settings is not None
+        edges = await _rerank_top(q, edges, k=k, settings=settings,
+                                  what="facet search", order_name="original order")
     citations = await Provenance(driver).resolve_citations([e.uuid for e in edges])
     return {
         "query": q, "count": len(edges),

@@ -78,6 +78,10 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
         top_n = settings.global_facet_top_n
     else:
         k, top_n = 15, None
+    # Facet shapes rerank a wider pool, as the router's facet callers do; a single
+    # question searches exactly as /answer's single path does.
+    pool: dict = ({"rerank_pool": settings.local_facet_rerank_pool}
+                  if shape.kind in ("comparison", "enumeration") else {})
     out = []
     for f in shape.facets:
         scope = f.scope if not f.scope.is_empty() else None
@@ -86,7 +90,7 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
                                  group_id=settings.group_id,
                                  fetch_cap=settings.local_scoped_fetch_cap,
                                  scan_max_episodes=settings.local_scoped_scan_max_episodes,
-                                 settings=settings)
+                                 settings=settings, **pool)
         hits = await shortlist_communities(
             driver, embedder, fq, level=settings.global_default_level,
             k=top_n or settings.global_shortlist_k, group_id=settings.group_id,

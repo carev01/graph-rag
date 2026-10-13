@@ -57,7 +57,7 @@ async def _gather(graphiti, driver, embedder, *, q, facet: Facet, group_id, sett
                      scope=facet.scope, group_id=group_id,
                      fetch_cap=settings.local_scoped_fetch_cap,
                      scan_max_episodes=settings.local_scoped_scan_max_episodes,
-                     settings=settings))
+                     settings=settings, rerank_pool=settings.local_facet_rerank_pool))
     return communities, facts["results"]
 
 

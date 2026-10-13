@@ -150,13 +150,18 @@ async def _top_member_entity(driver, group_id, community_id) -> str | None:
 async def _run_followup(graphiti, driver, fu: FollowUp, *, k, group_id,
                         scope: Scope | None = None, fetch_cap: int = 450,
                         scan_max_episodes: int = 6000,
-                        settings: ExtractSettings | None = None) -> list[dict]:
+                        settings: ExtractSettings | None = None,
+                        rerank_pool: int = 0) -> list[dict]:
+    """`rerank_pool` > 0 only for a facet-scoped follow-up (forwarded to
+    search_local, which reranks that many candidates); a single-shape follow-up
+    calls search_local exactly as before."""
     center = (await _top_member_entity(driver, group_id, fu.community_id)
               if fu.community_id else None)
+    pool: dict = {"rerank_pool": rerank_pool} if rerank_pool else {}
     res = await search_local(graphiti, driver, q=fu.query, k=k, scope=scope,
                              center_node_uuid=center, group_id=group_id,
                              fetch_cap=fetch_cap, scan_max_episodes=scan_max_episodes,
-                             settings=settings)
+                             settings=settings, **pool)
     return res["results"]
 
 
@@ -298,13 +303,17 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
     worked: set[Scope] = set()      # facet scopes with at least one follow-up that returned
 
     async def _execute(fu: FollowUp) -> None:
+        # A facet-scoped follow-up (including the facet coverage ones) reranks a
+        # wider pool; any other follow-up runs the single-shape search unchanged.
+        pool: dict = ({"rerank_pool": settings.local_facet_rerank_pool}
+                      if fu.scope is not None else {})
         try:
             facts.extend(await _run_followup(
                 graphiti, driver, fu, k=followup_k, group_id=group_id,
                 scope=fu.scope if fu.scope is not None else scope,
                 fetch_cap=settings.local_scoped_fetch_cap,
                 scan_max_episodes=settings.local_scoped_scan_max_episodes,
-                settings=settings))
+                settings=settings, **pool))
             if fu.scope is not None:
                 worked.add(fu.scope)
         except Exception:

@@ -109,14 +109,16 @@ def raise_if_cancelled(results: Iterable[object]) -> None:
 
 
 _FACET_QUERIES_PROMPT = (
-    "Rewrite the QUESTION about backup products into one standalone question per SIDE "
-    "listed below. Each question must ask only about its own side and name it; keep "
-    "the QUESTION's intent and its specific terms (feature names, workloads, "
-    "settings). Do not answer the question, do not add facts, and do not mention any "
-    "other side or any other vendor. Respond with ONLY JSON mapping each side's label, "
-    "exactly as written below, to its question: {{\"<label>\": \"<question>\", ...}}"
-    ".\n\nSIDES:\n{sides}\n\nQUESTION: {q}\nJSON:"
-)
+    "Each SIDE below is a vendor or product whose OWN documentation will be searched "
+    "separately. Rewrite the QUESTION into one standalone question per SIDE, asked "
+    "directly about that side alone, as you would ask its documentation: start with "
+    "the side's name as the subject (e.g. \"How does <side> ...\", \"Does <side> ...\"). "
+    "Keep the QUESTION's intent and its specific terms (feature names, workloads, "
+    "settings). Drop cross-vendor wording such as \"which vendors\", \"compare\", "
+    "\"differ\" or \"each\". Do not answer, do not add facts, and do not mention any other "
+    "side or vendor. Respond with ONLY JSON mapping each side's label, exactly as "
+    "written below, to its question: {{\"<label>\": \"<question>\", ...}}.\n\n"
+    "SIDES:\n{sides}\n\nQUESTION: {q}\nJSON:")
 
 
 async def facet_queries(client, model: str, q: str,
