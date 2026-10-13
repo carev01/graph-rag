@@ -161,7 +161,8 @@ async def test_pool_scan_fallback_targets_the_pool(monkeypatch):
     scans = []
 
     async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
-                    include_invalid=False, max_episodes=6000, settings=None):
+                    include_invalid=False, max_episodes=6000, settings=None,
+                    rerank=True):
         scans.append(k)
         return [_edge(f"s{i}") for i in range(k)]
 
@@ -175,6 +176,65 @@ async def test_pool_scan_fallback_targets_the_pool(monkeypatch):
                                         settings=_settings(**_RERANK))
     assert scans == [8]                    # pool 10 minus the 2 post-filter edges
     assert _uuids(res) == ["s7", "e0", "e1"]
+
+
+class _ScanGraph(_Graph):
+    """A hybrid search returning `n` edges, plus an embedder for the scoped scan."""
+
+    def __init__(self, n):
+        super().__init__(n)
+        self.embedder = SimpleNamespace(create=self._embed)
+
+    async def _embed(self, input_data):
+        return [0.0]
+
+
+class _ScanDriver:
+    """The scoped scan's query: up to `k` scope edges, cosine order."""
+
+    def __init__(self):
+        self.ks = []
+
+    async def execute_query(self, query, **kw):
+        self.ks.append(kw["k"])
+        recs = [{"n": 1, "uuid": f"s{i}", "fact": f"fact s{i}", "episodes": ["in"],
+                 "valid_at": None, "invalid_at": None} for i in range(kw["k"])]
+        return recs, None, None
+
+
+async def test_a_pooled_search_that_falls_back_to_the_scan_reranks_once(monkeypatch):
+    # Final review: the scan's own 200-candidate rerank was thrown away by the
+    # pool's rerank of the merged candidates -- one cross-encoder call suffices.
+    calls = []
+
+    async def _rerank(query, documents, *, top_k, settings):
+        calls.append((len(documents), top_k))
+        return [(len(documents) - 1, 1.0)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    driver = _ScanDriver()
+    res = await search_mod.search_local(_ScanGraph(2), driver, q="q", k=3, group_id="g",
+                                        scope=_V.scope, rerank_pool=10,
+                                        settings=_settings(**_RERANK))
+    assert calls == [(10, 3)]          # the pool's single rerank over 2 + 8 merged
+    assert driver.ks == [8]            # cosine top-N, no 200-candidate fetch
+    assert _uuids(res) == ["s7", "e0", "e1"]
+
+
+async def test_a_non_pooled_scoped_search_keeps_the_scans_rerank(monkeypatch):
+    calls = []
+
+    async def _rerank(query, documents, *, top_k, settings):
+        calls.append((len(documents), top_k))
+        return [(len(documents) - 1, 1.0)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    driver = _ScanDriver()
+    res = await search_mod.search_local(_ScanGraph(1), driver, q="q", k=3, group_id="g",
+                                        scope=_V.scope, settings=_settings(**_RERANK))
+    assert driver.ks == [200]          # local_scoped_scan_candidates
+    assert calls == [(200, 2)]         # the scan's own rerank, once
+    assert _uuids(res)[:2] == ["e0", "s199"]
 
 
 # --- facet callers pass the pool; single callers do not -----------------------------

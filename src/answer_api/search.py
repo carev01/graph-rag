@@ -93,7 +93,8 @@ async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id,
 async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: str,
                        exclude: set[str], include_invalid: bool = False,
                        max_episodes: int = 6000,
-                       settings: ExtractSettings | None = None) -> list[ScannedEdge]:
+                       settings: ExtractSettings | None = None,
+                       rerank: bool = True) -> list[ScannedEdge]:
     """The top `k` RELATES_TO edges of `scope` (not in `exclude`) for `q`.
 
     `q` is embedded exactly as graphiti's search embeds it (graphiti-core 0.30.1,
@@ -103,8 +104,10 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
     of 2,158 for "Which backup vendors support immutable backups?" (2026-10-13).
     Without a reranker, or when it fails, the cosine top `k` -- never empty because
     of the reranker. A scope with more than `max_episodes` episodes returns []
-    -- logged, not scanned: large scopes are served by the post-filter."""
-    use_rerank = settings is not None and rerank_configured(settings)
+    -- logged, not scanned: large scopes are served by the post-filter.
+    `rerank=False` returns the cosine top `k` without the cross-encoder: a pooled
+    caller reranks the merged candidates itself, once."""
+    use_rerank = rerank and settings is not None and rerank_configured(settings)
     fetch = max(k, settings.local_scoped_scan_candidates) \
         if settings is not None and use_rerank else k
     vec = await graphiti.embedder.create(input_data=[q.replace("\n", " ")])
@@ -122,7 +125,7 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
     cands = [ScannedEdge(uuid=r["uuid"], fact=r["fact"], episodes=list(r["episodes"] or []),
                          valid_at=_native(r["valid_at"]), invalid_at=_native(r["invalid_at"]))
              for r in records if r["uuid"] is not None]
-    if settings is None:
+    if settings is None or not rerank:
         return cands[:k]
     if not use_rerank:
         logger.warning("scoped scan: no reranker configured; returning cosine order")
@@ -206,7 +209,9 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
                 graphiti, driver, q=q, scope=scope, k=target - len(edges),
                 group_id=group_id,
                 exclude=seen, include_invalid=include_invalid,
-                max_episodes=scan_max_episodes, settings=settings)
+                max_episodes=scan_max_episodes, settings=settings,
+                # The pool's single rerank below orders the merged candidates.
+                rerank=not pooled)
         except Exception as exc:
             logger.warning("scoped scan failed for scope %s: %s; keeping %d "
                            "post-filter results", scope.as_dict(), exc, len(edges))

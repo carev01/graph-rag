@@ -56,9 +56,11 @@ def scan_calls(monkeypatch):
     calls = []
 
     async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
-                    include_invalid=False, max_episodes=6000, settings=None):
+                    include_invalid=False, max_episodes=6000, settings=None,
+                    rerank=True):
         calls.append({"k": k, "exclude": set(exclude), "max_episodes": max_episodes,
-                      "include_invalid": include_invalid, "settings": settings})
+                      "include_invalid": include_invalid, "settings": settings,
+                      "rerank": rerank})
         return [_edge("p1"), _edge("s1"), _edge("s2"), _edge("s3")]
 
     monkeypatch.setattr(search_mod, "_scoped_scan", _scan)
@@ -80,6 +82,7 @@ async def test_scan_appends_after_post_filter_results_deduplicated(scan_calls):
     assert scan_calls[0]["exclude"] == {"p0", "p1"}
     assert scan_calls[0]["max_episodes"] == 123
     assert scan_calls[0]["settings"] is None
+    assert scan_calls[0]["rerank"] is True     # non-pooled: the scan keeps its rerank
     # p1 came back from the scan too: kept once, in its post-filter position.
     assert [r["fact_uuid"] for r in res["results"]] == ["p0", "p1", "s1", "s2"]
     assert res["count"] == 4
