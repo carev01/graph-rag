@@ -277,3 +277,56 @@ async def test_a_comparison_routed_to_timeline_skips_the_facet_rewrite(monkeypat
                               source="detected"))
     assert rewrite_calls == []
     assert env["mode"] == "timeline"
+
+
+@pytest.fixture
+def fallback(monkeypatch):
+    """Global returns `state["global"]`; local records it ran."""
+    state = {"global": None, "calls": []}
+
+    async def _classify(q, **kw):
+        return "global", "heuristic"
+
+    async def _global(*a, **kw):
+        state["calls"].append(("global", kw.get("facets")))
+        return state["global"]
+
+    async def _local(*a, **kw):
+        state["calls"].append(("local", kw.get("facets")))
+        return {"answer": "L [1]", "citations": _CITE, "retrieved": 1}
+
+    async def _fresh(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(router, "classify", _classify)
+    monkeypatch.setattr(router.global_mod, "global_search", _global)
+    monkeypatch.setattr(router.synth_mod, "answer_local", _local)
+    monkeypatch.setattr(router.freshness_mod, "freshness", _fresh)
+    return state
+
+
+async def test_a_faceted_global_answer_grounded_by_local_supplements_is_kept(fallback):
+    # Every citation came from the facets' local supplements: no community was
+    # used, but the answer is grounded -- rerunning as local would discard it.
+    fallback["global"] = {"answer": "G [1]", "citations": _CITE, "communities_used": [],
+                          "applies_to": [], "degraded_facets": []}
+    env = await _answer(QuestionShape("comparison", (_V, _A)))
+    assert [m for m, _ in fallback["calls"]] == ["global"]
+    assert env["mode"] == "global" and env["answer"].startswith("G")
+
+
+async def test_a_faceted_global_answer_with_no_citation_reruns_as_local(fallback):
+    fallback["global"] = {"answer": "refused", "citations": [],
+                          "communities_used": [{"x": 1}], "applies_to": [],
+                          "degraded_facets": []}
+    env = await _answer(QuestionShape("comparison", (_V, _A)))
+    assert fallback["calls"] == [("global", (_V, _A)), ("local", (_V, _A))]
+    assert env["mode"] == "local"
+
+
+async def test_a_single_global_answer_with_no_community_still_reruns_as_local(fallback):
+    fallback["global"] = {"answer": "G [1]", "citations": _CITE, "communities_used": [],
+                          "applies_to": []}
+    env = await _answer(None)
+    assert [m for m, _ in fallback["calls"]] == ["global", "local"]
+    assert env["mode"] == "local"

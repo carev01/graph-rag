@@ -304,8 +304,14 @@ async def _run_mode(mode: Mode, graphiti, driver, embedder, synth_client, synth_
     # Global falls back to local when it grounded nothing: no community used, OR
     # communities used but no citation (the reduce step refused -- e.g. a scoped
     # comparison whose second vendor's community failed to map). Local runs with
-    # the same scope and answers such questions from facts directly.
-    elif mode == "global" and (not raw.get("communities_used") or not raw.get("citations")):
+    # the same scope and answers such questions from facts directly. A FACETED run
+    # (two or more facets) falls back only when uncited: its facets' local
+    # supplements can ground the answer with no community used, and rerunning as
+    # local would discard that grounded answer (final review).
+    elif mode == "global" and (
+            not raw.get("citations")
+            or (not (facets is not None and len(facets) >= 2)
+                and not raw.get("communities_used"))):
         fallback_from = "global"
         mode = "local"
         raw = await _dispatch("local", graphiti, driver, embedder, synth_client,
