@@ -248,3 +248,32 @@ async def test_a_timeline_routed_comparison_reports_single_with_no_facets(monkey
     assert env["mode"] == "timeline"
     assert env["shape"] == "single" and env["facets"] == []
     assert env["shape_requested"] == "comparison"
+
+
+async def test_a_comparison_routed_to_timeline_skips_the_facet_rewrite(monkeypatch):
+    """Timeline ignores facets, so the per-facet rewrite call (a cheap-tier LLM
+    call) is pure waste when that is the mode that will run."""
+    rewrite_calls = []
+
+    async def _rewrite(client, model, q, facets):
+        rewrite_calls.append(facets)
+        return tuple(facets)
+
+    async def _classify(q, **kw):
+        return "timeline", "heuristic"
+
+    async def _timeline(*a, **kw):
+        return {"query": "q", "count": 0, "timeline": []}
+
+    async def _fresh(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(router, "facet_queries", _rewrite)
+    monkeypatch.setattr(router, "classify", _classify)
+    monkeypatch.setattr(router.timeline_mod, "timeline_local", _timeline)
+    monkeypatch.setattr(router.freshness_mod, "freshness", _fresh)
+    env = await _answer(QuestionShape("comparison", (_V, _A)),
+                        Scope(vendors=("Veeam",), products=("AWS Backup",),
+                              source="detected"))
+    assert rewrite_calls == []
+    assert env["mode"] == "timeline"

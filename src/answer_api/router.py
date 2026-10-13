@@ -219,7 +219,12 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         # (the eval harness forces each mode in turn): run that mode unfaceted,
         # and report the run as the single question it was answered as.
         shape = None
-    if shape is not None and shape.kind in ("comparison", "enumeration"):
+    # A comparison routed to timeline runs unfaceted (timeline ignores facets,
+    # see _shape_fields/_grounded below): skip the rewrite call. An enumeration
+    # always rewrites regardless of `mode` -- it never dispatches through the
+    # mode functions, so "the mode that will run" for it is never timeline.
+    if (shape is not None and shape.kind in ("comparison", "enumeration")
+            and not (shape.kind == "comparison" and mode == "timeline")):
         # Each side retrieves with its own standalone question (one cheap map-tier
         # call); a side whose rewrite failed retrieves with the original question.
         # Answering prompts keep the original question.
