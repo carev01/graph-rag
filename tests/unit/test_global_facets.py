@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import answer_api.global_search as gs
+from answer_api.attribution import CLAIM_RULES, COMPARISON_RULES
 from answer_api.scope import Scope
 from answer_api.shape import Facet
 from graph_extract.config import ExtractSettings
@@ -549,6 +550,5 @@ async def test_facet_reduce_prompt_forbids_false_absence_and_long_marker_lists(s
     assert ("Never state that the documentation does not cover a side when findings "
             "are listed under its heading; describe what those findings say. Say a side "
             "is not covered only when it shows \"(no findings)\".") in p
-    assert ("Cite each claim with the one or two markers of the facts it rests on; do "
-            "not attach long marker lists to a sentence.") in p
+    assert CLAIM_RULES in p and COMPARISON_RULES in p
     assert "Address EVERY side" in p and "Do NOT write any URL." in p

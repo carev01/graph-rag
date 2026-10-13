@@ -9,7 +9,13 @@ from collections.abc import Sequence
 from openai import AsyncOpenAI
 
 from answer_api import search as search_mod
-from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
+from answer_api.attribution import (
+    ATTRIBUTION_RULES,
+    CLAIM_RULES,
+    COMPARISON_RULES,
+    applies_to,
+    fact_line,
+)
 from answer_api.scope import Scope
 from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from graph_extract.config import ExtractSettings
@@ -70,7 +76,7 @@ _RANGE_RE = re.compile(
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
-    "facts below. " + ATTRIBUTION_RULES +
+    "facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
     "Cite every claim inline with its [N] marker. Do NOT use outside "
     "knowledge. Do NOT write any URL or link. If the facts do not answer the "
     "question, reply exactly: "
@@ -87,12 +93,11 @@ _REFUSAL = "I don't have enough information to answer that from the available so
 _FACET_PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
     "facts below, grouped under a heading for each side of the question. "
-    + ATTRIBUTION_RULES +
+    + ATTRIBUTION_RULES + CLAIM_RULES + COMPARISON_RULES +
     "The question has these sides: {labels}. Address EVERY side, in that order. If a "
     "side shows \"(no facts retrieved)\", say in one sentence that the retrieved "
     "documentation does not cover it, and do not guess. Cite every claim inline with "
-    "its [N] marker. If you compare the sides, give each side's claim in its own "
-    "clause with only that side's markers. Do NOT use outside knowledge. Do NOT write "
+    "its [N] marker. Do NOT use outside knowledge. Do NOT write "
     "any URL or link. If no "
     "side has facts that answer the question, reply exactly: "
     "\"I don't have enough information to answer that from the available sources.\"\n\n"

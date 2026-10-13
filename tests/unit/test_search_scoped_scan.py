@@ -57,7 +57,7 @@ def scan_calls(monkeypatch):
 
     async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
                     include_invalid=False, max_episodes=6000, settings=None,
-                    rerank=True):
+                    rerank=True, episode_count=None):
         calls.append({"k": k, "exclude": set(exclude), "max_episodes": max_episodes,
                       "include_invalid": include_invalid, "settings": settings,
                       "rerank": rerank})

@@ -10,7 +10,13 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
+from answer_api.attribution import (
+    ATTRIBUTION_RULES,
+    CLAIM_RULES,
+    COMPARISON_RULES,
+    applies_to,
+    fact_line,
+)
 from answer_api.scope import Scope
 from answer_api.search import search_local
 from answer_api.shape import (Facet, could_not_check_note, group_by_facet,
@@ -197,7 +203,7 @@ _SYNTH_PROMPT = (
     "the facts support it. Cite every claim inline with its [N] marker. Do NOT use "
     "outside knowledge. Do NOT write any URL. If the facts do not answer the "
     "question, reply exactly: \"{refusal}\"\n\n"
-    + ATTRIBUTION_RULES +
+    + ATTRIBUTION_RULES + CLAIM_RULES +
     "\nQUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
 )
 
@@ -207,11 +213,10 @@ _SYNTH_FACETS_PROMPT = (
     "it. The question has these sides: {labels}. Address EVERY side, in that order. If "
     "a side shows \"(no facts retrieved)\", say in one sentence that the retrieved "
     "documentation does not cover it, and do not guess. Cite every claim inline with "
-    "its [N] marker. If you compare the sides, give each side's claim in its own "
-    "clause with only that side's markers. Do NOT use outside knowledge. Do NOT write "
+    "its [N] marker. Do NOT use outside knowledge. Do NOT write "
     "any URL. If no side has "
     "facts that answer the question, reply exactly: \"{refusal}\"\n\n"
-    + ATTRIBUTION_RULES +
+    + ATTRIBUTION_RULES + CLAIM_RULES + COMPARISON_RULES +
     "\nQUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"
 )
 

@@ -61,7 +61,7 @@ async def test_facts_are_grouped_under_facet_headings_and_deduplicated(searches)
     res = await synth.answer_local(None, None, s, "m", q="q", k=15, group_id="g",
                                    facets=[_V, _A])
     p = s.prompts[0]
-    assert p.index("=== Veeam ===") < p.index("[1]") < p.index("=== AWS Backup ===")
+    assert p.index("=== Veeam ===") < p.index("\n[1] ") < p.index("=== AWS Backup ===")
     # A fact retrieved for both facets keeps ONE marker and is listed under both.
     assert p.count("fact shared") == 2
     assert p.count("[2] ") == 2

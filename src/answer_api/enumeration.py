@@ -12,7 +12,13 @@ import json
 import logging
 from collections.abc import Sequence
 
-from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
+from answer_api.attribution import (
+    ATTRIBUTION_RULES,
+    CLAIM_RULES,
+    COMPARISON_RULES,
+    applies_to,
+    fact_line,
+)
 from answer_api.global_search import (_extract_json, _fact_texts, _in_scope_ci,
                                       shortlist_communities)
 from answer_api.search import search_local
@@ -52,11 +58,8 @@ def _check_question(q: str, facet: Facet) -> str:
 _ENUM_PROMPT = (
     "Answer the QUESTION by covering EVERY vendor below, in the order given, with one "
     "short paragraph each, using ONLY that vendor's numbered facts. "
-    + ATTRIBUTION_RULES +
-    "Cite every claim with the [N] marker of the fact it rests on, writing each marker "
-    "individually. Cite each claim with the one or two markers of the facts it rests "
-    "on; never attach a long list of markers to one sentence. If you compare the "
-    "sides, give each side's claim in its own clause with only that side's markers. "
+    + ATTRIBUTION_RULES + CLAIM_RULES + COMPARISON_RULES +
+    "Cite every claim with the [N] marker of the fact it rests on. "
     "Do NOT use outside knowledge. Do NOT write any URL. Do NOT mention "
     "any vendor that is not listed below.\n\nQUESTION: {q}\n\n{blocks}\n\nAnswer:"
 )

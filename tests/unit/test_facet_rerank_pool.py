@@ -166,7 +166,7 @@ async def test_pool_scan_fallback_targets_the_pool(monkeypatch):
 
     async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
                     include_invalid=False, max_episodes=6000, settings=None,
-                    rerank=True):
+                    rerank=True, episode_count=None):
         scans.append(k)
         return [_edge(f"s{i}") for i in range(k)]
 
@@ -425,7 +425,7 @@ async def test_pooled_scan_excludes_uuids_already_in_the_pool(monkeypatch):
 
     async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
                     include_invalid=False, max_episodes=6000, settings=None,
-                    rerank=True):
+                    rerank=True, episode_count=None):
         seen.update(k=k, exclude=set(exclude), rerank=rerank)
         return [_edge("e1"), _edge("s0")]
 
@@ -488,3 +488,59 @@ async def test_a_non_pooled_full_scoped_search_still_does_not_scan(monkeypatch):
     res = await search_mod.search_local(_Graph(100), None, q="q", k=3, group_id="g",
                                         scope=_A.scope, settings=_settings(**_RERANK))
     assert _uuids(res) == ["e0", "e1", "e2"]
+
+
+class _CountingDriver(_ScanDriver):
+    """`_ScanDriver` whose episode count is `n` (an Exception instance raises)."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.n = n
+        self.counts = 0
+
+    async def execute_query(self, query, **kw):
+        if query is search_mod._EPISODE_COUNT:
+            self.counts += 1
+            if isinstance(self.n, Exception):
+                raise self.n
+            return [{"n": self.n}], None, None
+        return await super().execute_query(query, **kw)
+
+
+async def _identity_rerank(query, documents, *, top_k, settings):
+    return [(i, 1.0) for i in range(min(top_k, len(documents)))]
+
+
+async def test_a_scannable_pooled_scope_fetches_once_then_scans(monkeypatch):
+    # Run 9: 120 -> 400 -> 450 corpus-wide fetches cost ~20 s per small-scope facet
+    # although the scan below them always supplies the scope's own facts.
+    monkeypatch.setattr(search_mod, "rerank", _identity_rerank)
+    g, driver = _ScanGraph(2), _CountingDriver(1040)
+    await search_mod.search_local(g, driver, q="q", k=3, group_id="g", scope=_A.scope,
+                                  rerank_pool=10, settings=_settings(**_RERANK))
+    assert g.limits == [30]            # one fetch at the pool's first limit
+    assert driver.counts == 1          # the scan reuses the count
+    assert driver.ks == [200]
+
+
+async def test_an_over_cap_pooled_scope_widens_the_fetch_and_skips_the_scan(monkeypatch):
+    monkeypatch.setattr(search_mod, "rerank", _identity_rerank)
+    g, driver = _ScanGraph(2), _CountingDriver(6001)
+    await search_mod.search_local(g, driver, q="q", k=3, group_id="g", scope=_V.scope,
+                                  rerank_pool=10, scan_max_episodes=6000,
+                                  settings=_settings(**_RERANK))
+    assert g.limits == [30, 100, 300]
+    assert driver.ks == []             # no scan query for a scope over the cap
+    assert driver.counts == 1
+
+
+async def test_a_failed_episode_count_widens_the_fetch_as_before(monkeypatch, caplog):
+    monkeypatch.setattr(search_mod, "rerank", _identity_rerank)
+    g, driver = _ScanGraph(2), _CountingDriver(RuntimeError("neo4j down"))
+    with caplog.at_level(logging.WARNING, logger="answer_api.search"):
+        res = await search_mod.search_local(g, driver, q="q", k=3, group_id="g",
+                                            scope=_A.scope, rerank_pool=10,
+                                            settings=_settings(**_RERANK))
+    assert g.limits == [30, 100, 300]
+    assert "scope episode count failed" in caplog.text
+    assert _uuids(res) == ["e0", "e1"]  # the post-filter's results survive

@@ -13,6 +13,31 @@ ATTRIBUTION_RULES = (
     "on the facts it cites. Never apply a fact labelled with one vendor or product "
     "to another. When comparing vendors, keep each vendor's claims separate.\n")
 
+# Run 9 (2026-10-13): the judge's 4s were a fact stripped of its qualifier (object
+# storage immutability presented as the hardened repository's), names no fact states
+# (NetApp from "SVM"/"cluster" facts), and 5-11 near-duplicate markers on one claim.
+# Every synthesis prompt carries this, single and multi-side alike.
+CLAIM_RULES = (
+    "State only what each fact says, keeping its qualifiers: a fact about a specific "
+    "component, storage type, mode, version or condition stays about that one; never "
+    "present it as true more generally. Do not infer names, capabilities or "
+    "relationships that no fact states. Cite each claim with the one or two markers "
+    "of the facts that state it most directly; when several facts say the same thing, "
+    "cite two of them at most. A sentence never carries more than three markers: "
+    "split it so each detail cites its own fact. Write each marker individually, "
+    "never as a range such as [1]-[3].\n")
+
+# Run 9: the one misattribution and an unsupported inference were both in a closing
+# "Comparison" paragraph -- "Both aim to protect against accidental deletion and
+# malicious activity [5] [15]" pinned a Veeam point on an Azure fact. Multi-side
+# prompts only.
+COMPARISON_RULES = (
+    "If you compare the sides, write contrasts only: each comparison sentence sets one "
+    "side's point against another side's, each in its own clause citing only that "
+    "side's markers. Never make one claim about several sides together (\"Both ...\", "
+    "\"Each ...\", \"All ...\"), and introduce no point that the side sections did "
+    "not already state.\n")
+
 
 def pairs_of(sources: list[dict]) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []

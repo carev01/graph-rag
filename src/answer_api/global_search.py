@@ -16,7 +16,14 @@ from openai import AsyncOpenAI
 from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 from graph_extract.usage import bounded_llm_client
-from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line, in_scope
+from answer_api.attribution import (
+    ATTRIBUTION_RULES,
+    CLAIM_RULES,
+    COMPARISON_RULES,
+    applies_to,
+    fact_line,
+    in_scope,
+)
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import Scope
 from answer_api.search import search_local
@@ -377,7 +384,7 @@ _REDUCE_PROMPT = (
     "Answer the QUESTION by synthesizing across these community findings, organized "
     "by theme and vendor. Each finding is shown as a marker [N] followed by the fact "
     "it refers to.\n"
-    + ATTRIBUTION_RULES +
+    + ATTRIBUTION_RULES + CLAIM_RULES +
     "Rules:\n"
     # BACKLOG 0b: the findings are now the facts themselves, marker-bound, so
     # the citation rule can say which marker a claim takes: the one printed
@@ -408,7 +415,7 @@ _REDUCE_FACETS_PROMPT = (
     "Answer the QUESTION by synthesizing these community findings, which are grouped "
     "under a heading for each side of the question. Each finding is shown as a marker "
     "[N] followed by the fact it refers to.\n"
-    + ATTRIBUTION_RULES +
+    + ATTRIBUTION_RULES + CLAIM_RULES + COMPARISON_RULES +
     "Rules:\n"
     "- The question has these sides: {labels}. Address EVERY side, in that order. If a "
     "side shows \"(no findings)\", say in one sentence that the retrieved "
@@ -420,12 +427,7 @@ _REDUCE_FACETS_PROMPT = (
     "covered only when it shows \"(no findings)\".\n"
     "- Cite every claim with the [N] marker of the fact it rests on. A sentence with "
     "no marker is not allowed.\n"
-    "- Cite each claim with the one or two markers of the facts it rests on; do not "
-    "attach long marker lists to a sentence.\n"
-    "- If you compare the sides, give each side's claim in its own clause with only "
-    "that side's markers.\n"
-    "- Write each marker individually: [1] [2] [3]. Never write a range or span such "
-    "as [1]-[3]; only the markers you write out are cited.\n"
+    "- Only the markers you write out are cited.\n"
     "- Use ONLY these findings. Do NOT use outside knowledge.\n"
     "- Do NOT write any URL.\n"
     "- Let the evidence set the length. Say what the findings support and then stop.\n"

@@ -101,11 +101,22 @@ async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id,
     return list(results.edges)
 
 
+async def _scope_episode_count(driver, scope: Scope, max_episodes: int) -> int:
+    """Episodes in `scope`, counted up to `max_episodes + 1` (enough to tell
+    whether the scope is over the scan cap without counting all of it)."""
+    records, _, _ = await driver.execute_query(
+        _EPISODE_COUNT, vendors=[v.lower() for v in scope.vendors],
+        products=[p.lower() for p in scope.products],
+        sources=[x.lower() for x in scope.sources], episode_cap=max_episodes + 1)
+    return records[0]["n"] if records else 0
+
+
 async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: str,
                        exclude: set[str], include_invalid: bool = False,
                        max_episodes: int = 6000,
                        settings: ExtractSettings | None = None,
-                       rerank: bool = True) -> list[ScannedEdge]:
+                       rerank: bool = True,
+                       episode_count: int | None = None) -> list[ScannedEdge]:
     """The top `k` RELATES_TO edges of `scope` (not in `exclude`) for `q`.
 
     `q` is embedded exactly as graphiti's search embeds it (graphiti-core 0.30.1,
@@ -119,15 +130,15 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
     count is checked first, before `q` is embedded, so an over-cap scope costs no
     embedding call (task 17).
     `rerank=False` returns the cosine top `k` without the cross-encoder: a pooled
-    caller reranks the merged candidates itself, once."""
+    caller reranks the merged candidates itself, once. `episode_count`, when the
+    caller has already counted the scope, skips the count query."""
     episode_cap = max_episodes + 1
     vendors = [v.lower() for v in scope.vendors]
     products = [p.lower() for p in scope.products]
     sources = [x.lower() for x in scope.sources]
-    count_records, _, _ = await driver.execute_query(
-        _EPISODE_COUNT, vendors=vendors, products=products, sources=sources,
-        episode_cap=episode_cap)
-    if count_records and count_records[0]["n"] > max_episodes:
+    if episode_count is None:
+        episode_count = await _scope_episode_count(driver, scope, max_episodes)
+    if episode_count > max_episodes:
         logger.info("scoped scan skipped: scope %s has more than %d episodes",
                     scope.as_dict(), max_episodes)
         return []
@@ -202,7 +213,21 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
     # narrow scope can filter out most of one fetch (the six Veeam Agent guides kept
     # 7 of 45, 2026-10-12), so a scoped search re-fetches wider until target survive.
     first = max(target * 3, target)
-    limits = [first] if not scoped else list(dict.fromkeys(
+    # A pooled search in a scope small enough to scan merges the scope's own top
+    # facts below whatever the post-filter finds, so widening the corpus-wide fetch
+    # buys it nothing but time: 120 -> 400 -> 450 edges cost ~20 s per facet on AWS
+    # and Azure Backup, the whole run 9 slowdown (fetch 450 alone is ~9 s). It
+    # fetches once. Over-cap scopes (no scan) and a failed count keep the widening.
+    episode_count: int | None = None
+    if scoped and pooled:
+        assert scope is not None
+        try:
+            episode_count = await _scope_episode_count(driver, scope, scan_max_episodes)
+        except Exception as exc:
+            logger.warning("scope episode count failed for scope %s: %s; widening the "
+                           "fetch as for an unscannable scope", scope.as_dict(), exc)
+    scannable = episode_count is not None and 0 < episode_count <= scan_max_episodes
+    limits = [first] if not scoped or scannable else list(dict.fromkeys(
         min(n, fetch_cap) for n in (first, target * 10, target * 30)))
     edges: list = []
     for limit in limits:
@@ -219,7 +244,8 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
         if len(edges) >= target:
             break
     edges = edges[:target]
-    if scoped and (pooled or len(edges) < target):
+    over_cap = episode_count is not None and episode_count > scan_max_episodes
+    if scoped and (pooled or len(edges) < target) and not over_cap:
         # The corpus-wide top-N can hold none of a small scope's facts next to a
         # huge one (Cohesity's 29 DataLock/FortKnox facts vs Veeam's 20k articles,
         # 2026-10-12): rank the scope's own facts and append them after the
@@ -245,7 +271,7 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
                 group_id=group_id,
                 exclude=seen, include_invalid=include_invalid,
                 max_episodes=scan_max_episodes, settings=settings,
-                rerank=not pooled)
+                rerank=not pooled, episode_count=episode_count)
         except Exception as exc:
             logger.warning("scoped scan failed for scope %s: %s; keeping %d "
                            "post-filter results", scope.as_dict(), exc, len(edges))
