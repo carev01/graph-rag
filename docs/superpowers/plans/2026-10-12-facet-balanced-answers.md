@@ -2371,3 +2371,36 @@ Tier 1 run 6 (paid, $0.15): enumeration completeness 0/3, facet coverage 5/6.
    all out of scope also gets the local fill; local fill returning nothing → "(no findings)";
    local fill raising → degraded + note; facets with in-scope findings do NOT call the local
    fill; single path untouched.
+
+### Task 16: Product-named side questions, enumeration marker rule, cross-site ground truth (run 7 fixes)
+
+Run 7: restore-verification enumeration documented only Veeam. Measured: "How does
+Microsoft verify that backups can actually be restored?" never surfaces Microsoft's
+"Azure Backup test restores can be used to verify … RPO" fact; "How does Azure Backup
+verify …" puts it first (documentation is organised by product, not vendor). Run 7 also:
+the enumeration answer carried a 14-marker sentence (bag share 0.64); one closing
+comparison sentence cited both vendors together (judge: 1 misattribution). User decision
+2026-10-13: Cohesity does cross-site copies → counts for the cross-region question.
+
+**Files:** `src/answer_api/scope.py`, `src/answer_api/shape.py`, `src/answer_api/enumeration.py`,
+`src/answer_api/global_search.py`, `src/answer_api/synthesize.py`, `src/answer_api/drift.py`,
+`src/answer_api/router_golden_tier1.json`, tests.
+
+1. `ScopeResolver.products_of(vendor: str) -> tuple[str, ...]` (structural products of that
+   vendor, sorted). `Facet` gains `products: tuple[str, ...] = ()`; `classify_shape` fills it for
+   ENUMERATION facets (one per content vendor). Comparison facets keep `()`.
+2. `facet_queries`: in the SIDES list, a facet with `products` renders as
+   `- <label> (its documented products: P1, P2, …)`; add to `_FACET_QUERIES_PROMPT` (keep
+   everything else verbatim): "When a side lists its documented products, make the product
+   the question concerns the subject (e.g. \"How does Azure Backup …\"); if several apply, name
+   the most relevant one or two." The label used as the JSON key stays the facet label.
+3. `_ENUM_PROMPT`: add "Cite each claim with the one or two markers of the facts it rests on;
+   never attach a long list of markers to one sentence."
+4. Every facet-answer prompt (`_FACET_PROMPT` in synthesize, `_REDUCE_FACETS_PROMPT`,
+   `_SYNTH_FACETS_PROMPT` in drift, `_ENUM_PROMPT`): add "If you compare the sides, give each
+   side's claim in its own clause with only that side's markers."
+5. Golden: the entry "Which backup vendors can keep a copy of backups in another region or at
+   another site?" → `"expected_vendors": ["AWS", "Cohesity", "Microsoft", "Veeam"]`.
+6. Tests: `products_of`; enumeration facets carry products, comparison facets do not;
+   `facet_queries` renders products in the SIDES list and keeps label keys; the new prompt
+   rules are present; golden schema still passes.
