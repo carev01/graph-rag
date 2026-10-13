@@ -1,5 +1,67 @@
 # Tier 1 (Veeam) golden-set eval
 
+## Run 8 -- 2026-10-13, facet-balanced answers, final (branch facet-answers)
+
+After the run 7 fixes: product-named side questions for enumerations, rewrite fallback never
+re-checks the cross-vendor question, faceted global keeps local-grounded answers, single rerank
+per pooled search, enumeration marker/clause rules, cross-site ground truth includes Cohesity.
+
+| | run 5 | run 6 | run 7 | **run 8** | target |
+|---|---|---|---|---|---|
+| routing | 1.00 | 1.00 | 1.00 | **1.00** | 1.00 |
+| scoped grounding | 0.70 | 0.83 | 1.00 | **1.00 (12/12)** | 1.00 |
+| faithfulness | 5.00 | 4.50 | 4.88 | **4.56** (4.87 excl. the probe) | 5.0 |
+| misattributed claims | 0 | 1 | 1 | **0** | 0 |
+| facet coverage | -- | 0.83 | 1.00 | **1.00 (6/6)** | 1.00 |
+| enumeration completeness | -- | 0.00 | 0.33 | **0.67 (2/3)** | 1.00 |
+| eval cost | | $0.15 | $0.24 | **$0.20** | |
+
+Open: (1) restore verification documents Microsoft + Veeam, not AWS ("Restore testing" not in
+AWS's gathered evidence); (2) the probe "Which vendors does Veeam integrate with?" is classified
+as an enumeration (any "vendors" wording is, per spec §2) and answers with each vendor's own
+integrations -- faithfulness 0. A question whose subject is a named vendor needs a different shape.
+
+## Run 8 detail
+
+
+Questions: 16 (failed: 0)
+
+**Routing accuracy: 1.00** (answer path); classifier: 1.00
+by intent: {'local': 1.0, 'drift': 1.0, 'global': 1.0}
+Grounding precision: 0.8666666666666667
+**Grounding, scoped questions: 1.0 (n=12)** | cross-vendor, informational (golden answers predate the Tier 1 vendors): 0.3333333333333333 (n=3)
+by mode: {'local': 1.0, 'global': 0.7777777777777778}
+Faithfulness mean: 4.56 (unscored: 0/16)
+by mode: {'local': 5.0, 'global': 4.3}
+Markers per sentence by mode (mean/max): {'local': {'mean': 1.4333333333333333, 'max': 2}, 'global': {'mean': 2.83, 'max': 11}}
+Share of citations in >=8-marker sentences, by mode: {'local': 0.0, 'global': 0.086}
+
+Misattributed claims: 0 across 0 answers (unscored: 0)
+**Facet coverage (comparisons): 1.0 (n=6)** | **Enumeration completeness: 0.67 (n=3)**
+Comparative (broad): {'local': {'faithfulness': 4.4, 'grounding': 0.7777777777777778}, 'global': {'faithfulness': 4.6, 'grounding': 0.8888888888888888}, 'drift': {'faithfulness': 4.8, 'grounding': 0.6666666666666666}}
+drift_wins: False
+
+## Per question
+
+| intent | chosen | routing | grounding | faithfulness | cited | ranges | mps | bag | misattributed | facet_coverage | enumeration_complete | question |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| local | local | True | True | 5 | 7 | 0 | 1.2/2 | 0.0 | 0 | - | - | How does a Veeam Backup & Replication hardened repository keep backups immutable? |
+| local | local | True | True | 5 | 5 | 0 | 1.7/2 | 0.0 | 0 | - | - | What does a Veeam SureBackup job verify, and how is it processed? |
+| local | local | True | True | 5 | 9 | 0 | 1.5/2 | 0.0 | 0 | - | - | How does Veeam Backup & Replication detect malware in backups? |
+| local | local | True | True | 5 | 15 | 0 | 1.5/2 | 0.0 | 0 | - | - | In Veeam ONE, what happens when an alarm is triggered and how are remediation actions approved? |
+| local | local | True | True | 5 | 14 | 0 | 1.4/2 | 0.0 | 0 | - | - | How do you halt and resume plan testing in Veeam Recovery Orchestrator? |
+| drift | local | True | True | 5 | 8 | 0 | 1.3/2 | 0.0 | 0 | - | - | What should I consider when enabling backup immutability for Veeam Agent backups? |
+| drift | global | True | True | 5 | 24 | 0 | 2.3/4 | 0.0 | 0 | True | - | Compare how Veeam hardened repositories and AWS Backup Vault Lock protect backups from deletion. |
+| global | global | True | True | 4 | 29 | 0 | 3.7/8 | 0.22 | 0 | True | - | Compare Veeam backup copy jobs with AWS Backup cross-Region copy for keeping an off-site copy. |
+| drift | global | True | True | 5 | 41 | 0 | 3.7/5 | 0.0 | 0 | True | - | How do Veeam Backup & Replication and Azure Backup each protect backups against ransomware? |
+| local | global | True | True | 5 | 19 | 0 | 2.5/4 | 0.0 | 0 | True | - | How does immutability in Veeam Backup for Microsoft 365 compare with soft delete in Azure Backup? |
+| global | global | True | False | 5 | 20 | 0 | 3.1/11 | 0.35 | 0 | - | True | Which backup vendors support immutable backups, and how do their approaches differ? |
+| drift | global | True | False | 5 | 17 | 0 | 2.8/4 | 0.0 | 0 | - | False | What approaches do backup vendors take to verify that backups can actually be restored? |
+| global | global | True | True | 5 | 15 | 0 | 1.5/2 | 0.0 | 0 | - | True | Which backup vendors can keep a copy of backups in another region or at another site? |
+| global | global | True | True | 5 | 18 | 0 | 2.7/6 | 0.0 | 0 | True | - | Compare AWS Backup Vault Lock with Cohesity DataLock. |
+| global | global | True | True | 4 | 26 | 0 | 3.5/8 | 0.29 | 0 | True | - | How does Cohesity FortKnox compare with Veeam hardened repositories for ransomware protection? |
+| global | global | True | None | 0 | 28 | 0 | 2.5/7 | 0.0 | 0 | - | - | Which vendors does Veeam integrate with? |
+
 ## Run 7 -- 2026-10-13, facet-balanced answers (branch facet-answers)
 
 16 questions (4 added 2026-10-13; ransomware question's expected articles widened, user-approved).
