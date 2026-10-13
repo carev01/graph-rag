@@ -25,7 +25,7 @@ def test_router_golden_schema():
 
 def test_tier1_golden_schema():
     """The Tier 1 vendor set (spec 2026-09-25 vendor/product end to end, section 6):
-    6 scoped, 4 two-vendor comparisons, 2 explicitly cross-vendor."""
+    6 scoped, 6 comparisons, 4 cross-vendor (one is a probe with no ground truth)."""
     path = _PATH.with_name("router_golden_tier1.json")
     data = json.loads(path.read_text())
     kinds = {"scoped": 0, "comparison": 0, "cross_vendor": 0}
@@ -33,6 +33,10 @@ def test_tier1_golden_schema():
         assert set(e) >= {"question", "intent", "expected_modes", "expected_article_ids", "kind"}
         assert e["intent"] in _MODES and set(e["expected_modes"]) <= _MODES
         assert e["intent"] in e["expected_modes"]
-        assert e["expected_article_ids"], "every Tier 1 question is grounded"
+        # Empty expected_article_ids allowed only for cross_vendor (routing/faithfulness probes)
+        if e["kind"] == "cross_vendor":
+            assert isinstance(e["expected_article_ids"], list)
+        else:
+            assert e["expected_article_ids"], "all non-probe Tier 1 questions must be grounded"
         kinds[e["kind"]] += 1
-    assert kinds == {"scoped": 6, "comparison": 4, "cross_vendor": 2}
+    assert kinds == {"scoped": 6, "comparison": 6, "cross_vendor": 4}
