@@ -268,3 +268,35 @@ async def test_search_local_passes_settings_to_the_scan(scan_calls):
     await search_mod.search_local(g, None, q="q", k=4, group_id="g", scope=_SCOPE,
                                   settings=s)
     assert scan_calls[0]["settings"] is s
+
+
+async def test_scan_query_excludes_edges_with_no_embedding():
+    # ORDER BY ... DESC puts nulls first in Cypher, so an edge with no
+    # fact_embedding would otherwise rank above every real candidate.
+    assert "f.fact_embedding IS NOT NULL" in search_mod._SCAN
+
+
+async def test_scan_rerank_pads_an_empty_reply_from_cosine_order(monkeypatch):
+    async def _rerank(*a, **kw):
+        return []
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    drv = _Driver(_cands(5))
+    out = await search_mod._scoped_scan(
+        SimpleNamespace(embedder=_Embedder()), drv, q="q", scope=_SCOPE, k=3,
+        group_id="g", exclude=set(), settings=_settings(**_RERANK))
+    assert [e.uuid for e in out] == ["c0", "c1", "c2"]
+
+
+async def test_scan_rerank_pads_a_short_reply_from_remaining_cosine_order(monkeypatch):
+    async def _rerank(query, documents, *, top_k, settings):
+        return [(3, 0.9)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    drv = _Driver(_cands(5))
+    out = await search_mod._scoped_scan(
+        SimpleNamespace(embedder=_Embedder()), drv, q="q", scope=_SCOPE, k=3,
+        group_id="g", exclude=set(), settings=_settings(**_RERANK))
+    # c3 (the one usable rerank hit) first, then the next unchosen cosine
+    # candidates (c0, c1) padded in to reach k=3.
+    assert [e.uuid for e in out] == ["c3", "c0", "c1"]

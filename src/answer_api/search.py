@@ -53,6 +53,7 @@ _SCAN = (
     "  WHERE f.group_id = $group_id AND NOT f.uuid IN $exclude "
     "  AND ($include_invalid OR f.invalid_at IS NULL OR f.invalid_at > datetime()) "
     "  AND any(x IN f.episodes WHERE x IN uu) "
+    "  AND f.fact_embedding IS NOT NULL "
     "  WITH DISTINCT f "
     "  ORDER BY vector.similarity.cosine(f.fact_embedding, $vec) DESC LIMIT $k "
     "  RETURN f.uuid AS uuid, f.fact AS fact, f.episodes AS episodes, "
@@ -137,6 +138,11 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
         logger.warning("scoped scan rerank unavailable; returning cosine order")
         return cands[:k]
     order = list(dict.fromkeys(i for i, _ in ranked if 0 <= i < len(cands)))
+    if len(order) < k:
+        # A short (or empty) rerank reply still returns k: pad from the
+        # cosine-ordered candidates not already chosen, in cosine order.
+        chosen = set(order)
+        order += [i for i in range(len(cands)) if i not in chosen]
     return [cands[i] for i in order][:k]
 
 

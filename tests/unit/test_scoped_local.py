@@ -76,6 +76,14 @@ async def test_search_local_scope_filters_by_episode_intersection(monkeypatch):
     monkeypatch.setattr(search_mod, "scope_episode_uuids",
                         _counting_scope_fn(calls, {"ep-veeam"}))
     monkeypatch.setattr(search_mod, "Provenance", lambda d: FakeProvenance())
+
+    async def _no_scan(*a, **kw):
+        # Post-filter leaves fewer than k edges here, so search_local falls
+        # back to _scoped_scan; this fake graphiti has no embedder, which is
+        # out of scope for this test -- stub the scan out rather than reach it.
+        return []
+
+    monkeypatch.setattr(search_mod, "_scoped_scan", _no_scan)
     edges = [FakeEdge("f1", "veeam fact", ["ep-veeam"]),
              FakeEdge("f2", "other vendor fact", ["ep-other"])]
     graphiti = FakeGraphiti(edges)
