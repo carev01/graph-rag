@@ -2284,3 +2284,49 @@ Append four entries (same key order and style as the existing ones):
 Run `uv run --extra dev pytest tests/unit/test_router_golden_schema.py -q`; if the schema
 test rejects an empty `expected_article_ids`, allow it only for `kind == "cross_vendor"`
 entries and say so.
+
+### Task 14: Better side questions and reranked facet searches (amendment 2)
+
+Gate run 2 (12/16) showed: the cheap model rewrote enumeration sides as "Which backup
+vendors support immutable backups on AWS…" (vendor treated as a platform, cross-vendor
+wording kept); and large scopes (Veeam, Microsoft) fill k from the corpus-wide hybrid
+search with poor ranking ("PostgreSQL WAL Files Backup" for a ransomware question).
+Measured: a vendor-subject rewrite prompt fixes the rewrites on the cheap model; a
+cross-encoder rerank of a larger candidate pool puts relevant facts on top.
+
+**Files:** `src/answer_api/shape.py`, `src/answer_api/search.py`,
+`src/graph_extract/config.py`, facet callers (`synthesize._answer_local_facets`,
+`drift` facet-scoped follow-ups, `enumeration._gather`, `eval_retrieval._evidence`),
+tests.
+
+1. Replace `_FACET_QUERIES_PROMPT` with exactly:
+```python
+_FACET_QUERIES_PROMPT = (
+    "Each SIDE below is a vendor or product whose OWN documentation will be searched "
+    "separately. Rewrite the QUESTION into one standalone question per SIDE, asked "
+    "directly about that side alone, as you would ask its documentation: start with "
+    "the side's name as the subject (e.g. \"How does <side> ...\", \"Does <side> ...\"). "
+    "Keep the QUESTION's intent and its specific terms (feature names, workloads, "
+    "settings). Drop cross-vendor wording such as \"which vendors\", \"compare\", "
+    "\"differ\" or \"each\". Do not answer, do not add facts, and do not mention any other "
+    "side or vendor. Respond with ONLY JSON mapping each side's label, exactly as "
+    "written below, to its question: {{\"<label>\": \"<question>\", ...}}.\n\n"
+    "SIDES:\n{sides}\n\nQUESTION: {q}\nJSON:")
+```
+2. `search_local` gains `rerank_pool: int = 0`. When `rerank_pool > 0`, `settings` is
+   given and `rerank_configured(settings)`: collect up to `max(k, rerank_pool)` filtered
+   edges (same adaptive limits / scan fallback, with the target raised to the pool size),
+   rerank them with `answer_api.rerank.rerank(q, [e.fact ...], top_k=k, settings=settings)`
+   and return that order, padding a short/empty rerank result from the original order;
+   on reranker failure (None/raise) log a warning and return the original top k. With
+   `rerank_pool == 0` (default) behaviour is byte-identical to today.
+3. New setting `local_facet_rerank_pool: int = 40` (comment: gate run 2 measurement).
+4. Facet callers pass `rerank_pool=settings.local_facet_rerank_pool` and
+   `settings=settings`: `_answer_local_facets` (per facet), DRIFT follow-ups that run in a
+   facet scope (`fu.scope is not None`) and the facet coverage follow-ups, enumeration
+   `_gather`'s local search, and `eval_retrieval._evidence` for comparison/enumeration
+   shapes. Single-shape searches never pass it.
+5. Tests: prompt text (snapshot of the new constant's key phrases); rerank_pool reorders
+   via a fake rerank and respects k; pads a short result; failure falls back with a
+   warning; pool 0 leaves the call path unchanged (no rerank call); each facet caller
+   passes the pool, single callers do not.
