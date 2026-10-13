@@ -1,7 +1,8 @@
 """Free retrieval gate (spec 2026-10-12 §6): per golden question, does per-facet
 retrieval find evidence for every facet, an expected article, and every expected
-vendor? No LLM calls -- the local embedder, Neo4j and the reranker only. Run before
-any paid eval.
+vendor? No generative calls except the per-facet question rewrite (one cheap
+map-tier call per comparison/enumeration question, exactly as /answer makes it) --
+otherwise the local embedder, Neo4j and the reranker only. Run before any paid eval.
 
 Single and comparison questions pass when every facet has evidence and (if the
 golden entry lists expected articles) one of them is retrieved. Enumerations pass
@@ -21,14 +22,15 @@ import asyncio
 import json
 import math
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
 
-from answer_api.global_search import shortlist_communities
+from answer_api.global_search import _map_client_and_model, shortlist_communities
 from answer_api.scope import ScopeResolver
 from answer_api.search import search_local
-from answer_api.shape import classify_shape
+from answer_api.shape import QuestionShape, classify_shape, facet_queries
 from graph_extract.config import get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 
@@ -58,6 +60,15 @@ def check_question(q: dict, facet_evidence: list[dict]) -> dict:
     return out
 
 
+async def _with_facet_queries(client, model: str, q: str,
+                              shape: QuestionShape) -> QuestionShape:
+    """The router's rewrite, reproduced: comparison/enumeration facets get their
+    own retrieval question; a single question is returned unchanged (no call)."""
+    if shape.kind not in ("comparison", "enumeration"):
+        return shape
+    return replace(shape, facets=await facet_queries(client, model, q, shape.facets))
+
+
 async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list[dict]:
     n = len(shape.facets)
     if shape.kind == "enumeration":
@@ -70,13 +81,14 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
     out = []
     for f in shape.facets:
         scope = f.scope if not f.scope.is_empty() else None
-        loc = await search_local(graphiti, driver, q=q, k=k, scope=scope,
+        fq = f.query or q
+        loc = await search_local(graphiti, driver, q=fq, k=k, scope=scope,
                                  group_id=settings.group_id,
                                  fetch_cap=settings.local_scoped_fetch_cap,
                                  scan_max_episodes=settings.local_scoped_scan_max_episodes,
                                  settings=settings)
         hits = await shortlist_communities(
-            driver, embedder, q, level=settings.global_default_level,
+            driver, embedder, fq, level=settings.global_default_level,
             k=top_n or settings.global_shortlist_k, group_id=settings.group_id,
             settings=settings, scope=scope, top_n=top_n)
         srcs = [s for r in loc["results"] for s in r["sources"]]
@@ -92,6 +104,8 @@ async def main() -> int:
     ap.add_argument("--questions", type=Path, required=True)
     args = ap.parse_args()
     settings = get_extract_settings()
+    # Built first: an unconfigured map tier fails before anything else is opened.
+    map_client, map_model = _map_client_and_model(settings)
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
     graphiti = build_graphiti(settings)
@@ -101,6 +115,7 @@ async def main() -> int:
         results = []
         for q in json.loads(args.questions.read_text()):
             shape = classify_shape(q["question"], resolver, resolver.resolve(q["question"]))
+            shape = await _with_facet_queries(map_client, map_model, q["question"], shape)
             ev = await _evidence(graphiti, driver, embedder, settings, q["question"], shape)
             r = check_question({**q, "_shape": shape.kind}, ev)
             results.append(r)
@@ -116,6 +131,7 @@ async def main() -> int:
         await graphiti.close()
         await driver.close()
         await embedder.client.close()
+        await map_client.close()
 
 
 if __name__ == "__main__":

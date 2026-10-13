@@ -1,5 +1,16 @@
 """The free retrieval gate's pass/fail logic."""
+import pytest
+
+import answer_api.eval_retrieval as er
 from answer_api.eval_retrieval import check_question
+from answer_api.scope import Scope
+from answer_api.shape import Facet, QuestionShape
+from graph_extract.config import ExtractSettings
+
+_S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+_V = Facet("Veeam", Scope(vendors=("Veeam",), source="detected"))
+_A = Facet("AWS", Scope(vendors=("AWS",), source="detected"))
 
 
 def _ev(label, articles=(), vendors=(), communities=1, facts=1):
@@ -60,3 +71,48 @@ def test_an_enumeration_still_checks_expected_articles():
     q["expected_article_ids"] = ["a1"]
     assert check_question(q, [_ev("AWS", ["a1"], ["AWS"]),
                               _ev("Veeam", communities=0, facts=0)])["pass"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["comparison", "enumeration"])
+async def test_comparison_and_enumeration_facets_get_their_own_questions(monkeypatch, kind):
+    rewrites = []
+
+    async def _rewrite(client, model, q, facets):
+        rewrites.append((client, model, q))
+        return tuple(Facet(f.label, f.scope, query=f"about {f.label}") for f in facets)
+
+    monkeypatch.setattr(er, "facet_queries", _rewrite)
+    shape = await er._with_facet_queries("C", "m", "q", QuestionShape(kind, (_V, _A)))
+    assert rewrites == [("C", "m", "q")]
+    assert [f.query for f in shape.facets] == ["about Veeam", "about AWS"]
+
+
+@pytest.mark.asyncio
+async def test_a_single_question_is_not_rewritten(monkeypatch):
+    async def _rewrite(*a):
+        raise AssertionError("no rewrite for single")
+
+    monkeypatch.setattr(er, "facet_queries", _rewrite)
+    single = QuestionShape("single", (Facet("", Scope()),))
+    assert await er._with_facet_queries("C", "m", "q", single) is single
+
+
+@pytest.mark.asyncio
+async def test_evidence_retrieves_with_each_facets_question(monkeypatch):
+    asked = []
+
+    async def _search(graphiti, driver, *, q, k, scope=None, **kw):
+        asked.append(("search", q))
+        return {"results": [], "count": 0}
+
+    async def _shortlist(driver, embedder, q, **kw):
+        asked.append(("shortlist", q))
+        return []
+
+    monkeypatch.setattr(er, "search_local", _search)
+    monkeypatch.setattr(er, "shortlist_communities", _shortlist)
+    shape = QuestionShape("comparison", (Facet("Veeam", _V.scope, query="veeam q"), _A))
+    await er._evidence(None, None, None, _S, "orig", shape)
+    assert asked == [("search", "veeam q"), ("shortlist", "veeam q"),
+                     ("search", "orig"), ("shortlist", "orig")]

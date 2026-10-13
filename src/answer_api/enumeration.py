@@ -46,12 +46,14 @@ _ENUM_PROMPT = (
 
 
 async def _gather(graphiti, driver, embedder, *, q, facet: Facet, group_id, settings):
+    # Retrieval asks the vendor's own question; `_check` keeps the original `q`.
+    fq = facet.query or q
     n = settings.enum_communities_per_vendor
     communities, facts = await asyncio.gather(
-        shortlist_communities(driver, embedder, q, level=settings.global_default_level,
+        shortlist_communities(driver, embedder, fq, level=settings.global_default_level,
                               k=n, group_id=group_id, settings=settings,
                               scope=facet.scope, top_n=n),
-        search_local(graphiti, driver, q=q, k=settings.enum_facts_per_vendor,
+        search_local(graphiti, driver, q=fq, k=settings.enum_facts_per_vendor,
                      scope=facet.scope, group_id=group_id,
                      fetch_cap=settings.local_scoped_fetch_cap,
                      scan_max_episodes=settings.local_scoped_scan_max_episodes,

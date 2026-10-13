@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import Literal, cast
 
 from openai import AsyncOpenAI
@@ -23,7 +24,7 @@ from answer_api import freshness as freshness_mod
 from answer_api import enumeration as enum_mod
 from answer_api import attribution
 from answer_api.scope import Scope
-from answer_api.shape import QuestionShape, could_not_check_note
+from answer_api.shape import QuestionShape, could_not_check_note, facet_queries
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,10 @@ def _shape_fields(env: dict, shape: QuestionShape | None, raw: dict,
     `shape_requested` is the classified kind it was asked as."""
     env["shape"] = shape.kind if shape is not None else "single"
     env["shape_requested"] = requested
-    env["facets"] = [{"label": f.label, "scope": f.scope.as_dict()}
+    # `query` (the facet's rewritten retrieval question) only when one was set, so a
+    # single question's envelope is unchanged.
+    env["facets"] = [{"label": f.label, "scope": f.scope.as_dict(),
+                      **({"query": f.query} if f.query else {})}
                      for f in (shape.facets if shape is not None else ())]
     for key in ("degraded_facets", "checked_vendors", "documented_vendors"):
         if key in raw:
@@ -215,6 +219,12 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         # (the eval harness forces each mode in turn): run that mode unfaceted,
         # and report the run as the single question it was answered as.
         shape = None
+    if shape is not None and shape.kind in ("comparison", "enumeration"):
+        # Each side retrieves with its own standalone question (one cheap map-tier
+        # call); a side whose rewrite failed retrieves with the original question.
+        # Answering prompts keep the original question.
+        shape = replace(shape, facets=await facet_queries(map_client, map_model, q,
+                                                          shape.facets))
     if shape is not None and shape.kind == "enumeration":
         # The classifier still runs (it labels the envelope's mode), but an
         # enumeration checks every content vendor instead of running that mode.

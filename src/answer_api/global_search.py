@@ -547,31 +547,36 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
                                 facets: Sequence[Facet]) -> dict:
     stats = RerankStats()
     n = settings.global_facet_top_n
+    # Each facet shortlists and maps with its own question (`f.query`, else `q`);
+    # the reduce prompt keeps the original `q`.
+    fqs = [f.query or q for f in facets]
     shortlists = await asyncio.gather(*[
-        shortlist_communities(driver, embedder, q, level=level, k=n, group_id=group_id,
+        shortlist_communities(driver, embedder, fq, level=level, k=n, group_id=group_id,
                               settings=settings, stats=stats, scope=f.scope, top_n=n)
-        for f in facets], return_exceptions=True)
+        for f, fq in zip(facets, fqs)], return_exceptions=True)
     raise_if_cancelled(shortlists)   # cancellation propagates; only Exceptions remain
     # A community shortlisted by several facets serves EVERY one of them (spec
-    # §3.2): it is mapped once, then its fact ids are filtered separately by each
-    # facet's scope under that facet's heading.
-    distinct: dict[str, CommunityHit] = {}
-    for hits in shortlists:
+    # §3.2): it is mapped once per distinct facet question (once when the facets
+    # share a question), then its fact ids are filtered separately by each facet's
+    # scope under that facet's heading.
+    distinct: dict[tuple[str, str], CommunityHit] = {}
+    for hits, fq in zip(shortlists, fqs):
         if not isinstance(hits, BaseException):
             for h in hits:
-                distinct.setdefault(h.community_id, h)
+                distinct.setdefault((h.community_id, fq), h)
     order = list(distinct)
-    maps = await asyncio.gather(*[map_report(map_client, map_model, q, distinct[c])
-                                  for c in order], return_exceptions=True)
+    maps = await asyncio.gather(*[map_report(map_client, map_model, key[1], distinct[key])
+                                  for key in order], return_exceptions=True)
     raise_if_cancelled(maps)
-    mapped: dict[str, MapResult] = {}
-    for cid, m in zip(order, maps):
+    mapped: dict[tuple[str, str], MapResult] = {}
+    for key, m in zip(order, maps):
         if isinstance(m, BaseException):
-            logger.warning("global map failed for community %s: %s", cid, m)
+            logger.warning("global map failed for community %s: %s", key[0], m)
         elif m is None:
-            logger.warning("global map returned no usable result for community %s", cid)
+            logger.warning("global map returned no usable result for community %s",
+                           key[0])
         else:
-            mapped[cid] = m
+            mapped[key] = m
     all_ids = sorted({fid for m in mapped.values() for fid in m.fact_ids})
     resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
     # A failure never reads as absence: a facet whose shortlist failed, or whose
@@ -580,12 +585,13 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
     # whose facts all fell outside its scope is genuine absence ("(no findings)").
     degraded: list[str] = []
     facet_results: list[tuple[str, list[MapResult]]] = []
-    for f, hits in zip(facets, shortlists):
+    for f, fq, hits in zip(facets, fqs, shortlists):
         if isinstance(hits, BaseException):
             logger.warning("global facet %r shortlist failed: %s", f.label, hits)
             degraded.append(f.label)
             continue
-        mine = [mapped[h.community_id] for h in hits if h.community_id in mapped]
+        mine = [mapped[(h.community_id, fq)] for h in hits
+                if (h.community_id, fq) in mapped]
         if hits and not mine:
             logger.warning("global facet %r: none of its %d communities mapped usably",
                            f.label, len(hits))

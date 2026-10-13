@@ -174,3 +174,37 @@ async def test_a_cancelled_map_propagates_not_degrades(stubs, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1,
                                k=10, group_id="g", settings=_S, facets=[_V, _A])
+
+
+async def test_each_facet_shortlists_and_maps_with_its_own_question(stubs, monkeypatch):
+    asked = SimpleNamespace(shortlist=[], maps=[])
+
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        asked.shortlist.append((q, scope))
+        if scope == _V.scope:
+            return [_hit("c1", ["v1"]), _hit("shared", ["v1", "a1"])]
+        return [_hit("shared", ["v1", "a1"]), _hit("c2", ["a1"])]
+
+    async def _map(client, model, q, hit):
+        asked.maps.append((q, hit.community_id))
+        return gs.MapResult(community_id=hit.community_id, title=hit.title,
+                            relevance=None, key_points=["p"],
+                            fact_ids=list(hit.cited_fact_uuids))
+
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(gs, "map_report", _map)
+    r = _Reducer()
+    facets = [Facet("Veeam", _V.scope, query="veeam q"),
+              Facet("AWS Backup", _A.scope, query="aws q")]
+    res = await gs.global_search(None, None, None, "m", r, "s", q="original q", level=1,
+                                 k=10, group_id="g", settings=_S, facets=facets)
+    assert asked.shortlist == [("veeam q", _V.scope), ("aws q", _A.scope)]
+    # A community shared by facets with different questions is mapped once per question.
+    assert sorted(asked.maps) == [("aws q", "c2"), ("aws q", "shared"),
+                                  ("veeam q", "c1"), ("veeam q", "shared")]
+    p = r.prompts[0]
+    assert "original q" in p and "veeam q" not in p and "aws q" not in p
+    veeam_part, aws_part = p.split("=== AWS Backup ===")
+    assert "text v1" in veeam_part and "text a1" in aws_part
+    assert [c["community_id"] for c in res["communities_used"]] == ["c1", "shared", "c2"]

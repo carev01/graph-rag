@@ -76,14 +76,15 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
     """Shortlist communities and draft follow-ups. Returns `None` (no communities)
     or `(preliminary, follow_ups, hits, degraded)`. With >= 2 facets each facet
     shortlists in its own scope; a follow-up drawn from a facet's community runs in
-    that facet's scope, and a facet left without a follow-up gets the original
-    question scoped to it. A facet whose shortlist raised is listed in `degraded`
+    that facet's scope, and a facet left without a follow-up gets its own question
+    (`f.query`, else the original) scoped to it. Each facet shortlists with its own
+    question too; the primer prompt keeps the original `q`. A facet whose shortlist raised is listed in `degraded`
     (never treated as having nothing to say) and gets no follow-up."""
     facet_of: dict[str, Facet] = {}
     degraded: list[str] = []
     if facets is not None and len(facets) >= 2:
         found = await asyncio.gather(*[
-            shortlist_communities(driver, embedder, q, level=level, k=k,
+            shortlist_communities(driver, embedder, f.query or q, level=level, k=k,
                                   group_id=group_id, settings=settings, stats=stats,
                                   scope=f.scope, top_n=top_n)
             for f in facets], return_exceptions=True)
@@ -130,8 +131,8 @@ async def _primer(embedder, synth_client, synth_model, driver, *, q, level, k,
         covered = {fu.scope for fu in fus if fu.scope is not None}
         for f in facets or []:
             if f.label not in degraded and f.scope not in covered:
-                fus.append(FollowUp(query=q, community_id=None, iteration=1,
-                                    scope=f.scope))
+                fus.append(FollowUp(query=f.query or q, community_id=None,
+                                    iteration=1, scope=f.scope))
     return preliminary, fus, hits, degraded
 
 

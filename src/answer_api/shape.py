@@ -3,22 +3,34 @@
 A question is SINGLE (zero or one named side), a COMPARISON (two or more named
 sides), or an ENUMERATION (cross-vendor wording with no explicit scope: every vendor
 with content is checked). Each side is a FACET -- a label plus its own Scope -- and
-every retrieval mode balances across facets. Deterministic: no LLM.
+every retrieval mode balances across facets. Classification is deterministic (no
+LLM); `facet_queries` then makes ONE cheap-tier call per comparison/enumeration to
+give each facet its own retrieval question (single questions never call it).
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
+
+from graph_extract.usage import usable_content
 
 from answer_api.attribution import in_scope
 from answer_api.scope import _CROSS_VENDOR, Scope, ScopeResolver
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class Facet:
     label: str
     scope: Scope
+    # The facet's own retrieval question ("" = not rewritten: retrieve with the
+    # original question). Only retrieval uses it; answering prompts keep the
+    # original question.
+    query: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,3 +106,60 @@ def raise_if_cancelled(results: Iterable[object]) -> None:
     for r in results:
         if isinstance(r, BaseException) and not isinstance(r, Exception):
             raise r
+
+
+_FACET_QUERIES_PROMPT = (
+    "Rewrite the QUESTION about backup products into one standalone question per SIDE "
+    "listed below. Each question must ask only about its own side and name it; keep "
+    "the QUESTION's intent and its specific terms (feature names, workloads, "
+    "settings). Do not answer the question, do not add facts, and do not mention any "
+    "other side or any other vendor. Respond with ONLY JSON mapping each side's label, "
+    "exactly as written below, to its question: {{\"<label>\": \"<question>\", ...}}"
+    ".\n\nSIDES:\n{sides}\n\nQUESTION: {q}\nJSON:"
+)
+
+
+async def facet_queries(client, model: str, q: str,
+                        facets: Sequence[Facet]) -> tuple[Facet, ...]:
+    """One cheap-tier call: rewrite `q` into a standalone question per facet, each
+    about that side only, and return the facets with `query` set. Each facet whose
+    rewrite is unusable (failed call, empty reply, no JSON, missing/empty label)
+    falls back to `q` with a warning -- a fallback, never an absence: that facet's
+    retrieval still runs, with the original question."""
+    # Deferred: global_search imports this module.
+    from answer_api.global_search import _extract_json
+
+    prompt = _FACET_QUERIES_PROMPT.format(
+        sides="\n".join(f"- {f.label}" for f in facets), q=q)
+    obj: dict | None = None
+    try:
+        # No reasoning parameter: the map tier is a non-reasoning model (sending
+        # one can switch thinking on and blank the reply). Headroom anyway, so a
+        # reasoning model is not starved: ~100 tokens per side, at least 1500.
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=max(1500, 100 * len(facets)),
+            messages=[{"role": "user", "content": prompt}])
+        content = usable_content(resp)
+        if content is None:
+            logger.warning("facet question rewrite: %s returned no usable content; "
+                           "every facet retrieves with the original question", model)
+        else:
+            obj = _extract_json(content)
+            if obj is None:
+                logger.warning("facet question rewrite: reply is not JSON; every facet "
+                               "retrieves with the original question: %r", content[:200])
+    except Exception:
+        logger.warning("facet question rewrite failed; every facet retrieves with the "
+                       "original question", exc_info=True)
+    if obj is None:
+        return tuple(replace(f, query=q) for f in facets)
+    out: list[Facet] = []
+    for f in facets:
+        rewritten = obj.get(f.label)
+        if isinstance(rewritten, str) and rewritten.strip():
+            out.append(replace(f, query=rewritten.strip()))
+        else:
+            logger.warning("facet question rewrite: no question for facet %r; it "
+                           "retrieves with the original question", f.label)
+            out.append(replace(f, query=q))
+    return tuple(out)

@@ -15,6 +15,16 @@ _A = Facet("AWS Backup", Scope(products=("AWS Backup",), source="detected"))
 _CITE = [{"marker": 1, "fact_uuid": "f", "sources": []}]
 
 
+@pytest.fixture(autouse=True)
+def _no_rewrite(monkeypatch):
+    """The per-facet question rewrite is covered in test_facet_queries; here it
+    returns the facets unchanged so shape assertions compare like with like."""
+    async def _identity(client, model, q, facets):
+        return tuple(facets)
+
+    monkeypatch.setattr(router, "facet_queries", _identity)
+
+
 @pytest.fixture
 def seen(monkeypatch):
     calls = []

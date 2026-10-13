@@ -255,3 +255,33 @@ async def test_a_fact_shared_by_two_vendors_renders_under_both_with_one_marker(m
     syn = c.prompts[-1]
     assert "=== AWS ===\n[1] " in syn
     assert "=== Veeam ===\n[1] " in syn
+
+
+async def test_gather_retrieves_with_the_facet_question_and_check_keeps_the_original(
+        monkeypatch):
+    asked = []
+
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        asked.append(("shortlist", q))
+        return []
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        asked.append(("search", q))
+        v = scope.vendors[0]
+        return {"results": [{"fact": f"{v} fact", "fact_uuid": f"lf-{v}",
+                             "valid_at": None, "invalid_at": None, "sources": _src(v)}]}
+
+    monkeypatch.setattr(en, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(en, "search_local", _search)
+    c = _Client({"AWS": '{"documented": false}'})
+    await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
+                               q="Which vendors lock backups?",
+                               facets=[Facet("AWS", Scope(vendors=("AWS",)),
+                                             query="Does AWS lock backups?")],
+                               group_id="g", settings=_S)
+    assert asked == [("shortlist", "Does AWS lock backups?"),
+                     ("search", "Does AWS lock backups?")]
+    check = next(p for p in c.prompts if p.startswith("Decide whether"))
+    assert "Which vendors lock backups?" in check
+    assert "Does AWS lock backups?" not in check

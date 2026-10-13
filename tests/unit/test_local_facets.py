@@ -146,3 +146,23 @@ async def test_a_facet_whose_facts_were_all_shared_is_never_rendered_empty(monke
     assert "=== Veeam ===\n[1] " in p
     assert "=== AWS Backup ===\n[1] " in p
     assert res["retrieved"] == 1
+
+
+async def test_each_facet_retrieves_with_its_own_question_but_answers_the_original(
+        monkeypatch):
+    asked = []
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        asked.append((q, scope))
+        rows = [_fact("v1" if scope == _V.scope else "a1", "Veeam", "Veeam ONE")]
+        return {"query": q, "count": 1, "results": rows}
+
+    monkeypatch.setattr(synth.search_mod, "search_local", _search)
+    s = _Synth()
+    facets = [Facet("Veeam", _V.scope, query="How do Veeam copy jobs work?"),
+              Facet("AWS Backup", _A.scope)]   # no rewrite -> the original question
+    await synth.answer_local(None, None, s, "m", q="Compare copy", k=15, group_id="g",
+                             facets=facets)
+    assert asked == [("How do Veeam copy jobs work?", _V.scope), ("Compare copy", _A.scope)]
+    assert "Compare copy" in s.prompts[0]
+    assert "How do Veeam copy jobs work?" not in s.prompts[0]

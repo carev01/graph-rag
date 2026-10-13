@@ -302,10 +302,13 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
     and group the facts block under one heading per facet so the comparison
     prompt can require every side to be addressed. A facet whose retrieval
     raises is reported in `degraded_facets` -- never silently shown as having
-    no facts, which would read as "nothing to say" rather than "could not check"."""
+    no facts, which would read as "nothing to say" rather than "could not check".
+    Each facet retrieves with its own question (`f.query`, else `q`); the answer
+    prompt keeps the original `q`."""
     k_facet = max(min_per_facet, math.ceil(k / len(facets)))
     found = await asyncio.gather(*[
-        search_mod.search_local(graphiti, driver, q=q, k=k_facet, scope=f.scope,
+        search_mod.search_local(graphiti, driver, q=f.query or q, k=k_facet,
+                                scope=f.scope,
                                 group_id=group_id, fetch_cap=fetch_cap,
                                 scan_max_episodes=scan_max_episodes, settings=settings)
         for f in facets], return_exceptions=True)

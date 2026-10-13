@@ -192,3 +192,25 @@ async def test_a_cancelled_primer_shortlist_propagates_not_degrades(monkeypatch,
     monkeypatch.setattr(drift, "shortlist_communities", _shortlist)
     with pytest.raises(asyncio.CancelledError):
         await _run(_Synth())
+
+
+async def test_primer_and_coverage_follow_ups_use_each_facets_question(monkeypatch, stubs):
+    shortlisted = []
+
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        shortlisted.append((q, scope))
+        return [_hit("cv")] if scope == _V.scope else [_hit("ca")]
+
+    monkeypatch.setattr(drift, "shortlist_communities", _shortlist)
+    s = _Synth()
+    await _run(s, facets=[Facet("Veeam", _V.scope, query="veeam q"),
+                          Facet("AWS Backup", _A.scope, query="aws q")])
+    assert shortlisted == [("veeam q", _V.scope), ("aws q", _A.scope)]
+    # AWS had no follow-up from the primer: its coverage follow-up asks its own question.
+    assert ("aws q", _A.scope) in stubs
+    assert ("compare", _A.scope) not in stubs
+    # The primer and the final synthesis still answer the original question.
+    assert "QUESTION: compare" in s.prompts[0]
+    assert "QUESTION: compare" in s.prompts[-1]
+    assert "QUESTION: aws q" not in s.prompts[-1]
