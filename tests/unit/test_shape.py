@@ -16,9 +16,15 @@ _SOURCES = [("Veeam Agent for Linux", "Veeam Backup & Replication"),
 _ALIASES = {"Veeam Agent": ["Veeam Agent for Linux", "Veeam Agent for Mac"]}
 
 
+# Veeam ONE is a structural product WITHOUT extracted content.
+_NO_CONTENT = {"Veeam ONE"}
+
+
 def _resolver(content=("AWS", "Cohesity", "Microsoft", "Veeam")):
+    products = {v: [p for p, pv in _PRODUCTS if pv == v and p not in _NO_CONTENT]
+                for v in content}
     return ScopeResolver(["AWS", "Cohesity", "Microsoft", "Veeam"], _PRODUCTS,
-                         _ALIASES, _SOURCES, content_vendors=content)
+                         _ALIASES, _SOURCES, content_products=products)
 
 
 def _shape(q, **kw):
@@ -133,11 +139,11 @@ def test_raise_if_cancelled_leaves_ordinary_exceptions_and_values_alone():
     raise_if_cancelled([])
 
 
-def test_enumeration_facets_carry_their_vendors_products():
+def test_enumeration_facets_carry_their_vendors_content_products():
     s = _shape("Which backup vendors support immutable backups?")
     assert [f.products for f in s.facets] == [
         ("AWS Backup",), ("Cohesity DataProtect",), ("Azure Backup",),
-        ("Veeam Backup & Replication", "Veeam Backup for Microsoft 365", "Veeam ONE")]
+        ("Veeam Backup & Replication", "Veeam Backup for Microsoft 365")]
 
 
 def test_comparison_and_single_facets_carry_no_products():

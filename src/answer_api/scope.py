@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,14 +49,16 @@ _EPISODES_AMONG = (
     "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products "
     "OR toLower(s.name) IN $sources) "
     "RETURN collect(DISTINCT u) AS u")
-# Vendors whose documentation has extracted content (at least one episode): the set
-# an enumeration question checks (spec 2026-10-12 §2). EXISTS short-circuits per
-# source, so this stays cheap at bootstrap scale.
-_CONTENT_VENDORS = (
+# (vendor, product) pairs whose documentation has extracted content (at least one
+# episode under one of the product's sources). Their vendors are the set an
+# enumeration question checks (spec 2026-10-12 §2); their products are what an
+# enumeration side question may name (Task 16). EXISTS short-circuits per source,
+# so this stays cheap at bootstrap scale.
+_CONTENT_PRODUCTS = (
     "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(s:Source) "
     "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
     "AND EXISTS { MATCH (s)-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(:Episodic) } "
-    "RETURN DISTINCT v.name AS vendor ORDER BY vendor")
+    "RETURN DISTINCT v.name AS vendor, p.name AS product ORDER BY vendor, product")
 
 
 # Wording that makes a question explicitly cross-vendor. Such a question stays
@@ -121,15 +124,23 @@ class ScopeResolver:
     def __init__(self, vendors: list[str], products: list[tuple[str, str]],
                  aliases: dict[str, str | list[str]],
                  sources: list[tuple[str, str]] | None = None,
-                 content_vendors: tuple[str, ...] | list[str] = ()) -> None:
+                 content_vendors: tuple[str, ...] | list[str] = (),
+                 content_products: Mapping[str, Iterable[str]] | None = None) -> None:
         """`sources`: (source name, product name). Only sources whose name is unique
         across the catalog are addressable at all (explicitly or by alias); of those,
-        only names containing their vendor's name are DETECTED (module docstring)."""
+        only names containing their vendor's name are DETECTED (module docstring).
+
+        `content_products`: vendor -> its products that have extracted content.
+        `content_vendors` defaults to its vendors (sorted); passing `content_vendors`
+        explicitly overrides that (hermetic tests that need no products)."""
         self._vendors = {v.lower(): v for v in vendors}
         self._products = {p.lower(): p for p, _ in products}
         self._vendor_of = {p: v for p, v in products}
         self._product_of_source = {n: p for n, p in sources or []}
-        self.content_vendors: tuple[str, ...] = tuple(content_vendors)
+        self._content_products: dict[str, tuple[str, ...]] = {
+            v: tuple(sorted(set(ps))) for v, ps in (content_products or {}).items()}
+        self.content_vendors: tuple[str, ...] = tuple(content_vendors) or tuple(
+            sorted(v for v, ps in self._content_products.items() if ps))
         counts: dict[str, int] = {}
         for name, _ in sources or []:
             counts[name.lower()] = counts.get(name.lower(), 0) + 1
@@ -195,9 +206,10 @@ class ScopeResolver:
         return self._vendor_of.get(product)
 
     def products_of(self, vendor: str) -> tuple[str, ...]:
-        """The vendor's structural products, sorted (documentation is organised by
-        product: an enumeration side question names one)."""
-        return tuple(sorted(p for p, v in self._vendor_of.items() if v == vendor))
+        """The vendor's products that have extracted content, sorted (documentation
+        is organised by product: an enumeration side question names one). () for a
+        vendor without content or when no content products were given."""
+        return self._content_products.get(vendor, ())
 
     def vendor_of_source(self, name: str) -> str | None:
         product = self._product_of_source.get(name)
@@ -266,9 +278,11 @@ class ScopeResolver:
         vendors = sorted({v for _, v in pairs})
         sources = [(name, r["product"]) for r in records for name in r["sources"] if name]
         aliases = json.loads((aliases_path or _ALIASES).read_text())
-        content, _, _ = await driver.execute_query(_CONTENT_VENDORS)
-        return cls(vendors, pairs, aliases, sources,
-                   content_vendors=tuple(r["vendor"] for r in content))
+        content, _, _ = await driver.execute_query(_CONTENT_PRODUCTS)
+        content_products: dict[str, list[str]] = {}
+        for r in content:
+            content_products.setdefault(r["vendor"], []).append(r["product"])
+        return cls(vendors, pairs, aliases, sources, content_products=content_products)
 
 
 async def scope_episode_uuids(driver, scope: Scope,

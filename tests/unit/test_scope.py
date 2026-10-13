@@ -200,9 +200,50 @@ def test_a_source_with_only_a_generic_word_beyond_the_vendor_is_not_detected():
         "Keepit Partner Management Console",)
 
 
-def test_products_of_lists_a_vendors_structural_products_sorted():
-    r = _r()
+def test_products_of_lists_only_a_vendors_content_products_sorted():
+    r = ScopeResolver(VENDORS, PRODUCTS, ALIASES, content_products={
+        "Microsoft": ["Microsoft 365 Backup", "Azure Backup"],
+        "Veeam": ["Veeam Backup & Replication"]})
     assert r.products_of("Microsoft") == ("Azure Backup", "Microsoft 365 Backup")
-    assert r.products_of("Veeam") == ("Veeam Backup & Replication",
-                                      "Veeam Backup for Microsoft 365")
-    assert r.products_of("Nope") == ()
+    # Veeam Backup for Microsoft 365 is a structural product without content.
+    assert r.products_of("Veeam") == ("Veeam Backup & Replication",)
+    assert r.products_of("AWS") == () and r.products_of("Nope") == ()
+    # content_vendors derives from the content products.
+    assert r.content_vendors == ("Microsoft", "Veeam")
+
+
+def test_products_of_is_empty_without_content_products():
+    assert _r().products_of("Microsoft") == ()
+    assert ScopeResolver(VENDORS, PRODUCTS, ALIASES, content_vendors=("AWS",)
+                         ).content_vendors == ("AWS",)
+
+
+class _Driver:
+    """Answers each catalog query with canned records, keyed on a query fragment."""
+    def __init__(self, by_fragment):
+        self.by_fragment = by_fragment
+        self.queries = []
+
+    async def execute_query(self, query, **kw):
+        self.queries.append(query)
+        for frag, records in self.by_fragment.items():
+            if frag in query:
+                return records, None, None
+        raise AssertionError(f"unexpected query: {query}")
+
+
+@pytest.mark.asyncio
+async def test_load_keeps_content_products_per_vendor_and_derives_content_vendors(tmp_path):
+    aliases = tmp_path / "aliases.json"
+    aliases.write_text("{}")
+    d = _Driver({
+        "collect(s.name)": [
+            {"vendor": "Veeam", "product": "Veeam ONE", "sources": ["User Guide"]},
+            {"vendor": "Veeam", "product": "Veeam Backup & Replication", "sources": []},
+            {"vendor": "AWS", "product": "AWS Backup", "sources": []}],
+        "EXISTS": [{"vendor": "Veeam", "product": "Veeam ONE"}]})
+    r = await ScopeResolver.load(d, aliases)
+    assert r.content_vendors == ("Veeam",)
+    assert r.products_of("Veeam") == ("Veeam ONE",)
+    assert r.products_of("AWS") == ()
+    assert len(d.queries) == 2
