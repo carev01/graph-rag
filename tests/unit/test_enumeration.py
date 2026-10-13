@@ -284,8 +284,11 @@ async def test_gather_and_check_use_the_facet_question_synthesis_keeps_the_origi
                                      facets=[Facet("AWS", Scope(vendors=("AWS",)),
                                                    query="Does AWS lock backups?")],
                                      group_id="g", settings=_S)
+    # Facts are searched with the vendor's question AND the original (run 10), and
+    # merged without duplicates (both fake searches return lf-AWS).
     assert asked == [("shortlist", "Does AWS lock backups?"),
-                     ("search", "Does AWS lock backups?")]
+                     ("search", "Does AWS lock backups?"),
+                     ("search", "Which vendors lock backups?")]
     check = next(p for p in c.prompts if p.startswith("Decide whether"))
     assert "QUESTION: Does AWS lock backups?" in check
     assert "Which vendors lock backups?" not in check
@@ -370,3 +373,42 @@ class _AnyProv:
 
 async def test_enum_concurrency_defaults_to_8():
     assert _S.enum_concurrency == 8
+
+
+async def test_gather_merges_the_vendor_question_and_original_question_facts(monkeypatch):
+    # Run 10: the rewrite's wording alone dropped AWS's restore-testing facts.
+    async def _shortlist(*a, **kw):
+        return []
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        tag = "own" if q.startswith("Does") else "orig"
+        return {"results": [{"fact": f"{tag} {i}", "fact_uuid": f"{tag}-{i}"}
+                            for i in range(2)]
+                + [{"fact": "shared", "fact_uuid": "shared"}]}
+
+    monkeypatch.setattr(en, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(en, "search_local", _search)
+    _, facts = await en._gather(None, None, None, q="Which vendors lock backups?",
+                                facet=Facet("AWS", Scope(vendors=("AWS",)),
+                                            query="Does AWS lock backups?"),
+                                group_id="g", settings=_S)
+    assert [f["fact_uuid"] for f in facts] == ["own-0", "own-1", "shared",
+                                               "orig-0", "orig-1"]
+
+
+async def test_gather_without_a_rewrite_searches_once(monkeypatch):
+    asked = []
+
+    async def _shortlist(*a, **kw):
+        return []
+
+    async def _search(graphiti, driver, *, q, **kw):
+        asked.append(q)
+        return {"results": []}
+
+    monkeypatch.setattr(en, "shortlist_communities", _shortlist)
+    monkeypatch.setattr(en, "search_local", _search)
+    await en._gather(None, None, None, q="Which vendors lock backups?",
+                     facet=Facet("AWS", Scope(vendors=("AWS",))), group_id="g",
+                     settings=_S)
+    assert asked == ["Which vendors lock backups?"]

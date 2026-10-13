@@ -44,3 +44,10 @@ def test_single_prompts_do_not_carry_the_comparison_rules(prompt):
 def test_no_prompt_keeps_the_superseded_marker_wording(prompt):
     assert "one or two markers of the facts it rests on" not in prompt
     assert "give each side's claim in its own clause" not in prompt
+
+
+def test_attribution_rules_keep_products_apart_within_a_vendor():
+    # Run 10: a "Veeam Backup & Replication ..." paragraph cited Veeam Backup for
+    # Microsoft 365 and Service Provider Console facts -- 3 misattributions.
+    from answer_api.attribution import ATTRIBUTION_RULES
+    assert "Keep products apart within a vendor too" in ATTRIBUTION_RULES

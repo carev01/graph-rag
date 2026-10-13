@@ -11,7 +11,10 @@ ATTRIBUTION_RULES = (
     "Each fact is prefixed with the vendor and product whose documentation states "
     "it, as (Vendor · Product). Attribute every claim to the vendor/product shown "
     "on the facts it cites. Never apply a fact labelled with one vendor or product "
-    "to another. When comparing vendors, keep each vendor's claims separate.\n")
+    "to another. When comparing vendors, keep each vendor's claims separate. Keep "
+    "products apart within a vendor too: a sentence that names one product cites "
+    "only facts labelled with that product; a fact labelled with another product is "
+    "stated under that product's name.\n")
 
 # Run 9 (2026-10-13): the judge's 4s were a fact stripped of its qualifier (object
 # storage immutability presented as the hardened repository's), names no fact states

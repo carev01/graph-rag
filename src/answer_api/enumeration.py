@@ -67,18 +67,31 @@ _ENUM_PROMPT = (
 
 async def _gather(graphiti, driver, embedder, *, q, facet: Facet, group_id, settings):
     # Retrieval (and `_check`) ask the vendor's own question; synthesis keeps `q`.
+    # The vendor's facts are searched with BOTH its own question and `q`, merged:
+    # the cheap rewrite's wording varies run to run, and in AWS's scope "How does AWS
+    # Backup verify ..." ranked 2 restore-testing facts into the top 8 where the
+    # original question ranked 6 -- run 10 checked AWS "not documented" on the
+    # former. Both searches are scoped to the vendor, so neither can admit another.
     fq = facet.query or q
     n = settings.enum_communities_per_vendor
-    communities, facts = await asyncio.gather(
+    communities, *found = await asyncio.gather(
         shortlist_communities(driver, embedder, fq, level=settings.global_default_level,
                               k=n, group_id=group_id, settings=settings,
                               scope=facet.scope, top_n=n),
-        search_local(graphiti, driver, q=fq, k=settings.enum_facts_per_vendor,
-                     scope=facet.scope, group_id=group_id,
-                     fetch_cap=settings.local_scoped_fetch_cap,
-                     scan_max_episodes=settings.local_scoped_scan_max_episodes,
-                     settings=settings, rerank_pool=settings.local_facet_rerank_pool))
-    return communities, facts["results"]
+        *[search_local(graphiti, driver, q=query, k=settings.enum_facts_per_vendor,
+                       scope=facet.scope, group_id=group_id,
+                       fetch_cap=settings.local_scoped_fetch_cap,
+                       scan_max_episodes=settings.local_scoped_scan_max_episodes,
+                       settings=settings, rerank_pool=settings.local_facet_rerank_pool)
+          for query in dict.fromkeys((fq, q))])
+    facts: list[dict] = []
+    seen: set[str] = set()
+    for res in found:
+        for f in res["results"]:
+            if f["fact_uuid"] not in seen:
+                seen.add(f["fact_uuid"])
+                facts.append(f)
+    return communities, facts
 
 
 def _community_ids(communities) -> list[tuple[str, list[str]]]:
