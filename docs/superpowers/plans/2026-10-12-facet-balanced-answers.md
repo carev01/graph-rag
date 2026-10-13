@@ -2147,3 +2147,140 @@ Expected: full suite PASS.
 - [ ] **Step 3: Review narrow expected-article lists.** For each golden question whose `eval_retrieval` hit is False, show the user the retrieved articles next to the expected ones; the user decides whether to widen the list.
 - [ ] **Step 4: Free gate.** `uv run python -m answer_api.eval_retrieval --questions src/answer_api/router_golden_tier1.json` must print `PASS N/N`. Fix and repeat until it does; no paid run before.
 - [ ] **Step 5: One paid Tier 1 eval** (~$0.20): `uv run python -m answer_api.eval_router --questions src/answer_api/router_golden_tier1.json`. Save runs 1–5 first (the harness overwrites the report), record the result as run 6. Targets: routing 1.00, faithfulness 5.0, misattributed 0, scoped grounding 1.00, facet coverage 1.00, enumeration completeness 1.00, no Veeam-only regression. On a miss: diagnose with `eval_retrieval` and the saved raw answers; at most one more paid run, then report to the user.
+
+---
+
+## Amendment (2026-10-13, approved by the user after the first free-gate run)
+
+The free gate passed 8/12. Diagnosis on the four misses: (1) every facet searches with
+the WHOLE question, so the AWS side of "Compare Veeam backup copy jobs with AWS Backup
+cross-Region copy…" and every vendor of a "Which backup vendors…" question retrieve
+generic pages; (2) the scoped post-filter over a corpus-wide top-450 found zero
+Cohesity immutability facts although 29 exist — a large vendor fills the 450. Tasks 11
+and 12 fix these; Task 13 adds the confirmed golden ground truth and questions. Task 10
+(free gate, one paid eval) runs after them.
+
+### Task 11: Scoped search falls back to ranking the scope's own facts
+
+**Files:**
+- Modify: `src/answer_api/search.py` (`search_local`; new `_scoped_scan`)
+- Test: `tests/unit/test_search_scoped_scan.py`
+
+**Interfaces:**
+- Produces: `search_local(...)` unchanged signature. When `scoped` and the adaptive limits
+  are exhausted with fewer than `k` edges, it calls `_scoped_scan(graphiti, driver, *, q,
+  scope, k, group_id, exclude: set[str]) -> list` and appends its edges (deduplicated by
+  uuid, current facts only unless `include_invalid`) until `k`.
+
+Requirements:
+1. `_scoped_scan` embeds `q` with the same embedder graphiti uses for edge search
+   (`graphiti.embedder.create(input_data=[q])` — confirm the call shape against
+   graphiti-core 0.30.1 and how `vector_search.py` embeds queries; use the same) and ranks
+   the scope's RELATES_TO edges by `vector.similarity.cosine(f.fact_embedding, $vec)`
+   (Neo4j normalises to (1+cos)/2; ranking is unaffected), returning the top `k` not in
+   `exclude`.
+2. Scope membership is the structural chain used by `scope._EPISODES` (vendor / product /
+   source names, case-insensitive) → the scope's Episodic uuids → edges whose
+   `episodes` list intersects them. Write the Cypher so it does not scan every
+   RELATES_TO edge in the corpus: go from the scope's episodes through
+   `(:Episodic)-[:MENTIONS]->(:Entity)` to candidate entities and their RELATES_TO edges,
+   then keep edges whose `episodes` intersect the scope's episodes. Measure it against the
+   live graph read-only (`.env` is configured in the main repo checkout
+   `/home/openclaw/Documents/Shared/projects/graph-rag/.env`; source it with
+   `set -a; . <path>; set +a` but NEVER print it) for three scopes: vendor Cohesity,
+   the six Veeam Agent guides (sources "Veeam Agent for Microsoft Windows", "Veeam Agent
+   for Linux", …), and product "AWS Backup". Each must finish in under 3 s; report the
+   timings. If a scope has more than `local_scoped_scan_max_episodes` episodes (new
+   setting, default 20000), skip the scan and log at INFO (large scopes are served by the
+   post-filter).
+3. Returned objects expose what `search_local` reads: `uuid`, `fact`, `episodes`,
+   `valid_at`, `invalid_at` (a small dataclass is fine).
+4. Unscoped searches and scoped searches that fill `k` from the post-filter never call
+   the scan (byte-identical path).
+5. A scan failure is logged (warning) and the post-filter results are returned as is —
+   never an exception that empties the facet.
+
+Tests (hermetic, fake graphiti/driver): scan not called when post-filter fills k; called
+when short, results appended after post-filter results and deduplicated; not called for
+unscoped; over-limit scope skips the scan; scan exception returns the post-filter
+results. Also add an `@live`-marked test (excluded from the default run) asserting a
+Cohesity-scoped search for "Which backup vendors support immutable backups?" returns at
+least one fact mentioning DataLock or WORM.
+
+### Task 12: Per-facet questions
+
+**Files:**
+- Modify: `src/answer_api/shape.py` (`Facet.query`; new `async def facet_queries(...)`)
+- Modify: `src/answer_api/router.py` (compute once per comparison/enumeration request)
+- Modify: `src/answer_api/synthesize.py`, `global_search.py`, `drift.py`,
+  `enumeration.py`, `eval_retrieval.py` (use `f.query or q` for retrieval)
+- Test: `tests/unit/test_facet_queries.py` plus updates to mode tests
+
+**Interfaces:**
+- `Facet` gains `query: str = ""` (frozen; default keeps every existing construction valid).
+- `async def facet_queries(client, model, q: str, facets: Sequence[Facet]) -> tuple[Facet, ...]`
+  — ONE cheap-tier call returning JSON `{"<label>": "<standalone question about that side
+  only>", ...}`; returns the facets with `query` set (`dataclasses.replace`). Prompt: rewrite
+  the QUESTION into one standalone question per SIDE, each asking only about that side,
+  keeping the question's intent and its specific terms (feature names, workloads), never
+  adding facts or other vendors. Use `max_tokens` with headroom (≥ 1500) and
+  `usable_content`; on an unusable reply or a missing/empty label, fall back to `q` for that
+  facet and log a warning (a fallback is not an absence: retrieval still runs).
+- Router: after classifying, for `comparison` and `enumeration` shapes (not under a mode
+  override for enumerations, consistent with the existing rule), call `facet_queries` with
+  the MAP client/model (`map_client`, `map_model`) and pass the rewritten facets on.
+- Retrieval uses the facet question; prompts that ANSWER keep the original question:
+  - local: per-facet `search_local(q=f.query or q)`; the answer prompt keeps `q`.
+  - global: per-facet `shortlist_communities(q=f.query or q)` and `map_report` with the
+    facet question; the reduce prompt keeps `q`.
+  - DRIFT: per-facet primer shortlist and the coverage follow-ups use `f.query or q`.
+  - enumeration: `_gather` uses `f.query or q`; `_check` keeps `q` (it names the vendor).
+  - eval_retrieval: compute facet queries the same way (it then makes one cheap call per
+    comparison/enumeration question — update its docstring: "no generative calls except
+    the per-facet question rewrite").
+- Single shape: no call, unchanged.
+
+Tests: facet_queries parses the JSON and sets each query; falls back per facet on a
+missing label and on an unusable reply (with a warning); router calls it once for a
+comparison and for an enumeration, never for single or an overridden enumeration; each
+mode's per-facet retrieval receives `f.query` while its answering prompt still contains
+the original question.
+
+### Task 13: Golden ground truth and new questions (data)
+
+**Files:**
+- Modify: `src/answer_api/router_golden_tier1.json`
+
+Add `"expected_vendors"` to two existing entries:
+- "Which backup vendors support immutable backups, and how do their approaches differ?" →
+  `["AWS", "Cohesity", "Microsoft", "Veeam"]`
+- "What approaches do backup vendors take to verify that backups can actually be
+  restored?" → `["AWS", "Microsoft", "Veeam"]`
+
+Append four entries (same key order and style as the existing ones):
+1. `{"question": "Which backup vendors can keep a copy of backups in another region or at
+   another site?", "intent": "global", "expected_modes": ["global", "drift"], "kind":
+   "cross_vendor", "expected_article_ids": ["2c92266f-f84c-49c2-9e89-3b4376ec9043",
+   "3f4fec00-cd76-41b4-ac19-bec8894d09bb", "41cb167c-fffd-4a26-acdb-8db2e2992b2a",
+   "78e2b9e5-bf0c-4e76-8b83-fc54e76f52cd", "8f869443-b48d-4a45-a9fb-7d0df772e632",
+   "e53dfaee-916c-4947-9224-43ba63f6a14f", "ecc02e55-394d-4e8d-8020-33c62a938c19"],
+   "expected_vendors": ["AWS", "Microsoft", "Veeam"]}`
+2. `{"question": "Compare AWS Backup Vault Lock with Cohesity DataLock.", "intent": "global",
+   "expected_modes": ["global", "local", "drift"], "kind": "comparison",
+   "expected_article_ids": ["dad69d7c-189b-4d53-8d70-40697eae685a",
+   "3b8017a4-63ab-4fb7-b7dd-42dd6c574935", "0f3cb305-4373-49e3-baeb-e02daa49cda7",
+   "6f3b9166-974d-43cb-891a-db656254d314", "1e48210b-9421-404a-886f-3794a60408d8"]}`
+3. `{"question": "How does Cohesity FortKnox compare with Veeam hardened repositories for
+   ransomware protection?", "intent": "global", "expected_modes": ["global", "local",
+   "drift"], "kind": "comparison", "expected_article_ids":
+   ["fc409999-9c70-47cd-9944-dc829cf5824c", "bc0bdcbc-b80d-4498-bf90-1cd52c4e8150",
+   "689a50cd-5ae3-48dd-8c65-12a765199cb5", "1eaa2ba2-ea95-4feb-ad13-4f51ce86bd68",
+   "572832b9-67d7-40cc-b228-ea4c4139c8c9", "f3894faa-9a9a-414a-b9bf-43464ad2114a",
+   "e586b6b1-cb89-47fa-b572-80363237ff7e", "f6e78d99-29ad-46c2-8f7a-579d6d80b21c"]}`
+4. `{"question": "Which vendors does Veeam integrate with?", "intent": "global",
+   "expected_modes": ["global", "drift"], "kind": "cross_vendor", "expected_article_ids": []}`
+   (a probe: routing/faithfulness only; no ground truth).
+
+Run `uv run --extra dev pytest tests/unit/test_router_golden_schema.py -q`; if the schema
+test rejects an empty `expected_article_ids`, allow it only for `kind == "cross_vendor"`
+entries and say so.
