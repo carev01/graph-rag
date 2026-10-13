@@ -21,6 +21,7 @@ from answer_api.synthesize import (
 from answer_api.global_search import (
     RerankStats, _extract_json, _with_disclaimer, shortlist_communities,
 )
+from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 
 logger = logging.getLogger(__name__)
@@ -147,12 +148,14 @@ async def _top_member_entity(driver, group_id, community_id) -> str | None:
 
 async def _run_followup(graphiti, driver, fu: FollowUp, *, k, group_id,
                         scope: Scope | None = None, fetch_cap: int = 450,
-                        scan_max_episodes: int = 20000) -> list[dict]:
+                        scan_max_episodes: int = 6000,
+                        settings: ExtractSettings | None = None) -> list[dict]:
     center = (await _top_member_entity(driver, group_id, fu.community_id)
               if fu.community_id else None)
     res = await search_local(graphiti, driver, q=fu.query, k=k, scope=scope,
                              center_node_uuid=center, group_id=group_id,
-                             fetch_cap=fetch_cap, scan_max_episodes=scan_max_episodes)
+                             fetch_cap=fetch_cap, scan_max_episodes=scan_max_episodes,
+                             settings=settings)
     return res["results"]
 
 
@@ -282,7 +285,8 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                                  q=q, group_id=group_id, scope=scope, facets=facets,
                                  min_per_facet=settings.local_min_per_facet,
                                  fetch_cap=settings.local_scoped_fetch_cap,
-                                 scan_max_episodes=settings.local_scoped_scan_max_episodes)
+                                 scan_max_episodes=settings.local_scoped_scan_max_episodes,
+                                 settings=settings)
         res["degraded"] = "no-primer-communities"
         return res
     preliminary, followups, hits, degraded = primed
@@ -298,7 +302,8 @@ async def drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                 graphiti, driver, fu, k=followup_k, group_id=group_id,
                 scope=fu.scope if fu.scope is not None else scope,
                 fetch_cap=settings.local_scoped_fetch_cap,
-                scan_max_episodes=settings.local_scoped_scan_max_episodes))
+                scan_max_episodes=settings.local_scoped_scan_max_episodes,
+                settings=settings))
             if fu.scope is not None:
                 worked.add(fu.scope)
         except Exception:

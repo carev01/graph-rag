@@ -48,7 +48,7 @@ class FakeEmbedder:
 
 async def _fake_search_local(graphiti, driver, *, q, k=10, scope=None,
                               include_invalid=False, group_id, fetch_cap=450,
-                              scan_max_episodes=20000):
+                              scan_max_episodes=6000, settings=None):
     return {
         "query": q,
         "count": 1,
@@ -207,9 +207,10 @@ async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
 
     async def _capture_search_local(graphiti, driver, *, q, k=10, scope=None,
                                     include_invalid=False, group_id, fetch_cap=450,
-                                    scan_max_episodes=20000):
+                                    scan_max_episodes=6000, settings=None):
         captured["scope"] = scope
         captured["caps"] = (fetch_cap, scan_max_episodes)
+        captured["settings"] = settings
         return {"query": q, "count": 0, "results": []}
 
     monkeypatch.setattr(search_mod, "search_local", _capture_search_local)
@@ -223,6 +224,7 @@ async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
     settings = app.state.settings
     assert captured["caps"] == (settings.local_scoped_fetch_cap,
                                 settings.local_scoped_scan_max_episodes)
+    assert captured["settings"] is settings
 
 
 async def test_answer_router_returns_envelope():

@@ -217,6 +217,7 @@ def create_app() -> FastAPI:
             group_id=app.state.settings.group_id,
             fetch_cap=app.state.settings.local_scoped_fetch_cap,
             scan_max_episodes=app.state.settings.local_scoped_scan_max_episodes,
+            settings=app.state.settings,
         )
         result["scope"] = resolved.as_dict()
         return result

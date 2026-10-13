@@ -11,6 +11,7 @@ import pytest
 
 import answer_api.search as search_mod
 from answer_api.scope import Scope
+from graph_extract.config import ExtractSettings
 
 pytestmark = pytest.mark.asyncio
 
@@ -55,9 +56,9 @@ def scan_calls(monkeypatch):
     calls = []
 
     async def _scan(graphiti, driver, *, q, scope, k, group_id, exclude,
-                    include_invalid=False, max_episodes=20000):
+                    include_invalid=False, max_episodes=6000, settings=None):
         calls.append({"k": k, "exclude": set(exclude), "max_episodes": max_episodes,
-                      "include_invalid": include_invalid})
+                      "include_invalid": include_invalid, "settings": settings})
         return [_edge("p1"), _edge("s1"), _edge("s2"), _edge("s3")]
 
     monkeypatch.setattr(search_mod, "_scoped_scan", _scan)
@@ -78,6 +79,7 @@ async def test_scan_appends_after_post_filter_results_deduplicated(scan_calls):
     assert len(scan_calls) == 1
     assert scan_calls[0]["exclude"] == {"p0", "p1"}
     assert scan_calls[0]["max_episodes"] == 123
+    assert scan_calls[0]["settings"] is None
     # p1 came back from the scan too: kept once, in its post-filter position.
     assert [r["fact_uuid"] for r in res["results"]] == ["p0", "p1", "s1", "s2"]
     assert res["count"] == 4
@@ -191,3 +193,78 @@ async def test_scoped_scan_converts_neo4j_datetimes():
         exclude=set(), include_invalid=True)
     assert isinstance(out[0].invalid_at, datetime)
     assert drv.calls[0][1]["include_invalid"] is True
+
+
+# --- cross-encoder rerank of the scan's candidates --------------------------------
+
+def _settings(**kw):
+    base = dict(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                local_scoped_scan_candidates=50)
+    base.update(kw)
+    return ExtractSettings(**base)
+
+
+_RERANK = dict(rerank_base_url="http://rr", rerank_model="rerank-x")
+
+
+def _cands(n):
+    return [_row(100, f"c{i}", fact=f"fact c{i}", episodes=["e"]) for i in range(n)]
+
+
+async def test_scan_reranks_the_cosine_candidates_when_configured(monkeypatch):
+    seen = {}
+
+    async def _rerank(query, documents, *, top_k, settings):
+        seen.update(query=query, documents=documents, top_k=top_k)
+        return [(4, 0.9), (0, 0.8), (2, 0.1)]
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    drv = _Driver(_cands(5))
+    out = await search_mod._scoped_scan(
+        SimpleNamespace(embedder=_Embedder()), drv, q="immutable", scope=_SCOPE, k=3,
+        group_id="g", exclude=set(), settings=_settings(**_RERANK))
+    assert drv.calls[0][1]["k"] == 50            # fetches local_scoped_scan_candidates
+    assert seen == {"query": "immutable", "documents": [f"fact c{i}" for i in range(5)],
+                    "top_k": 3}
+    assert [e.uuid for e in out] == ["c4", "c0", "c2"]
+
+
+async def test_scan_unconfigured_reranker_keeps_cosine_order(monkeypatch, caplog):
+    async def _rerank(*a, **kw):
+        raise AssertionError("rerank must not be called")
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    drv = _Driver(_cands(5))
+    with caplog.at_level(logging.WARNING, logger="answer_api.search"):
+        out = await search_mod._scoped_scan(
+            SimpleNamespace(embedder=_Embedder()), drv, q="q", scope=_SCOPE, k=3,
+            group_id="g", exclude=set(), settings=_settings())
+    assert drv.calls[0][1]["k"] == 3
+    assert [e.uuid for e in out] == ["c0", "c1", "c2"]
+    assert "no reranker" in caplog.text
+
+
+@pytest.mark.parametrize("outcome", ["none", "raise"])
+async def test_scan_rerank_failure_keeps_cosine_order(monkeypatch, caplog, outcome):
+    async def _rerank(*a, **kw):
+        if outcome == "raise":
+            raise RuntimeError("voyage down")
+        return None
+
+    monkeypatch.setattr(search_mod, "rerank", _rerank)
+    drv = _Driver(_cands(5))
+    with caplog.at_level(logging.WARNING, logger="answer_api.search"):
+        out = await search_mod._scoped_scan(
+            SimpleNamespace(embedder=_Embedder()), drv, q="q", scope=_SCOPE, k=3,
+            group_id="g", exclude=set(), settings=_settings(**_RERANK))
+    assert [e.uuid for e in out] == ["c0", "c1", "c2"]
+    assert "cosine order" in caplog.text
+
+
+async def test_search_local_passes_settings_to_the_scan(scan_calls):
+    s = _settings(**_RERANK)
+    g = _Graph([_edge("p0")])
+    await search_mod.search_local(g, None, q="q", k=4, group_id="g", scope=_SCOPE,
+                                  settings=s)
+    assert scan_calls[0]["settings"] is s

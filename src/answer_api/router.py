@@ -165,7 +165,7 @@ async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
             graphiti, driver, synth_client, synth_model, q=q, scope=scope, group_id=g,
             facets=facets, min_per_facet=settings.local_min_per_facet,
             fetch_cap=settings.local_scoped_fetch_cap,
-            scan_max_episodes=settings.local_scoped_scan_max_episodes)
+            scan_max_episodes=settings.local_scoped_scan_max_episodes, settings=settings)
     if mode == "global":
         return await global_mod.global_search(
             driver, embedder, map_client, map_model, synth_client, synth_model,

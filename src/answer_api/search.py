@@ -8,8 +8,10 @@ from typing import Any
 from graphiti_core.search.search_config_recipes import (
     EDGE_HYBRID_SEARCH_NODE_DISTANCE, EDGE_HYBRID_SEARCH_RRF)
 
+from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import Scope, scope_episode_uuids
 from answer_api.temporal import is_current
+from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 
 logger = logging.getLogger(__name__)
@@ -89,15 +91,24 @@ async def _retrieve_edges(graphiti, q, *, fetch_limit, group_id,
 
 async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: str,
                        exclude: set[str], include_invalid: bool = False,
-                       max_episodes: int = 20000) -> list[ScannedEdge]:
-    """The top `k` RELATES_TO edges of `scope` (not in `exclude`) by cosine to `q`.
+                       max_episodes: int = 6000,
+                       settings: ExtractSettings | None = None) -> list[ScannedEdge]:
+    """The top `k` RELATES_TO edges of `scope` (not in `exclude`) for `q`.
 
     `q` is embedded exactly as graphiti's search embeds it (graphiti-core 0.30.1,
-    search/search.py). A scope with more than `max_episodes` episodes returns []
+    search/search.py). With `settings` and a configured reranker, the top
+    `local_scoped_scan_candidates` by cosine are reranked by the cross-encoder and
+    the best `k` returned: cosine alone ranked Cohesity's first DataLock fact ~103rd
+    of 2,158 for "Which backup vendors support immutable backups?" (2026-10-13).
+    Without a reranker, or when it fails, the cosine top `k` -- never empty because
+    of the reranker. A scope with more than `max_episodes` episodes returns []
     -- logged, not scanned: large scopes are served by the post-filter."""
+    use_rerank = settings is not None and rerank_configured(settings)
+    fetch = max(k, settings.local_scoped_scan_candidates) \
+        if settings is not None and use_rerank else k
     vec = await graphiti.embedder.create(input_data=[q.replace("\n", " ")])
     records, _, _ = await driver.execute_query(
-        _SCAN, vec=vec, k=k, exclude=sorted(exclude), group_id=group_id,
+        _SCAN, vec=vec, k=fetch, exclude=sorted(exclude), group_id=group_id,
         include_invalid=include_invalid, max_episodes=max_episodes,
         episode_cap=max_episodes + 1,
         vendors=[v.lower() for v in scope.vendors],
@@ -107,14 +118,34 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
         logger.info("scoped scan skipped: scope %s has more than %d episodes",
                     scope.as_dict(), max_episodes)
         return []
-    return [ScannedEdge(uuid=r["uuid"], fact=r["fact"], episodes=list(r["episodes"] or []),
-                        valid_at=_native(r["valid_at"]), invalid_at=_native(r["invalid_at"]))
-            for r in records if r["uuid"] is not None]
+    cands = [ScannedEdge(uuid=r["uuid"], fact=r["fact"], episodes=list(r["episodes"] or []),
+                         valid_at=_native(r["valid_at"]), invalid_at=_native(r["invalid_at"]))
+             for r in records if r["uuid"] is not None]
+    if settings is None:
+        return cands[:k]
+    if not use_rerank:
+        logger.warning("scoped scan: no reranker configured; returning cosine order")
+        return cands[:k]
+    if not cands:
+        return []
+    try:
+        ranked = await rerank(q, [e.fact for e in cands], top_k=k, settings=settings)
+    except Exception as exc:
+        logger.warning("scoped scan rerank failed (%s); returning cosine order", exc)
+        return cands[:k]
+    if ranked is None:
+        logger.warning("scoped scan rerank unavailable; returning cosine order")
+        return cands[:k]
+    order = list(dict.fromkeys(i for i, _ in ranked if 0 <= i < len(cands)))
+    return [cands[i] for i in order][:k]
 
 
 async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
                        include_invalid=False, group_id, center_node_uuid=None,
-                       fetch_cap: int = 450, scan_max_episodes: int = 20000):
+                       fetch_cap: int = 450, scan_max_episodes: int = 6000,
+                       settings: ExtractSettings | None = None):
+    """`settings` enables the cross-encoder rerank of the scoped scan's candidates;
+    None keeps the scan in cosine order."""
     scoped = scope is not None and not scope.is_empty()
     # Over-fetch so post-filters (validity, scope) still leave ~k results. A narrow
     # scope can filter out most of one fetch (the six Veeam Agent guides kept 7 of
@@ -149,7 +180,7 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
             extra = await _scoped_scan(
                 graphiti, driver, q=q, scope=scope, k=k - len(edges), group_id=group_id,
                 exclude=seen, include_invalid=include_invalid,
-                max_episodes=scan_max_episodes)
+                max_episodes=scan_max_episodes, settings=settings)
         except Exception as exc:
             logger.warning("scoped scan failed for scope %s: %s; keeping %d "
                            "post-filter results", scope.as_dict(), exc, len(edges))

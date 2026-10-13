@@ -247,7 +247,8 @@ def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI,
 async def answer_local(graphiti, driver, synth_client, synth_model, *,
                        q, k=15, scope: Scope | None = None, group_id,
                        facets: Sequence[Facet] | None = None, min_per_facet: int = 6,
-                       fetch_cap: int = 450, scan_max_episodes: int = 20000) -> dict:
+                       fetch_cap: int = 450, scan_max_episodes: int = 6000,
+                       settings: ExtractSettings | None = None) -> dict:
     """Retrieve facts via search_local, number them [1..N], let the LLM cite
     by marker only (design-decision #2: the LLM never writes a URL), then
     resolve citations deterministically from the marker map. Zero-retrieval
@@ -260,10 +261,10 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
         return await _answer_local_facets(
             graphiti, driver, synth_client, synth_model, q=q, k=k, group_id=group_id,
             facets=facets, min_per_facet=min_per_facet, fetch_cap=fetch_cap,
-            scan_max_episodes=scan_max_episodes)
+            scan_max_episodes=scan_max_episodes, settings=settings)
     res = await search_mod.search_local(
         graphiti, driver, q=q, k=k, scope=scope, group_id=group_id, fetch_cap=fetch_cap,
-        scan_max_episodes=scan_max_episodes)
+        scan_max_episodes=scan_max_episodes, settings=settings)
     results = res["results"]
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [],
@@ -293,7 +294,8 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
 
 async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q, k,
                                group_id, facets: Sequence[Facet], min_per_facet: int,
-                               fetch_cap: int, scan_max_episodes: int = 20000) -> dict:
+                               fetch_cap: int, scan_max_episodes: int = 6000,
+                               settings: ExtractSettings | None = None) -> dict:
     """Retrieve each facet's facts with its own scope and an equal share of `k`
     (at least `min_per_facet`), number facts in facet order (one marker per
     fact_uuid; a fact shared by facets is listed under each with that marker),
@@ -305,7 +307,7 @@ async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q
     found = await asyncio.gather(*[
         search_mod.search_local(graphiti, driver, q=q, k=k_facet, scope=f.scope,
                                 group_id=group_id, fetch_cap=fetch_cap,
-                                scan_max_episodes=scan_max_episodes)
+                                scan_max_episodes=scan_max_episodes, settings=settings)
         for f in facets], return_exceptions=True)
     raise_if_cancelled(found)   # cancellation propagates; only Exceptions remain
     marker_map: dict[int, dict] = {}

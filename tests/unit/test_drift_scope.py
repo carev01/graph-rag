@@ -113,7 +113,7 @@ async def test_run_followup_passes_scope_to_search_local(monkeypatch):
 
     async def fake_search_local(graphiti, driver, *, q, k, scope=None,
                                 include_invalid=False, group_id, center_node_uuid=None,
-                                fetch_cap=450, scan_max_episodes=20000):
+                                fetch_cap=450, scan_max_episodes=6000, settings=None):
         captured["scope"] = scope
         captured["fetch_cap"] = fetch_cap
         return {"results": []}
@@ -133,8 +133,8 @@ async def test_drift_followups_receive_the_configured_fetch_cap(monkeypatch):
         return "d", [FollowUp("q", "c1", 1)], [_hit()], []
 
     async def fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None,
-                                fetch_cap=450, scan_max_episodes=20000):
-        seen.append((fetch_cap, scan_max_episodes))
+                                fetch_cap=450, scan_max_episodes=6000, settings=None):
+        seen.append((fetch_cap, scan_max_episodes, settings))
         return []
 
     monkeypatch.setattr(drift, "_primer", fake_primer)
@@ -142,7 +142,7 @@ async def test_drift_followups_receive_the_configured_fetch_cap(monkeypatch):
     await drift.drift_search(object(), object(), object(), object(), "m", q="q",
                              level=1, iterations=1, primer_k=5, max_followups=4,
                              followup_k=8, group_id="g", settings=_S7)
-    assert seen == [(_S7.local_scoped_fetch_cap, _S7.local_scoped_scan_max_episodes)]
+    assert seen == [(_S7.local_scoped_fetch_cap, _S7.local_scoped_scan_max_episodes, _S7)]
 
 
 async def test_run_followup_defaults_scope_to_none(monkeypatch):
@@ -150,7 +150,7 @@ async def test_run_followup_defaults_scope_to_none(monkeypatch):
 
     async def fake_search_local(graphiti, driver, *, q, k, scope=None,
                                 include_invalid=False, group_id, center_node_uuid=None,
-                                fetch_cap=450, scan_max_episodes=20000):
+                                fetch_cap=450, scan_max_episodes=6000, settings=None):
         captured["scope"] = scope
         captured["fetch_cap"] = fetch_cap
         return {"results": []}
@@ -172,7 +172,7 @@ async def test_drift_search_no_primer_fallback_passes_scope_to_answer_local(monk
 
     async def fake_answer_local(graphiti, driver, synth_client, synth_model, *,
                                 q, group_id, scope=None, k=15, facets=None,
-                                min_per_facet=6, fetch_cap=450, scan_max_episodes=20000):
+                                min_per_facet=6, fetch_cap=450, scan_max_episodes=6000, settings=None):
         captured["scope"] = scope
         captured["min_per_facet"] = min_per_facet
         captured["fetch_cap"] = fetch_cap

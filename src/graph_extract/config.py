@@ -330,8 +330,14 @@ class ExtractSettings(BaseSettings):
     # (search._scoped_scan): a small vendor next to a huge one has none in the
     # corpus-wide top-N (Cohesity scoped search returned 0 facts, 2026-10-12). Scopes
     # with more episodes than this skip the scan (served by the post-filter). Live
-    # cost is ~0.45 ms/episode (Microsoft, 4.7k episodes: 2.3 s, 2026-10-13).
-    local_scoped_scan_max_episodes: int = 20000
+    # cost is ~0.45 ms/episode (Microsoft, 4.7k episodes: 2.3 s, 2026-10-13), so
+    # 6000 keeps the scan inside a 3 s budget.
+    local_scoped_scan_max_episodes: int = 6000
+    # The scan reranks its top-N cosine candidates with the cross-encoder when one is
+    # configured: cosine ranked Cohesity's first DataLock fact ~103rd for "Which backup
+    # vendors support immutable backups?"; reranking the top 200 put DataLock/WORM at
+    # rank 1 (and top 3 for "Does Cohesity support immutable backups?", 2026-10-13).
+    local_scoped_scan_candidates: int = 200
     # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
     global_facet_top_n: int = 3
     # Enumeration: evidence gathered per content vendor before its cheap check.
