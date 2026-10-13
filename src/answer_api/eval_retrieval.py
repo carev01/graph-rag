@@ -72,7 +72,8 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
         scope = f.scope if not f.scope.is_empty() else None
         loc = await search_local(graphiti, driver, q=q, k=k, scope=scope,
                                  group_id=settings.group_id,
-                                 fetch_cap=settings.local_scoped_fetch_cap)
+                                 fetch_cap=settings.local_scoped_fetch_cap,
+                                 scan_max_episodes=settings.local_scoped_scan_max_episodes)
         hits = await shortlist_communities(
             driver, embedder, q, level=settings.global_default_level,
             k=top_n or settings.global_shortlist_k, group_id=settings.group_id,

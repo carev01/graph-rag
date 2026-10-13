@@ -115,7 +115,7 @@ async def test_complete_or_none_returns_none_after_both_attempts_fail():
 # ---------------------------------------------------------------------------
 
 async def _fake_search_local_with_hit(graphiti, driver, *, q, k=15, scope=None, group_id,
-                                      fetch_cap=450):
+                                      fetch_cap=450, scan_max_episodes=20000):
     return {"query": q, "count": 1, "results": [
         {"fact": "AWS Backup uses Vault Lock", "fact_uuid": "f1", "valid_at": None,
          "invalid_at": None, "sources": [{"article_id": "a1", "source_url": "https://x/a1"}]}]}
@@ -240,7 +240,7 @@ async def test_drift_search_end_to_end_refuses_on_unusable_synthesis(monkeypatch
                 [hit], [])
 
     async def _fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None,
-                        fetch_cap=450):
+                        fetch_cap=450, scan_max_episodes=20000):
         return [{"fact": "AWS Backup uses Vault Lock", "fact_uuid": "f1"}]
 
     monkeypatch.setattr(drift_mod, "_primer", _fake_primer)

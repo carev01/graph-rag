@@ -326,6 +326,12 @@ class ExtractSettings(BaseSettings):
     # Scoped local search re-fetches at k*3, k*10, k*30 until k edges survive the
     # scope filter, never above this (the Veeam Agent scope kept 7 of 45, 2026-10-12).
     local_scoped_fetch_cap: int = 450
+    # When that post-filter still leaves fewer than k, rank the scope's OWN facts
+    # (search._scoped_scan): a small vendor next to a huge one has none in the
+    # corpus-wide top-N (Cohesity scoped search returned 0 facts, 2026-10-12). Scopes
+    # with more episodes than this skip the scan (served by the post-filter). Live
+    # cost is ~0.45 ms/episode (Microsoft, 4.7k episodes: 2.3 s, 2026-10-13).
+    local_scoped_scan_max_episodes: int = 20000
     # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
     global_facet_top_n: int = 3
     # Enumeration: evidence gathered per content vendor before its cheap check.

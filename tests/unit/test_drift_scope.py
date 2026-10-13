@@ -23,7 +23,8 @@ _S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key
 # Non-default facet settings, so a test proves they are threaded, not defaulted.
 _S7 = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                       neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
-                      local_min_per_facet=7, local_scoped_fetch_cap=901)
+                      local_min_per_facet=7, local_scoped_fetch_cap=901,
+                      local_scoped_scan_max_episodes=77)
 
 _SCOPE = Scope(("Veeam",), (), "detected")
 
@@ -112,7 +113,7 @@ async def test_run_followup_passes_scope_to_search_local(monkeypatch):
 
     async def fake_search_local(graphiti, driver, *, q, k, scope=None,
                                 include_invalid=False, group_id, center_node_uuid=None,
-                                fetch_cap=450):
+                                fetch_cap=450, scan_max_episodes=20000):
         captured["scope"] = scope
         captured["fetch_cap"] = fetch_cap
         return {"results": []}
@@ -132,8 +133,8 @@ async def test_drift_followups_receive_the_configured_fetch_cap(monkeypatch):
         return "d", [FollowUp("q", "c1", 1)], [_hit()], []
 
     async def fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None,
-                                fetch_cap=450):
-        seen.append(fetch_cap)
+                                fetch_cap=450, scan_max_episodes=20000):
+        seen.append((fetch_cap, scan_max_episodes))
         return []
 
     monkeypatch.setattr(drift, "_primer", fake_primer)
@@ -141,7 +142,7 @@ async def test_drift_followups_receive_the_configured_fetch_cap(monkeypatch):
     await drift.drift_search(object(), object(), object(), object(), "m", q="q",
                              level=1, iterations=1, primer_k=5, max_followups=4,
                              followup_k=8, group_id="g", settings=_S7)
-    assert seen == [_S7.local_scoped_fetch_cap]
+    assert seen == [(_S7.local_scoped_fetch_cap, _S7.local_scoped_scan_max_episodes)]
 
 
 async def test_run_followup_defaults_scope_to_none(monkeypatch):
@@ -149,7 +150,7 @@ async def test_run_followup_defaults_scope_to_none(monkeypatch):
 
     async def fake_search_local(graphiti, driver, *, q, k, scope=None,
                                 include_invalid=False, group_id, center_node_uuid=None,
-                                fetch_cap=450):
+                                fetch_cap=450, scan_max_episodes=20000):
         captured["scope"] = scope
         captured["fetch_cap"] = fetch_cap
         return {"results": []}
@@ -171,10 +172,11 @@ async def test_drift_search_no_primer_fallback_passes_scope_to_answer_local(monk
 
     async def fake_answer_local(graphiti, driver, synth_client, synth_model, *,
                                 q, group_id, scope=None, k=15, facets=None,
-                                min_per_facet=6, fetch_cap=450):
+                                min_per_facet=6, fetch_cap=450, scan_max_episodes=20000):
         captured["scope"] = scope
         captured["min_per_facet"] = min_per_facet
         captured["fetch_cap"] = fetch_cap
+        captured["scan_max_episodes"] = scan_max_episodes
         return {"query": q, "answer": "ans", "citations": [], "retrieved": 0,
                 "cited": 0, "applies_to": []}
 
@@ -186,6 +188,7 @@ async def test_drift_search_no_primer_fallback_passes_scope_to_answer_local(monk
     assert captured["scope"] is _SCOPE
     assert captured["min_per_facet"] == _S7.local_min_per_facet
     assert captured["fetch_cap"] == _S7.local_scoped_fetch_cap
+    assert captured["scan_max_episodes"] == _S7.local_scoped_scan_max_episodes
     assert res["degraded"] == "no-primer-communities"
     assert res["applies_to"] == []
 

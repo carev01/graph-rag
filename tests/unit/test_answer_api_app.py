@@ -47,7 +47,8 @@ class FakeEmbedder:
 
 
 async def _fake_search_local(graphiti, driver, *, q, k=10, scope=None,
-                              include_invalid=False, group_id):
+                              include_invalid=False, group_id, fetch_cap=450,
+                              scan_max_episodes=20000):
     return {
         "query": q,
         "count": 1,
@@ -205,8 +206,10 @@ async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
     captured: dict = {}
 
     async def _capture_search_local(graphiti, driver, *, q, k=10, scope=None,
-                                    include_invalid=False, group_id):
+                                    include_invalid=False, group_id, fetch_cap=450,
+                                    scan_max_episodes=20000):
         captured["scope"] = scope
+        captured["caps"] = (fetch_cap, scan_max_episodes)
         return {"query": q, "count": 0, "results": []}
 
     monkeypatch.setattr(search_mod, "search_local", _capture_search_local)
@@ -217,6 +220,9 @@ async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
     assert resp.status_code == 200
     assert captured["scope"].vendors == ("AWS",)
     assert captured["scope"].source == "explicit"
+    settings = app.state.settings
+    assert captured["caps"] == (settings.local_scoped_fetch_cap,
+                                settings.local_scoped_scan_max_episodes)
 
 
 async def test_answer_router_returns_envelope():
