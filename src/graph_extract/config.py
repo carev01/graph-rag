@@ -356,6 +356,9 @@ class ExtractSettings(BaseSettings):
     # Enumeration: evidence gathered per content vendor before its cheap check.
     enum_communities_per_vendor: int = 2
     enum_facts_per_vendor: int = 8
+    # Vendors gathered/checked at once: at 40 vendors the unbounded fan-out issued
+    # up to 120 hybrid searches plus 40 scans at once against Neo4j.
+    enum_concurrency: int = 8
     # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
     # older than this (plan ruling 4 -- no separate freshness module exists).
     scope_reload_seconds: int = 3600

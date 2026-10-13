@@ -138,9 +138,19 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
                             synth_client, synth_model, *, q: str,
                             facets: Sequence[Facet], group_id: str, settings) -> dict:
     attempted = [f.label for f in facets]
-    gathered = await asyncio.gather(*[
-        _gather(graphiti, driver, embedder, q=q, facet=f, group_id=group_id,
-                settings=settings) for f in facets], return_exceptions=True)
+    # One semaphore bounds both per-vendor phases (gather, then check): the
+    # community ids are resolved once between them, so a vendor holds a slot
+    # for each phase rather than across the shared resolution. gather() keeps
+    # the results in facet order.
+    sem = asyncio.Semaphore(max(1, settings.enum_concurrency))
+
+    async def _bounded_gather(f: Facet):
+        async with sem:
+            return await _gather(graphiti, driver, embedder, q=q, facet=f,
+                                 group_id=group_id, settings=settings)
+
+    gathered = await asyncio.gather(*[_bounded_gather(f) for f in facets],
+                                    return_exceptions=True)
     raise_if_cancelled(gathered)   # cancellation propagates, never a degraded vendor
     degraded: set[str] = set()
     supported: dict[str, list[str]] = {}
@@ -161,6 +171,10 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             community_sources = None
 
     async def _one(f: Facet, got):
+        async with sem:
+            return await _check_one(f, got)
+
+    async def _check_one(f: Facet, got):
         if isinstance(got, BaseException):
             logger.warning("enumeration gather for %s failed: %s", f.label, got)
             return f, None

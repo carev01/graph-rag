@@ -1,5 +1,6 @@
 # tests/unit/test_enumeration.py
 """Enumeration checks every content vendor (spec §3.4)."""
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -318,3 +319,54 @@ async def test_a_rewritten_facet_checks_its_own_question_verbatim():
     check = next(p for p in c.prompts if p.startswith("Decide whether"))
     assert "QUESTION: Does AWS lock backups?\n\nEVIDENCE:" in check
     assert "Consider only" not in check
+
+
+async def test_enum_concurrency_bounds_the_vendor_fan_out(monkeypatch):
+    # At 40 vendors the unbounded fan-out issued up to 120 hybrid searches plus 40
+    # scans at once against Neo4j: enum_concurrency bounds vendor gathers and checks.
+    live = {"gather": 0, "check": 0}
+    peak = {"gather": 0, "check": 0}
+
+    async def _hold(kind):
+        live[kind] += 1
+        peak[kind] = max(peak[kind], live[kind])
+        for _ in range(5):
+            await asyncio.sleep(0)
+        live[kind] -= 1
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        await _hold("gather")
+        v = scope.vendors[0]
+        return {"results": [{"fact": f"{v} fact", "fact_uuid": f"lf-{v}",
+                             "valid_at": None, "invalid_at": None, "sources": _src(v)}]}
+
+    class _Counting(_Client):
+        async def _create(self, **kw):
+            await _hold("check")
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"documented": false}'),
+                finish_reason="stop")])
+
+    monkeypatch.setattr(en, "search_local", _search)
+    vendors = [f"V{i}" for i in range(7)]
+    facets = [Facet(v, Scope(vendors=(v,))) for v in vendors]
+    monkeypatch.setattr(en, "Provenance", _AnyProv)
+    c = _Counting({})
+    settings = _S.model_copy(update={"enum_concurrency": 2})
+    res = await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
+                                     q="Which vendors lock backups?", facets=facets,
+                                     group_id="g", settings=settings)
+    assert peak == {"gather": 2, "check": 2}
+    assert res["checked_vendors"] == vendors   # results stay in facet order
+
+
+class _AnyProv:
+    def __init__(self, driver):
+        pass
+
+    async def resolve_citations(self, uuids):
+        return {u: {"sources": _src(u.split("-", 1)[1])} for u in uuids}
+
+
+async def test_enum_concurrency_defaults_to_8():
+    assert _S.enum_concurrency == 8
