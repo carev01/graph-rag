@@ -9,6 +9,7 @@ import answer_api.search as search_mod
 import answer_api.synthesize as synth_mod
 import answer_api.timeline as timeline_mod
 from answer_api.scope import ScopeResolver
+from answer_api.shape import Facet
 
 pytestmark = pytest.mark.asyncio
 
@@ -572,3 +573,56 @@ async def test_search_global_forwards_a_comparisons_facets(monkeypatch):
             assert [f.label for f in seen["facets"]] == ["Veeam", "AWS Backup"]
             await c.get("/search/global", params={"q": "Veeam retention"})
     assert seen["facets"] is None
+
+
+async def test_search_global_rewrites_a_comparisons_facets_like_answer(monkeypatch):
+    """/search/global mirrors /answer's router: a comparison's facets get one
+    cheap-tier retrieval question each before the mode runs."""
+    seen = {}
+
+    async def _rewrite(client, model, q, facets):
+        seen["rewrite_args"] = (client, model, q, tuple(facets))
+        return tuple(Facet(f.label, f.scope, query=f"about {f.label}") for f in facets)
+
+    async def _global(*a, facets=None, **kw):
+        seen["mode_facets"] = facets
+        return await _fake_global_search(*a, **kw)
+
+    monkeypatch.setattr(app_mod, "facet_queries", _rewrite)
+    monkeypatch.setattr(app_mod.global_mod, "global_search", _global)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/global",
+                               params={"q": "Veeam versus AWS Backup retention"})
+    assert resp.status_code == 200
+    _, model, q, facets = seen["rewrite_args"]
+    assert model == "map-model" and q == "Veeam versus AWS Backup retention"
+    assert [f.label for f in facets] == ["Veeam", "AWS Backup"]
+    assert [f.query for f in seen["mode_facets"]] == ["about Veeam", "about AWS Backup"]
+
+
+async def test_search_drift_rewrites_a_comparisons_facets_like_answer(monkeypatch):
+    seen = {}
+
+    async def _rewrite(client, model, q, facets):
+        seen["rewrite_args"] = (client, model, q, tuple(facets))
+        return tuple(Facet(f.label, f.scope, query=f"about {f.label}") for f in facets)
+
+    async def _drift(*a, facets=None, **kw):
+        seen["mode_facets"] = facets
+        return await _fake_drift_search(*a, **kw)
+
+    monkeypatch.setattr(app_mod, "facet_queries", _rewrite)
+    import answer_api.drift as drift_mod
+    monkeypatch.setattr(drift_mod, "drift_search", _drift)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/drift",
+                               params={"q": "Veeam versus AWS Backup retention"})
+    assert resp.status_code == 200
+    _, model, q, facets = seen["rewrite_args"]
+    assert model == "map-model" and q == "Veeam versus AWS Backup retention"
+    assert [f.label for f in facets] == ["Veeam", "AWS Backup"]
+    assert [f.query for f in seen["mode_facets"]] == ["about Veeam", "about AWS Backup"]
