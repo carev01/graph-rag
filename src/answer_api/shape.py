@@ -140,8 +140,11 @@ async def facet_queries(client, model: str, q: str,
     """One cheap-tier call: rewrite `q` into a standalone question per facet, each
     about that side only, and return the facets with `query` set. Each facet whose
     rewrite is unusable (failed call, empty reply, no JSON, missing/empty label)
-    falls back to `q` with a warning -- a fallback, never an absence: that facet's
-    retrieval still runs, with the original question."""
+    keeps an empty `query` with a warning -- a fallback, never an absence: that
+    facet's retrieval still runs, with the original question (every caller uses
+    `f.query or q`). The query stays empty rather than becoming `q` so a caller can
+    tell a fallback from a rewrite: the enumeration check must not ask a single
+    vendor the bare cross-vendor question (final review)."""
     # Deferred: global_search imports this module.
     from answer_api.global_search import _extract_json
 
@@ -168,7 +171,7 @@ async def facet_queries(client, model: str, q: str,
         logger.warning("facet question rewrite failed; every facet retrieves with the "
                        "original question", exc_info=True)
     if obj is None:
-        return tuple(replace(f, query=q) for f in facets)
+        return tuple(replace(f, query="") for f in facets)
     out: list[Facet] = []
     for f in facets:
         rewritten = obj.get(f.label)
@@ -185,5 +188,5 @@ async def facet_queries(client, model: str, q: str,
         else:
             logger.warning("facet question rewrite: no question for facet %r; it "
                            "retrieves with the original question", f.label)
-            out.append(replace(f, query=q))
+            out.append(replace(f, query=""))
     return tuple(out)

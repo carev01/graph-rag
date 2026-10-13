@@ -296,9 +296,25 @@ async def test_gather_and_check_use_the_facet_question_synthesis_keeps_the_origi
     assert res["documented_vendors"] == ["AWS"]
 
 
-async def test_check_falls_back_to_the_original_question_without_a_facet_query():
+async def test_a_failed_rewrite_checks_a_per_vendor_form_never_the_bare_question():
+    # Regression (final review): a facet whose rewrite failed has no query; its
+    # check must not reintroduce the cross-vendor question run 6 failed on.
     c = _Client(_checks())
     await _run(c)
     checks = [p for p in c.prompts if p.startswith("Decide whether")]
     assert len(checks) == 4
-    assert all("QUESTION: Which vendors lock backups?" in p for p in checks)
+    for v in _VENDORS:
+        check = next(p for p in checks if f"from {v}'s documentation" in p)
+        assert (f"QUESTION: Which vendors lock backups?\n(Consider only what {v}'s "
+                f"evidence shows about this for {v}.)\n\nEVIDENCE:") in check
+
+
+async def test_a_rewritten_facet_checks_its_own_question_verbatim():
+    c = _Client(_checks())
+    facets = [Facet("AWS", Scope(vendors=("AWS",)), query="Does AWS lock backups?")]
+    await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
+                               q="Which vendors lock backups?", facets=facets,
+                               group_id="g", settings=_S)
+    check = next(p for p in c.prompts if p.startswith("Decide whether"))
+    assert "QUESTION: Does AWS lock backups?\n\nEVIDENCE:" in check
+    assert "Consider only" not in check

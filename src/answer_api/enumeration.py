@@ -26,9 +26,11 @@ logger = logging.getLogger(__name__)
 NONE_DOCUMENTED = ("None of the checked vendors ({vendors}) document this in the "
                    "available sources.")
 
-# The check asks the vendor's OWN question (`facet.query`, else `q`): run 6 handed
-# every check the cross-vendor "...and how do their approaches differ?", which one
-# vendor's evidence cannot show, and all four vendors came back "not documented".
+# The check asks the vendor's OWN question (`facet.query`, else `_PER_VENDOR` around
+# `q`): run 6 handed every check the cross-vendor "...and how do their approaches
+# differ?", which one vendor's evidence cannot show, and all four vendors came back
+# "not documented". A facet whose rewrite failed has no query; it gets the
+# deterministic per-vendor form, never the bare cross-vendor question.
 _CHECK_PROMPT = (
     "Decide whether the EVIDENCE below, all from {vendor}'s documentation, answers the "
     "QUESTION about {vendor}. Use ONLY the evidence. Absence of evidence "
@@ -37,6 +39,15 @@ _CHECK_PROMPT = (
     "from the evidence that support those points]}}. If documented is false, points and "
     "fact_ids must be empty. Do NOT write URLs.\n\nQUESTION: {q}\n\nEVIDENCE:\n{evidence}"
 )
+
+_PER_VENDOR = "{q}\n(Consider only what {vendor}'s evidence shows about this for {vendor}.)"
+
+
+def _check_question(q: str, facet: Facet) -> str:
+    """The question a vendor's check asks: its rewritten question, else the
+    deterministic per-vendor form of `q`."""
+    return facet.query or _PER_VENDOR.format(q=q, vendor=facet.label)
+
 
 _ENUM_PROMPT = (
     "Answer the QUESTION by covering EVERY vendor below, in the order given, with one "
@@ -165,8 +176,8 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             evidence, valid = _evidence(communities, facts, admitted)
             if not evidence:
                 return f, []
-            return f, await _check(map_client, map_model, q=f.query or q, vendor=f.label,
-                                   evidence=evidence, valid=valid)
+            return f, await _check(map_client, map_model, q=_check_question(q, f),
+                                   vendor=f.label, evidence=evidence, valid=valid)
         except Exception as exc:   # one vendor's failure must not sink the rest
             logger.warning("enumeration check for %s failed: %s", f.label, exc)
             return f, None

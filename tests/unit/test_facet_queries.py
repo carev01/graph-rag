@@ -1,6 +1,7 @@
 """Per-facet questions: one cheap call rewrites a comparison/enumeration question
 into one standalone question per side, used for that side's retrieval."""
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -55,11 +56,13 @@ async def test_a_missing_or_empty_label_falls_back_to_the_question(caplog):
     c = _Client('{"Veeam": "How do Veeam backup copy jobs work?", "Other": "x"}')
     with caplog.at_level(logging.WARNING):
         out = await facet_queries(c, "map", _Q, (_V, _A))
-    assert [f.query for f in out] == ["How do Veeam backup copy jobs work?", _Q]
+    # A fallback leaves the query empty (retrieval uses `f.query or q`), so the
+    # envelope shows no query and the enumeration check asks its per-vendor form.
+    assert [f.query for f in out] == ["How do Veeam backup copy jobs work?", ""]
     assert "AWS Backup" in caplog.text
     c = _Client('{"Veeam": "  ", "AWS Backup": "How does AWS Backup copy?"}')
     out = await facet_queries(c, "map", _Q, (_V, _A))
-    assert [f.query for f in out] == [_Q, "How does AWS Backup copy?"]
+    assert [f.query for f in out] == ["", "How does AWS Backup copy?"]
 
 
 async def test_a_label_matched_case_insensitively_and_stripped_sets_the_query(caplog):
@@ -73,11 +76,12 @@ async def test_a_label_matched_case_insensitively_and_stripped_sets_the_query(ca
 
 
 @pytest.mark.parametrize("client", [_Client(None), _Client(""), _Client("no json here"),
+                                    _Client('["not", "an", "object"]'),
                                     _Client(exc=RuntimeError("down"))])
 async def test_an_unusable_reply_falls_back_for_every_facet(client, caplog):
     with caplog.at_level(logging.WARNING):
         out = await facet_queries(client, "map", _Q, (_V, _A))
-    assert [f.query for f in out] == [_Q, _Q]
+    assert [f.query for f in out] == ["", ""]
     assert "facet question rewrite" in caplog.text
 
 
@@ -158,6 +162,17 @@ async def test_router_never_rewrites_an_overridden_enumeration(run):
     seen, _ = await run(QuestionShape("enumeration", facets), mode_override="local")
     assert seen.rewrites == []
     assert seen.modes == [("local", None)]
+
+
+async def test_a_fallback_facet_shows_no_query_in_the_envelope(run, monkeypatch):
+    async def _rewrite(client, model, q, facets):
+        return (replace(facets[0], query="about Veeam"), facets[1])   # AWS fell back
+
+    monkeypatch.setattr(router, "facet_queries", _rewrite)
+    _, env = await run(QuestionShape("comparison", (_V, _A)))
+    assert env["facets"] == [
+        {"label": "Veeam", "scope": _V.scope.as_dict(), "query": "about Veeam"},
+        {"label": "AWS Backup", "scope": _A.scope.as_dict()}]
 
 
 async def test_a_single_envelope_carries_no_facet_query(run):
