@@ -171,7 +171,8 @@ async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
         return await global_mod.global_search(
             driver, embedder, map_client, map_model, synth_client, synth_model,
             q=q, level=settings.global_default_level, k=settings.global_shortlist_k,
-            group_id=g, settings=settings, scope=scope, facets=facets)
+            group_id=g, settings=settings, scope=scope, facets=facets,
+            graphiti=graphiti)
     if mode == "drift":
         return await drift_mod.drift_search(
             graphiti, driver, embedder, synth_client, synth_model, q=q,

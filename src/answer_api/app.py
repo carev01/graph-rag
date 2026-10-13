@@ -266,7 +266,8 @@ def create_app() -> FastAPI:
             q=q, level=st.settings.global_default_level if level is None else level,
             k=st.settings.global_shortlist_k if k is None else k,
             group_id=st.settings.group_id,
-            settings=st.settings, scope=resolved, facets=facets)
+            settings=st.settings, scope=resolved, facets=facets,
+            graphiti=st.graphiti)
         result["scope"] = resolved.as_dict()
         return result
 

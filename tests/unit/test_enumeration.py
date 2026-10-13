@@ -258,8 +258,10 @@ async def test_a_fact_shared_by_two_vendors_renders_under_both_with_one_marker(m
     assert "=== Veeam ===\n[1] " in syn
 
 
-async def test_gather_retrieves_with_the_facet_question_and_check_keeps_the_original(
+async def test_gather_and_check_use_the_facet_question_synthesis_keeps_the_original(
         monkeypatch):
+    # Run 6: a single vendor's evidence cannot answer "...and how do their approaches
+    # differ?", so the check asks the vendor's own question; synthesis keeps `q`.
     asked = []
 
     async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
@@ -275,14 +277,28 @@ async def test_gather_retrieves_with_the_facet_question_and_check_keeps_the_orig
 
     monkeypatch.setattr(en, "shortlist_communities", _shortlist)
     monkeypatch.setattr(en, "search_local", _search)
-    c = _Client({"AWS": '{"documented": false}'})
-    await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
-                               q="Which vendors lock backups?",
-                               facets=[Facet("AWS", Scope(vendors=("AWS",)),
-                                             query="Does AWS lock backups?")],
-                               group_id="g", settings=_S)
+    c = _Client({"AWS": '{"documented": true, "points": ["p"], "fact_ids": ["lf-AWS"]}'})
+    res = await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
+                                     q="Which vendors lock backups?",
+                                     facets=[Facet("AWS", Scope(vendors=("AWS",)),
+                                                   query="Does AWS lock backups?")],
+                                     group_id="g", settings=_S)
     assert asked == [("shortlist", "Does AWS lock backups?"),
                      ("search", "Does AWS lock backups?")]
     check = next(p for p in c.prompts if p.startswith("Decide whether"))
-    assert "Which vendors lock backups?" in check
-    assert "Does AWS lock backups?" not in check
+    assert "QUESTION: Does AWS lock backups?" in check
+    assert "Which vendors lock backups?" not in check
+    assert "answers the QUESTION about AWS" in check
+    syn = c.prompts[-1]
+    assert not syn.startswith("Decide whether")
+    assert "QUESTION: Which vendors lock backups?" in syn
+    assert "Does AWS lock backups?" not in syn
+    assert res["documented_vendors"] == ["AWS"]
+
+
+async def test_check_falls_back_to_the_original_question_without_a_facet_query():
+    c = _Client(_checks())
+    await _run(c)
+    checks = [p for p in c.prompts if p.startswith("Decide whether")]
+    assert len(checks) == 4
+    assert all("QUESTION: Which vendors lock backups?" in p for p in checks)

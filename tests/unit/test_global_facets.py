@@ -208,3 +208,254 @@ async def test_each_facet_shortlists_and_maps_with_its_own_question(stubs, monke
     veeam_part, aws_part = p.split("=== AWS Backup ===")
     assert "text v1" in veeam_part and "text a1" in aws_part
     assert [c["community_id"] for c in res["communities_used"]] == ["c1", "shared", "c2"]
+
+
+# --- Task 15 (run 6): every live facet gets a scoped local supplement -------------
+
+_G = object()   # a graphiti handle; the stubbed search_local never touches it
+_LSRC = {"lv": [{"vendor": "Veeam", "product": "Veeam Backup & Replication",
+                 "article_id": "lva"}],
+         "la": [{"vendor": "AWS", "product": "AWS Backup", "article_id": "laa"}]}
+
+
+def _local_fact(uuid):
+    return {"fact": f"local {uuid}", "fact_uuid": uuid, "valid_at": None,
+            "invalid_at": None, "sources": []}
+
+
+class _CitingReducer(_Reducer):
+    def __init__(self, text):
+        super().__init__()
+        self.text = text
+
+    async def _create(self, **kw):
+        self.prompts.append(kw["messages"][0]["content"])
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=self.text), finish_reason="stop")])
+
+
+@pytest.fixture
+def local(monkeypatch):
+    """search_local stub: facts per facet scope; `raise_for` scopes raise."""
+    state = SimpleNamespace(calls=[], facts={_V.scope: ["lv"], _A.scope: ["la"]},
+                            raise_for=set())
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, fetch_cap=450,
+                      scan_max_episodes=6000, settings=None, rerank_pool=0):
+        state.calls.append({"graphiti": graphiti, "q": q, "k": k, "scope": scope,
+                            "group_id": group_id, "fetch_cap": fetch_cap,
+                            "scan_max_episodes": scan_max_episodes,
+                            "settings": settings, "rerank_pool": rerank_pool})
+        if scope in state.raise_for:
+            raise RuntimeError("local down")
+        return {"results": [_local_fact(u) for u in state.facts.get(scope, [])]}
+
+    class _Prov:
+        def __init__(self, driver):
+            pass
+
+        async def resolve_citations(self, uuids):
+            src = {**_SRC, **_LSRC}
+            state.resolved = list(uuids)
+            return {u: {"sources": src[u]} for u in uuids if u in src}
+
+    monkeypatch.setattr(gs, "search_local", _search)
+    monkeypatch.setattr(gs, "Provenance", _Prov)
+    return state
+
+
+def _facets_with_queries():
+    return [Facet("Veeam", _V.scope, query="veeam q"),
+            Facet("AWS Backup", _A.scope, query="aws q")]
+
+
+async def test_every_live_facet_gets_the_local_supplement(stubs, local):
+    await gs.global_search(None, None, None, "m", _Reducer(), "s", q="original q",
+                           level=1, k=10, group_id="g", settings=_S,
+                           facets=_facets_with_queries(), graphiti=_G)
+    assert [(c["q"], c["scope"]) for c in local.calls] == [("veeam q", _V.scope),
+                                                           ("aws q", _A.scope)]
+    for c in local.calls:
+        assert c["graphiti"] is _G and c["group_id"] == "g" and c["settings"] is _S
+        assert c["k"] == _S.global_facet_local_k == 8
+        assert c["fetch_cap"] == _S.local_scoped_fetch_cap
+        assert c["scan_max_episodes"] == _S.local_scoped_scan_max_episodes
+        assert c["rerank_pool"] == _S.local_facet_rerank_pool
+
+
+async def test_supplement_renders_after_community_blocks_and_cites_via_markers(stubs,
+                                                                             local):
+    r = _CitingReducer("Veeam X [1]. Veeam local [2]. AWS local [4].")
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    p = r.prompts[0]
+    veeam_part, aws_part = p.split("=== AWS Backup ===")
+    # community block first, then the facet's own facts under the same heading
+    assert veeam_part.index('COMMUNITY "Tc1"') < veeam_part.index(
+        "FACTS FROM Veeam DOCUMENTATION:")
+    assert "[2] (Veeam · Veeam Backup & Replication) local lv" in veeam_part
+    assert aws_part.index('COMMUNITY "Tc2"') < aws_part.index(
+        "FACTS FROM AWS Backup DOCUMENTATION:")
+    assert "local la" in aws_part and "local lv" not in aws_part
+    # one resolve_citations call covers community AND local facts
+    assert sorted(local.resolved) == ["a1", "la", "lv", "v1"]
+    by_marker = {c["marker"]: c for c in res["citations"]}
+    assert by_marker[2]["fact_uuid"] == "lv"
+    assert by_marker[2]["sources"] == _LSRC["lv"]
+    assert by_marker[4]["fact_uuid"] == "la"
+    assert by_marker[4]["sources"] == _LSRC["la"]
+    # communities_used lists communities only, never local facts
+    assert [c["community_id"] for c in res["communities_used"]] == ["c1", "shared", "c2"]
+    assert res["degraded_facets"] == []
+
+
+async def test_a_shared_fact_keeps_one_marker(stubs, local):
+    # AWS's local search returns a1 (already a community fact under AWS) and v1
+    # (already numbered under Veeam): neither gets a second marker.
+    local.facts[_A.scope] = ["a1", "v1", "la"]
+    r = _Reducer()
+    await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                           group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    p = r.prompts[0]
+    _, aws_part = p.split("=== AWS Backup ===")
+    lines = p.split("FINDINGS:\n", 1)[1].splitlines()
+    a1_lines = [ln for ln in lines if ln.endswith(" a1")]
+    assert a1_lines == ["[3] (AWS · AWS Backup) local a1"]   # not repeated under AWS
+    v1_lines = [ln for ln in lines if ln.endswith(" v1")]
+    assert len(v1_lines) >= 2 and all(ln.startswith("[1] ") for ln in v1_lines)
+    assert "[1] (Veeam · Veeam ONE) local v1" in aws_part   # v1 keeps marker 1
+    assert "[4] (AWS · AWS Backup) local la" in aws_part
+
+
+async def test_a_facet_with_no_communities_uses_its_local_facts(stubs, local,
+                                                                monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_hit("c1", ["v1"])] if scope == _V.scope else []
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    r = _CitingReducer("Veeam X [1]. AWS local [3].")
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    _, aws_part = r.prompts[0].split("=== AWS Backup ===")
+    assert "\n(no findings)" not in aws_part
+    assert "FACTS FROM AWS Backup DOCUMENTATION:" in aws_part
+    assert [c["fact_uuid"] for c in res["citations"]] == ["v1", "la"]
+
+
+async def test_a_facet_whose_communities_are_all_out_of_scope_uses_local_facts(
+        stubs, local, monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_hit("c1", ["v1"])]   # AWS's only community cites a Veeam fact
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    local.facts[_V.scope] = []
+    r = _Reducer()
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    _, aws_part = r.prompts[0].split("=== AWS Backup ===")
+    assert "\n(no findings)" not in aws_part
+    assert "local la" in aws_part and "text v1" not in aws_part
+    assert res["degraded_facets"] == []
+
+
+async def test_no_communities_and_no_local_facts_is_no_findings(stubs, local,
+                                                                monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_hit("c1", ["v1"])] if scope == _V.scope else []
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    local.facts[_A.scope] = []
+    r = _Reducer()
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    assert "=== AWS Backup ===\n(no findings)" in r.prompts[0]
+    assert res["degraded_facets"] == []
+
+
+async def test_supplement_failure_keeps_community_findings(stubs, local, caplog):
+    local.raise_for = {_A.scope}
+    r = _Reducer()
+    with caplog.at_level("WARNING"):
+        res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1,
+                                     k=10, group_id="g", settings=_S, facets=[_V, _A],
+                                     graphiti=_G)
+    _, aws_part = r.prompts[0].split("=== AWS Backup ===")
+    assert "text a1" in aws_part
+    assert "FACTS FROM AWS Backup DOCUMENTATION:" not in aws_part
+    assert res["degraded_facets"] == []
+    assert "Could not check" not in res["answer"]
+    assert any("local down" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_supplement_failure_without_communities_degrades_never_absent(
+        stubs, local, monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        return [_hit("c1", ["v1"])] if scope == _V.scope else []
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    local.raise_for = {_A.scope}
+    r = _Reducer()
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    assert "=== AWS Backup ===" not in r.prompts[0]
+    assert "\n(no findings)" not in r.prompts[0]
+    assert res["degraded_facets"] == ["AWS Backup"]
+    assert res["answer"].endswith("Could not check: AWS Backup.")
+
+
+async def test_a_degraded_facet_gets_no_supplement_block(stubs, local, monkeypatch):
+    async def _shortlist(driver, embedder, q, *, level, k, group_id, settings=None,
+                         stats=None, scope=None, top_n=None):
+        if scope == _A.scope:
+            raise RuntimeError("rerank down")
+        return [_hit("c1", ["v1"])]
+    monkeypatch.setattr(gs, "shortlist_communities", _shortlist)
+    r = _Reducer()
+    res = await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                                 group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    assert "local la" not in r.prompts[0]
+    assert res["degraded_facets"] == ["AWS Backup"]
+
+
+async def test_a_cancelled_supplement_propagates(stubs, local, monkeypatch):
+    async def _search(graphiti, driver, **kw):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(gs, "search_local", _search)
+    with pytest.raises(asyncio.CancelledError):
+        await gs.global_search(None, None, None, "m", _Reducer(), "s", q="q", level=1,
+                               k=10, group_id="g", settings=_S, facets=[_V, _A],
+                               graphiti=_G)
+
+
+async def test_without_graphiti_the_supplement_is_skipped(stubs, local, caplog):
+    r = _Reducer()
+    with caplog.at_level("INFO"):
+        await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                               group_id="g", settings=_S, facets=[_V, _A])
+    assert local.calls == []
+    assert "FACTS FROM" not in r.prompts[0]
+    assert any("local supplement skipped" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_single_path_never_calls_the_supplement(stubs, local):
+    r = _Reducer()
+    await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                           group_id="g", settings=_S, facets=[_V], graphiti=_G)
+    assert local.calls == []
+    assert "FACTS FROM" not in r.prompts[0]
+    assert r.prompts[0] == gs._REDUCE_PROMPT.format(q="q", blocks=r.prompts[0].split(
+        "FINDINGS:\n", 1)[1].rsplit("\n\nAnswer:", 1)[0])
+
+
+async def test_facet_reduce_prompt_forbids_false_absence_and_long_marker_lists(stubs,
+                                                                               local):
+    r = _Reducer()
+    await gs.global_search(None, None, None, "m", r, "s", q="q", level=1, k=10,
+                           group_id="g", settings=_S, facets=[_V, _A], graphiti=_G)
+    p = r.prompts[0]
+    assert ("Never state that the documentation does not cover a side when findings "
+            "are listed under its heading; describe what those findings say. Say a side "
+            "is not covered only when it shows \"(no findings)\".") in p
+    assert ("Cite each claim with the one or two markers of the facts it rests on; do "
+            "not attach long marker lists to a sentence.") in p
+    assert "Address EVERY side" in p and "Do NOT write any URL." in p

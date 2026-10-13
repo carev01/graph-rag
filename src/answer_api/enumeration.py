@@ -26,9 +26,12 @@ logger = logging.getLogger(__name__)
 NONE_DOCUMENTED = ("None of the checked vendors ({vendors}) document this in the "
                    "available sources.")
 
+# The check asks the vendor's OWN question (`facet.query`, else `q`): run 6 handed
+# every check the cross-vendor "...and how do their approaches differ?", which one
+# vendor's evidence cannot show, and all four vendors came back "not documented".
 _CHECK_PROMPT = (
-    "Decide whether the EVIDENCE below, all from {vendor}'s documentation, shows what "
-    "the QUESTION asks about for {vendor}. Use ONLY the evidence. Absence of evidence "
+    "Decide whether the EVIDENCE below, all from {vendor}'s documentation, answers the "
+    "QUESTION about {vendor}. Use ONLY the evidence. Absence of evidence "
     "is not a finding. Respond with ONLY JSON: {{\"documented\": true or false, "
     "\"points\": [short strings stating what the evidence shows], \"fact_ids\": [ids "
     "from the evidence that support those points]}}. If documented is false, points and "
@@ -46,7 +49,7 @@ _ENUM_PROMPT = (
 
 
 async def _gather(graphiti, driver, embedder, *, q, facet: Facet, group_id, settings):
-    # Retrieval asks the vendor's own question; `_check` keeps the original `q`.
+    # Retrieval (and `_check`) ask the vendor's own question; synthesis keeps `q`.
     fq = facet.query or q
     n = settings.enum_communities_per_vendor
     communities, facts = await asyncio.gather(
@@ -159,7 +162,7 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             evidence, valid = _evidence(communities, facts, admitted)
             if not evidence:
                 return f, []
-            return f, await _check(map_client, map_model, q=q, vendor=f.label,
+            return f, await _check(map_client, map_model, q=f.query or q, vendor=f.label,
                                    evidence=evidence, valid=valid)
         except Exception as exc:   # one vendor's failure must not sink the rest
             logger.warning("enumeration check for %s failed: %s", f.label, exc)

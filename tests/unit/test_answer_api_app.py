@@ -559,8 +559,9 @@ async def test_answer_hands_the_router_the_question_shape(monkeypatch):
 async def test_search_global_forwards_a_comparisons_facets(monkeypatch):
     seen = {}
 
-    async def _global(*a, facets=None, **kw):
+    async def _global(*a, facets=None, graphiti=None, **kw):
         seen["facets"] = facets
+        seen["graphiti"] = graphiti
         return await _fake_global_search(*a, **kw)
 
     monkeypatch.setattr(app_mod.global_mod, "global_search", _global)
@@ -571,6 +572,8 @@ async def test_search_global_forwards_a_comparisons_facets(monkeypatch):
                                params={"q": "Veeam versus AWS Backup retention"})
             assert resp.status_code == 200
             assert [f.label for f in seen["facets"]] == ["Veeam", "AWS Backup"]
+            assert seen["graphiti"] is app.state.graphiti   # the facet supplement's handle
+            assert isinstance(seen["graphiti"], FakeGraphiti)
             await c.get("/search/global", params={"q": "Veeam retention"})
     assert seen["facets"] is None
 

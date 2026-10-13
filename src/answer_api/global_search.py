@@ -19,6 +19,7 @@ from graph_extract.usage import bounded_llm_client
 from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line, in_scope
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import Scope
+from answer_api.search import search_local
 from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content,
@@ -412,8 +413,15 @@ _REDUCE_FACETS_PROMPT = (
     "- The question has these sides: {labels}. Address EVERY side, in that order. If a "
     "side shows \"(no findings)\", say in one sentence that the retrieved "
     "documentation does not cover it, and do not guess.\n"
+    # Run 6: sides whose findings were present but off the question's point were
+    # still called "not covered" -- a false absence.
+    "- Never state that the documentation does not cover a side when findings are "
+    "listed under its heading; describe what those findings say. Say a side is not "
+    "covered only when it shows \"(no findings)\".\n"
     "- Cite every claim with the [N] marker of the fact it rests on. A sentence with "
     "no marker is not allowed.\n"
+    "- Cite each claim with the one or two markers of the facts it rests on; do not "
+    "attach long marker lists to a sentence.\n"
     "- Write each marker individually: [1] [2] [3]. Never write a range or span such "
     "as [1]-[3]; only the markers you write out are cited.\n"
     "- Use ONLY these findings. Do NOT use outside knowledge.\n"
@@ -424,12 +432,19 @@ _REDUCE_FACETS_PROMPT = (
 )
 
 
-def _render_facet_blocks(facet_results: list[tuple[str, list[MapResult]]],
+def _render_facet_blocks(facet_results: list[tuple[str, list[MapResult], list[str]]],
                          fact_to_marker: dict[str, int], texts: dict[str, str],
                          sources: dict[str, list[dict]]) -> str:
+    """Per facet heading: its community blocks, then a block of the facet's own
+    local-search facts, numbered by the same fact_to_marker. "(no findings)" only
+    when both are empty."""
     parts = []
-    for label, results in facet_results:
+    for label, results, own in facet_results:
         blocks = _render_blocks(results, fact_to_marker, texts, sources)
+        lines = [fact_line(fact_to_marker[x], texts[x], sources.get(x, []))
+                 for x in own if x in texts]
+        if lines:
+            blocks.append(f"FACTS FROM {label} DOCUMENTATION:\n" + "\n".join(lines))
         parts.append(f"=== {label} ===\n" + ("\n\n".join(blocks) or "(no findings)"))
     return "\n\n".join(parts)
 
@@ -439,11 +454,15 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
                         level: int, k: int, group_id: str,
                         settings: ExtractSettings,
                         scope: Scope | None = None,
-                        facets: Sequence[Facet] | None = None) -> dict:
+                        facets: Sequence[Facet] | None = None,
+                        graphiti=None) -> dict:
+    """`graphiti` is used only by a comparison (>= 2 facets), for each facet's local
+    supplement; None skips the supplement."""
     if facets is not None and len(facets) >= 2:
         return await _global_search_facets(
             driver, embedder, map_client, map_model, synth_client, synth_model, q=q,
-            level=level, group_id=group_id, settings=settings, facets=facets)
+            level=level, group_id=group_id, settings=settings, facets=facets,
+            graphiti=graphiti)
     stats = RerankStats()
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
                                        group_id=group_id, settings=settings, stats=stats,
@@ -544,17 +563,49 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
 
 async def _global_search_facets(driver, embedder, map_client, map_model, synth_client,
                                 synth_model, *, q, level, group_id, settings,
-                                facets: Sequence[Facet]) -> dict:
+                                facets: Sequence[Facet], graphiti=None) -> dict:
     stats = RerankStats()
     n = settings.global_facet_top_n
     # Each facet shortlists and maps with its own question (`f.query`, else `q`);
     # the reduce prompt keeps the original `q`.
     fqs = [f.query or q for f in facets]
-    shortlists = await asyncio.gather(*[
-        shortlist_communities(driver, embedder, fq, level=level, k=n, group_id=group_id,
-                              settings=settings, stats=stats, scope=f.scope, top_n=n)
-        for f, fq in zip(facets, fqs)], return_exceptions=True)
+    # Every facet also gets a scoped, reranked LOCAL supplement, run alongside the
+    # shortlists: run 6's community findings were sometimes absent, out of scope, or
+    # off the side's point, and the reducer then called that side "not covered"
+    # although the facet's own local search found the right facts.
+    if graphiti is None:
+        logger.info("global facets: no graphiti handle, local supplement skipped")
+
+    async def _no_supplement() -> list:
+        return [None] * len(facets)
+
+    shortlists, supplements = await asyncio.gather(
+        asyncio.gather(*[
+            shortlist_communities(driver, embedder, fq, level=level, k=n,
+                                  group_id=group_id, settings=settings, stats=stats,
+                                  scope=f.scope, top_n=n)
+            for f, fq in zip(facets, fqs)], return_exceptions=True),
+        asyncio.gather(*[
+            search_local(graphiti, driver, q=fq, k=settings.global_facet_local_k,
+                         scope=f.scope, group_id=group_id,
+                         fetch_cap=settings.local_scoped_fetch_cap,
+                         scan_max_episodes=settings.local_scoped_scan_max_episodes,
+                         settings=settings, rerank_pool=settings.local_facet_rerank_pool)
+            for f, fq in zip(facets, fqs)], return_exceptions=True)
+        if graphiti is not None else _no_supplement())
     raise_if_cancelled(shortlists)   # cancellation propagates; only Exceptions remain
+    raise_if_cancelled(supplements)
+    # Each live supplement's facts with text, in search order, by facet position.
+    own_facts: list[list[str]] = []
+    local_texts: dict[str, str] = {}
+    for sup in supplements:
+        ids: list[str] = []
+        if sup is not None and not isinstance(sup, BaseException):
+            for x in sup["results"]:
+                if x.get("fact") and str(x["fact"]).strip() and x["fact_uuid"] not in ids:
+                    ids.append(x["fact_uuid"])
+                    local_texts[x["fact_uuid"]] = x["fact"]
+        own_facts.append(ids)
     # A community shortlisted by several facets serves EVERY one of them (spec
     # §3.2): it is mapped once per distinct facet question (once when the facets
     # share a question), then its fact ids are filtered separately by each facet's
@@ -577,15 +628,19 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
                            key[0])
         else:
             mapped[key] = m
-    all_ids = sorted({fid for m in mapped.values() for fid in m.fact_ids})
+    # ONE resolve over community and local facts: scope filter, labels, citations.
+    all_ids = sorted({fid for m in mapped.values() for fid in m.fact_ids}
+                     | {x for ids in own_facts for x in ids})
     resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
     # A failure never reads as absence: a facet whose shortlist failed, or whose
     # communities were shortlisted but none mapped usably, is left out of the
     # prompt and reported as "could not check". A facet whose maps succeeded but
-    # whose facts all fell outside its scope is genuine absence ("(no findings)").
+    # whose facts all fell outside its scope, and whose local supplement found
+    # nothing, is genuine absence ("(no findings)"). A failed supplement on a facet
+    # with no community findings is a failure too, never absence.
     degraded: list[str] = []
-    facet_results: list[tuple[str, list[MapResult]]] = []
-    for f, fq, hits in zip(facets, fqs, shortlists):
+    facet_results: list[tuple[str, list[MapResult], list[str]]] = []
+    for f, fq, hits, sup, own in zip(facets, fqs, shortlists, supplements, own_facts):
         if isinstance(hits, BaseException):
             logger.warning("global facet %r shortlist failed: %s", f.label, hits)
             degraded.append(f.label)
@@ -601,10 +656,18 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
             x for x in m.fact_ids
             if _in_scope_ci(resolved.get(x, {}).get("sources", []), f.scope)])
             for m in mine]
-        facet_results.append((f.label, [m for m in kept if m.fact_ids]))
+        kept = [m for m in kept if m.fact_ids]
+        if isinstance(sup, Exception):
+            logger.warning("global facet %r local supplement failed: %s", f.label, sup)
+            if not kept:
+                degraded.append(f.label)
+                continue
+        community_facts = {x for m in kept for x in m.fact_ids}
+        facet_results.append((f.label, kept,
+                              [x for x in own if x not in community_facts]))
     seen_cids: set[str] = set()
     communities_used: list[dict] = []
-    for _, ms in facet_results:
+    for _, ms, _own in facet_results:
         for m in ms:
             if m.community_id not in seen_cids:
                 seen_cids.add(m.community_id)
@@ -613,13 +676,16 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
     note = could_not_check_note(degraded)
     marker_map: dict[int, dict] = {}
     fact_to_marker: dict[str, int] = {}
-    for _, ms in facet_results:
-        for m in ms:
-            for fid in m.fact_ids:
-                if fid not in fact_to_marker:
-                    fact_to_marker[fid] = len(fact_to_marker) + 1
-                    marker_map[fact_to_marker[fid]] = {"fact_uuid": fid}
-    texts = await _fact_texts(driver, group_id, list(fact_to_marker))
+    for _, ms, own in facet_results:
+        # one marker per fact uuid: a fact already numbered keeps its marker
+        for fid in [x for m in ms for x in m.fact_ids] + own:
+            if fid not in fact_to_marker:
+                fact_to_marker[fid] = len(fact_to_marker) + 1
+                marker_map[fact_to_marker[fid]] = {"fact_uuid": fid}
+    # Local facts arrive with their text; only community facts are fetched.
+    texts = {**await _fact_texts(driver, group_id,
+                                 [x for x in fact_to_marker if x not in local_texts]),
+             **{x: t for x, t in local_texts.items() if x in fact_to_marker}}
     missing = [fid for fid in fact_to_marker if fid not in texts]
     if missing:
         # Same rule as the single-facet path: never drop a marker silently.
@@ -637,7 +703,7 @@ async def _global_search_facets(driver, embedder, map_client, map_model, synth_c
     blocks = _render_facet_blocks(facet_results, fact_to_marker, texts, sources_by_fact)
     raw = await _complete_or_none(
         synth_client, synth_model,
-        _REDUCE_FACETS_PROMPT.format(labels="; ".join(lab for lab, _ in facet_results),
+        _REDUCE_FACETS_PROMPT.format(labels="; ".join(lab for lab, _, _ in facet_results),
                                      q=q, blocks=blocks), max_tokens=3000)
     if raw is None:
         return refusal

@@ -347,6 +347,12 @@ class ExtractSettings(BaseSettings):
     local_facet_rerank_pool: int = 40
     # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
     global_facet_top_n: int = 3
+    # Comparison: every facet also gets this many facts from a scoped, reranked local
+    # search, rendered under its heading after its community findings. Run 6
+    # (2026-10-13): a Veeam Backup for Microsoft 365 side with no usable community
+    # finding, and AWS/Veeam sides with only off-point findings, were all reported as
+    # "not covered" although the facet's own local search found the right facts.
+    global_facet_local_k: int = 8
     # Enumeration: evidence gathered per content vendor before its cheap check.
     enum_communities_per_vendor: int = 2
     enum_facts_per_vendor: int = 8
