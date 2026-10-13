@@ -40,6 +40,8 @@ Before retrieval, every question gets a **shape**, decided deterministically (no
 | **comparison** | two or more **facets** (below) | "Compare Veeam hardened repositories and AWS Backup Vault Lock" |
 | **single** | zero or one facet | "How does Veeam SureBackup verify backups?" |
 
+A cross-vendor question whose grammatical subject is a named vendor or product ("Which vendors does Veeam integrate with?") is **single**, scoped to that entity; a named entity in any other position (object, workload) leaves the question an enumeration.
+
 An explicit scope (`vendor=`/`product=`/`source=`) is the caller's instruction: it is
 one facet and the shape is **single**, whatever the wording. `scope=none` gives
 **single** with an empty facet (today's unscoped behaviour).
