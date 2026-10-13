@@ -192,6 +192,25 @@ def test_scope_none_keeps_a_named_subject_question_single_unscoped():
     assert s.facets == (Facet("", Scope()),)
 
 
+@pytest.mark.parametrize("q", [
+    "Which vendors do Veeam and AWS Backup both support?",
+    "Which vendors do Veeam or AWS Backup support?"])
+def test_a_compound_named_subject_stays_an_enumeration(q):
+    # "Veeam and/or AWS Backup" is two sides, not one named subject: the rule
+    # must not collapse it to a single facet (run 9, task 17).
+    assert _shape(q).kind == "enumeration"
+
+
+def test_a_comma_before_and_is_not_a_compound_subject():
+    # "Veeam, and its partners, ..." has no SECOND detected mention after
+    # "and" -- the comma sits before "and", not after it -- so the named
+    # subject still applies and the question stays single.
+    q = "Which vendors does Veeam, and its partners, integrate with?"
+    s = _shape(q)
+    assert s.kind == "single"
+    assert s.facets == (Facet("Veeam", Scope(vendors=("Veeam",), source="detected")),)
+
+
 def test_detect_mention_spans_returns_start_offsets():
     r = _resolver()
     q = "Does veeam work with AWS Backup?"

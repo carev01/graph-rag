@@ -148,7 +148,9 @@ async def test_scoped_scan_embeds_and_ranks_the_scope_edges():
         group_id="g", exclude={"p0"}, max_episodes=500)
     # Same call shape graphiti's search uses (newlines flattened).
     assert emb.calls == [["immutable backups"]]
-    _, params = drv.calls[0]
+    # drv.calls[0] is the episode-count/cap pre-check (runs before the
+    # embedding call above); drv.calls[-1] is the full scan.
+    _, params = drv.calls[-1]
     assert params["vendors"] == ["cohesity"]
     assert params["vec"] == [0.1, 0.2]
     assert params["k"] == 7
@@ -175,6 +177,28 @@ async def test_scoped_scan_skips_a_scope_over_the_episode_limit(caplog):
     assert "skipped" in caplog.text
 
 
+async def test_scoped_scan_over_cap_makes_no_embedder_call():
+    # The episode-count/cap check runs BEFORE the query is embedded, so an
+    # over-cap scope never pays for an embedding call (task 17, item 2).
+    emb = _Embedder()
+    drv = _Driver([_row(501)])          # n = episode_cap: the scope has > 500 episodes
+    out = await search_mod._scoped_scan(
+        SimpleNamespace(embedder=emb), drv, q="q", scope=Scope(vendors=("Veeam",)),
+        k=5, group_id="g", exclude=set(), max_episodes=500)
+    assert out == []
+    assert emb.calls == []
+
+
+async def test_scoped_scan_within_cap_still_embeds_once():
+    emb = _Embedder()
+    drv = _Driver([_row(3, "s1", fact="f", episodes=["e1"])])
+    out = await search_mod._scoped_scan(
+        SimpleNamespace(embedder=emb), drv, q="q", scope=_SCOPE,
+        k=5, group_id="g", exclude=set(), max_episodes=500)
+    assert [e.uuid for e in out] == ["s1"]
+    assert emb.calls == [["q"]]
+
+
 async def test_over_limit_scope_returns_post_filter_results(monkeypatch):
     emb = _Embedder()
     drv = _Driver([_row(20001)])
@@ -195,7 +219,7 @@ async def test_scoped_scan_converts_neo4j_datetimes():
         SimpleNamespace(embedder=emb), drv, q="q", scope=_SCOPE, k=5, group_id="g",
         exclude=set(), include_invalid=True)
     assert isinstance(out[0].invalid_at, datetime)
-    assert drv.calls[0][1]["include_invalid"] is True
+    assert drv.calls[-1][1]["include_invalid"] is True
 
 
 # --- cross-encoder rerank of the scan's candidates --------------------------------
@@ -227,7 +251,7 @@ async def test_scan_reranks_the_cosine_candidates_when_configured(monkeypatch):
     out = await search_mod._scoped_scan(
         SimpleNamespace(embedder=_Embedder()), drv, q="immutable", scope=_SCOPE, k=3,
         group_id="g", exclude=set(), settings=_settings(**_RERANK))
-    assert drv.calls[0][1]["k"] == 50            # fetches local_scoped_scan_candidates
+    assert drv.calls[-1][1]["k"] == 50            # fetches local_scoped_scan_candidates
     assert seen == {"query": "immutable", "documents": [f"fact c{i}" for i in range(5)],
                     "top_k": 3}
     assert [e.uuid for e in out] == ["c4", "c0", "c2"]
@@ -243,7 +267,7 @@ async def test_scan_unconfigured_reranker_keeps_cosine_order(monkeypatch, caplog
         out = await search_mod._scoped_scan(
             SimpleNamespace(embedder=_Embedder()), drv, q="q", scope=_SCOPE, k=3,
             group_id="g", exclude=set(), settings=_settings())
-    assert drv.calls[0][1]["k"] == 3
+    assert drv.calls[-1][1]["k"] == 3
     assert [e.uuid for e in out] == ["c0", "c1", "c2"]
     assert "no reranker" in caplog.text
 

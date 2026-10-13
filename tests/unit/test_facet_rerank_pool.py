@@ -195,12 +195,18 @@ class _ScanGraph(_Graph):
 
 
 class _ScanDriver:
-    """The scoped scan's query: up to `k` scope edges, cosine order."""
+    """The scoped scan's query: up to `k` scope edges, cosine order.
+
+    `_scoped_scan` now runs the (vec-free) episode-count/cap pre-check before
+    the full scan query (task 17, item 2): that first call is answered with a
+    small `n`, under any cap, so the scan proceeds as before."""
 
     def __init__(self):
         self.ks = []
 
     async def execute_query(self, query, **kw):
+        if query is search_mod._EPISODE_COUNT:
+            return [{"n": 1}], None, None
         self.ks.append(kw["k"])
         recs = [{"n": 1, "uuid": f"s{i}", "fact": f"fact s{i}", "episodes": ["in"],
                  "valid_at": None, "invalid_at": None} for i in range(kw["k"])]
@@ -374,17 +380,18 @@ async def test_eval_evidence_passes_the_pool_for_facet_shapes(monkeypatch, kind,
 # --- task 17: a scannable scope's own candidates always join the pool ---------------
 
 class _CapDriver(_ScanDriver):
-    """The scan query reporting `n` scope episodes (n > max_episodes = over the cap)."""
+    """The scan query reporting `n` scope episodes (n > max_episodes = over the cap).
+
+    The episode-count pre-check reports `n`; an over-cap `n` makes `_scoped_scan`
+    return before any further query, so the full scan is never reached."""
 
     def __init__(self, n):
         super().__init__()
         self.n = n
 
     async def execute_query(self, query, **kw):
-        if self.n > kw["max_episodes"]:
-            self.ks.append(kw["k"])
-            return [{"n": self.n, "uuid": None, "fact": None, "episodes": None,
-                     "valid_at": None, "invalid_at": None}], None, None
+        if query is search_mod._EPISODE_COUNT:
+            return [{"n": self.n}], None, None
         return await super().execute_query(query, **kw)
 
 

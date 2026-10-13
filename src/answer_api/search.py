@@ -31,6 +31,17 @@ logger = logging.getLogger(__name__)
 # A scope above $max_episodes is not scanned: `LIMIT $episode_cap` (max + 1) bounds
 # the chain walk, and n = episode_cap tells the caller it was skipped. Neo4j cosine
 # is (1+cos)/2; ranking is unaffected.
+#
+# The episode count is checked with this separate, vec-free query BEFORE the query
+# is embedded (task 17, item 2): an over-cap scope then costs no embedding call.
+_EPISODE_COUNT = (
+    "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(s:Source)"
+    "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products "
+    "OR toLower(s.name) IN $sources) "
+    "WITH DISTINCT e LIMIT $episode_cap "
+    "RETURN count(e) AS n")
 _SCAN = (
     "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(s:Source)"
     "-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(e:Episodic) "
@@ -104,9 +115,22 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
     of 2,158 for "Which backup vendors support immutable backups?" (2026-10-13).
     Without a reranker, or when it fails, the cosine top `k` -- never empty because
     of the reranker. A scope with more than `max_episodes` episodes returns []
-    -- logged, not scanned: large scopes are served by the post-filter.
+    -- logged, not scanned: large scopes are served by the post-filter. That episode
+    count is checked first, before `q` is embedded, so an over-cap scope costs no
+    embedding call (task 17).
     `rerank=False` returns the cosine top `k` without the cross-encoder: a pooled
     caller reranks the merged candidates itself, once."""
+    episode_cap = max_episodes + 1
+    vendors = [v.lower() for v in scope.vendors]
+    products = [p.lower() for p in scope.products]
+    sources = [x.lower() for x in scope.sources]
+    count_records, _, _ = await driver.execute_query(
+        _EPISODE_COUNT, vendors=vendors, products=products, sources=sources,
+        episode_cap=episode_cap)
+    if count_records and count_records[0]["n"] > max_episodes:
+        logger.info("scoped scan skipped: scope %s has more than %d episodes",
+                    scope.as_dict(), max_episodes)
+        return []
     use_rerank = rerank and settings is not None and rerank_configured(settings)
     fetch = max(k, settings.local_scoped_scan_candidates) \
         if settings is not None and use_rerank else k
@@ -114,10 +138,7 @@ async def _scoped_scan(graphiti, driver, *, q, scope: Scope, k: int, group_id: s
     records, _, _ = await driver.execute_query(
         _SCAN, vec=vec, k=fetch, exclude=sorted(exclude), group_id=group_id,
         include_invalid=include_invalid, max_episodes=max_episodes,
-        episode_cap=max_episodes + 1,
-        vendors=[v.lower() for v in scope.vendors],
-        products=[p.lower() for p in scope.products],
-        sources=[x.lower() for x in scope.sources])
+        episode_cap=episode_cap, vendors=vendors, products=products, sources=sources)
     if records and records[0]["n"] > max_episodes:
         logger.info("scoped scan skipped: scope %s has more than %d episodes",
                     scope.as_dict(), max_episodes)

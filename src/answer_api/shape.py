@@ -80,15 +80,30 @@ _NAMED_SUBJECT = re.compile(
     re.IGNORECASE)
 
 
+# A COMPOUND subject ("Veeam and AWS Backup") must not collapse to one facet:
+# right after the matched subject mention, optional whitespace then `and`/`or`
+# (an optional `,` after it) then another detected mention means two sides, not
+# a single named subject (run 9, task 17). A `,` BEFORE `and` ("Veeam, and its
+# partners, ...") does not match this -- there is no leading whitespace right
+# at the mention's end -- so it leaves the subject named and single.
+_COMPOUND_CONTINUATION = re.compile(r"\s+(?:and|or),?\s+", re.IGNORECASE)
+
+
 def _named_subject(q: str, resolver: ScopeResolver) -> Facet | None:
     """The facet of the named vendor/product a cross-vendor question is asked
-    ABOUT, or None (see _NAMED_SUBJECT)."""
+    ABOUT, or None (see _NAMED_SUBJECT and _COMPOUND_CONTINUATION)."""
     ends = {m.end() for m in _NAMED_SUBJECT.finditer(q)}
     if not ends:
         return None
-    for start, label, scope in resolver.detect_mention_spans(q):
-        if start in ends:
-            return Facet(label, scope)
+    spans = resolver.detect_mention_spans(q)
+    starts = {start for start, _, _ in spans}
+    for start, label, scope in spans:
+        if start not in ends:
+            continue
+        continuation = _COMPOUND_CONTINUATION.match(q, start + len(label))
+        if continuation is not None and continuation.end() in starts:
+            continue
+        return Facet(label, scope)
     return None
 
 
