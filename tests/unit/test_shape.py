@@ -150,3 +150,52 @@ def test_comparison_and_single_facets_carry_no_products():
     s = _shape("Compare Veeam ONE with AWS Backup reporting.")
     assert s.kind == "comparison" and all(f.products == () for f in s.facets)
     assert _shape("How does Veeam ONE report?").facets[0].products == ()
+
+
+# --- named-subject cross-vendor questions (run 8, task 17) --------------------------
+
+@pytest.mark.parametrize("q", ["Which vendors does Veeam integrate with?",
+                               "What vendors can Veeam back up?",
+                               "which VENDORS does veeam integrate with?"])
+def test_a_named_vendor_subject_makes_a_cross_vendor_question_single(q):
+    s = _shape(q)
+    assert s.kind == "single"
+    assert s.facets == (Facet("Veeam", Scope(vendors=("Veeam",), source="detected")),)
+
+
+def test_a_named_product_subject_is_single_scoped_to_the_product():
+    s = _shape("Which backup vendors does AWS Backup support?")
+    assert s.kind == "single"
+    assert s.facets == (Facet("AWS Backup",
+                              Scope(products=("AWS Backup",), source="detected")),)
+
+
+@pytest.mark.parametrize("q", ["Which vendors integrate with Veeam?",
+                               "Which vendors can protect Azure Backup vaults?",
+                               "Which backup vendors support immutable backups?",
+                               "Which vendors does the guide say Veeam supports?"])
+def test_a_named_entity_in_any_other_position_stays_an_enumeration(q):
+    assert _shape(q).kind == "enumeration"
+
+
+def test_an_explicit_scope_still_wins_over_a_named_subject():
+    r = _resolver()
+    q = "Which vendors does Veeam integrate with?"
+    explicit = r.resolve(q, vendors=["AWS"])
+    s = classify_shape(q, r, explicit)
+    assert s.kind == "single"
+    assert s.facets == (Facet("AWS", explicit),)
+
+
+def test_scope_none_keeps_a_named_subject_question_single_unscoped():
+    s = _shape("Which vendors does Veeam integrate with?", scope_disabled=True)
+    assert s.facets == (Facet("", Scope()),)
+
+
+def test_detect_mention_spans_returns_start_offsets():
+    r = _resolver()
+    q = "Does veeam work with AWS Backup?"
+    spans = r.detect_mention_spans(q)
+    assert [(start, label) for start, label, _ in spans] == [(5, "Veeam"),
+                                                             (21, "AWS Backup")]
+    assert [(label, sc) for _, label, sc in spans] == r.detect_mentions(q)

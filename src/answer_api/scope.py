@@ -220,9 +220,15 @@ class ScopeResolver:
         `detect` flattens. An alias with several targets is ONE mention ("Veeam
         Agent" -> its guides). Ignores the cross-vendor rule: shape.classify_shape
         decides enumeration before it asks for mentions."""
+        return [(label, scope) for _, label, scope in self.detect_mention_spans(q)]
+
+    def detect_mention_spans(self, q: str) -> list[tuple[int, str, Scope]]:
+        """`detect_mentions` with each mention's start offset in `q`: (start, label,
+        Scope). shape.classify_shape uses the offset to tell a named grammatical
+        subject ("Which vendors does Veeam ...") from any other position."""
         if self._re is None:
             return []
-        out: list[tuple[str, Scope]] = []
+        out: list[tuple[int, str, Scope]] = []
         for m in self._re.finditer(q):
             hits = self._terms[m.group(1).lower()]
             found: dict[str, list[str]] = {"vendor": [], "product": [], "source": []}
@@ -230,8 +236,9 @@ class ScopeResolver:
                 if name not in found[kind]:
                     found[kind].append(name)
             label = hits[0][1] if len(hits) == 1 else m.group(1)
-            out.append((label, Scope(tuple(found["vendor"]), tuple(found["product"]),
-                                     "detected", tuple(found["source"]))))
+            out.append((m.start(1), label,
+                        Scope(tuple(found["vendor"]), tuple(found["product"]),
+                              "detected", tuple(found["source"]))))
         return out
 
     def detect(self, q: str) -> Scope:

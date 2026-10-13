@@ -16,7 +16,7 @@ from answer_api import search as search_mod
 from answer_api import timeline as timeline_mod
 from answer_api.router import Mode
 from answer_api.scope import Scope, ScopeResolver, UnknownScopeName
-from answer_api.shape import classify_shape, facet_queries
+from answer_api.shape import classify_shape, facet_queries, retrieval_scope
 from graph_extract.config import ExtractSettings, get_extract_settings
 from graph_extract.graphiti_client import build_embedder, build_graphiti
 from graph_extract.vector_search import ensure_vector_indexes
@@ -238,6 +238,7 @@ def create_app() -> FastAPI:
         resolved = await _resolve_scope(app, q, vendor, product, scope, source)
         shape = classify_shape(q, st.scope_resolver, resolved,
                                scope_disabled=(scope == "none"))
+        resolved = retrieval_scope(shape, resolved)
         return await router_mod.answer_router(
             st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
             st.map_client, st.map_model, st.cheap_client, st.cheap_model,

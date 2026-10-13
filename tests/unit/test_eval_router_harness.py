@@ -213,3 +213,20 @@ async def test_report_and_progress_show_facet_and_enumeration_columns(monkeypatc
     assert header.count("|") == next(ln for ln in report if ln.startswith("|---")).count("|")
     row = next(ln for ln in report if ln.endswith("| loc |"))
     assert "| True | False | loc |" in row
+
+
+async def test_score_one_retrieves_a_named_subject_question_with_its_facet_scope(
+        monkeypatch):
+    seen = {}
+
+    async def _router(*a, q, mode_override, scope, settings, shape=None, **kw):
+        seen.update(scope=scope, shape=shape)
+        return _env("local", "A1")
+
+    monkeypatch.setattr(er.router_mod, "answer_router", _router)
+    resolver = ScopeResolver(["Veeam", "AWS"], [], {}, content_vendors=("Veeam", "AWS"))
+    q = {"question": "Which vendors does Veeam integrate with?", "intent": "local",
+         "expected_modes": ["local"], "expected_article_ids": ["A1"]}
+    await er._score_one((None,) * 11, q, None, _S, resolver)
+    assert seen["shape"].kind == "single"
+    assert seen["scope"].vendors == ("Veeam",) and seen["scope"].source == "detected"

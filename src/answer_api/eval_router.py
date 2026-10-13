@@ -29,7 +29,7 @@ from answer_api.router_eval import (
     markers_per_sentence, routing_hit,
 )
 from answer_api.scope import Scope, ScopeResolver
-from answer_api.shape import QuestionShape, classify_shape
+from answer_api.shape import QuestionShape, classify_shape, retrieval_scope
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -276,6 +276,7 @@ async def _score_one(clients, q, mode_override, settings, resolver):
     graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
     scope = resolver.resolve(q["question"])
     shape = classify_shape(q["question"], resolver, scope)
+    scope = retrieval_scope(shape, scope)
     env = await router_mod.answer_router(
         graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel,
         q=q["question"], mode_override=mode_override, scope=scope, settings=settings,

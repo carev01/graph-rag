@@ -1,8 +1,9 @@
 """Question shape and facets (spec 2026-10-12 §2).
 
-A question is SINGLE (zero or one named side), a COMPARISON (two or more named
-sides), or an ENUMERATION (cross-vendor wording with no explicit scope: every vendor
-with content is checked). Each side is a FACET -- a label plus its own Scope -- and
+A question is SINGLE (zero or one named side, or cross-vendor wording about one
+named subject: "Which vendors does Veeam integrate with?"), a COMPARISON (two or
+more named sides), or an ENUMERATION (cross-vendor wording with no explicit scope:
+every vendor with content is checked). Each side is a FACET -- a label plus its own Scope -- and
 every retrieval mode balances across facets. Classification is deterministic (no
 LLM); `facet_queries` then makes ONE cheap-tier call per comparison/enumeration to
 give each facet its own retrieval question (single questions never call it).
@@ -10,6 +11,7 @@ give each facet its own retrieval question (single questions never call it).
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -67,12 +69,39 @@ def _facets_from_mentions(resolver: ScopeResolver, q: str) -> list[Facet]:
                     and set(f.scope.vendors) <= covered)]
 
 
+# A cross-vendor question whose grammatical SUBJECT is a named vendor or product
+# ("Which vendors does Veeam integrate with?") asks about that one entity: it is
+# SINGLE, scoped to it. The named mention must start right where this match ends;
+# a named entity in any other position (object, workload: "Which vendors integrate
+# with Veeam?") leaves the question an enumeration (run 8, task 17).
+_NAMED_SUBJECT = re.compile(
+    r"\b(which|what)\s+(\w+\s+){0,2}vendors?\s+"
+    r"(does|do|did|can|could|is|are|was|were|has|have|will|would)\s+",
+    re.IGNORECASE)
+
+
+def _named_subject(q: str, resolver: ScopeResolver) -> Facet | None:
+    """The facet of the named vendor/product a cross-vendor question is asked
+    ABOUT, or None (see _NAMED_SUBJECT)."""
+    ends = {m.end() for m in _NAMED_SUBJECT.finditer(q)}
+    if not ends:
+        return None
+    for start, label, scope in resolver.detect_mention_spans(q):
+        if start in ends:
+            return Facet(label, scope)
+    return None
+
+
 def classify_shape(q: str, resolver: ScopeResolver, scope: Scope, *,
                    scope_disabled: bool = False) -> QuestionShape:
     if scope_disabled:
         return QuestionShape("single", (Facet("", Scope()),))
     if scope.source == "explicit":
         return QuestionShape("single", (Facet(_label_of(scope), scope),))
+    if _CROSS_VENDOR.search(q):
+        subject = _named_subject(q, resolver)
+        if subject is not None:
+            return QuestionShape("single", (subject,))
     if _CROSS_VENDOR.search(q) and resolver.content_vendors:
         return QuestionShape("enumeration", tuple(
             Facet(v, Scope(vendors=(v,), source="detected"),
@@ -86,6 +115,17 @@ def classify_shape(q: str, resolver: ScopeResolver, scope: Scope, *,
         # single path is exactly today's.
         return QuestionShape("single", (Facet(facets[0].label, scope),))
     return QuestionShape("single", (Facet("", scope),))
+
+
+def retrieval_scope(shape: QuestionShape, scope: Scope) -> Scope:
+    """The scope to retrieve with: a single shape whose facet carries a scope the
+    request lacks (a named-subject cross-vendor question -- `resolve` returns an
+    empty Scope for cross-vendor wording) retrieves with the facet's scope;
+    otherwise `scope` unchanged."""
+    if (shape.kind == "single" and scope.is_empty()
+            and not shape.facets[0].scope.is_empty()):
+        return shape.facets[0].scope
+    return scope
 
 
 def group_by_facet(items: list[dict], facets: Sequence[Facet]

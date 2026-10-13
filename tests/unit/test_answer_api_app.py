@@ -556,6 +556,39 @@ async def test_answer_hands_the_router_the_question_shape(monkeypatch):
     assert seen["shape"].kind == "single"
 
 
+async def test_answer_retrieves_a_named_subject_question_with_its_facet_scope(
+        monkeypatch):
+    # "Which vendors does Veeam ...": resolve() returns an empty scope for
+    # cross-vendor wording; the single shape's facet scope is used instead.
+    seen = {}
+
+    async def _router(*a, q, mode_override, scope, settings, shape=None, **kw):
+        seen.update(scope=scope, shape=shape)
+        return await _fake_answer_router(*a, q=q, mode_override=mode_override,
+                                         scope=scope, settings=settings)
+
+    monkeypatch.setattr(app_mod.router_mod, "answer_router", _router)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/answer",
+                               params={"q": "Which vendors does Veeam integrate with?"})
+            assert resp.status_code == 200
+            assert seen["shape"].kind == "single"
+            assert seen["scope"].vendors == ("Veeam",)
+            assert seen["scope"].source == "detected"
+            # An explicit scope still wins.
+            resp = await c.get("/answer", params={
+                "q": "Which vendors does Veeam integrate with?", "vendor": "AWS"})
+            assert seen["scope"].vendors == ("AWS",)
+            assert seen["scope"].source == "explicit"
+            # scope=none stays unscoped.
+            resp = await c.get("/answer", params={
+                "q": "Which vendors does Veeam integrate with?", "scope": "none"})
+    assert resp.status_code == 200
+    assert seen["scope"].is_empty()
+
+
 async def test_search_global_forwards_a_comparisons_facets(monkeypatch):
     seen = {}
 
