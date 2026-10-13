@@ -163,3 +163,21 @@ async def test_router_never_rewrites_an_overridden_enumeration(run):
 async def test_a_single_envelope_carries_no_facet_query(run):
     _, env = await run(QuestionShape("single", (Facet("Veeam", _V.scope),)))
     assert env["facets"] == [{"label": "Veeam", "scope": _V.scope.as_dict()}]
+
+
+async def test_sides_list_renders_documented_products_and_keeps_label_keys():
+    m = Facet("Microsoft", Scope(vendors=("Microsoft",), source="detected"),
+              products=("Azure Backup", "Microsoft 365 Backup"))
+    c = _Client('{"Microsoft": "How does Azure Backup verify restores?", '
+                '"Veeam": "How does Veeam verify restores?"}')
+    out = await facet_queries(c, "map", "Which vendors verify restores?", (m, _V))
+    prompt = c.calls[0]["messages"][0]["content"]
+    assert ("SIDES:\n- Microsoft (its documented products: Azure Backup, "
+            "Microsoft 365 Backup)\n- Veeam\n") in prompt
+    assert ("When a side lists its documented products, make the product the question "
+            "concerns the subject (e.g. \"How does Azure Backup …\"); if several apply, "
+            "name the most relevant one or two.") in prompt
+    assert [(f.label, f.query) for f in out] == [
+        ("Microsoft", "How does Azure Backup verify restores?"),
+        ("Veeam", "How does Veeam verify restores?")]
+    assert out[0].products == m.products

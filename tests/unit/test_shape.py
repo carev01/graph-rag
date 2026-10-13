@@ -131,3 +131,16 @@ def test_raise_if_cancelled_reraises_a_cancellation_among_results():
 def test_raise_if_cancelled_leaves_ordinary_exceptions_and_values_alone():
     raise_if_cancelled([{"ok": 1}, RuntimeError("x"), None])
     raise_if_cancelled([])
+
+
+def test_enumeration_facets_carry_their_vendors_products():
+    s = _shape("Which backup vendors support immutable backups?")
+    assert [f.products for f in s.facets] == [
+        ("AWS Backup",), ("Cohesity DataProtect",), ("Azure Backup",),
+        ("Veeam Backup & Replication", "Veeam Backup for Microsoft 365", "Veeam ONE")]
+
+
+def test_comparison_and_single_facets_carry_no_products():
+    s = _shape("Compare Veeam ONE with AWS Backup reporting.")
+    assert s.kind == "comparison" and all(f.products == () for f in s.facets)
+    assert _shape("How does Veeam ONE report?").facets[0].products == ()

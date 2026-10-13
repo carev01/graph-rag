@@ -40,3 +40,12 @@ def test_tier1_golden_schema():
             assert e["expected_article_ids"], "all non-probe Tier 1 questions must be grounded"
         kinds[e["kind"]] += 1
     assert kinds == {"scoped": 6, "comparison": 6, "cross_vendor": 4}
+
+
+def test_tier1_cross_site_question_counts_cohesity():
+    """User decision 2026-10-13: Cohesity's cross-site copies count for the
+    cross-region question (eval run 7)."""
+    data = json.loads(_PATH.with_name("router_golden_tier1.json").read_text())
+    e = next(x for x in data if x["question"].startswith(
+        "Which backup vendors can keep a copy of backups in another region"))
+    assert e["expected_vendors"] == ["AWS", "Cohesity", "Microsoft", "Veeam"]

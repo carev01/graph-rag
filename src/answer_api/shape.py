@@ -31,6 +31,10 @@ class Facet:
     # original question). Only retrieval uses it; answering prompts keep the
     # original question.
     query: str = ""
+    # The side's documented products (ENUMERATION facets only; comparison and
+    # single facets keep ()). Only the side-question rewrite uses them: a vendor's
+    # documentation is organised by product, so its side question names one.
+    products: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,7 +75,8 @@ def classify_shape(q: str, resolver: ScopeResolver, scope: Scope, *,
         return QuestionShape("single", (Facet(_label_of(scope), scope),))
     if _CROSS_VENDOR.search(q) and resolver.content_vendors:
         return QuestionShape("enumeration", tuple(
-            Facet(v, Scope(vendors=(v,), source="detected"))
+            Facet(v, Scope(vendors=(v,), source="detected"),
+                  products=resolver.products_of(v))
             for v in resolver.content_vendors))
     facets = _facets_from_mentions(resolver, q)
     if len(facets) >= 2:
@@ -116,9 +121,18 @@ _FACET_QUERIES_PROMPT = (
     "Keep the QUESTION's intent and its specific terms (feature names, workloads, "
     "settings). Drop cross-vendor wording such as \"which vendors\", \"compare\", "
     "\"differ\" or \"each\". Do not answer, do not add facts, and do not mention any other "
-    "side or vendor. Respond with ONLY JSON mapping each side's label, exactly as "
-    "written below, to its question: {{\"<label>\": \"<question>\", ...}}.\n\n"
+    "side or vendor. When a side lists its documented products, make the product the "
+    "question concerns the subject (e.g. \"How does Azure Backup …\"); if several "
+    "apply, name the most relevant one or two. Respond with ONLY JSON mapping each "
+    "side's label, exactly as written below, to its question: "
+    "{{\"<label>\": \"<question>\", ...}}.\n\n"
     "SIDES:\n{sides}\n\nQUESTION: {q}\nJSON:")
+
+
+def _side_line(f: Facet) -> str:
+    if f.products:
+        return f"- {f.label} (its documented products: {', '.join(f.products)})"
+    return f"- {f.label}"
 
 
 async def facet_queries(client, model: str, q: str,
@@ -132,7 +146,7 @@ async def facet_queries(client, model: str, q: str,
     from answer_api.global_search import _extract_json
 
     prompt = _FACET_QUERIES_PROMPT.format(
-        sides="\n".join(f"- {f.label}" for f in facets), q=q)
+        sides="\n".join(_side_line(f) for f in facets), q=q)
     obj: dict | None = None
     try:
         # No reasoning parameter: the map tier is a non-reasoning model (sending

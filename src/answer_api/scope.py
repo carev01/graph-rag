@@ -194,6 +194,11 @@ class ScopeResolver:
     def vendor_of(self, product: str) -> str | None:
         return self._vendor_of.get(product)
 
+    def products_of(self, vendor: str) -> tuple[str, ...]:
+        """The vendor's structural products, sorted (documentation is organised by
+        product: an enumeration side question names one)."""
+        return tuple(sorted(p for p, v in self._vendor_of.items() if v == vendor))
+
     def vendor_of_source(self, name: str) -> str | None:
         product = self._product_of_source.get(name)
         return self._vendor_of.get(product) if product else None

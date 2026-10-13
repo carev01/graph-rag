@@ -43,7 +43,10 @@ _ENUM_PROMPT = (
     "short paragraph each, using ONLY that vendor's numbered facts. "
     + ATTRIBUTION_RULES +
     "Cite every claim with the [N] marker of the fact it rests on, writing each marker "
-    "individually. Do NOT use outside knowledge. Do NOT write any URL. Do NOT mention "
+    "individually. Cite each claim with the one or two markers of the facts it rests "
+    "on; never attach a long list of markers to one sentence. If you compare the "
+    "sides, give each side's claim in its own clause with only that side's markers. "
+    "Do NOT use outside knowledge. Do NOT write any URL. Do NOT mention "
     "any vendor that is not listed below.\n\nQUESTION: {q}\n\n{blocks}\n\nAnswer:"
 )
 

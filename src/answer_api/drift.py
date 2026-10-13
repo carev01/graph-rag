@@ -207,7 +207,9 @@ _SYNTH_FACETS_PROMPT = (
     "it. The question has these sides: {labels}. Address EVERY side, in that order. If "
     "a side shows \"(no facts retrieved)\", say in one sentence that the retrieved "
     "documentation does not cover it, and do not guess. Cite every claim inline with "
-    "its [N] marker. Do NOT use outside knowledge. Do NOT write any URL. If no side has "
+    "its [N] marker. If you compare the sides, give each side's claim in its own "
+    "clause with only that side's markers. Do NOT use outside knowledge. Do NOT write "
+    "any URL. If no side has "
     "facts that answer the question, reply exactly: \"{refusal}\"\n\n"
     + ATTRIBUTION_RULES +
     "\nQUESTION: {q}\n\nDRAFT: {draft}\n\nFACTS:\n{facts}\n\nAnswer:"

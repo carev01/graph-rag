@@ -422,6 +422,8 @@ _REDUCE_FACETS_PROMPT = (
     "no marker is not allowed.\n"
     "- Cite each claim with the one or two markers of the facts it rests on; do not "
     "attach long marker lists to a sentence.\n"
+    "- If you compare the sides, give each side's claim in its own clause with only "
+    "that side's markers.\n"
     "- Write each marker individually: [1] [2] [3]. Never write a range or span such "
     "as [1]-[3]; only the markers you write out are cited.\n"
     "- Use ONLY these findings. Do NOT use outside knowledge.\n"

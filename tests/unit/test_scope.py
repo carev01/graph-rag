@@ -198,3 +198,11 @@ def test_a_source_with_only_a_generic_word_beyond_the_vendor_is_not_detected():
     assert s.vendors == ("Keepit",) and s.sources == ()
     assert r.detect("Keepit Partner Management Console roles").sources == (
         "Keepit Partner Management Console",)
+
+
+def test_products_of_lists_a_vendors_structural_products_sorted():
+    r = _r()
+    assert r.products_of("Microsoft") == ("Azure Backup", "Microsoft 365 Backup")
+    assert r.products_of("Veeam") == ("Veeam Backup & Replication",
+                                      "Veeam Backup for Microsoft 365")
+    assert r.products_of("Nope") == ()
