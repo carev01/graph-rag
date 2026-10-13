@@ -2330,3 +2330,44 @@ _FACET_QUERIES_PROMPT = (
    via a fake rerank and respects k; pads a short result; failure falls back with a
    warning; pool 0 leaves the call path unchanged (no rerank call); each facet caller
    passes the pool, single callers do not.
+
+### Task 15: Vendor checks on the vendor's own question; global sides with no community findings use their own facts (run 6 fixes)
+
+Tier 1 run 6 (paid, $0.15): enumeration completeness 0/3, facet coverage 5/6.
+1. "Which backup vendors support immutable backups…" answered "None of the checked vendors
+   … document this": each vendor's `_check` received the ORIGINAL cross-vendor question
+   ("…and how do their approaches differ?"), which a single vendor's evidence cannot show,
+   so the cheap check model said `documented: false` for all four. (Task 12 had ruled that
+   `_check` keeps `q`; that ruling is reversed.)
+2. "How does immutability in Veeam Backup for Microsoft 365 compare with soft delete in
+   Azure Backup?" was routed global; the Veeam Backup for Microsoft 365 facet's scoped
+   community shortlist found nothing usable, so the reducer said the documentation does
+   not cover it — although the free gate's local search found that side's facts. A false
+   absence.
+
+**Files:** `src/answer_api/enumeration.py`, `src/answer_api/global_search.py`, tests.
+
+1. `enumeration._check` receives the facet's question (`f.query or q`) and the
+   `_CHECK_PROMPT` asks whether the evidence answers THAT question for the vendor
+   ("Decide whether the EVIDENCE below, all from {vendor}'s documentation, answers the
+   QUESTION about {vendor}…"); keep every other guard (evidence-only, absence is not a
+   finding, ids from the evidence, JSON shape, retry). The final synthesis prompt keeps the
+   original question.
+2. `global_search._global_search_facets`: a facet whose shortlist succeeded but yields no
+   usable in-scope findings (no communities, or every community's facts fall outside the
+   facet scope) gets a LOCAL fill: `search_local(q=f.query or q, k=settings.global_facet_local_k
+   (new setting, default 8), scope=f.scope, settings=settings,
+   fetch_cap=settings.local_scoped_fetch_cap, rerank_pool=settings.local_facet_rerank_pool)`.
+   Its facts are rendered under that facet's heading in the reduce prompt as `[N] (Vendor ·
+   Product) fact` lines (numbered in the same marker map, resolved through the same
+   `resolve_citations` path as community facts, so citations stay fact-id based). Only if
+   the local fill also returns nothing does the facet render "(no findings)". A local-fill
+   exception degrades the facet (Could not check), never "(no findings)". Communities_used is
+   unchanged (local facts are not communities). Shortlist failures and all-maps-failed
+   facets keep their existing degraded handling.
+3. Tests: `_check` gets the facet question and the synthesis still gets the original
+   question; a facet with an empty shortlist gets local facts under its heading, cited
+   through the marker map with resolved sources; a facet with communities whose facts are
+   all out of scope also gets the local fill; local fill returning nothing → "(no findings)";
+   local fill raising → degraded + note; facets with in-scope findings do NOT call the local
+   fill; single path untouched.
