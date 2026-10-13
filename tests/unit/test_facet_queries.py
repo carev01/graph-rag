@@ -62,6 +62,16 @@ async def test_a_missing_or_empty_label_falls_back_to_the_question(caplog):
     assert [f.query for f in out] == [_Q, "How does AWS Backup copy?"]
 
 
+async def test_a_label_matched_case_insensitively_and_stripped_sets_the_query(caplog):
+    c = _Client('{"aws backup ": "How does AWS Backup copy?", '
+                '"Veeam": "How do Veeam backup copy jobs work?"}')
+    with caplog.at_level(logging.WARNING):
+        out = await facet_queries(c, "map", _Q, (_V, _A))
+    assert [f.query for f in out] == ["How do Veeam backup copy jobs work?",
+                                      "How does AWS Backup copy?"]
+    assert "AWS Backup" not in caplog.text
+
+
 @pytest.mark.parametrize("client", [_Client(None), _Client(""), _Client("no json here"),
                                     _Client(exc=RuntimeError("down"))])
 async def test_an_unusable_reply_falls_back_for_every_facet(client, caplog):

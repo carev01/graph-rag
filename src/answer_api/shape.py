@@ -156,6 +156,14 @@ async def facet_queries(client, model: str, q: str,
     out: list[Facet] = []
     for f in facets:
         rewritten = obj.get(f.label)
+        if rewritten is None:
+            # A model reply sometimes echoes the label with different case or
+            # stray whitespace ("aws backup " for "AWS Backup"): match before
+            # falling back to the original question.
+            target = f.label.strip().casefold()
+            rewritten = next(
+                (v for k, v in obj.items()
+                 if isinstance(k, str) and k.strip().casefold() == target), None)
         if isinstance(rewritten, str) and rewritten.strip():
             out.append(replace(f, query=rewritten.strip()))
         else:
