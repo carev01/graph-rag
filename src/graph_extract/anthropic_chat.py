@@ -11,7 +11,13 @@ the LLM capture keep working untouched.
 
 Mapping notes:
 - `system` chat messages become the top-level `system` parameter; Claude takes no
-  system role inside `messages`.
+  system role inside `messages`. That block carries a prompt-cache breakpoint
+  (BACKLOG 58): `cache_layout` moves graphiti's static prompt tails into the system
+  message, so it is the one part of a request that repeats byte for byte. The
+  user message is never marked -- it is per-call content, and a breakpoint after it
+  pays the 1.25x write on every request for reads that never come. A prefix under
+  the model's minimum (measured: Claude Haiku 5.5 caches a 782-token system block,
+  2026-10-14) is simply not cached, at no cost.
 - `temperature` is dropped: current Claude models (and SDK 1.x) no longer take it.
 - The tier's reasoning effort becomes `output_config.effort` when it is a level Claude
   accepts; anything else (an empty string, OpenRouter's "minimal") sends none, which
@@ -109,7 +115,8 @@ class AnthropicChat:
 
     def __init__(self, *, api_key: str, reasoning_effort: str = "",
                  timeout: float = 180.0, max_retries: int = 3,
-                 client: anthropic.AsyncAnthropic | None = None):
+                 client: anthropic.AsyncAnthropic | None = None,
+                 cache_system: bool = True):
         self._client = client or anthropic.AsyncAnthropic(
             api_key=api_key, timeout=timeout, max_retries=max_retries)
         effort = (reasoning_effort or "").strip().lower()
@@ -118,6 +125,7 @@ class AnthropicChat:
                            "none (the model's default)", reasoning_effort)
             effort = ""
         self._effort = effort
+        self._cache_system = cache_system
         # A mutable namespace, so `instrument` can wrap `create` like on AsyncOpenAI.
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
@@ -131,7 +139,9 @@ class AnthropicChat:
         system, msgs = split_system(messages)
         kwargs: dict[str, Any] = {}
         if system is not None:
-            kwargs["system"] = system
+            kwargs["system"] = ([{"type": "text", "text": system,
+                                  "cache_control": {"type": "ephemeral"}}]
+                                if self._cache_system else system)
         if self._effort:
             kwargs["output_config"] = {"effort": self._effort}
         # Always streamed: report calls carry large max_tokens (thinking + a long JSON

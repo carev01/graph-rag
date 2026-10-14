@@ -1384,7 +1384,16 @@ The full-rebuild path (`theme-build --full`, `_run_theme_build`) is also still
 sequential and unresumable; the incremental path (the default) got concurrency and
 draft-resume on 2026-10-10.
 
-### 58. Prompt caching for the Claude tiers (added 2026-10-13, after the answer-quality slice)
+### 58. ~~Prompt caching for the Claude tiers~~ — **DONE 2026-10-14** (added 2026-10-13)
+**Done:** `AnthropicChat` puts one ephemeral cache breakpoint on the system block (where
+`cache_layout` moves graphiti's static prompt tails); user content is never marked, since a
+breakpoint after per-call content only adds the 1.25x write. Measured on Claude Haiku 5.5:
+a 782-token system block caches (minimum is at or below that), and a repeat call through
+`bounded_llm_client` read 1,399 of 1,413 prompt tokens from cache. **The theme writer gains
+~nothing today:** its static instructions are 80-150 tokens and the ~21k-token community
+context is unique per call; caching that context for the verify-failure regeneration would
+save ~$0.40 of a ~$5.50 full rebuild at a ~50% regeneration rate -- not built. The payoff
+is #59 (extraction on Claude). Original note:
 `graph_extract/anthropic_chat.AnthropicChat` sends no `cache_control`, so every Claude
 call pays full input price. The theme-report writer repeats a fixed instruction prefix
 (`_PROMPT`, `_VERIFY_PROMPT`, `_SUMMARY_PROMPT`) ahead of a variable community context,

@@ -81,7 +81,8 @@ def test_system_messages_become_the_system_parameter_and_temperature_is_dropped(
     client, seen = _adapter(_msg(["x"]))
     _call(client, messages=[{"role": "system", "content": "be terse"},
                             {"role": "user", "content": "q"}])
-    assert seen.seen["system"] == "be terse"
+    assert seen.seen["system"] == [{"type": "text", "text": "be terse",
+                                    "cache_control": {"type": "ephemeral"}}]
     assert seen.seen["messages"] == [{"role": "user", "content": "q"}]
     assert "temperature" not in seen.seen
     assert split_system([{"role": "user", "content": "q"}]) == (None, [
@@ -158,3 +159,35 @@ def test_a_reply_cut_off_at_max_tokens_is_logged(caplog):
         resp = _call(client, max_tokens=16000)
     assert resp.choices[0].finish_reason == "length"
     assert any("hit max_tokens=16000" in r.getMessage() for r in caplog.records)
+
+
+def test_only_the_system_block_carries_a_cache_breakpoint():
+    # BACKLOG 58: the static prefix is cached; per-call user content never is.
+    client, seen = _adapter(_msg(["x"]))
+    _call(client, messages=[{"role": "system", "content": "rules"},
+                            {"role": "user", "content": "chunk"}])
+    assert seen.seen["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert seen.seen["messages"] == [{"role": "user", "content": "chunk"}]
+    assert "cache_control" not in seen.seen
+
+
+def test_no_system_message_sends_no_system_and_no_breakpoint():
+    client, seen = _adapter(_msg(["x"]))
+    _call(client)
+    assert "system" not in seen.seen and "cache_control" not in seen.seen
+
+
+def test_cache_system_false_sends_the_plain_system_string():
+    fake = SimpleNamespace(messages=_FakeMessages(_msg(["x"])))
+    client = AnthropicChat(api_key="k", client=fake, cache_system=False)
+    _call(client, messages=[{"role": "system", "content": "rules"},
+                            {"role": "user", "content": "q"}])
+    assert fake.messages.seen["system"] == "rules"
+
+
+def test_cache_reads_are_reported_as_cached_prompt_tokens():
+    client, _ = _adapter(_msg(["x"], input_tokens=15, cache_read_input_tokens=782))
+    resp = _call(client, messages=[{"role": "system", "content": "rules"},
+                                   {"role": "user", "content": "q"}])
+    assert resp.usage.prompt_tokens == 797
+    assert resp.usage.prompt_tokens_details.cached_tokens == 782
