@@ -11,6 +11,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.graphiti import AddEpisodeResults
+from graph_extract.anthropic_chat import AnthropicChat, is_anthropic
 from graph_extract.cache_layout import StaticTailLearner, wrap_client
 from graph_extract.config import ExtractSettings
 from graph_extract.contradiction_gate import install_contradiction_gate
@@ -160,6 +161,24 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
             tier=tier, capture_path=s.llm_capture_path)
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
+    if is_anthropic(s.llm_base_url):
+        # Claude (BACKLOG 59): graphiti's generic client over the chat-completions
+        # adapter, which turns its json_schema response_format into Claude's
+        # structured outputs and caches the system block -- where cache_layout puts
+        # the static prompt tails. Only json_schema mode exists on Claude: the
+        # Responses-API "structured" client and json_object have no equivalent.
+        # The maxItems that _bound_index_arrays adds is stripped by the adapter
+        # (Claude rejects it) and checked on the reply instead (ARRAY_OVERRUNS).
+        claude = instrument(AnthropicChat(
+            api_key=s.llm_api_key, reasoning_effort=s.llm_reasoning_effort,
+            timeout=s.llm_timeout_seconds, max_retries=4),
+            tier=tier, capture_path=s.llm_capture_path)
+        if s.llm_max_index_array:
+            claude = _bound_index_arrays(claude, s.llm_max_index_array)
+        if s.llm_cache_layout:
+            claude = wrap_client(claude, StaticTailLearner())
+        return OpenAIGenericClient(config=cfg, client=claude,
+                                   structured_output_mode="json_schema")
     raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
                                  timeout=s.llm_timeout_seconds, max_retries=4),
                      tier=tier, capture_path=s.llm_capture_path)

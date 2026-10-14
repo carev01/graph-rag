@@ -50,3 +50,21 @@ def test_the_cache_layout_wrapper_is_installed_only_when_configured(monkeypatch)
     assert len(calls) == 1
     gc._llm_client(_s(**base), tier="cheap")
     assert len(calls) == 1, "off by default"
+
+
+def test_an_anthropic_extraction_tier_uses_the_claude_adapter_in_json_schema_mode():
+    # BACKLOG 59: graphiti's generic client over AnthropicChat, whatever llm_client_mode.
+    from graph_extract.anthropic_chat import AnthropicChat
+    from graph_extract.graphiti_client import _llm_client
+    from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                        llm_base_url="https://api.anthropic.com", llm_api_key="k",
+                        llm_model="claude-haiku-5-5", llm_reasoning_effort="none",
+                        llm_client_mode="structured", llm_cache_layout=True)
+    llm = _llm_client(s)
+    assert isinstance(llm, OpenAIGenericClient)
+    assert llm.structured_output_mode == "json_schema"
+    assert isinstance(llm.client, AnthropicChat)
+    assert llm.client._thinking_disabled is True
