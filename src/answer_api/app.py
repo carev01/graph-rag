@@ -196,6 +196,41 @@ async def _comparison_facets(app: FastAPI, q: str, resolved: Scope, scope_mode: 
                                shape.facets)
 
 
+async def run_answer(app: FastAPI, *, q: str, mode: Mode | None = None,
+                     vendor: list[str] | None = None, product: list[str] | None = None,
+                     source: list[str] | None = None,
+                     scope: Literal["auto", "none"] = "auto") -> dict[str, Any]:
+    """What GET /answer runs; shared with the MCP `answer_question` tool."""
+    st = app.state
+    resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+    shape = classify_shape(q, st.scope_resolver, resolved,
+                           scope_disabled=(scope == "none"))
+    resolved = retrieval_scope(shape, resolved)
+    return await router_mod.answer_router(
+        st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
+        st.map_client, st.map_model, st.cheap_client, st.cheap_model,
+        q=q, mode_override=mode, scope=resolved, settings=st.settings,
+        shape=shape)
+
+
+async def run_search_local(app: FastAPI, *, q: str, k: int = 10,
+                           vendor: list[str] | None = None,
+                           product: list[str] | None = None,
+                           source: list[str] | None = None,
+                           scope: Literal["auto", "none"] = "auto",
+                           include_invalid: bool = False) -> dict[str, Any]:
+    """What GET /search/local runs; shared with the MCP `search_facts` tool."""
+    resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+    result = await search_mod.search_local(
+        app.state.graphiti, app.state.driver, q=q, k=k, scope=resolved,
+        include_invalid=include_invalid, group_id=app.state.settings.group_id,
+        fetch_cap=app.state.settings.local_scoped_fetch_cap,
+        scan_max_episodes=app.state.settings.local_scoped_scan_max_episodes,
+        settings=app.state.settings)
+    result["scope"] = resolved.as_dict()
+    return result
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="answer-api", lifespan=_lifespan)
 
@@ -211,21 +246,9 @@ def create_app() -> FastAPI:
         scope: Literal["auto", "none"] = "auto",
         include_invalid: bool = False
     ) -> dict[str, Any]:
-        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
-        result = await search_mod.search_local(
-            app.state.graphiti,
-            app.state.driver,
-            q=q,
-            k=k,
-            scope=resolved,
-            include_invalid=include_invalid,
-            group_id=app.state.settings.group_id,
-            fetch_cap=app.state.settings.local_scoped_fetch_cap,
-            scan_max_episodes=app.state.settings.local_scoped_scan_max_episodes,
-            settings=app.state.settings,
-        )
-        result["scope"] = resolved.as_dict()
-        return result
+        return await run_search_local(app, q=q, k=k, vendor=vendor, product=product,
+                                      source=source, scope=scope,
+                                      include_invalid=include_invalid)
 
     @app.get("/answer")
     async def answer(
@@ -234,16 +257,8 @@ def create_app() -> FastAPI:
         source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
-        st = app.state
-        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
-        shape = classify_shape(q, st.scope_resolver, resolved,
-                               scope_disabled=(scope == "none"))
-        resolved = retrieval_scope(shape, resolved)
-        return await router_mod.answer_router(
-            st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
-            st.map_client, st.map_model, st.cheap_client, st.cheap_model,
-            q=q, mode_override=mode, scope=resolved, settings=st.settings,
-            shape=shape)
+        return await run_answer(app, q=q, mode=mode, vendor=vendor, product=product,
+                                source=source, scope=scope)
 
     @app.get(
         "/search/global",
