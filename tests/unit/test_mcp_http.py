@@ -4,6 +4,7 @@ import pytest
 
 import answer_api.app as app_mod
 from answer_api.mcp_auth import BearerTokenGate
+from tests.unit.test_answer_api_app import install_stub_deps
 
 pytestmark = pytest.mark.asyncio
 
@@ -124,3 +125,18 @@ async def test_setting_the_token_does_not_change_rest_responses(monkeypatch):
     for a, b in zip(off, on):
         assert (a.status_code, a.headers.get("content-type"), a.content) == \
                (b.status_code, b.headers.get("content-type"), b.content)
+
+
+async def test_the_real_lifespan_serves_mcp_through_the_gate(monkeypatch):
+    install_stub_deps(monkeypatch)
+    _settings(monkeypatch, "s3cret-token")
+    app = app_mod.create_app()
+    auth = {**_HDRS, "authorization": "Bearer s3cret-token"}
+    listing = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://graphrag.k3s.home.lan") as c:
+            r = await c.post("/mcp", json=listing, headers=auth)
+    assert r.status_code == 200
+    for name in ("answer_question", "search_facts", "list_vendors_products"):
+        assert name in r.text

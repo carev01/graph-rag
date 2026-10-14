@@ -122,6 +122,10 @@ async def _fake_drift_search(graphiti, driver, embedder, synth_client, synth_mod
 
 @pytest.fixture(autouse=True)
 def _stub_deps(monkeypatch):
+    install_stub_deps(monkeypatch)
+
+
+def install_stub_deps(monkeypatch):
     """Avoid building a real Graphiti/Neo4jDriver/synthesis client in the
     lifespan and avoid real search_local/answer_local/timeline_local calls so
     the endpoint tests need no Neo4j and no GLM endpoint."""
