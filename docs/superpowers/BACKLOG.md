@@ -1213,7 +1213,7 @@ public. Safe only while 80/443 on the cluster IP are unreachable from the intern
 operator confirms that at cut-over (`docs/deploy/k3s.md`, "Exposure"). A Traefik
 `ipAllowList` was considered and not relied on: behind k3s ServiceLB the client source IP
 may be SNATed, making it ineffective. Public exposure and auth (OAuth, per item 26) are
-Phase F.
+Phase F. **2026-10-14:** `/mcp` is token-gated (`MCP_BEARER_TOKEN`, fail closed); the REST routes are still unauthenticated and LAN-only — this item stays open for them until public exposure.
 
 ### 48. Deployment hygiene: pin Postgres to a patch version, set CronJob `timeZone` — **P4**
 `values.yaml` runs `postgres:16-alpine` (a moving tag: a node re-pull can change the
