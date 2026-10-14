@@ -68,3 +68,70 @@ def test_an_anthropic_extraction_tier_uses_the_claude_adapter_in_json_schema_mod
     assert llm.structured_output_mode == "json_schema"
     assert isinstance(llm.client, AnthropicChat)
     assert llm.client._thinking_disabled is True
+
+
+def test_strict_schema_closes_objects_and_requires_every_property():
+    from graph_extract.graphiti_client import strict_schema
+    src = {"type": "object",
+           "properties": {"required": {"type": "string"},           # a FIELD named required
+                          "opt": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                          "ids": {"type": "array", "maxItems": 25,
+                                  "items": {"type": "integer"}},
+                          "n": {"$ref": "#/$defs/N"}},
+           "required": ["required"],
+           "$defs": {"N": {"type": "object", "properties": {"x": {"type": "integer"}}}}}
+    out = strict_schema(src)
+    assert out["additionalProperties"] is False
+    assert out["required"] == ["required", "opt", "ids", "n"]
+    assert out["properties"]["ids"]["maxItems"] == 25              # the bound stays
+    assert out["$defs"]["N"] == {"type": "object", "properties": {"x": {"type": "integer"}},
+                                 "additionalProperties": False, "required": ["x"]}
+    assert src["required"] == ["required"] and "additionalProperties" not in src
+
+
+def test_openrouter_strict_schema_and_reasoning_are_opt_in():
+    import asyncio
+    from types import SimpleNamespace
+    from graph_extract.graphiti_client import _inject_openrouter_reasoning, _strict_schemas
+    seen = {}
+
+    async def create(**kw):
+        seen.update(kw)
+        return SimpleNamespace()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    client = _inject_openrouter_reasoning(_strict_schemas(client), "none")
+    fmt = {"type": "json_schema", "json_schema": {"name": "X", "schema": {
+        "type": "object", "properties": {"a": {"type": "string"}}}}}
+    asyncio.run(client.chat.completions.create(model="m", response_format=fmt))
+    assert seen["extra_body"]["reasoning"] == {"effort": "none"}
+    sch = seen["response_format"]["json_schema"]["schema"]
+    assert sch["additionalProperties"] is False and sch["required"] == ["a"]
+    assert "additionalProperties" not in fmt["json_schema"]["schema"]   # not mutated
+
+
+def test_solar_cheap_tier_sends_no_reasoning_and_keeps_its_schema():
+    # The defaults leave the production cheap tier's requests exactly as before.
+    from graph_extract.config import ExtractSettings
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.llm_strict_schema is False and s.llm_openrouter_reasoning_effort == ""
+
+
+def test_drop_temperature_removes_it_and_defaults_keep_it():
+    import asyncio
+    from types import SimpleNamespace
+    from graph_extract.config import ExtractSettings
+    from graph_extract.graphiti_client import _drop_temperature
+    seen = {}
+
+    async def create(**kw):
+        seen.update(kw)
+
+    client = _drop_temperature(SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    asyncio.run(client.chat.completions.create(model="m", temperature=0.0))
+    assert "temperature" not in seen and seen["model"] == "m"
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.llm_send_temperature is True
