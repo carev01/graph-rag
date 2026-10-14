@@ -1405,7 +1405,13 @@ minimum cacheable prefix is model-dependent — short prefixes silently do not c
 `instrument` already tallies `cached_tokens` from `prompt_tokens_details`, which the
 adapter fills from `cache_read_input_tokens`.
 
-### 59. Evaluate Claude Haiku 5.5 as the single API extraction model (added 2026-10-13)
+### 59. ~~Evaluate Claude Haiku 5.5 as the single API extraction model~~ — **CLOSED 2026-10-14: keep routed** (added 2026-10-13)
+**Measured** (`haiku-extraction-ab-2026-10-14.md`, 197 articles, ~$6): Haiku alone keeps
+**77% of distinct supported facts** (81% prose, 62% dense tables), with 22% fewer unsupported
+facts, 0 failures, 0 invalid dedup indices, 0 array overruns, 12% lower cost and ~2x speed --
+but +14% cost per distinct fact and +61% per prose episode vs solar-pro4. Fails the >=95%
+yield bar. Untested: Haiku with thinking on. The Claude extraction path stays available by
+configuration. Original note:
 Replace the API extraction tiers — cheap Solar Pro 4 on OpenRouter plus escalation to
 gpt-5-mini on Azure (hybrid router, dense-table routing, `dedup_guard` retry-on-strong) —
 with one model, Claude Haiku 5.5, for the API-driven pipeline: no cheap/strong split
@@ -1418,7 +1424,7 @@ per episode (~20–35k LLM tokens/episode today), and throughput under
 `INGEST_ARTICLE_CONCURRENCY`. Prove the model is actually engaged in the paid run (cost
 rule: a call counter, not timing). Pairs with #58 (caching) and #60 (batch).
 
-### 60. Evaluate the Claude Message Batches API for extraction (added 2026-10-13)
+### 60. Evaluate the Claude Message Batches API for extraction (added 2026-10-13) — **SHELVED 2026-10-14** (depended on #59, closed: keep routed)
 Batch requests run asynchronously at roughly half price. Graphiti's `add_episode` is a
 synchronous multi-call chain (extract nodes → dedupe → extract edges → dedupe →
 summaries), each call depending on the previous one, so batching does not drop in
