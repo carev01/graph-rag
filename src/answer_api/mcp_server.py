@@ -105,10 +105,11 @@ async def _with_heartbeat(ctx: Context, work: Awaitable[T], every: float) -> T:
             task.cancel()
 
 
-def _unknown_names(exc: HTTPException, app: FastAPI) -> ToolError:
+def _unknown_names(exc: HTTPException, app: FastAPI, tool: str) -> ToolError:
     detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
     names = ", ".join(detail.get("unknown", [])) or "?"
-    vendors = ", ".join(app.state.scope_resolver.content_vendors)
+    logger.info("%s: unknown vendor/product name(s): %s", tool, names)
+    vendors = ", ".join(app.state.scope_resolver.content_vendors) or "none yet"
     return ToolError(f"Unknown vendor/product name(s): {names}. Vendors with content: "
                      f"{vendors}. Call list_vendors_products for product names.")
 
@@ -129,7 +130,7 @@ def build_mcp_server(app: FastAPI) -> MCPServer:
                 vendor=vendors, product=products), app.state.settings.mcp_progress_seconds)
         except HTTPException as exc:
             if exc.status_code == 422:
-                raise _unknown_names(exc, app) from exc
+                raise _unknown_names(exc, app, "answer_question") from exc
             logger.exception("answer_question failed")
             raise ToolError(f"answer_question failed: HTTP {exc.status_code}") from exc
         except Exception as exc:
@@ -151,7 +152,7 @@ def build_mcp_server(app: FastAPI) -> MCPServer:
                 include_invalid=include_superseded)
         except HTTPException as exc:
             if exc.status_code == 422:
-                raise _unknown_names(exc, app) from exc
+                raise _unknown_names(exc, app, "search_facts") from exc
             logger.exception("search_facts failed")
             raise ToolError(f"search_facts failed: HTTP {exc.status_code}") from exc
         except Exception as exc:

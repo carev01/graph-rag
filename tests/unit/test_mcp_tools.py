@@ -118,6 +118,28 @@ async def test_unknown_names_are_a_tool_error_naming_valid_vendors(patch):
     assert "AWS, Veeam" in msg and "list_vendors_products" in msg
 
 
+@pytest.mark.parametrize("tool,args", [("answer_question", {"question": "q"}),
+                                       ("search_facts", {"query": "q"})])
+async def test_unknown_names_are_logged(patch, caplog, tool, args):
+    err = HTTPException(422, detail={"unknown": ["Veam", "Comvault"]})
+    patch(answer=err, search=err)
+    caplog.set_level("INFO", logger=ms.logger.name)
+    async with Client(ms.build_mcp_server(_app())) as c:
+        r = await c.call_tool(tool, {**args, "vendors": ["Veam", "Comvault"]})
+    assert r.is_error
+    assert f"{tool}: unknown vendor/product name(s): Veam, Comvault" in caplog.text
+
+
+async def test_unknown_names_with_no_content_vendors_reads_sensibly(patch):
+    patch(answer=HTTPException(422, detail={"unknown": ["Veam"]}))
+    app = _app()
+    app.state.scope_resolver = SimpleNamespace(content_vendors=())
+    async with Client(ms.build_mcp_server(app)) as c:
+        r = await c.call_tool("answer_question", {"question": "q", "vendors": ["Veam"]})
+    assert r.is_error
+    assert "Vendors with content: none yet." in r.content[0].text
+
+
 async def test_a_backend_failure_is_a_tool_error_saying_what_failed(patch, caplog):
     patch(answer=RuntimeError("neo4j unavailable"))
     async with Client(ms.build_mcp_server(_app())) as c:
