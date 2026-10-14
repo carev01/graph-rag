@@ -122,6 +122,10 @@ async def _fake_drift_search(graphiti, driver, embedder, synth_client, synth_mod
 
 @pytest.fixture(autouse=True)
 def _stub_deps(monkeypatch):
+    install_stub_deps(monkeypatch)
+
+
+def install_stub_deps(monkeypatch):
     """Avoid building a real Graphiti/Neo4jDriver/synthesis client in the
     lifespan and avoid real search_local/answer_local/timeline_local calls so
     the endpoint tests need no Neo4j and no GLM endpoint."""
@@ -636,6 +640,20 @@ async def test_search_global_rewrites_a_comparisons_facets_like_answer(monkeypat
     assert model == "map-model" and q == "Veeam versus AWS Backup retention"
     assert [f.label for f in facets] == ["Veeam", "AWS Backup"]
     assert [f.query for f in seen["mode_facets"]] == ["about Veeam", "about AWS Backup"]
+
+
+async def test_run_answer_and_run_search_local_match_their_routes():
+    # The REST routes are thin wrappers over run_answer / run_search_local (spec
+    # 2026-10-14 §1); the MCP tools call the same functions.
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            via_answer = (await c.get("/answer", params={"q": "plan retention"})).json()
+            via_search = (await c.get("/search/local", params={"q": "plan retention"})).json()
+            direct_answer = await app_mod.run_answer(app, q="plan retention")
+            direct_search = await app_mod.run_search_local(app, q="plan retention")
+    assert direct_answer == via_answer
+    assert direct_search == via_search
 
 
 async def test_search_drift_rewrites_a_comparisons_facets_like_answer(monkeypatch):

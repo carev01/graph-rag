@@ -423,6 +423,17 @@ class ExtractSettings(BaseSettings):
     # does the selecting. 0.45 would have cut the very community that complaint
     # wanted ranked higher; 0.55+ refuses 3 of 10 answerable questions.
     rerank_score_floor: float = 0.40
+    # --- MCP server (spec 2026-10-14) ---
+    # Bearer token required on /mcp. Empty (the default) leaves /mcp unmounted: a
+    # deployment without the token never exposes the MCP endpoint. Set only in the
+    # cluster Secret, never in the repo, image or chart values.
+    mcp_bearer_token: str = ""
+    # Host header values the MCP transport accepts (DNS-rebinding protection): the
+    # ingress host, plus localhost for a kubectl port-forward.
+    mcp_allowed_hosts: list[str] = ["graphrag.k3s.home.lan", "localhost:*", "127.0.0.1:*"]
+    # Seconds between progress notifications while answer_question runs (comparisons
+    # and enumerations take 1-7 minutes; clients time out silent calls).
+    mcp_progress_seconds: float = 10.0
 
     @field_validator("ingest_article_concurrency")
     @classmethod

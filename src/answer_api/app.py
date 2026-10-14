@@ -7,13 +7,16 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Query
+from mcp.server.transport_security import TransportSecuritySettings
 from neo4j import AsyncDriver, AsyncGraphDatabase
+from starlette.routing import Route
 
 from answer_api import drift as drift_mod
 from answer_api import global_search as global_mod
 from answer_api import router as router_mod
 from answer_api import search as search_mod
 from answer_api import timeline as timeline_mod
+from answer_api.mcp_auth import BearerTokenGate
 from answer_api.router import Mode
 from answer_api.scope import Scope, ScopeResolver, UnknownScopeName
 from answer_api.shape import classify_shape, facet_queries, retrieval_scope
@@ -117,8 +120,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.map_model = map_model
     app.state.cheap_client = cheap_client
     app.state.cheap_model = cheap_model
+    mcp_server = getattr(app.state, "mcp_server", None)
     try:
-        yield
+        if mcp_server is not None:
+            async with mcp_server.session_manager.run():
+                yield
+        else:
+            yield
     finally:
         closers = [
             ("graphiti", graphiti.close),
@@ -196,6 +204,41 @@ async def _comparison_facets(app: FastAPI, q: str, resolved: Scope, scope_mode: 
                                shape.facets)
 
 
+async def run_answer(app: FastAPI, *, q: str, mode: Mode | None = None,
+                     vendor: list[str] | None = None, product: list[str] | None = None,
+                     source: list[str] | None = None,
+                     scope: Literal["auto", "none"] = "auto") -> dict[str, Any]:
+    """What GET /answer runs; shared with the MCP `answer_question` tool."""
+    st = app.state
+    resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+    shape = classify_shape(q, st.scope_resolver, resolved,
+                           scope_disabled=(scope == "none"))
+    resolved = retrieval_scope(shape, resolved)
+    return await router_mod.answer_router(
+        st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
+        st.map_client, st.map_model, st.cheap_client, st.cheap_model,
+        q=q, mode_override=mode, scope=resolved, settings=st.settings,
+        shape=shape)
+
+
+async def run_search_local(app: FastAPI, *, q: str, k: int = 10,
+                           vendor: list[str] | None = None,
+                           product: list[str] | None = None,
+                           source: list[str] | None = None,
+                           scope: Literal["auto", "none"] = "auto",
+                           include_invalid: bool = False) -> dict[str, Any]:
+    """What GET /search/local runs; shared with the MCP `search_facts` tool."""
+    resolved = await _resolve_scope(app, q, vendor, product, scope, source)
+    result = await search_mod.search_local(
+        app.state.graphiti, app.state.driver, q=q, k=k, scope=resolved,
+        include_invalid=include_invalid, group_id=app.state.settings.group_id,
+        fetch_cap=app.state.settings.local_scoped_fetch_cap,
+        scan_max_episodes=app.state.settings.local_scoped_scan_max_episodes,
+        settings=app.state.settings)
+    result["scope"] = resolved.as_dict()
+    return result
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="answer-api", lifespan=_lifespan)
 
@@ -211,21 +254,9 @@ def create_app() -> FastAPI:
         scope: Literal["auto", "none"] = "auto",
         include_invalid: bool = False
     ) -> dict[str, Any]:
-        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
-        result = await search_mod.search_local(
-            app.state.graphiti,
-            app.state.driver,
-            q=q,
-            k=k,
-            scope=resolved,
-            include_invalid=include_invalid,
-            group_id=app.state.settings.group_id,
-            fetch_cap=app.state.settings.local_scoped_fetch_cap,
-            scan_max_episodes=app.state.settings.local_scoped_scan_max_episodes,
-            settings=app.state.settings,
-        )
-        result["scope"] = resolved.as_dict()
-        return result
+        return await run_search_local(app, q=q, k=k, vendor=vendor, product=product,
+                                      source=source, scope=scope,
+                                      include_invalid=include_invalid)
 
     @app.get("/answer")
     async def answer(
@@ -234,16 +265,8 @@ def create_app() -> FastAPI:
         source: list[str] | None = Query(None),
         scope: Literal["auto", "none"] = "auto",
     ) -> dict[str, Any]:
-        st = app.state
-        resolved = await _resolve_scope(app, q, vendor, product, scope, source)
-        shape = classify_shape(q, st.scope_resolver, resolved,
-                               scope_disabled=(scope == "none"))
-        resolved = retrieval_scope(shape, resolved)
-        return await router_mod.answer_router(
-            st.graphiti, st.driver, st.embedder, st.synth_client, st.synth_model,
-            st.map_client, st.map_model, st.cheap_client, st.cheap_model,
-            q=q, mode_override=mode, scope=resolved, settings=st.settings,
-            shape=shape)
+        return await run_answer(app, q=q, mode=mode, vendor=vendor, product=product,
+                                source=source, scope=scope)
 
     @app.get(
         "/search/global",
@@ -319,6 +342,27 @@ def create_app() -> FastAPI:
         )
         result["scope"] = resolved.as_dict()
         return result
+
+    # MCP (spec 2026-10-14): mounted only when a token is configured -- fail closed.
+    settings = get_extract_settings()
+    app.state.mcp_server = None
+    if settings.mcp_bearer_token:
+        from answer_api.mcp_server import build_mcp_server  # imports run_* from here
+
+        server = build_mcp_server(app)
+        mcp_app = server.streamable_http_app(
+            streamable_http_path="/mcp", stateless_http=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=list(settings.mcp_allowed_hosts),
+                allowed_origins=[f"https://{h}" for h in settings.mcp_allowed_hosts
+                                 if not h.endswith(":*")]))
+        app.state.mcp_server = server
+        # A route for exactly /mcp, not a root mount: a mount at "" would swallow every
+        # unmatched request and change REST behaviour (405 -> 404, /health/ redirect ->
+        # 404, JSON 404 -> plain text). The gate still checks the root_path-stripped path.
+        app.router.routes.append(Route(
+            "/mcp", endpoint=BearerTokenGate(mcp_app, settings.mcp_bearer_token, "/mcp")))
 
     return app
 
