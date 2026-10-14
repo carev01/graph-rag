@@ -21,11 +21,24 @@ async def test_load_reads_only_structural_catalog_and_scopes_episodes(extract_ne
                    -[:HAS_SOURCE]->(:Source {id:'s1'})
                    -[:HAS_ARTICLE]->(:Article {id:'a1'})
                    -[:HAS_EPISODE]->(:Episodic {uuid:'e1'})
+            CREATE (:Vendor {id:'v2', name:'AWS'})
+                   -[:HAS_PRODUCT]->(:Product {id:'p3', name:'AWS Backup'})
+                   -[:HAS_SOURCE]->(:Source {id:'s3'})
             CREATE (:Entity:Vendor {uuid:'x', name:'Fake Vendor'})
             CREATE (:Entity:Product {uuid:'y', name:'Cohesity Copilot'})
+            WITH 1 AS _
+            MATCH (v:Vendor {id:'v1'})
+            CREATE (v)-[:HAS_PRODUCT]->(:Product {id:'p2', name:'Veeam Backup & Replication'})
+                   -[:HAS_SOURCE]->(:Source {id:'s2'})-[:HAS_ARTICLE]->(:Article {id:'a2'})
         """)
 
         resolver = await ScopeResolver.load(driver)
+
+        # Content (an Article->Episodic) is per product: products without it are
+        # not listed, and a vendor with none is not a content vendor.
+        assert resolver.content_vendors == ("Veeam",)
+        assert resolver.products_of("Veeam") == ("Veeam ONE",)
+        assert resolver.products_of("AWS") == ()
 
         detected = resolver.detect("How do I configure Veeam ONE?")
         assert detected.products == ("Veeam ONE",)

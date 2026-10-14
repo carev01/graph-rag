@@ -9,6 +9,7 @@ import answer_api.search as search_mod
 import answer_api.synthesize as synth_mod
 import answer_api.timeline as timeline_mod
 from answer_api.scope import ScopeResolver
+from answer_api.shape import Facet
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,7 +48,8 @@ class FakeEmbedder:
 
 
 async def _fake_search_local(graphiti, driver, *, q, k=10, scope=None,
-                              include_invalid=False, group_id):
+                              include_invalid=False, group_id, fetch_cap=450,
+                              scan_max_episodes=6000, settings=None):
     return {
         "query": q,
         "count": 1,
@@ -72,7 +74,7 @@ def _fake_synthesis_client_and_model(settings):
 
 async def _fake_answer_router(graphiti, driver, embedder, synth_client, synth_model,
                               map_client, map_model, cheap_client, cheap_model, *,
-                              q, mode_override, scope, settings):
+                              q, mode_override, scope, settings, **kw):
     return {"mode": mode_override or "drift", "query": q, "answer": "routed answer [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],
@@ -101,7 +103,7 @@ async def _fake_timeline_local(graphiti, driver, *, q, limit=30, scope=None,
 
 async def _fake_global_search(driver, embedder, map_client, map_model, synth_client,
                               synth_model, *, q, level, k, group_id, settings,
-                              scope=None):
+                              scope=None, **kw):
     return {"query": q, "answer": "AWS and Azure both back up S3 [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"article_id": "art1", "source_url": "https://x/art1"}]}],
@@ -110,7 +112,7 @@ async def _fake_global_search(driver, embedder, map_client, map_model, synth_cli
 
 async def _fake_drift_search(graphiti, driver, embedder, synth_client, synth_model, *,
                              q, level, iterations, primer_k, max_followups, followup_k,
-                             group_id, settings, scope=None):
+                             group_id, settings, scope=None, **kw):
     return {"query": q, "answer": "cross-vendor DRIFT answer [1].",
             "citations": [{"marker": 1, "fact_uuid": "f1",
                            "sources": [{"url": "https://x/art1", "title": "T", "article_id": "art1"}]}],
@@ -205,8 +207,11 @@ async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
     captured: dict = {}
 
     async def _capture_search_local(graphiti, driver, *, q, k=10, scope=None,
-                                    include_invalid=False, group_id):
+                                    include_invalid=False, group_id, fetch_cap=450,
+                                    scan_max_episodes=6000, settings=None):
         captured["scope"] = scope
+        captured["caps"] = (fetch_cap, scan_max_episodes)
+        captured["settings"] = settings
         return {"query": q, "count": 0, "results": []}
 
     monkeypatch.setattr(search_mod, "search_local", _capture_search_local)
@@ -217,6 +222,10 @@ async def test_search_local_vendor_param_converts_to_scope(monkeypatch):
     assert resp.status_code == 200
     assert captured["scope"].vendors == ("AWS",)
     assert captured["scope"].source == "explicit"
+    settings = app.state.settings
+    assert captured["caps"] == (settings.local_scoped_fetch_cap,
+                                settings.local_scoped_scan_max_episodes)
+    assert captured["settings"] is settings
 
 
 async def test_answer_router_returns_envelope():
@@ -524,3 +533,132 @@ async def test_concurrent_stale_requests_reload_the_resolver_once(monkeypatch):
             r1, r2 = await asyncio.gather(t1, t2)
     assert r1.status_code == 200 and r2.status_code == 200
     assert load_calls["n"] == 1
+
+
+async def test_answer_hands_the_router_the_question_shape(monkeypatch):
+    seen = {}
+
+    async def _router(*a, q, mode_override, scope, settings, shape=None, **kw):
+        seen["shape"] = shape
+        return await _fake_answer_router(*a, q=q, mode_override=mode_override,
+                                         scope=scope, settings=settings)
+
+    monkeypatch.setattr(app_mod.router_mod, "answer_router", _router)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/answer", params={"q": "Veeam versus AWS Backup retention"})
+            assert resp.status_code == 200
+            assert seen["shape"].kind == "comparison"
+            resp = await c.get("/answer", params={"q": "Veeam versus AWS Backup",
+                                                  "scope": "none"})
+    assert resp.status_code == 200
+    assert seen["shape"].kind == "single"
+
+
+async def test_answer_retrieves_a_named_subject_question_with_its_facet_scope(
+        monkeypatch):
+    # "Which vendors does Veeam ...": resolve() returns an empty scope for
+    # cross-vendor wording; the single shape's facet scope is used instead.
+    seen = {}
+
+    async def _router(*a, q, mode_override, scope, settings, shape=None, **kw):
+        seen.update(scope=scope, shape=shape)
+        return await _fake_answer_router(*a, q=q, mode_override=mode_override,
+                                         scope=scope, settings=settings)
+
+    monkeypatch.setattr(app_mod.router_mod, "answer_router", _router)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/answer",
+                               params={"q": "Which vendors does Veeam integrate with?"})
+            assert resp.status_code == 200
+            assert seen["shape"].kind == "single"
+            assert seen["scope"].vendors == ("Veeam",)
+            assert seen["scope"].source == "detected"
+            # An explicit scope still wins.
+            resp = await c.get("/answer", params={
+                "q": "Which vendors does Veeam integrate with?", "vendor": "AWS"})
+            assert seen["scope"].vendors == ("AWS",)
+            assert seen["scope"].source == "explicit"
+            # scope=none stays unscoped.
+            resp = await c.get("/answer", params={
+                "q": "Which vendors does Veeam integrate with?", "scope": "none"})
+    assert resp.status_code == 200
+    assert seen["scope"].is_empty()
+
+
+async def test_search_global_forwards_a_comparisons_facets(monkeypatch):
+    seen = {}
+
+    async def _global(*a, facets=None, graphiti=None, **kw):
+        seen["facets"] = facets
+        seen["graphiti"] = graphiti
+        return await _fake_global_search(*a, **kw)
+
+    monkeypatch.setattr(app_mod.global_mod, "global_search", _global)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/global",
+                               params={"q": "Veeam versus AWS Backup retention"})
+            assert resp.status_code == 200
+            assert [f.label for f in seen["facets"]] == ["Veeam", "AWS Backup"]
+            assert seen["graphiti"] is app.state.graphiti   # the facet supplement's handle
+            assert isinstance(seen["graphiti"], FakeGraphiti)
+            await c.get("/search/global", params={"q": "Veeam retention"})
+    assert seen["facets"] is None
+
+
+async def test_search_global_rewrites_a_comparisons_facets_like_answer(monkeypatch):
+    """/search/global mirrors /answer's router: a comparison's facets get one
+    cheap-tier retrieval question each before the mode runs."""
+    seen = {}
+
+    async def _rewrite(client, model, q, facets):
+        seen["rewrite_args"] = (client, model, q, tuple(facets))
+        return tuple(Facet(f.label, f.scope, query=f"about {f.label}") for f in facets)
+
+    async def _global(*a, facets=None, **kw):
+        seen["mode_facets"] = facets
+        return await _fake_global_search(*a, **kw)
+
+    monkeypatch.setattr(app_mod, "facet_queries", _rewrite)
+    monkeypatch.setattr(app_mod.global_mod, "global_search", _global)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/global",
+                               params={"q": "Veeam versus AWS Backup retention"})
+    assert resp.status_code == 200
+    _, model, q, facets = seen["rewrite_args"]
+    assert model == "map-model" and q == "Veeam versus AWS Backup retention"
+    assert [f.label for f in facets] == ["Veeam", "AWS Backup"]
+    assert [f.query for f in seen["mode_facets"]] == ["about Veeam", "about AWS Backup"]
+
+
+async def test_search_drift_rewrites_a_comparisons_facets_like_answer(monkeypatch):
+    seen = {}
+
+    async def _rewrite(client, model, q, facets):
+        seen["rewrite_args"] = (client, model, q, tuple(facets))
+        return tuple(Facet(f.label, f.scope, query=f"about {f.label}") for f in facets)
+
+    async def _drift(*a, facets=None, **kw):
+        seen["mode_facets"] = facets
+        return await _fake_drift_search(*a, **kw)
+
+    monkeypatch.setattr(app_mod, "facet_queries", _rewrite)
+    import answer_api.drift as drift_mod
+    monkeypatch.setattr(drift_mod, "drift_search", _drift)
+    app = app_mod.create_app()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://t") as c:
+        async with app.router.lifespan_context(app):
+            resp = await c.get("/search/drift",
+                               params={"q": "Veeam versus AWS Backup retention"})
+    assert resp.status_code == 200
+    _, model, q, facets = seen["rewrite_args"]
+    assert model == "map-model" and q == "Veeam versus AWS Backup retention"
+    assert [f.label for f in facets] == ["Veeam", "AWS Backup"]
+    assert [f.query for f in seen["mode_facets"]] == ["about Veeam", "about AWS Backup"]

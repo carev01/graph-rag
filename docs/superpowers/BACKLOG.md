@@ -1384,6 +1384,41 @@ The full-rebuild path (`theme-build --full`, `_run_theme_build`) is also still
 sequential and unresumable; the incremental path (the default) got concurrency and
 draft-resume on 2026-10-10.
 
+### 58. Prompt caching for the Claude tiers (added 2026-10-13, after the answer-quality slice)
+`graph_extract/anthropic_chat.AnthropicChat` sends no `cache_control`, so every Claude
+call pays full input price. The theme-report writer repeats a fixed instruction prefix
+(`_PROMPT`, `_VERIFY_PROMPT`, `_SUMMARY_PROMPT`) ahead of a variable community context,
+and an extraction tier on Claude (#59) would repeat graphiti's long static system prompts
+on every call. Add automatic/top-level `cache_control` (or a breakpoint after the static
+prefix) in the adapter, keep the static part first and byte-stable, and verify with
+`usage.cache_read_input_tokens` > 0 across repeated calls before claiming a saving (the
+minimum cacheable prefix is model-dependent — short prefixes silently do not cache).
+`instrument` already tallies `cached_tokens` from `prompt_tokens_details`, which the
+adapter fills from `cache_read_input_tokens`.
+
+### 59. Evaluate Claude Haiku 5.5 as the single API extraction model (added 2026-10-13)
+Replace the API extraction tiers — cheap Solar Pro 4 on OpenRouter plus escalation to
+gpt-5-mini on Azure (hybrid router, dense-table routing, `dedup_guard` retry-on-strong) —
+with one model, Claude Haiku 5.5, for the API-driven pipeline: no cheap/strong split
+there. The GPU-driven pipeline (vLLM fine-tune) keeps its own tiering. Evaluate before
+switching, on the existing extraction benchmark (~200 articles, the Phase 1 cost/quality
+gate): entity/fact quality and dedup-index validity against today's routed output,
+structured-output reliability with graphiti's schemas (the unbounded index arrays that
+broke every cheap model — `LLM_MAX_INDEX_ARRAY` — must hold on Haiku too), tokens and $
+per episode (~20–35k LLM tokens/episode today), and throughput under
+`INGEST_ARTICLE_CONCURRENCY`. Prove the model is actually engaged in the paid run (cost
+rule: a call counter, not timing). Pairs with #58 (caching) and #60 (batch).
+
+### 60. Evaluate the Claude Message Batches API for extraction (added 2026-10-13)
+Batch requests run asynchronously at roughly half price. Graphiti's `add_episode` is a
+synchronous multi-call chain (extract nodes → dedupe → extract edges → dedupe →
+summaries), each call depending on the previous one, so batching does not drop in
+directly. Evaluate viability: which steps could be batched across many episodes at once
+(stage-wise batching of the same step for N articles), the latency trade (batches
+complete within hours, so bootstrap backfill only — never the incremental lane), how
+results would re-enter graphiti's pipeline, and the expected saving against the
+engineering cost. Depends on #59's outcome.
+
 ---
 
 ## Next steps, in order

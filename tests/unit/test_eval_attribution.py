@@ -105,7 +105,7 @@ async def test_score_one_builds_labelled_facts_from_citation_sources(monkeypatch
     env = {"mode": "local", "answer": "ans [1] [2].", "citations": _CITATIONS,
            "routing": {"chosen": "local", "via": "llm", "fallback_from": None}}
 
-    async def _fake_router(*a, q, mode_override, scope, settings):
+    async def _fake_router(*a, q, mode_override, scope, settings, **kw):
         return env
 
     async def _fake_facts(driver, g, uuids):
@@ -131,8 +131,8 @@ async def test_score_one_builds_labelled_facts_from_citation_sources(monkeypatch
 
     q = {"question": "who does X?", "expected_article_ids": []}
     result = await er._score_one((None,) * 11, q, None, settings, resolver)
-    assert len(result) == 5
-    _env, _ghit, _faith, _facts, misattributed = result
+    assert len(result) == 6
+    _env, _ghit, _faith, _facts, misattributed, _facet_coverage = result
     assert misattributed == 1
     assert captured["labelled_facts"] == (
         "[1] (Veeam · B&R) Veeam fact\n[2] (Rubrik · RSC) Rubrik fact")
@@ -200,7 +200,7 @@ async def test_score_one_pairs_labelled_facts_by_uuid_despite_reverse_row_order(
            "routing": {"chosen": "local", "via": "llm", "fallback_from": None}}
     driver = _ReverseOrderDriver({"f1": "Veeam fact", "f2": "Rubrik fact"})
 
-    async def _fake_router(*a, q, mode_override, scope, settings):
+    async def _fake_router(*a, q, mode_override, scope, settings, **kw):
         return env
 
     async def _fake_facts(driver, g, uuids):

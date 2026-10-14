@@ -18,6 +18,7 @@ from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 
 from answer_api import attribution, router as router_mod
+from answer_api.attribution import in_scope
 from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
@@ -27,7 +28,8 @@ from answer_api.router_eval import (
     BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
     markers_per_sentence, routing_hit,
 )
-from answer_api.scope import ScopeResolver
+from answer_api.scope import Scope, ScopeResolver
+from answer_api.shape import QuestionShape, classify_shape, retrieval_scope
 from answer_api.synthesize import _REFUSAL as _SYNTH_REFUSAL
 from answer_api.synthesize import (
     _range_markers, _synthesis_client_and_model, _usable_content,
@@ -64,6 +66,41 @@ _ATTRIBUTION_PROMPT = (
     "ONLY the integer (0 if none)."
     "\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
+
+
+def _scope_of(d: dict) -> Scope:
+    return Scope(tuple(d.get("vendors", [])), tuple(d.get("products", [])),
+                 d.get("source", "none"), tuple(d.get("sources", [])))
+
+
+def facet_coverage_hit(env: dict, shape: QuestionShape | None = None) -> bool | None:
+    """Comparison only: every facet has a citation from its own side.
+
+    `shape` is the shape the question was ASKED as (classified before the
+    router ran). Scored from it, a comparison the router relaxed to single
+    scores on its citations (False when a side is uncited) instead of dropping
+    out of the metric as None. Without `shape`, falls back to the envelope."""
+    if shape is not None:
+        if shape.kind != "comparison":
+            return None
+        scopes = [f.scope for f in shape.facets]
+    else:
+        if env.get("shape") != "comparison":
+            return None
+        scopes = [_scope_of(f["scope"]) for f in env.get("facets", [])]
+    cites = env.get("citations", [])
+    return all(any(in_scope(c.get("sources", []), sc) for c in cites) for sc in scopes)
+
+
+def enumeration_hit(env: dict, expected_vendors: list[str] | None) -> bool | None:
+    """Enumeration only: exactly the ground-truth vendors, each cited."""
+    if env.get("shape") != "enumeration" or expected_vendors is None:
+        return None
+    documented = env.get("documented_vendors", [])
+    if set(documented) != set(expected_vendors):
+        return False
+    cited = {s.get("vendor") for c in env.get("citations", []) for s in c.get("sources", [])}
+    return all(v in cited for v in documented)
 
 
 def _eval_judge_client_and_model(settings) -> tuple[AsyncOpenAI, str]:
@@ -238,9 +275,12 @@ async def _cited_fact_texts_by_uuid(driver, group_id, fact_uuids) -> dict[str, s
 async def _score_one(clients, q, mode_override, settings, resolver):
     graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel, jc, jm = clients
     scope = resolver.resolve(q["question"])
+    shape = classify_shape(q["question"], resolver, scope)
+    scope = retrieval_scope(shape, scope)
     env = await router_mod.answer_router(
         graphiti, driver, embedder, sc, sm, mc, mm, cc, cmodel,
-        q=q["question"], mode_override=mode_override, scope=scope, settings=settings)
+        q=q["question"], mode_override=mode_override, scope=scope, settings=settings,
+        shape=shape)
     ghit = (precision_at_k(env["citations"], q["expected_article_ids"])
             if q["expected_article_ids"] else None)
     facts = await _cited_fact_texts(driver, settings.group_id,
@@ -250,7 +290,7 @@ async def _score_one(clients, q, mode_override, settings, resolver):
                                             [c["fact_uuid"] for c in env["citations"]])
     labelled = _labelled_facts(env["citations"], texts)
     misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
-    return env, ghit, faith, facts, misattributed
+    return env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape)
 
 
 async def run_eval(clients, questions, settings, resolver) -> dict:
@@ -265,7 +305,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts, misattributed = await _score_one(
+            env, ghit, faith, facts, misattributed, facet_cov = await _score_one(
                 clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
@@ -294,6 +334,9 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "mps_max": max(mps) if mps else None,
                          "bag_share": _round_or_none(bag_share(env["answer"])),
                          "misattributed": misattributed,
+                         "facet_coverage": facet_cov,
+                         "enumeration_complete": enumeration_hit(
+                             env, q.get("expected_vendors")),
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -301,7 +344,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts, _mis = await _score_one(
+                    _e, _g, _f, _facts, _mis, _fc = await _score_one(
                         clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
@@ -313,7 +356,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
-                   "bag_share": None, "misattributed": None, "failed": True}
+                   "bag_share": None, "misattributed": None,
+                   "facet_coverage": None, "enumeration_complete": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -323,9 +367,18 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
               f"faith={rec['faithfulness'] if rec['faithfulness'] is not None else '-'} "
               f"cited={rec['cited']} ranges={rec['ranges']} mps={_mps_cell(rec)} "
               f"bag={_cell(rec.get('bag_share'))} "
-              f"misattributed={_cell(rec.get('misattributed'))} {elapsed:.0f}s", flush=True)
+              f"misattributed={_cell(rec.get('misattributed'))} "
+              f"facet={_cell(rec.get('facet_coverage'))} "
+              f"enum={_cell(rec.get('enumeration_complete'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
+    fc = [r["facet_coverage"] for r in per_question if r.get("facet_coverage") is not None]
+    ec = [r["enumeration_complete"] for r in per_question
+          if r.get("enumeration_complete") is not None]
+    summary["facet_coverage"] = round(sum(fc) / len(fc), 2) if fc else None
+    summary["facet_coverage_n"] = len(fc)
+    summary["enumeration_completeness"] = round(sum(ec) / len(ec), 2) if ec else None
+    summary["enumeration_n"] = len(ec)
     summary["raw"] = raw
     return summary
 
@@ -373,12 +426,17 @@ def format_report(summary: dict) -> str:
              f"Misattributed claims: {summary['misattributed_total']} across "
              f"{summary['misattributed_answers']} answers "
              f"(unscored: {summary['misattributed_unscored']})",
+             f"**Facet coverage (comparisons): {summary.get('facet_coverage')} "
+             f"(n={summary.get('facet_coverage_n')})** | **Enumeration completeness: "
+             f"{summary.get('enumeration_completeness')} "
+             f"(n={summary.get('enumeration_n')})**",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
-             "| mps | bag | misattributed | question |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| mps | bag | misattributed | facet_coverage | enumeration_complete "
+             "| question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
@@ -388,7 +446,8 @@ def format_report(summary: dict) -> str:
                      f"{r['grounding_hit']} | {faith_cell} | {_cell(r.get('cited'))} | "
                      f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
                      f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
-                     f"{r['question']} |")
+                     f"{_cell(r.get('facet_coverage'))} | "
+                     f"{_cell(r.get('enumeration_complete'))} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 

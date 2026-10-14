@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,16 @@ _EPISODES_AMONG = (
     "AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products "
     "OR toLower(s.name) IN $sources) "
     "RETURN collect(DISTINCT u) AS u")
+# (vendor, product) pairs whose documentation has extracted content (at least one
+# episode under one of the product's sources). Their vendors are the set an
+# enumeration question checks (spec 2026-10-12 §2); their products are what an
+# enumeration side question may name (Task 16). EXISTS short-circuits per source,
+# so this stays cheap at bootstrap scale.
+_CONTENT_PRODUCTS = (
+    "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->(s:Source) "
+    "WHERE v.id IS NOT NULL AND p.id IS NOT NULL "
+    "AND EXISTS { MATCH (s)-[:HAS_ARTICLE]->(:Article)-[:HAS_EPISODE]->(:Episodic) } "
+    "RETURN DISTINCT v.name AS vendor, p.name AS product ORDER BY vendor, product")
 
 
 # Wording that makes a question explicitly cross-vendor. Such a question stays
@@ -112,13 +123,24 @@ class UnknownScopeName(ValueError):
 class ScopeResolver:
     def __init__(self, vendors: list[str], products: list[tuple[str, str]],
                  aliases: dict[str, str | list[str]],
-                 sources: list[tuple[str, str]] | None = None) -> None:
+                 sources: list[tuple[str, str]] | None = None,
+                 content_vendors: tuple[str, ...] | list[str] = (),
+                 content_products: Mapping[str, Iterable[str]] | None = None) -> None:
         """`sources`: (source name, product name). Only sources whose name is unique
         across the catalog are addressable at all (explicitly or by alias); of those,
-        only names containing their vendor's name are DETECTED (module docstring)."""
+        only names containing their vendor's name are DETECTED (module docstring).
+
+        `content_products`: vendor -> its products that have extracted content.
+        `content_vendors` defaults to its vendors (sorted); passing `content_vendors`
+        explicitly overrides that (hermetic tests that need no products)."""
         self._vendors = {v.lower(): v for v in vendors}
         self._products = {p.lower(): p for p, _ in products}
         self._vendor_of = {p: v for p, v in products}
+        self._product_of_source = {n: p for n, p in sources or []}
+        self._content_products: dict[str, tuple[str, ...]] = {
+            v: tuple(sorted(set(ps))) for v, ps in (content_products or {}).items()}
+        self.content_vendors: tuple[str, ...] = tuple(content_vendors) or tuple(
+            sorted(v for v, ps in self._content_products.items() if ps))
         counts: dict[str, int] = {}
         for name, _ in sources or []:
             counts[name.lower()] = counts.get(name.lower(), 0) + 1
@@ -183,6 +205,42 @@ class ScopeResolver:
     def vendor_of(self, product: str) -> str | None:
         return self._vendor_of.get(product)
 
+    def products_of(self, vendor: str) -> tuple[str, ...]:
+        """The vendor's products that have extracted content, sorted (documentation
+        is organised by product: an enumeration side question names one). () for a
+        vendor without content or when no content products were given."""
+        return self._content_products.get(vendor, ())
+
+    def vendor_of_source(self, name: str) -> str | None:
+        product = self._product_of_source.get(name)
+        return self._vendor_of.get(product) if product else None
+
+    def detect_mentions(self, q: str) -> list[tuple[str, Scope]]:
+        """One (label, Scope) per mention, in question order -- the grouping
+        `detect` flattens. An alias with several targets is ONE mention ("Veeam
+        Agent" -> its guides). Ignores the cross-vendor rule: shape.classify_shape
+        decides enumeration before it asks for mentions."""
+        return [(label, scope) for _, label, scope in self.detect_mention_spans(q)]
+
+    def detect_mention_spans(self, q: str) -> list[tuple[int, str, Scope]]:
+        """`detect_mentions` with each mention's start offset in `q`: (start, label,
+        Scope). shape.classify_shape uses the offset to tell a named grammatical
+        subject ("Which vendors does Veeam ...") from any other position."""
+        if self._re is None:
+            return []
+        out: list[tuple[int, str, Scope]] = []
+        for m in self._re.finditer(q):
+            hits = self._terms[m.group(1).lower()]
+            found: dict[str, list[str]] = {"vendor": [], "product": [], "source": []}
+            for kind, name in hits:
+                if name not in found[kind]:
+                    found[kind].append(name)
+            label = hits[0][1] if len(hits) == 1 else m.group(1)
+            out.append((m.start(1), label,
+                        Scope(tuple(found["vendor"]), tuple(found["product"]),
+                              "detected", tuple(found["source"]))))
+        return out
+
     def detect(self, q: str) -> Scope:
         if self._re is None or _CROSS_VENDOR.search(q):
             return Scope()
@@ -227,7 +285,11 @@ class ScopeResolver:
         vendors = sorted({v for _, v in pairs})
         sources = [(name, r["product"]) for r in records for name in r["sources"] if name]
         aliases = json.loads((aliases_path or _ALIASES).read_text())
-        return cls(vendors, pairs, aliases, sources)
+        content, _, _ = await driver.execute_query(_CONTENT_PRODUCTS)
+        content_products: dict[str, list[str]] = {}
+        for r in content:
+            content_products.setdefault(r["vendor"], []).append(r["product"])
+        return cls(vendors, pairs, aliases, sources, content_products=content_products)
 
 
 async def scope_episode_uuids(driver, scope: Scope,

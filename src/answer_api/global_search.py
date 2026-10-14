@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from openai import AsyncOpenAI
@@ -15,9 +16,18 @@ from openai import AsyncOpenAI
 from graph_extract.config import ExtractSettings
 from graph_extract.provenance import Provenance
 from graph_extract.usage import bounded_llm_client
-from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line, in_scope
+from answer_api.attribution import (
+    ATTRIBUTION_RULES,
+    CLAIM_RULES,
+    COMPARISON_RULES,
+    applies_to,
+    fact_line,
+    in_scope,
+)
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import Scope
+from answer_api.search import search_local
+from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from answer_api.synthesize import (
     _build_citations, _complete_or_none, _finalize_answer, _usable_content,
 )
@@ -202,7 +212,12 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
                                 group_id: str, rating_boost: float = 0.1,
                                 settings: ExtractSettings | None = None,
                                 stats: RerankStats | None = None,
-                                scope: Scope | None = None) -> list[CommunityHit]:
+                                scope: Scope | None = None,
+                                top_n: int | None = None) -> list[CommunityHit]:
+    # `top_n` (spec 2026-10-12 §3.2) overrides BOTH cut sizes -- rerank_top_n on
+    # the reranked path and k on the unreranked one -- so a per-facet caller gets
+    # the same depth whichever path the deployment takes.
+    k_eff = top_n if top_n is not None else k
     query_vec = (await embedder.create_batch([q]))[0]
     async with driver.session() as s:
         r = await s.run(
@@ -222,11 +237,12 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
     # is set to, or it silently under-returns (finding: rerank_candidates < k) --
     # so only widen the pre-cut pool once we know it will actually be reranked.
     if settings is None or not rerank_configured(settings):
-        pool_k = max(k, settings.global_scope_candidates) if (scoped and settings) else k
+        pool_k = (max(k_eff, settings.global_scope_candidates) if (scoped and settings)
+                  else k_eff)
         candidates = _rank_hits(query_vec, rows, k=pool_k, rating_boost=rating_boost)
         if scope_ is not None:
             candidates = await _keep_in_scope(driver, group_id, candidates, scope_, settings)
-        return candidates[:k]
+        return candidates[:k_eff]
     pool_k = settings.rerank_candidates
     if scoped:
         pool_k = max(pool_k, settings.global_scope_candidates)
@@ -235,8 +251,12 @@ async def shortlist_communities(driver, embedder, q: str, *, level: int, k: int,
         candidates = await _keep_in_scope(driver, group_id, candidates, scope_, settings)
     st = stats if stats is not None else RerankStats()
     docs = [f"{h.title}: {h.summary}" for h in candidates]
-    scored = await rerank(q, docs, top_k=settings.rerank_top_n, settings=settings)
-    return _apply_rerank(candidates, scored, top_n=settings.rerank_top_n,
+    # Ask the reranker for at least the per-call top_n: top_k=rerank_top_n alone
+    # would silently cap a larger top_n.
+    scored = await rerank(q, docs, top_k=max(settings.rerank_top_n, top_n or 0),
+                          settings=settings)
+    return _apply_rerank(candidates, scored,
+                         top_n=top_n if top_n is not None else settings.rerank_top_n,
                          floor=settings.rerank_score_floor, stats=st)
 
 
@@ -364,7 +384,7 @@ _REDUCE_PROMPT = (
     "Answer the QUESTION by synthesizing across these community findings, organized "
     "by theme and vendor. Each finding is shown as a marker [N] followed by the fact "
     "it refers to.\n"
-    + ATTRIBUTION_RULES +
+    + ATTRIBUTION_RULES + CLAIM_RULES +
     "Rules:\n"
     # BACKLOG 0b: the findings are now the facts themselves, marker-bound, so
     # the citation rule can say which marker a claim takes: the one printed
@@ -388,11 +408,65 @@ _REDUCE_PROMPT = (
 )
 
 
+# Comparison reducer (spec 2026-10-12 §3.2). Same rules as _REDUCE_PROMPT, except a
+# side with no findings MUST be named as uncovered: a comparison that silently drops
+# one side reads as complete.
+_REDUCE_FACETS_PROMPT = (
+    "Answer the QUESTION by synthesizing these community findings, which are grouped "
+    "under a heading for each side of the question. Each finding is shown as a marker "
+    "[N] followed by the fact it refers to.\n"
+    + ATTRIBUTION_RULES + CLAIM_RULES + COMPARISON_RULES +
+    "Rules:\n"
+    "- The question has these sides: {labels}. Address EVERY side, in that order. If a "
+    "side shows \"(no findings)\", say in one sentence that the retrieved "
+    "documentation does not cover it, and do not guess.\n"
+    # Run 6: sides whose findings were present but off the question's point were
+    # still called "not covered" -- a false absence.
+    "- Never state that the documentation does not cover a side when findings are "
+    "listed under its heading; describe what those findings say. Say a side is not "
+    "covered only when it shows \"(no findings)\".\n"
+    "- Cite every claim with the [N] marker of the fact it rests on. A sentence with "
+    "no marker is not allowed.\n"
+    "- Only the markers you write out are cited.\n"
+    "- Use ONLY these findings. Do NOT use outside knowledge.\n"
+    "- Do NOT write any URL.\n"
+    "- Let the evidence set the length. Say what the findings support and then stop.\n"
+    "- If no side has findings that support an answer, reply exactly: "
+    "\"" + _REFUSAL + "\"\n\nQUESTION: {q}\n\nFINDINGS:\n{blocks}\n\nAnswer:"
+)
+
+
+def _render_facet_blocks(facet_results: list[tuple[str, list[MapResult], list[str]]],
+                         fact_to_marker: dict[str, int], texts: dict[str, str],
+                         sources: dict[str, list[dict]]) -> str:
+    """Per facet heading: its community blocks, then a block of the facet's own
+    local-search facts, numbered by the same fact_to_marker. "(no findings)" only
+    when both are empty."""
+    parts = []
+    for label, results, own in facet_results:
+        blocks = _render_blocks(results, fact_to_marker, texts, sources)
+        lines = [fact_line(fact_to_marker[x], texts[x], sources.get(x, []))
+                 for x in own if x in texts]
+        if lines:
+            blocks.append(f"FACTS FROM {label} DOCUMENTATION:\n" + "\n".join(lines))
+        parts.append(f"=== {label} ===\n" + ("\n\n".join(blocks) or "(no findings)"))
+    return "\n\n".join(parts)
+
+
 async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: str,
                         synth_client: AsyncOpenAI, synth_model: str, *, q: str,
                         level: int, k: int, group_id: str,
                         settings: ExtractSettings,
-                        scope: Scope | None = None) -> dict:
+                        scope: Scope | None = None,
+                        facets: Sequence[Facet] | None = None,
+                        graphiti=None) -> dict:
+    """`graphiti` is used only by a comparison (>= 2 facets), for each facet's local
+    supplement; None skips the supplement."""
+    if facets is not None and len(facets) >= 2:
+        return await _global_search_facets(
+            driver, embedder, map_client, map_model, synth_client, synth_model, q=q,
+            level=level, group_id=group_id, settings=settings, facets=facets,
+            graphiti=graphiti)
     stats = RerankStats()
     hits = await shortlist_communities(driver, embedder, q, level=level, k=k,
                                        group_id=group_id, settings=settings, stats=stats,
@@ -489,3 +563,185 @@ async def global_search(driver, embedder, map_client: AsyncOpenAI, map_model: st
     return {"query": q, "answer": answer, "citations": citations,
             "degraded": stats.degraded, "communities_used": communities_used,
             "applies_to": applies_to(citations)}
+
+
+async def _global_search_facets(driver, embedder, map_client, map_model, synth_client,
+                                synth_model, *, q, level, group_id, settings,
+                                facets: Sequence[Facet], graphiti=None) -> dict:
+    stats = RerankStats()
+    n = settings.global_facet_top_n
+    # Each facet shortlists and maps with its own question (`f.query`, else `q`);
+    # the reduce prompt keeps the original `q`.
+    fqs = [f.query or q for f in facets]
+    # Every facet also gets a scoped, reranked LOCAL supplement, run alongside the
+    # shortlists: run 6's community findings were sometimes absent, out of scope, or
+    # off the side's point, and the reducer then called that side "not covered"
+    # although the facet's own local search found the right facts.
+    if graphiti is None:
+        logger.info("global facets: no graphiti handle, local supplement skipped")
+
+    async def _no_supplement() -> list:
+        return [None] * len(facets)
+
+    shortlists, supplements = await asyncio.gather(
+        asyncio.gather(*[
+            shortlist_communities(driver, embedder, fq, level=level, k=n,
+                                  group_id=group_id, settings=settings, stats=stats,
+                                  scope=f.scope, top_n=n)
+            for f, fq in zip(facets, fqs)], return_exceptions=True),
+        asyncio.gather(*[
+            search_local(graphiti, driver, q=fq, k=settings.global_facet_local_k,
+                         scope=f.scope, group_id=group_id,
+                         fetch_cap=settings.local_scoped_fetch_cap,
+                         scan_max_episodes=settings.local_scoped_scan_max_episodes,
+                         settings=settings, rerank_pool=settings.local_facet_rerank_pool)
+            for f, fq in zip(facets, fqs)], return_exceptions=True)
+        if graphiti is not None else _no_supplement())
+    raise_if_cancelled(shortlists)   # cancellation propagates; only Exceptions remain
+    raise_if_cancelled(supplements)
+    # Each live supplement's facts with text, in search order, by facet position.
+    own_facts: list[list[str]] = []
+    local_texts: dict[str, str] = {}
+    for sup in supplements:
+        ids: list[str] = []
+        if sup is not None and not isinstance(sup, BaseException):
+            for x in sup["results"]:
+                if x.get("fact") and str(x["fact"]).strip() and x["fact_uuid"] not in ids:
+                    ids.append(x["fact_uuid"])
+                    local_texts[x["fact_uuid"]] = x["fact"]
+        own_facts.append(ids)
+    # A community shortlisted by several facets serves EVERY one of them (spec
+    # §3.2): it is mapped once per distinct facet question (once when the facets
+    # share a question), then its fact ids are filtered separately by each facet's
+    # scope under that facet's heading.
+    distinct: dict[tuple[str, str], CommunityHit] = {}
+    for hits, fq in zip(shortlists, fqs):
+        if not isinstance(hits, BaseException):
+            for h in hits:
+                distinct.setdefault((h.community_id, fq), h)
+    order = list(distinct)
+    maps = await asyncio.gather(*[map_report(map_client, map_model, key[1], distinct[key])
+                                  for key in order], return_exceptions=True)
+    raise_if_cancelled(maps)
+    mapped: dict[tuple[str, str], MapResult] = {}
+    for key, m in zip(order, maps):
+        if isinstance(m, BaseException):
+            logger.warning("global map failed for community %s: %s", key[0], m)
+        elif m is None:
+            logger.warning("global map returned no usable result for community %s",
+                           key[0])
+        else:
+            mapped[key] = m
+    # ONE resolve over community and local facts: scope filter, labels, citations.
+    all_ids = sorted({fid for m in mapped.values() for fid in m.fact_ids}
+                     | {x for ids in own_facts for x in ids})
+    resolved = await Provenance(driver).resolve_citations(all_ids) if all_ids else {}
+    # A failure never reads as absence. Per facet, the community side FAILED when its
+    # shortlist raised or none of its shortlisted communities mapped usably; such a
+    # facet answers from its in-scope local facts alone when it has any, and is
+    # "could not check" (left out of the prompt) only when its supplement also
+    # returned nothing, raised, or was skipped. A failed supplement degrades a facet
+    # only when it has no community findings. A facet with community findings or
+    # local facts none of which has readable text is "could not check" too (below).
+    # Genuine absence ("(no findings)") is a facet whose community side succeeded
+    # with no in-scope fact and whose supplement succeeded with no in-scope fact.
+    degraded_set: set[str] = set()
+    facet_results: list[tuple[str, list[MapResult], list[str]]] = []
+    for f, fq, hits, sup, own in zip(facets, fqs, shortlists, supplements, own_facts):
+        if isinstance(sup, Exception):
+            logger.warning("global facet %r local supplement failed: %s", f.label, sup)
+        # Local facts are kept only with resolved provenance inside the facet scope.
+        own = [x for x in own if resolved.get(x, {}).get("sources")
+               and _in_scope_ci(resolved[x]["sources"], f.scope)]
+        community_failure: str | None = None
+        kept: list[MapResult] = []
+        if isinstance(hits, BaseException):
+            community_failure = f"shortlist failed: {hits}"
+        else:
+            mine = [mapped[(h.community_id, fq)] for h in hits
+                    if (h.community_id, fq) in mapped]
+            if hits and not mine:
+                community_failure = (f"none of its {len(hits)} communities mapped "
+                                     "usably")
+            kept = [replace(m, fact_ids=[
+                x for x in m.fact_ids
+                if _in_scope_ci(resolved.get(x, {}).get("sources", []), f.scope)])
+                for m in mine]
+            kept = [m for m in kept if m.fact_ids]
+        if community_failure is not None:
+            if own:
+                logger.warning("global facet %r %s; answering from its %d local facts",
+                               f.label, community_failure, len(own))
+            else:
+                logger.warning("global facet %r %s, and its local supplement returned "
+                               "nothing", f.label, community_failure)
+                degraded_set.add(f.label)
+                continue
+        elif isinstance(sup, Exception) and not kept:
+            degraded_set.add(f.label)
+            continue
+        community_facts = {x for m in kept for x in m.fact_ids}
+        facet_results.append((f.label, kept,
+                              [x for x in own if x not in community_facts]))
+    marker_map: dict[int, dict] = {}
+    fact_to_marker: dict[str, int] = {}
+    for _, ms, own in facet_results:
+        # one marker per fact uuid: a fact already numbered keeps its marker
+        for fid in [x for m in ms for x in m.fact_ids] + own:
+            if fid not in fact_to_marker:
+                fact_to_marker[fid] = len(fact_to_marker) + 1
+                marker_map[fact_to_marker[fid]] = {"fact_uuid": fid}
+    # Local facts arrive with their text; only community facts are fetched.
+    texts = {**await _fact_texts(driver, group_id,
+                                 [x for x in fact_to_marker if x not in local_texts]),
+             **{x: t for x, t in local_texts.items() if x in fact_to_marker}}
+    missing = [fid for fid in fact_to_marker if fid not in texts]
+    if missing:
+        # Same rule as the single-facet path: never drop a marker silently.
+        logger.warning(
+            "global facet reduce: %d of %d selected facts have no readable text and "
+            "were dropped from the findings: %s", len(missing), len(fact_to_marker),
+            missing)
+    marker_map = {k: v for k, v in marker_map.items() if v["fact_uuid"] in texts}
+    # Findings existed but none can be shown: a failure, never "(no findings)".
+    renderable = []
+    for label, ms, own in facet_results:
+        ids = [x for m in ms for x in m.fact_ids] + own
+        if ids and not any(x in texts for x in ids):
+            logger.warning("global facet %r: none of its %d facts has readable text",
+                           label, len(ids))
+            degraded_set.add(label)
+        else:
+            renderable.append((label, ms, own))
+    facet_results = renderable
+    degraded = [f.label for f in facets if f.label in degraded_set]
+    seen_cids: set[str] = set()
+    communities_used: list[dict] = []
+    for _, ms, _own in facet_results:
+        for m in ms:
+            if m.community_id not in seen_cids:
+                seen_cids.add(m.community_id)
+                communities_used.append({"community_id": m.community_id,
+                                         "title": m.title, "relevance": m.relevance})
+    note = could_not_check_note(degraded)
+    refusal = {"query": q, "answer": _REFUSAL + (" " + note if note else ""),
+               "citations": [], "communities_used": communities_used,
+               "degraded": stats.degraded, "applies_to": [], "degraded_facets": degraded}
+    if not marker_map:
+        return refusal
+    sources_by_fact = {fid: resolved.get(fid, {}).get("sources", []) for fid in fact_to_marker}
+    blocks = _render_facet_blocks(facet_results, fact_to_marker, texts, sources_by_fact)
+    raw = await _complete_or_none(
+        synth_client, synth_model,
+        _REDUCE_FACETS_PROMPT.format(labels="; ".join(lab for lab, _, _ in facet_results),
+                                     q=q, blocks=blocks), max_tokens=3000)
+    if raw is None:
+        return refusal
+    answer, cited = _finalize_answer(raw, marker_map)
+    citations = _build_citations(cited, marker_map, resolved)
+    answer = _with_disclaimer(answer, stats.degraded)
+    if note:
+        answer = f"{answer}\n\n{note}"
+    return {"query": q, "answer": answer, "citations": citations,
+            "degraded": stats.degraded, "communities_used": communities_used,
+            "applies_to": applies_to(citations), "degraded_facets": degraded}

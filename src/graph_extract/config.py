@@ -320,6 +320,45 @@ class ExtractSettings(BaseSettings):
     # trace to the scope's vendor(s)/product(s) -- see design spec §4.3 step 3
     # for the measured Azure/AWS example this threshold was picked against.
     global_scope_min_share: float = 0.5
+    # --- facet-balanced answers (spec 2026-10-12) ---
+    # Comparison: each facet's local search gets max(this, ceil(k / facets)) facts.
+    local_min_per_facet: int = 6
+    # Scoped local search re-fetches at k*3, k*10, k*30 until k edges survive the
+    # scope filter, never above this (the Veeam Agent scope kept 7 of 45, 2026-10-12).
+    local_scoped_fetch_cap: int = 450
+    # When that post-filter still leaves fewer than k, rank the scope's OWN facts
+    # (search._scoped_scan): a small vendor next to a huge one has none in the
+    # corpus-wide top-N (Cohesity scoped search returned 0 facts, 2026-10-12). Scopes
+    # with more episodes than this skip the scan (served by the post-filter). Live
+    # cost is ~0.45 ms/episode (Microsoft, 4.7k episodes: 2.3 s, 2026-10-13), so
+    # 6000 keeps the scan inside a 3 s budget.
+    local_scoped_scan_max_episodes: int = 6000
+    # The scan reranks its top-N cosine candidates with the cross-encoder when one is
+    # configured: cosine ranked Cohesity's first DataLock fact ~103rd for "Which backup
+    # vendors support immutable backups?"; reranking the top 200 put DataLock/WORM at
+    # rank 1 (and top 3 for "Does Cohesity support immutable backups?", 2026-10-13).
+    local_scoped_scan_candidates: int = 200
+    # Facet searches (comparison/enumeration sides, facet-scoped DRIFT follow-ups) pull
+    # this many candidates and rerank them with the cross-encoder down to k: gate run 2
+    # showed large scopes (Veeam, Microsoft) filling k from the corpus-wide hybrid
+    # search with poor ranking ("PostgreSQL WAL Files Backup" for a ransomware
+    # question); reranking a 40-fact pool put the relevant facts on top (2026-10-13).
+    # Single-shape searches never rerank this way.
+    local_facet_rerank_pool: int = 40
+    # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
+    global_facet_top_n: int = 3
+    # Comparison: every facet also gets this many facts from a scoped, reranked local
+    # search, rendered under its heading after its community findings. Run 6
+    # (2026-10-13): a Veeam Backup for Microsoft 365 side with no usable community
+    # finding, and AWS/Veeam sides with only off-point findings, were all reported as
+    # "not covered" although the facet's own local search found the right facts.
+    global_facet_local_k: int = 8
+    # Enumeration: evidence gathered per content vendor before its cheap check.
+    enum_communities_per_vendor: int = 2
+    enum_facts_per_vendor: int = 8
+    # Vendors gathered/checked at once: at 40 vendors the unbounded fan-out issued
+    # up to 120 hybrid searches plus 40 scans at once against Neo4j.
+    enum_concurrency: int = 8
     # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
     # older than this (plan ruling 4 -- no separate freshness module exists).
     scope_reload_seconds: int = 3600

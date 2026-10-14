@@ -133,3 +133,17 @@ async def test_global_with_communities_stays_global():
     assert env["mode"] == "global"
     assert env["routing"]["fallback_from"] is None
     assert env["freshness"]["reports_as_of"] == "2026-07-17T00:00:00Z"
+
+
+async def test_global_dispatch_passes_graphiti_for_the_facet_supplement(monkeypatch):
+    seen = {}
+
+    async def _global(*a, **k):
+        seen["graphiti"] = k.get("graphiti")
+        return await _fake_global(*a, **k)
+
+    monkeypatch.setattr(global_mod, "global_search", _global)
+    g = object()
+    await answer_router(g, None, None, None, "sm", None, "mm", None, "", q="q",
+                        mode_override="global", scope=Scope(), settings=_S)
+    assert seen["graphiti"] is g

@@ -114,7 +114,8 @@ async def test_complete_or_none_returns_none_after_both_attempts_fail():
 # local (answer_local)
 # ---------------------------------------------------------------------------
 
-async def _fake_search_local_with_hit(graphiti, driver, *, q, k=15, scope=None, group_id):
+async def _fake_search_local_with_hit(graphiti, driver, *, q, k=15, scope=None, group_id,
+                                      fetch_cap=450, scan_max_episodes=6000, settings=None):
     return {"query": q, "count": 1, "results": [
         {"fact": "AWS Backup uses Vault Lock", "fact_uuid": "f1", "valid_at": None,
          "invalid_at": None, "sources": [{"article_id": "a1", "source_url": "https://x/a1"}]}]}
@@ -233,10 +234,13 @@ async def test_drift_search_end_to_end_refuses_on_unusable_synthesis(monkeypatch
     hit = _hit()
 
     async def _fake_primer(embedder, synth_client, synth_model, driver, *, q, level, k,
-                           max_followups, group_id, settings, stats=None, scope=None):
-        return "prelim", [drift_mod.FollowUp(query="q2", community_id="c1", iteration=1)], [hit]
+                           max_followups, group_id, settings, stats=None, scope=None,
+                           facets=None, top_n=None):
+        return ("prelim", [drift_mod.FollowUp(query="q2", community_id="c1", iteration=1)],
+                [hit], [])
 
-    async def _fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None):
+    async def _fake_run_followup(graphiti, driver, fu, *, k, group_id, scope=None,
+                        fetch_cap=450, scan_max_episodes=6000, settings=None):
         return [{"fact": "AWS Backup uses Vault Lock", "fact_uuid": "f1"}]
 
     monkeypatch.setattr(drift_mod, "_primer", _fake_primer)

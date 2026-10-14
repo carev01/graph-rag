@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import re
+from collections.abc import Sequence
 
 from openai import AsyncOpenAI
 
 from answer_api import search as search_mod
-from answer_api.attribution import ATTRIBUTION_RULES, applies_to, fact_line
+from answer_api.attribution import (
+    ATTRIBUTION_RULES,
+    CLAIM_RULES,
+    COMPARISON_RULES,
+    applies_to,
+    fact_line,
+)
 from answer_api.scope import Scope
+from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from graph_extract.config import ExtractSettings
 from graph_extract.usage import bounded_llm_client, usable_content as _usable_content
 
@@ -66,7 +76,7 @@ _RANGE_RE = re.compile(
 
 _PROMPT = (
     "You are answering a question about backup products using ONLY the numbered "
-    "facts below. " + ATTRIBUTION_RULES +
+    "facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
     "Cite every claim inline with its [N] marker. Do NOT use outside "
     "knowledge. Do NOT write any URL or link. If the facts do not answer the "
     "question, reply exactly: "
@@ -75,6 +85,34 @@ _PROMPT = (
 )
 
 _REFUSAL = "I don't have enough information to answer that from the available sources."
+
+# Comparison prompt (spec 2026-10-12 §3.1): facts arrive grouped under one heading
+# per facet, and every facet must be answered. Saying a facet is NOT covered is
+# required here -- unlike the global reducer's "absence of evidence" rule -- because
+# a comparison that silently drops one side reads as a complete answer.
+_FACET_PROMPT = (
+    "You are answering a question about backup products using ONLY the numbered "
+    "facts below, grouped under a heading for each side of the question. "
+    + ATTRIBUTION_RULES + CLAIM_RULES + COMPARISON_RULES +
+    "The question has these sides: {labels}. Address EVERY side, in that order. If a "
+    "side shows \"(no facts retrieved)\", say in one sentence that the retrieved "
+    "documentation does not cover it, and do not guess. Cite every claim inline with "
+    "its [N] marker. Do NOT use outside knowledge. Do NOT write "
+    "any URL or link. If no "
+    "side has facts that answer the question, reply exactly: "
+    "\"I don't have enough information to answer that from the available sources.\"\n\n"
+    "FACTS:\n{facts}\n\nQUESTION: {q}\n\nAnswer:"
+)
+
+
+def _facet_facts_block(groups: list[tuple[str, list[int]]],
+                       marker_map: dict[int, dict]) -> str:
+    parts = []
+    for label, markers in groups:
+        lines = [fact_line(i, marker_map[i]["fact"], marker_map[i]["sources"])
+                 for i in markers] or ["(no facts retrieved)"]
+        parts.append(f"=== {label} ===\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _strip_markers(text: str, keep: set[int]) -> str:
@@ -214,13 +252,26 @@ def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI,
 
 
 async def answer_local(graphiti, driver, synth_client, synth_model, *,
-                       q, k=15, scope: Scope | None = None, group_id) -> dict:
+                       q, k=15, scope: Scope | None = None, group_id,
+                       facets: Sequence[Facet] | None = None, min_per_facet: int = 6,
+                       fetch_cap: int = 450, scan_max_episodes: int = 6000,
+                       settings: ExtractSettings | None = None) -> dict:
     """Retrieve facts via search_local, number them [1..N], let the LLM cite
     by marker only (design-decision #2: the LLM never writes a URL), then
     resolve citations deterministically from the marker map. Zero-retrieval
-    short-circuits to the fixed refusal without spending any LLM tokens."""
+    short-circuits to the fixed refusal without spending any LLM tokens.
+
+    With `facets` of length >= 2 (a comparison/enumeration question), delegate to
+    `_answer_local_facets`, which retrieves per facet and balances the answer
+    across every side instead of one pooled search."""
+    if facets is not None and len(facets) >= 2:
+        return await _answer_local_facets(
+            graphiti, driver, synth_client, synth_model, q=q, k=k, group_id=group_id,
+            facets=facets, min_per_facet=min_per_facet, fetch_cap=fetch_cap,
+            scan_max_episodes=scan_max_episodes, settings=settings)
     res = await search_mod.search_local(
-        graphiti, driver, q=q, k=k, scope=scope, group_id=group_id)
+        graphiti, driver, q=q, k=k, scope=scope, group_id=group_id, fetch_cap=fetch_cap,
+        scan_max_episodes=scan_max_episodes, settings=settings)
     results = res["results"]
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [],
@@ -246,3 +297,72 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
     return {"query": q, "answer": answer, "citations": citations,
             "retrieved": len(results), "cited": len(cited),
             "applies_to": applies_to(citations)}
+
+
+async def _answer_local_facets(graphiti, driver, synth_client, synth_model, *, q, k,
+                               group_id, facets: Sequence[Facet], min_per_facet: int,
+                               fetch_cap: int, scan_max_episodes: int = 6000,
+                               settings: ExtractSettings | None = None) -> dict:
+    """Retrieve each facet's facts with its own scope and an equal share of `k`
+    (at least `min_per_facet`), number facts in facet order (one marker per
+    fact_uuid; a fact shared by facets is listed under each with that marker),
+    and group the facts block under one heading per facet so the comparison
+    prompt can require every side to be addressed. A facet whose retrieval
+    raises is reported in `degraded_facets` -- never silently shown as having
+    no facts, which would read as "nothing to say" rather than "could not check".
+    Each facet retrieves with its own question (`f.query`, else `q`); the answer
+    prompt keeps the original `q`."""
+    k_facet = max(min_per_facet, math.ceil(k / len(facets)))
+    found = await asyncio.gather(*[
+        search_mod.search_local(graphiti, driver, q=f.query or q, k=k_facet,
+                                scope=f.scope,
+                                group_id=group_id, fetch_cap=fetch_cap,
+                                scan_max_episodes=scan_max_episodes, settings=settings,
+                                rerank_pool=settings.local_facet_rerank_pool
+                                if settings is not None else 0)
+        for f in facets], return_exceptions=True)
+    raise_if_cancelled(found)   # cancellation propagates; only Exceptions remain
+    marker_map: dict[int, dict] = {}
+    marker_of: dict[str, int] = {}
+    groups: list[tuple[str, list[int]]] = []
+    degraded: list[str] = []
+    for f, res in zip(facets, found):
+        if isinstance(res, BaseException):
+            # Never read as absence: the facet is reported, not shown as empty.
+            logger.warning("local facet %r retrieval failed: %s", f.label, res)
+            degraded.append(f.label)
+            continue
+        markers: list[int] = []
+        for r in res["results"]:
+            # A fact numbered under an earlier facet keeps its marker and is listed
+            # under this facet too, so a facet whose facts were all shared is
+            # never rendered as "(no facts retrieved)".
+            if r["fact_uuid"] not in marker_of:
+                marker_of[r["fact_uuid"]] = len(marker_map) + 1
+                marker_map[marker_of[r["fact_uuid"]]] = r
+            if marker_of[r["fact_uuid"]] not in markers:
+                markers.append(marker_of[r["fact_uuid"]])
+        groups.append((f.label, markers))
+    note = could_not_check_note(degraded)
+    if not marker_map:
+        return {"query": q, "answer": (_REFUSAL + (" " + note if note else "")),
+                "citations": [], "retrieved": 0, "cited": 0, "applies_to": [],
+                "degraded_facets": degraded}
+    prompt = _FACET_PROMPT.format(labels="; ".join(lab for lab, _ in groups),
+                                  facts=_facet_facts_block(groups, marker_map), q=q)
+    raw = await _complete_or_none(synth_client, synth_model, prompt, max_tokens=3000)
+    if raw is None:
+        return {"query": q, "answer": (_REFUSAL + (" " + note if note else "")),
+                "citations": [], "retrieved": len(marker_map), "cited": 0,
+                "applies_to": [], "degraded_facets": degraded}
+    answer, cited = _finalize_answer(raw, marker_map)
+    if note:
+        answer = f"{answer}\n\n{note}"
+    citations = [{"marker": m, "fact": marker_map[m]["fact"],
+                  "fact_uuid": marker_map[m]["fact_uuid"],
+                  "valid_at": marker_map[m].get("valid_at"),
+                  "invalid_at": marker_map[m].get("invalid_at"),
+                  "sources": marker_map[m]["sources"]} for m in cited]
+    return {"query": q, "answer": answer, "citations": citations,
+            "retrieved": len(marker_map), "cited": len(cited),
+            "applies_to": applies_to(citations), "degraded_facets": degraded}

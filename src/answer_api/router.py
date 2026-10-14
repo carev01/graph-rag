@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import Literal, cast
 
 from openai import AsyncOpenAI
@@ -20,8 +21,10 @@ from answer_api import global_search as global_mod
 from answer_api import drift as drift_mod
 from answer_api import timeline as timeline_mod
 from answer_api import freshness as freshness_mod
+from answer_api import enumeration as enum_mod
 from answer_api import attribution
 from answer_api.scope import Scope
+from answer_api.shape import QuestionShape, could_not_check_note, facet_queries
 
 logger = logging.getLogger(__name__)
 
@@ -155,23 +158,28 @@ def _normalize(mode: Mode, via: str, fallback_from: str | None, raw: dict,
 
 
 async def _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
-                    map_client, map_model, *, q, scope: Scope, settings) -> dict:
+                    map_client, map_model, *, q, scope: Scope, settings,
+                    facets=None) -> dict:
     g = settings.group_id
     if mode == "local":
         return await synth_mod.answer_local(
-            graphiti, driver, synth_client, synth_model, q=q, scope=scope, group_id=g)
+            graphiti, driver, synth_client, synth_model, q=q, scope=scope, group_id=g,
+            facets=facets, min_per_facet=settings.local_min_per_facet,
+            fetch_cap=settings.local_scoped_fetch_cap,
+            scan_max_episodes=settings.local_scoped_scan_max_episodes, settings=settings)
     if mode == "global":
         return await global_mod.global_search(
             driver, embedder, map_client, map_model, synth_client, synth_model,
             q=q, level=settings.global_default_level, k=settings.global_shortlist_k,
-            group_id=g, settings=settings, scope=scope)
+            group_id=g, settings=settings, scope=scope, facets=facets,
+            graphiti=graphiti)
     if mode == "drift":
         return await drift_mod.drift_search(
             graphiti, driver, embedder, synth_client, synth_model, q=q,
             level=settings.drift_primer_level, iterations=settings.drift_iterations,
             primer_k=settings.drift_primer_k, max_followups=settings.drift_max_followups,
             followup_k=settings.drift_followup_k, group_id=g, settings=settings,
-            scope=scope)
+            scope=scope, facets=facets)
     return await timeline_mod.timeline_local(
         graphiti, driver, q=q, scope=scope, group_id=g)
 
@@ -182,56 +190,131 @@ def _grounded(mode: Mode, raw: dict) -> bool:
     return bool(raw.get("citations"))
 
 
+def _shape_fields(env: dict, shape: QuestionShape | None, raw: dict,
+                  requested: str) -> None:
+    """`shape`/`facets` describe how the question was ANSWERED (single after an
+    override, relaxation or a timeline run, which ignores facets);
+    `shape_requested` is the classified kind it was asked as."""
+    env["shape"] = shape.kind if shape is not None else "single"
+    env["shape_requested"] = requested
+    # `query` (the facet's rewritten retrieval question) only when one was set, so a
+    # single question's envelope is unchanged.
+    env["facets"] = [{"label": f.label, "scope": f.scope.as_dict(),
+                      **({"query": f.query} if f.query else {})}
+                     for f in (shape.facets if shape is not None else ())]
+    for key in ("degraded_facets", "checked_vendors", "documented_vendors"):
+        if key in raw:
+            env[key] = raw[key]
+
+
 async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
                         map_client, map_model, cheap_client, cheap_model, *,
-                        q, mode_override, scope: Scope, settings) -> dict:
+                        q, mode_override, scope: Scope, settings,
+                        shape: QuestionShape | None = None) -> dict:
     mode, via = await classify(q, cheap_client=cheap_client, cheap_model=cheap_model,
                                mode_override=mode_override,
                                default_mode=settings.router_default_mode)
+    requested = shape.kind if shape is not None else "single"
+    if shape is not None and shape.kind == "enumeration" and via == "override":
+        # An explicit mode is the caller's instruction, like an explicit scope
+        # (the eval harness forces each mode in turn): run that mode unfaceted,
+        # and report the run as the single question it was answered as.
+        shape = None
+    # A comparison routed to timeline runs unfaceted (timeline ignores facets,
+    # see _shape_fields/_grounded below): skip the rewrite call. An enumeration
+    # always rewrites regardless of `mode` -- it never dispatches through the
+    # mode functions, so "the mode that will run" for it is never timeline.
+    if (shape is not None and shape.kind in ("comparison", "enumeration")
+            and not (shape.kind == "comparison" and mode == "timeline")):
+        # Each side retrieves with its own standalone question (one cheap map-tier
+        # call); a side whose rewrite failed retrieves with the original question.
+        # Answering prompts keep the original question.
+        shape = replace(shape, facets=await facet_queries(map_client, map_model, q,
+                                                          shape.facets))
+    if shape is not None and shape.kind == "enumeration":
+        # The classifier still runs (it labels the envelope's mode), but an
+        # enumeration checks every content vendor instead of running that mode.
+        # It has no detected scope, so there is nothing to relax. Temporal wording
+        # classifies as timeline, but the enumeration's result is a prose answer,
+        # not a timeline -- normalizing it as one would discard the answer -- so
+        # it is labelled global, the map-reduce it most resembles.
+        raw = await enum_mod.enumerate_vendors(
+            graphiti, driver, embedder, map_client, map_model, synth_client,
+            synth_model, q=q, facets=shape.facets, group_id=settings.group_id,
+            settings=settings)
+        label: Mode = "global" if mode == "timeline" else mode
+        env = _normalize(label, via, None, raw, q, scope)
+        env["routing"]["path"] = "enumeration"
+        _shape_fields(env, shape, raw, requested)
+        env["freshness"] = await freshness_mod.freshness(
+            driver, settings.group_id, reports=True)
+        return env
+    facets = shape.facets if shape is not None and shape.kind == "comparison" else None
     args = (graphiti, driver, embedder, synth_client, synth_model, map_client, map_model)
     first = mode
     mode, fallback_from, raw = await _run_mode(first, *args, q=q, scope=scope,
-                                               settings=settings)
+                                               settings=settings, facets=facets)
     env_scope = scope
     relaxed = False
+    first_degraded: list[str] = []
     if scope.source == "detected" and not _grounded(mode, raw):
+        first_degraded = list(raw.get("degraded_facets") or [])
         # A DETECTED scope is a guess from names in the question; when the scoped
         # path grounds nothing, answer unscoped rather than refuse where the
         # unscoped system would have answered (final review). An explicit scope
-        # is the caller's instruction and is never relaxed.
+        # is the caller's instruction and is never relaxed. The re-run is single
+        # and unscoped: the facets were derived from the same detected names.
         mode, fallback_from, raw = await _run_mode(first, *args, q=q, scope=Scope(),
                                                    settings=settings)
         relaxed = True
     env = _normalize(mode, via, fallback_from, raw, q, env_scope)
     if relaxed:
         env["scope"] = {**scope.as_dict(), "source": "detected-relaxed"}
+    # A relaxed re-run, or a timeline run (which ignores facets), never balanced
+    # across facets: report it as the single question it was answered as.
+    answered_as = None if relaxed or mode == "timeline" else shape
+    _shape_fields(env, answered_as, raw, requested)
+    if relaxed and first_degraded:
+        # A failure never reads as absence: the scoped run's could-not-check
+        # facets survive the unscoped re-run.
+        env["degraded_facets"] = first_degraded
+        note = could_not_check_note(first_degraded)
+        if note not in env["answer"]:
+            env["answer"] = f"{env['answer']}\n\n{note}"
     env["freshness"] = await freshness_mod.freshness(
         driver, settings.group_id, reports=mode in ("global", "drift"))
     return env
 
 
 async def _run_mode(mode: Mode, graphiti, driver, embedder, synth_client, synth_model,
-                    map_client, map_model, *, q, scope: Scope, settings
-                    ) -> tuple[Mode, str | None, dict]:
+                    map_client, map_model, *, q, scope: Scope, settings,
+                    facets=None) -> tuple[Mode, str | None, dict]:
     """One mode plus its fallback (local->drift when nothing was retrieved;
     global->local when global grounded nothing), all with the same scope."""
     raw = await _dispatch(mode, graphiti, driver, embedder, synth_client, synth_model,
-                          map_client, map_model, q=q, scope=scope, settings=settings)
+                          map_client, map_model, q=q, scope=scope, settings=settings,
+                          facets=facets)
     fallback_from: str | None = None
     if mode == "local" and raw.get("retrieved") == 0:
         fallback_from = "local"
         mode = "drift"
         raw = await _dispatch("drift", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, scope=scope,
-                              settings=settings)
+                              settings=settings, facets=facets)
     # Global falls back to local when it grounded nothing: no community used, OR
     # communities used but no citation (the reduce step refused -- e.g. a scoped
     # comparison whose second vendor's community failed to map). Local runs with
-    # the same scope and answers such questions from facts directly.
-    elif mode == "global" and (not raw.get("communities_used") or not raw.get("citations")):
+    # the same scope and answers such questions from facts directly. A FACETED run
+    # (two or more facets) falls back only when uncited: its facets' local
+    # supplements can ground the answer with no community used, and rerunning as
+    # local would discard that grounded answer (final review).
+    elif mode == "global" and (
+            not raw.get("citations")
+            or (not (facets is not None and len(facets) >= 2)
+                and not raw.get("communities_used"))):
         fallback_from = "global"
         mode = "local"
         raw = await _dispatch("local", graphiti, driver, embedder, synth_client,
                               synth_model, map_client, map_model, q=q, scope=scope,
-                              settings=settings)
+                              settings=settings, facets=facets)
     return mode, fallback_from, raw
