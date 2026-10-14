@@ -82,3 +82,22 @@ async def test_gate_passes_other_paths_and_non_http_scopes():
     await gate({"type": "http", "path": "/other", "headers": []}, None, None)
     await gate({"type": "lifespan"}, None, None)
     assert seen == ["/other", "lifespan"]
+
+
+async def _post_under_root_path(app, headers):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, root_path="/api"),
+                                 base_url="http://graphrag.k3s.home.lan") as c:
+        return await c.post("/api/mcp", json=_INIT, headers=headers)
+
+
+async def test_a_root_path_does_not_bypass_the_gate(monkeypatch):
+    _settings(monkeypatch, "s3cret-token")
+    app = app_mod.create_app()
+    async with app.state.mcp_server.session_manager.run():
+        denied = await _post_under_root_path(app, dict(_HDRS))
+        allowed = await _post_under_root_path(
+            app, {**_HDRS, "authorization": "Bearer s3cret-token"})
+    assert denied.status_code == 401
+    assert denied.headers["www-authenticate"] == "Bearer"
+    assert allowed.status_code == 200
+    assert "graph-rag" in allowed.text
