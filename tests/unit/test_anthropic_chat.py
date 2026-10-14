@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import graph_extract.anthropic_chat as ac
 import graph_extract.usage as usage_mod
 from graph_extract.anthropic_chat import AnthropicChat, is_anthropic, split_system
 from graph_extract.config import ExtractSettings
@@ -81,7 +82,8 @@ def test_system_messages_become_the_system_parameter_and_temperature_is_dropped(
     client, seen = _adapter(_msg(["x"]))
     _call(client, messages=[{"role": "system", "content": "be terse"},
                             {"role": "user", "content": "q"}])
-    assert seen.seen["system"] == "be terse"
+    assert seen.seen["system"] == [{"type": "text", "text": "be terse",
+                                    "cache_control": {"type": "ephemeral"}}]
     assert seen.seen["messages"] == [{"role": "user", "content": "q"}]
     assert "temperature" not in seen.seen
     assert split_system([{"role": "user", "content": "q"}]) == (None, [
@@ -158,3 +160,110 @@ def test_a_reply_cut_off_at_max_tokens_is_logged(caplog):
         resp = _call(client, max_tokens=16000)
     assert resp.choices[0].finish_reason == "length"
     assert any("hit max_tokens=16000" in r.getMessage() for r in caplog.records)
+
+
+def test_only_the_system_block_carries_a_cache_breakpoint():
+    # BACKLOG 58: the static prefix is cached; per-call user content never is.
+    client, seen = _adapter(_msg(["x"]))
+    _call(client, messages=[{"role": "system", "content": "rules"},
+                            {"role": "user", "content": "chunk"}])
+    assert seen.seen["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert seen.seen["messages"] == [{"role": "user", "content": "chunk"}]
+    assert "cache_control" not in seen.seen
+
+
+def test_no_system_message_sends_no_system_and_no_breakpoint():
+    client, seen = _adapter(_msg(["x"]))
+    _call(client)
+    assert "system" not in seen.seen and "cache_control" not in seen.seen
+
+
+def test_cache_system_false_sends_the_plain_system_string():
+    fake = SimpleNamespace(messages=_FakeMessages(_msg(["x"])))
+    client = AnthropicChat(api_key="k", client=fake, cache_system=False)
+    _call(client, messages=[{"role": "system", "content": "rules"},
+                            {"role": "user", "content": "q"}])
+    assert fake.messages.seen["system"] == "rules"
+
+
+def test_cache_reads_are_reported_as_cached_prompt_tokens():
+    client, _ = _adapter(_msg(["x"], input_tokens=15, cache_read_input_tokens=782))
+    resp = _call(client, messages=[{"role": "system", "content": "rules"},
+                                   {"role": "user", "content": "q"}])
+    assert resp.usage.prompt_tokens == 797
+    assert resp.usage.prompt_tokens_details.cached_tokens == 782
+
+
+# --- BACKLOG 59: structured outputs, no-thinking, overruns, usage ---------------------
+
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {"type": "array", "maxItems": 25, "items": {"type": "integer"}},
+        "maxItems": {"type": "string", "maxLength": 9},   # a FIELD named maxItems
+        "nested": {"$ref": "#/$defs/N"},
+    },
+    "$defs": {"N": {"type": "object", "properties": {
+        "n": {"type": "integer", "minimum": 0},
+        "ids": {"type": "array", "maxItems": 5, "items": {"type": "integer"}}}}},
+}
+
+
+def test_claude_schema_closes_objects_and_strips_rejected_constraints():
+    out, cap = ac.claude_schema(_SCHEMA)
+    assert cap == 5
+    assert out["additionalProperties"] is False
+    assert out["$defs"]["N"]["additionalProperties"] is False
+    assert "maxItems" not in out["properties"]["items"]
+    assert "maxItems" in out["properties"]               # the field survives
+    assert "maxLength" not in out["properties"]["maxItems"]
+    assert "minimum" not in out["$defs"]["N"]["properties"]["n"]
+    assert "maxItems" in _SCHEMA["properties"]["items"]   # input never mutated
+
+
+def test_json_schema_response_format_becomes_output_config_format():
+    client, seen = _adapter(_msg(['{"items": [1]}']), effort="low")
+    _call(client, response_format={"type": "json_schema",
+                                   "json_schema": {"name": "X", "schema": _SCHEMA}})
+    fmt = seen.seen["output_config"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["schema"]["additionalProperties"] is False
+    assert seen.seen["output_config"]["effort"] == "low"
+    assert "response_format" not in seen.seen
+
+
+def test_json_object_response_format_sends_no_format():
+    client, seen = _adapter(_msg(["{}"]))
+    _call(client, response_format={"type": "json_object"})
+    assert "output_config" not in seen.seen
+
+
+@pytest.mark.parametrize("effort", ["none", "disabled", "OFF"])
+def test_effort_none_disables_thinking(effort):
+    client, seen = _adapter(_msg(["x"]), effort=effort)
+    _call(client)
+    assert seen.seen["thinking"] == {"type": "disabled"}
+    assert "output_config" not in seen.seen
+
+
+def test_an_integer_array_over_the_schema_cap_is_counted(monkeypatch, caplog):
+    monkeypatch.setattr(ac, "ARRAY_OVERRUNS", ac.ArrayOverruns())
+    reply = '{"items": [1, 2, 3, 4, 5, 6, 7], "nested": {"ids": [1]}}'
+    client, _ = _adapter(_msg([reply]))
+    _call(client, response_format={"type": "json_schema",
+                                   "json_schema": {"name": "X", "schema": _SCHEMA}})
+    assert ac.ARRAY_OVERRUNS.replies == 1 and ac.ARRAY_OVERRUNS.longest == 7
+    assert "over the schema's maxItems=5" in caplog.text
+
+
+def test_claude_usage_keeps_cache_writes_apart_and_prices_them(monkeypatch):
+    monkeypatch.setattr(ac, "CLAUDE_USAGE", ac.ClaudeUsage())
+    client, _ = _adapter(_msg(["x"], input_tokens=100, cache_read_input_tokens=1000,
+                              cache_creation_input_tokens=400, output_tokens=50))
+    _call(client)
+    u = ac.CLAUDE_USAGE
+    assert (u.calls, u.input_tokens, u.cache_read_tokens, u.cache_write_tokens,
+            u.output_tokens) == (1, 100, 1000, 400, 50)
+    # $0.10/M input, $0.50/M output: 100 + 1000*0.1 + 400*1.25 = 700 input-equivalent
+    assert u.dollars(0.10, 0.50) == pytest.approx((700 * 0.10 + 50 * 0.50) / 1e6)

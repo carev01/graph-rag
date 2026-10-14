@@ -135,6 +135,10 @@ def _request_payload(kwargs: dict) -> dict:
     fmt = kwargs.get("response_format", kwargs.get("text_format"))
     if fmt is not None:
         payload["response_format"] = _jsonable(fmt)
+    # OpenRouter routing/reasoning preferences (`provider`, `reasoning`) -- what a
+    # paid run's engagement gate checks; never credentials.
+    if kwargs.get("extra_body"):
+        payload["extra_body"] = _jsonable(kwargs["extra_body"])
     return payload
 
 

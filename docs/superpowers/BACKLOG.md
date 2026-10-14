@@ -1384,7 +1384,16 @@ The full-rebuild path (`theme-build --full`, `_run_theme_build`) is also still
 sequential and unresumable; the incremental path (the default) got concurrency and
 draft-resume on 2026-10-10.
 
-### 58. Prompt caching for the Claude tiers (added 2026-10-13, after the answer-quality slice)
+### 58. ~~Prompt caching for the Claude tiers~~ — **DONE 2026-10-14** (added 2026-10-13)
+**Done:** `AnthropicChat` puts one ephemeral cache breakpoint on the system block (where
+`cache_layout` moves graphiti's static prompt tails); user content is never marked, since a
+breakpoint after per-call content only adds the 1.25x write. Measured on Claude Haiku 5.5:
+a 782-token system block caches (minimum is at or below that), and a repeat call through
+`bounded_llm_client` read 1,399 of 1,413 prompt tokens from cache. **The theme writer gains
+~nothing today:** its static instructions are 80-150 tokens and the ~21k-token community
+context is unique per call; caching that context for the verify-failure regeneration would
+save ~$0.40 of a ~$5.50 full rebuild at a ~50% regeneration rate -- not built. The payoff
+is #59 (extraction on Claude). Original note:
 `graph_extract/anthropic_chat.AnthropicChat` sends no `cache_control`, so every Claude
 call pays full input price. The theme-report writer repeats a fixed instruction prefix
 (`_PROMPT`, `_VERIFY_PROMPT`, `_SUMMARY_PROMPT`) ahead of a variable community context,
@@ -1396,7 +1405,13 @@ minimum cacheable prefix is model-dependent — short prefixes silently do not c
 `instrument` already tallies `cached_tokens` from `prompt_tokens_details`, which the
 adapter fills from `cache_read_input_tokens`.
 
-### 59. Evaluate Claude Haiku 5.5 as the single API extraction model (added 2026-10-13)
+### 59. ~~Evaluate Claude Haiku 5.5 as the single API extraction model~~ — **CLOSED 2026-10-14: keep routed** (added 2026-10-13)
+**Measured** (`haiku-extraction-ab-2026-10-14.md`, 197 articles, ~$6): Haiku alone keeps
+**77% of distinct supported facts** (81% prose, 62% dense tables), with 22% fewer unsupported
+facts, 0 failures, 0 invalid dedup indices, 0 array overruns, 12% lower cost and ~2x speed --
+but +14% cost per distinct fact and +61% per prose episode vs solar-pro4. Fails the >=95%
+yield bar. Untested: Haiku with thinking on. The Claude extraction path stays available by
+configuration. Original note:
 Replace the API extraction tiers — cheap Solar Pro 4 on OpenRouter plus escalation to
 gpt-5-mini on Azure (hybrid router, dense-table routing, `dedup_guard` retry-on-strong) —
 with one model, Claude Haiku 5.5, for the API-driven pipeline: no cheap/strong split
@@ -1409,7 +1424,7 @@ per episode (~20–35k LLM tokens/episode today), and throughput under
 `INGEST_ARTICLE_CONCURRENCY`. Prove the model is actually engaged in the paid run (cost
 rule: a call counter, not timing). Pairs with #58 (caching) and #60 (batch).
 
-### 60. Evaluate the Claude Message Batches API for extraction (added 2026-10-13)
+### 60. Evaluate the Claude Message Batches API for extraction (added 2026-10-13) — **SHELVED 2026-10-14** (depended on #59, closed: keep routed)
 Batch requests run asynchronously at roughly half price. Graphiti's `add_episode` is a
 synchronous multi-call chain (extract nodes → dedupe → extract edges → dedupe →
 summaries), each call depending on the previous one, so batching does not drop in

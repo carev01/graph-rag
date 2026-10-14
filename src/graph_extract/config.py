@@ -87,6 +87,22 @@ class ExtractSettings(BaseSettings):
     # chat.completions path only (the Azure Responses path is untouched). Off until
     # the A/B shows cache hits up and extraction unchanged.
     llm_cache_layout: bool = False
+    # OpenAI-family models on OpenRouter (BACKLOG 59 follow-up, gpt-6-luna): their
+    # structured outputs reject graphiti's schemas unless every object is closed
+    # (additionalProperties: false) and lists every property as required (measured
+    # 2026-10-14, a 400 otherwise); maxItems is accepted, so the index-array bound
+    # stays. Off by default: the solar-pro4 cheap tier never needed it.
+    llm_strict_schema: bool = False
+    # Reasoning effort sent to OpenRouter as `reasoning: {effort}` on extraction calls
+    # (gpt-6-luna: "none" -> 0 reasoning tokens). Empty sends nothing -- the solar-pro4
+    # cheap tier's long-standing behaviour, which an effort would change (`low` turns
+    # its thinking on). Separate from llm_reasoning_effort, which the Azure strong tier
+    # reads and the cheap view inherits.
+    llm_openrouter_reasoning_effort: str = ""
+    # graphiti always sends `temperature`; reasoning models such as gpt-6-luna do not
+    # take it, and with OpenRouter's require_parameters routing that leaves NO
+    # endpoint (a 404, measured 2026-10-14). False drops it from extraction calls.
+    llm_send_temperature: bool = True
     # Per-request timeout of the strong-tier client (and, through the cheap view, of the
     # cheap tier's via cheap_llm_timeout_seconds). One 90 s value for every tier starved
     # the vast.ai GPU tier: at ~47 generated tokens/s per request an answer over ~4k

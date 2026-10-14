@@ -11,6 +11,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.graphiti import AddEpisodeResults
+from graph_extract.anthropic_chat import AnthropicChat, is_anthropic
 from graph_extract.cache_layout import StaticTailLearner, wrap_client
 from graph_extract.config import ExtractSettings
 from graph_extract.contradiction_gate import install_contradiction_gate
@@ -143,6 +144,74 @@ def _bound_index_arrays(client: AsyncOpenAI, max_items: int) -> AsyncOpenAI:
     return client
 
 
+def strict_schema(schema: dict) -> dict:
+    """`schema` in OpenAI's strict structured-output form: every object closed and
+    every property required. Optional fields keep their `null` alternative, so the
+    model writes null instead of omitting them. `properties` / `$defs` maps hold
+    field and definition names, never schema keywords, and are not treated as nodes."""
+    out = copy.deepcopy(schema)
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                node["additionalProperties"] = False
+                if isinstance(node.get("properties"), dict):
+                    node["required"] = list(node["properties"])
+            for key, value in node.items():
+                if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+                    for sub in value.values():
+                        walk(sub)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(out)
+    return out
+
+
+def _strict_schemas(client: AsyncOpenAI) -> AsyncOpenAI:
+    """Rewrite each json_schema response_format with `strict_schema` (never
+    mutating graphiti's own dict)."""
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        fmt = kwargs.get("response_format")
+        if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
+            fmt = copy.deepcopy(fmt)
+            fmt["json_schema"]["schema"] = strict_schema(fmt["json_schema"]["schema"])
+            kwargs["response_format"] = fmt
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
+def _inject_openrouter_reasoning(client: AsyncOpenAI, effort: str) -> AsyncOpenAI:
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        extra = dict(kwargs.get("extra_body") or {})
+        extra.setdefault("reasoning", {"effort": effort})
+        kwargs["extra_body"] = extra
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
+def _drop_temperature(client: AsyncOpenAI) -> AsyncOpenAI:
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        kwargs.pop("temperature", None)
+        return await orig(*args, **kwargs)
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
 def _is_azure(base_url: str) -> bool:
     return "azure.com" in base_url or "cognitiveservices" in base_url
 
@@ -160,11 +229,31 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
             tier=tier, capture_path=s.llm_capture_path)
         return OpenAIClient(config=cfg, client=raw,
                             reasoning=s.llm_reasoning_effort, verbosity="low")
+    if is_anthropic(s.llm_base_url):
+        # Claude (BACKLOG 59): graphiti's generic client over the chat-completions
+        # adapter, which turns its json_schema response_format into Claude's
+        # structured outputs and caches the system block -- where cache_layout puts
+        # the static prompt tails. Only json_schema mode exists on Claude: the
+        # Responses-API "structured" client and json_object have no equivalent.
+        # The maxItems that _bound_index_arrays adds is stripped by the adapter
+        # (Claude rejects it) and checked on the reply instead (ARRAY_OVERRUNS).
+        claude = instrument(AnthropicChat(
+            api_key=s.llm_api_key, reasoning_effort=s.llm_reasoning_effort,
+            timeout=s.llm_timeout_seconds, max_retries=4),
+            tier=tier, capture_path=s.llm_capture_path)
+        if s.llm_max_index_array:
+            claude = _bound_index_arrays(claude, s.llm_max_index_array)
+        if s.llm_cache_layout:
+            claude = wrap_client(claude, StaticTailLearner())
+        return OpenAIGenericClient(config=cfg, client=claude,
+                                   structured_output_mode="json_schema")
     raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
                                  timeout=s.llm_timeout_seconds, max_retries=4),
                      tier=tier, capture_path=s.llm_capture_path)
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
+        if s.llm_openrouter_reasoning_effort:
+            raw = _inject_openrouter_reasoning(raw, s.llm_openrouter_reasoning_effort)
     # Only wrap when configured: 0.0/0.0 leaves the proven gpt-5-mini path untouched
     # (and avoids sending params some reasoning endpoints reject).
     if s.llm_frequency_penalty or s.llm_presence_penalty:
@@ -172,6 +261,10 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
                                 presence_penalty=s.llm_presence_penalty)
     if s.llm_max_index_array:
         raw = _bound_index_arrays(raw, s.llm_max_index_array)
+    if s.llm_strict_schema:
+        raw = _strict_schemas(raw)
+    if not s.llm_send_temperature:
+        raw = _drop_temperature(raw)
     if s.llm_cache_layout:
         # Static prompt tails into the system message, learned per prompt type
         # (graph_extract.cache_layout); one learner per client, i.e. per tier.

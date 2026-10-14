@@ -144,19 +144,22 @@ async def test_pool_rerank_failure_returns_the_original_top_k(monkeypatch, caplo
         assert "original order" in caplog.text
 
 
-@pytest.mark.parametrize("kw", [
-    {},                                                    # pool 0 (default)
-    {"rerank_pool": 0, "settings": _settings(**_RERANK)},  # explicit 0
-    {"rerank_pool": 40, "settings": _settings()},          # no reranker configured
-    {"rerank_pool": 40},                                   # no settings
-])
-async def test_no_pool_leaves_the_call_path_unchanged(monkeypatch, kw):
+# Settings are built inside the test, never at collection: graphiti's load_dotenv()
+# has copied a developer .env into os.environ by then, and the conftest fixture that
+# strips it only runs per test -- a collection-time _settings() saw .env's reranker.
+@pytest.mark.parametrize("make_kw", [
+    lambda: {},                                                    # pool 0 (default)
+    lambda: {"rerank_pool": 0, "settings": _settings(**_RERANK)},  # explicit 0
+    lambda: {"rerank_pool": 40, "settings": _settings()},          # no reranker configured
+    lambda: {"rerank_pool": 40},                                   # no settings
+], ids=["default", "explicit-0", "unconfigured", "no-settings"])
+async def test_no_pool_leaves_the_call_path_unchanged(monkeypatch, make_kw):
     async def _rerank(*a, **k):
         raise AssertionError("rerank must not be called")
 
     monkeypatch.setattr(search_mod, "rerank", _rerank)
     g = _Graph(100)
-    res = await search_mod.search_local(g, None, q="q", k=5, group_id="g", **kw)
+    res = await search_mod.search_local(g, None, q="q", k=5, group_id="g", **make_kw())
     assert g.limits == [15]
     assert _uuids(res) == [f"e{i}" for i in range(5)]
 
