@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Query
+from mcp.server.transport_security import TransportSecuritySettings
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from answer_api import drift as drift_mod
@@ -14,6 +15,7 @@ from answer_api import global_search as global_mod
 from answer_api import router as router_mod
 from answer_api import search as search_mod
 from answer_api import timeline as timeline_mod
+from answer_api.mcp_auth import BearerTokenGate
 from answer_api.router import Mode
 from answer_api.scope import Scope, ScopeResolver, UnknownScopeName
 from answer_api.shape import classify_shape, facet_queries, retrieval_scope
@@ -117,8 +119,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.map_model = map_model
     app.state.cheap_client = cheap_client
     app.state.cheap_model = cheap_model
+    mcp_server = getattr(app.state, "mcp_server", None)
     try:
-        yield
+        if mcp_server is not None:
+            async with mcp_server.session_manager.run():
+                yield
+        else:
+            yield
     finally:
         closers = [
             ("graphiti", graphiti.close),
@@ -334,6 +341,25 @@ def create_app() -> FastAPI:
         )
         result["scope"] = resolved.as_dict()
         return result
+
+    # MCP (spec 2026-10-14): mounted only when a token is configured -- fail closed.
+    settings = get_extract_settings()
+    app.state.mcp_server = None
+    if settings.mcp_bearer_token:
+        from answer_api.mcp_server import build_mcp_server  # imports run_* from here
+
+        server = build_mcp_server(app)
+        mcp_app = server.streamable_http_app(
+            streamable_http_path="/mcp", stateless_http=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=list(settings.mcp_allowed_hosts),
+                allowed_origins=[f"https://{h}" for h in settings.mcp_allowed_hosts
+                                 if not h.endswith(":*")]))
+        app.state.mcp_server = server
+        # Mounted at the root AFTER the REST routes: only /mcp reaches it; anything
+        # else unmatched gets the sub-app's 404.
+        app.mount("", BearerTokenGate(mcp_app, settings.mcp_bearer_token, "/mcp"))
 
     return app
 
