@@ -101,3 +101,26 @@ async def test_a_root_path_does_not_bypass_the_gate(monkeypatch):
     assert denied.headers["www-authenticate"] == "Bearer"
     assert allowed.status_code == 200
     assert "graph-rag" in allowed.text
+
+
+async def _rest_probes(app):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://graphrag.k3s.home.lan") as c:
+        return (await c.post("/answer", json={}), await c.get("/no/such/path"),
+                await c.get("/health/", follow_redirects=False))
+
+
+async def test_setting_the_token_does_not_change_rest_responses(monkeypatch):
+    _settings(monkeypatch, "")
+    off = await _rest_probes(app_mod.create_app())
+    _settings(monkeypatch, "s3cret-token")
+    on = await _rest_probes(app_mod.create_app())
+    wrong_method, unknown, slash = on
+    assert wrong_method.status_code == 405
+    assert wrong_method.json() == {"detail": "Method Not Allowed"}
+    assert unknown.status_code == 404
+    assert unknown.json() == {"detail": "Not Found"}
+    assert slash.status_code == 307
+    for a, b in zip(off, on):
+        assert (a.status_code, a.headers.get("content-type"), a.content) == \
+               (b.status_code, b.headers.get("content-type"), b.content)

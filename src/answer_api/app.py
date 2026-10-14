@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Literal
 from fastapi import FastAPI, HTTPException, Query
 from mcp.server.transport_security import TransportSecuritySettings
 from neo4j import AsyncDriver, AsyncGraphDatabase
+from starlette.routing import Route
 
 from answer_api import drift as drift_mod
 from answer_api import global_search as global_mod
@@ -357,9 +358,11 @@ def create_app() -> FastAPI:
                 allowed_origins=[f"https://{h}" for h in settings.mcp_allowed_hosts
                                  if not h.endswith(":*")]))
         app.state.mcp_server = server
-        # Mounted at the root AFTER the REST routes: only /mcp reaches it; anything
-        # else unmatched gets the sub-app's 404.
-        app.mount("", BearerTokenGate(mcp_app, settings.mcp_bearer_token, "/mcp"))
+        # A route for exactly /mcp, not a root mount: a mount at "" would swallow every
+        # unmatched request and change REST behaviour (405 -> 404, /health/ redirect ->
+        # 404, JSON 404 -> plain text). The gate still checks the root_path-stripped path.
+        app.router.routes.append(Route(
+            "/mcp", endpoint=BearerTokenGate(mcp_app, settings.mcp_bearer_token, "/mcp")))
 
     return app
 
