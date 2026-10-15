@@ -24,7 +24,7 @@ Dependency + venv management is **`uv`**. All commands run through `uv run`:
 - **`@live` tests (opt-in, hit the real compose Neo4j 5.26 + LLM/embedder endpoints):** `uv run --extra dev pytest -m live tests/integration/<file>.py` — need `.env` configured (never committed).
 - **Lint (the CI gate — lints tests too):** `uv run ruff check src tests`. E7 rules are on: **no semicolons in test fakes** (E702), imports at file top (E402).
 - **Types:** `uv run mypy src`
-- **Run a service:** answer-api — `uv run --extra dev uvicorn answer_api.app:main --factory`; theme-build — `uv run --extra dev python -m theme_builder.cli theme-build`; ingestion — `uv run --extra dev python -m graph_extract.cli ingest ...`; graph-sync — `uvicorn graph_sync.app:main --factory`.
+- **Run a service:** answer-api — `uv run --extra dev uvicorn answer_api.app:main --factory --loop asyncio` (always `--loop asyncio`: under uvloop a Neo4j connection dropped while idle breaks the pool until restart); theme-build — `uv run --extra dev python -m theme_builder.cli theme-build`; ingestion — `uv run --extra dev python -m graph_extract.cli ingest ...`; graph-sync — `uvicorn graph_sync.app:main --factory`.
 
 CI (`.github/workflows/ci.yml`) runs exactly: `uv run ruff check src tests`, `uv run mypy src`, `uv run pytest -m "not live"`.
 
