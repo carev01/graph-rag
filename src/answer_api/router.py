@@ -22,6 +22,7 @@ from answer_api import drift as drift_mod
 from answer_api import timeline as timeline_mod
 from answer_api import freshness as freshness_mod
 from answer_api import enumeration as enum_mod
+from answer_api import list_mode as list_mod
 from answer_api import attribution
 from answer_api.scope import Scope
 from answer_api.shape import QuestionShape, could_not_check_note, facet_queries
@@ -215,6 +216,24 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
                                mode_override=mode_override,
                                default_mode=settings.router_default_mode)
     requested = shape.kind if shape is not None else "single"
+    if (requested == "single" and via != "override" and settings.list_mode_enabled
+            and list_mod.is_list_question(q)):
+        # Single-vendor list questions are answered exhaustively (spec 2026-10-15).
+        # An ungrounded list answer falls through to the normal route, whose detected-
+        # scope relaxation and local/drift fallbacks still apply.
+        raw = await list_mod.answer_list(
+            graphiti, driver, map_client, map_model, synth_client, synth_model,
+            q=q, scope=scope, group_id=settings.group_id, settings=settings)
+        if raw.get("citations"):
+            env = _normalize("local", via, None, raw, q, scope)
+            env["routing"]["path"] = "list"
+            env["list_mode"] = True
+            env["expansion_queries"] = raw.get("expansion_queries", [])
+            _shape_fields(env, shape, raw, requested)
+            env["freshness"] = await freshness_mod.freshness(
+                driver, settings.group_id, reports=False)
+            return env
+        logger.info("list mode grounded nothing for %r; taking the normal route", q)
     if shape is not None and shape.kind == "enumeration" and via == "override":
         # An explicit mode is the caller's instruction, like an explicit scope
         # (the eval harness forces each mode in turn): run that mode unfaceted,
