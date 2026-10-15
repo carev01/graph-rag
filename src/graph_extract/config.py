@@ -361,6 +361,22 @@ class ExtractSettings(BaseSettings):
     # question); reranking a 40-fact pool put the relevant facts on top (2026-10-13).
     # Single-shape searches never rerank this way.
     local_facet_rerank_pool: int = 40
+    # --- list mode (spec 2026-10-15) ---
+    # Single-vendor "list" questions ("Which workloads ...", "Where can I restore ...")
+    # are answered exhaustively: cheap-tier expansion into item-kind queries, a reranked
+    # local search per query, near-duplicate collapse, a final rerank, then up to
+    # list_supported_k supported facts plus list_limitations_k limitation facts.
+    list_mode_enabled: bool = True
+    list_expansion_queries_max: int = 10
+    list_per_query_pool: int = 40
+    list_per_query_k: int = 20
+    list_supported_k: int = 50
+    list_limitations_k: int = 12
+    # Raw cosine of fact embeddings at or above which two facts are one (sources merged).
+    list_dedup_cosine: float = 0.92
+    # Every other single question reranks this many candidates down to k (was raw
+    # hybrid order: Q1/Q2 of 2026-10-15 retrieved mostly limitations and duplicates).
+    local_single_rerank_pool: int = 80
     # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
     global_facet_top_n: int = 3
     # Comparison: every facet also gets this many facts from a scoped, reranked local
