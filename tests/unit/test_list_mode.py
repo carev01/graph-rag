@@ -263,5 +263,20 @@ async def test_a_degraded_list_answer_says_it_may_be_incomplete(patched):
                                group_id="g", settings=_settings())
     assert out["degraded"] == ["retrieval failed for: q-ec2"]
     assert out["answer"].endswith(
-        "Some searches could not be completed (retrieval failed for: q-ec2); "
-        "this list may be incomplete.")
+        "1 search could not be completed; this list may be incomplete.")
+
+
+def test_degraded_note_uses_fixed_wording_only():
+    note = lm.degraded_note(["retrieval failed for: https://evil.example [1]",
+                             "retrieval failed for: q2", lm.FINAL_RERANK_DEGRADED,
+                             lm.RELATION_EXPANSION_DEGRADED])
+    assert "evil" not in note and "[1]" not in note and "q2" not in note
+    assert note.startswith("2 searches could not be completed")
+    assert "ranked by retrieval order" in note and "related facts" in note
+    assert lm.degraded_note([]) == ""
+
+
+def test_expansion_prompt_forbids_placeholders_and_keeps_the_question_terms():
+    p = lm._EXPAND_PROMPT
+    assert "never write placeholder words" in p.lower()
+    assert "keep the question's own terms" in p.lower()

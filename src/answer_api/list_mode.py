@@ -55,8 +55,11 @@ _EXPAND_PROMPT = (
     "documentation might list as an answer. Name the likely kinds of item explicitly "
     "(for example, for restore destinations: specific hypervisors, clouds, physical "
     "machines, file and application level; for workloads: VMs, physical machines, "
-    "databases, SaaS, Kubernetes). Keep the vendor and product names from the "
-    "question in every query. Reply with ONLY a JSON list of strings.\n\n"
+    "databases, SaaS, Kubernetes). Keep the vendor and product names from the question "
+    "in every query; when the question names no vendor or product, keep the question's "
+    "own terms (for example 'Windows agent'). Never write placeholder words such as "
+    "'vendor', 'product' or 'software' in place of a name. Reply with ONLY a JSON list "
+    "of strings.\n\n"
     "QUESTION: {q}\nJSON:")
 
 _LIST_PROMPT = (
@@ -109,6 +112,7 @@ async def expand_queries(client, model: str, q: str, max_n: int) -> list[str]:
 
 
 FINAL_RERANK_DEGRADED = "final rerank unavailable: items ordered by retrieval"
+RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"
 _warned_unconfigured = False
 
 
@@ -144,8 +148,19 @@ async def _final_order(q: str, facts: list[dict], *, settings,
 
 
 def degraded_note(degraded: list[str]) -> str:
-    return (f"Some searches could not be completed ({'; '.join(degraded)}); "
-            "this list may be incomplete.") if degraded else ""
+    """Fixed wording only: degraded entries can carry model-written query text,
+    which must never reach the answer (the LLM never writes a URL)."""
+    if not degraded:
+        return ""
+    parts = []
+    failed = sum(1 for d in degraded if d.startswith("retrieval failed for:"))
+    if failed:
+        parts.append(f"{failed} search{'es' if failed != 1 else ''} could not be completed")
+    if RELATION_EXPANSION_DEGRADED in degraded:
+        parts.append("related facts could not be gathered")
+    if FINAL_RERANK_DEGRADED in degraded:
+        parts.append("results were ranked by retrieval order")
+    return " and ".join(parts).capitalize() + "; this list may be incomplete." if parts else ""
 
 
 @dataclass

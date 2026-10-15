@@ -373,7 +373,8 @@ class ExtractSettings(BaseSettings):
     list_supported_k: int = 50
     list_limitations_k: int = 12
     # Raw cosine of fact embeddings at or above which two facts are one (sources merged).
-    list_dedup_cosine: float = 0.92
+    # 0.92 merged "VMware Cloud Director" into a vSphere fact (2026-10-15 amendment).
+    list_dedup_cosine: float = 0.96
     # Every other single question reranks this many candidates down to k (was raw
     # hybrid order: Q1/Q2 of 2026-10-15 retrieved mostly limitations and duplicates).
     local_single_rerank_pool: int = 80

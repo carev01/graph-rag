@@ -1,8 +1,9 @@
-"""Collapse near-duplicate facts (spec 2026-10-15 §4.3): the same statement extracted
-from several articles in different wordings filled answer slots (four variants of
-"Instant Recovery ... as a Hyper-V VM"). The first occurrence is kept; every source
-of the merged facts is kept on it, so no citation is lost. Only facts sharing a
-source vendor (or with none) merge."""
+"""Collapse near-duplicate facts (spec 2026-10-15 §4.3, amended §10): the same statement
+extracted from several articles in different wordings filled answer slots (four variants
+of "Instant Recovery ... as a Hyper-V VM"). The first occurrence is kept; every source
+of the merged facts is kept on it, so no citation is lost. Facts merge only within a
+vendor; a fact with no vendor merges only with another vendor-less fact (no vendorless
+bridge between two named vendors)."""
 from __future__ import annotations
 
 import asyncio
@@ -39,8 +40,9 @@ def _vendors(r: dict) -> frozenset[str]:
 def _same_vendor(a: frozenset[str], b: frozenset[str]) -> bool:
     """Facts merge only within a vendor: an unscoped question can retrieve the same
     statement for two vendors, and those are two claims. A fact with no vendor
-    merges with any."""
-    return not a or not b or bool(a & b)
+    merges only with another fact that also has no vendor -- a vendorless fact must
+    never bridge two named vendors into one merged entry."""
+    return (not a and not b) or bool(a & b)
 
 
 def _unit_rows(results: list[dict], vectors: dict[str, list[float]]

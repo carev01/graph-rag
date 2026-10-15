@@ -66,15 +66,32 @@ async def test_an_embedding_fetch_failure_falls_back_to_text_collapse(caplog):
 
 
 async def test_facts_from_different_vendors_never_merge():
+    # A vendorless fact ("d") merges only with another vendorless fact, never into a
+    # named vendor's -- no vendorless bridge between two named vendors.
     rs = [_r("a", "Immutability is supported for Amazon S3.", "u1", vendor="Veeam"),
           _r("b", "Immutability is supported for Amazon S3.", "u2", vendor="Rubrik"),
           _r("c", "S3 immutability is supported.", "u3", vendor="Rubrik"),
           _r("d", "Immutability is supported for Amazon S3.", "u4", vendor="")]
     vec = {"a": [1.0, 0.0], "b": [1.0, 0.0], "c": [0.99, 0.01], "d": [1.0, 0.0]}
     out = await fd.collapse_near_duplicates(_Driver(vec), rs, cosine=0.92)
-    assert [o["fact_uuid"] for o in out] == ["a", "b"]
-    assert [s["url"] for s in out[0]["sources"]] == ["u1", "u4"]
+    assert [o["fact_uuid"] for o in out] == ["a", "b", "d"]
+    assert [s["url"] for s in out[0]["sources"]] == ["u1"]
     assert [s["url"] for s in out[1]["sources"]] == ["u2", "u3"]
+    assert [s["url"] for s in out[2]["sources"]] == ["u4"]
+
+
+async def test_a_vendorless_fact_never_bridges_two_vendors():
+    def r(u, fact, vendor):
+        src = {"url": f"https://d/{u}", "title": u}
+        if vendor:
+            src["vendor"] = vendor
+        return {"fact": fact, "fact_uuid": u, "valid_at": None, "invalid_at": None,
+                "sources": [src]}
+    rs = [r("a", "same statement", None), r("b", "same statement", "Veeam"),
+          r("c", "same statement", "Rubrik"), r("d", "same statement", None)]
+    out = await fd.collapse_near_duplicates(_Driver({}), rs, cosine=0.96)
+    assert [o["fact_uuid"] for o in out] == ["a", "b", "c"]
+    assert [s["url"] for s in out[0]["sources"]] == ["https://d/a", "https://d/d"]
 
 
 async def test_raw_cosine_threshold_is_not_neo4j_normalised():
