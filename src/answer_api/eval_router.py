@@ -23,6 +23,7 @@ from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
+from answer_api.item_coverage import match_items
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
     BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
@@ -323,6 +324,21 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             scope_d = env.get("scope") or {}
             classifier_mode = (env["routing"].get("classified")
                                or env["routing"].get("fallback_from") or chosen)
+            # Item coverage (spec 2026-10-15 §7): golden list questions carry
+            # `expected_items`, confirmed exhaustive by the user. `bonus_items`,
+            # when present, are informational extras the documentation also
+            # supports -- counted but never scored, so an answer that surfaces
+            # them does not inflate coverage and one that omits them is not
+            # penalised.
+            item_coverage = None
+            items_missing = None
+            bonus_found = None
+            if q.get("expected_items"):
+                found_items, items_missing = match_items(env["answer"], q["expected_items"])
+                item_coverage = round(len(found_items) / len(q["expected_items"]), 2)
+                if q.get("bonus_items"):
+                    bonus_hits, _ = match_items(env["answer"], q["bonus_items"])
+                    bonus_found = len(bonus_hits)
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
                          "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),
@@ -338,6 +354,9 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "facet_coverage": facet_cov,
                          "enumeration_complete": enumeration_hit(
                              env, q.get("expected_vendors")),
+                         "item_coverage": item_coverage,
+                         "items_missing": items_missing,
+                         "bonus_found": bonus_found,
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -358,7 +377,9 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
                    "bag_share": None, "misattributed": None,
-                   "facet_coverage": None, "enumeration_complete": None, "failed": True}
+                   "facet_coverage": None, "enumeration_complete": None,
+                   "item_coverage": None, "items_missing": None, "bonus_found": None,
+                   "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -370,7 +391,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
               f"bag={_cell(rec.get('bag_share'))} "
               f"misattributed={_cell(rec.get('misattributed'))} "
               f"facet={_cell(rec.get('facet_coverage'))} "
-              f"enum={_cell(rec.get('enumeration_complete'))} {elapsed:.0f}s", flush=True)
+              f"enum={_cell(rec.get('enumeration_complete'))} "
+              f"items={_cell(rec.get('item_coverage'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
     fc = [r["facet_coverage"] for r in per_question if r.get("facet_coverage") is not None]
@@ -380,6 +402,9 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     summary["facet_coverage_n"] = len(fc)
     summary["enumeration_completeness"] = round(sum(ec) / len(ec), 2) if ec else None
     summary["enumeration_n"] = len(ec)
+    ic = [r["item_coverage"] for r in per_question if r.get("item_coverage") is not None]
+    summary["item_coverage"] = round(sum(ic) / len(ic), 2) if ic else None
+    summary["item_coverage_n"] = len(ic)
     summary["raw"] = raw
     return summary
 
@@ -430,14 +455,15 @@ def format_report(summary: dict) -> str:
              f"**Facet coverage (comparisons): {summary.get('facet_coverage')} "
              f"(n={summary.get('facet_coverage_n')})** | **Enumeration completeness: "
              f"{summary.get('enumeration_completeness')} "
-             f"(n={summary.get('enumeration_n')})**",
+             f"(n={summary.get('enumeration_n')})** | **Item coverage (list questions): "
+             f"{summary.get('item_coverage')} (n={summary.get('item_coverage_n')})**",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
              "| mps | bag | misattributed | facet_coverage | enumeration_complete "
-             "| question |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| item_coverage | question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
@@ -448,7 +474,8 @@ def format_report(summary: dict) -> str:
                      f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
                      f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
                      f"{_cell(r.get('facet_coverage'))} | "
-                     f"{_cell(r.get('enumeration_complete'))} | {r['question']} |")
+                     f"{_cell(r.get('enumeration_complete'))} | "
+                     f"{_cell(r.get('item_coverage'))} | {r['question']} |")
     return "\n".join(lines) + "\n"
 
 

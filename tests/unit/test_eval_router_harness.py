@@ -205,14 +205,15 @@ async def test_report_and_progress_show_facet_and_enumeration_columns(monkeypatc
                   "expected_article_ids": ["A1"]}]
     summary = await er.run_eval((None,) * 11, questions, _S, _RESOLVER)
     line = capsys.readouterr().out
-    assert "facet=- enum=-" in line
+    assert "facet=- enum=- items=-" in line
     summary["per_question"][0].update(facet_coverage=True, enumeration_complete=False)
     report = er.format_report(summary).splitlines()
     header = next(ln for ln in report if ln.startswith("| intent |"))
-    assert "| misattributed | facet_coverage | enumeration_complete | question |" in header
+    assert ("| misattributed | facet_coverage | enumeration_complete | item_coverage "
+            "| question |" in header)
     assert header.count("|") == next(ln for ln in report if ln.startswith("|---")).count("|")
     row = next(ln for ln in report if ln.endswith("| loc |"))
-    assert "| True | False | loc |" in row
+    assert "| True | False | - | loc |" in row
 
 
 async def test_score_one_retrieves_a_named_subject_question_with_its_facet_scope(

@@ -1,8 +1,10 @@
-"""Free retrieval gate (spec 2026-10-12 §6): per golden question, does per-facet
-retrieval find evidence for every facet, an expected article, and every expected
-vendor? No generative calls except the per-facet question rewrite (one cheap
-map-tier call per comparison/enumeration question, exactly as /answer makes it) --
-otherwise the local embedder, Neo4j and the reranker only. Run before any paid eval.
+"""Free retrieval gate (spec 2026-10-12 §6, list check added 2026-10-15 §7): per
+golden question, does per-facet retrieval find evidence for every facet, an
+expected article, and every expected vendor? No generative calls except the
+per-facet question rewrite (one cheap map-tier call per comparison/enumeration
+question, exactly as /answer makes it) and, for list questions,
+`list_mode.retrieve_list`'s cheap-tier item-kind expansion -- otherwise the
+local embedder, Neo4j and the reranker only. Run before any paid eval.
 
 Single and comparison questions pass when every facet has evidence and (if the
 golden entry lists expected articles) one of them is retrieved. Enumerations pass
@@ -11,7 +13,10 @@ check); the other content vendors' evidence counts are reported as information
 only, because a vendor that does not document the feature legitimately has none.
 This gate therefore cannot tell whether an enumeration answer is COMPLETE (no
 vendor missing, none extra): only the paid eval's enumeration_completeness metric
-measures that.
+measures that. A question carrying `expected_items` (a golden list question) must
+ALSO have `list_mode.retrieve_list` find every expected item among its results'
+and limitations' fact text -- a missing item fails the question even if its
+facets otherwise have evidence.
 
     uv run python -m answer_api.eval_retrieval --questions src/answer_api/router_golden_tier1.json
 """
@@ -27,8 +32,10 @@ from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
 
+from answer_api import list_mode
 from answer_api.fact_dedup import collapse_near_duplicates
 from answer_api.global_search import _map_client_and_model, shortlist_communities
+from answer_api.item_coverage import match_items
 from answer_api.scope import ScopeResolver
 from answer_api.search import search_local
 from answer_api.shape import QuestionShape, classify_shape, facet_queries
@@ -113,6 +120,32 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
     return out
 
 
+async def check_list_items(graphiti, driver, map_client, map_model, settings,
+                           q: dict, shape: QuestionShape) -> dict:
+    """List-retrieval check (spec 2026-10-15 §7): does `list_mode.retrieve_list`
+    find evidence for every `expected_items` entry? A single-shaped question's
+    one facet already carries the scope `retrieval_scope` would resolve to
+    (classify_shape fills it from the detected or named-subject scope), so it is
+    used directly rather than recomputed. `retrieve_list` raising (every
+    expansion/retrieval attempt failed) must read as FAIL with the error, never
+    as a pass with zero items found."""
+    items = q["expected_items"]
+    scope = None
+    if shape.facets and not shape.facets[0].scope.is_empty():
+        scope = shape.facets[0].scope
+    try:
+        got = await list_mode.retrieve_list(
+            graphiti, driver, map_client, map_model, q=q["question"], scope=scope,
+            group_id=settings.group_id, settings=settings)
+    except Exception as exc:
+        return {"pass": False, "found": 0, "total": len(items),
+                "missing": [i["item"] for i in items], "error": str(exc)}
+    text = " || ".join(r["fact"] for r in got.results + got.limitations)
+    found, missing = match_items(text, items)
+    return {"pass": not missing, "found": len(found), "total": len(items),
+            "missing": missing}
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--questions", type=Path, required=True)
@@ -132,11 +165,21 @@ async def main() -> int:
             shape = await _with_facet_queries(map_client, map_model, q["question"], shape)
             ev = await _evidence(graphiti, driver, embedder, settings, q["question"], shape)
             r = check_question({**q, "_shape": shape.kind}, ev)
+            extra = ""
+            if q.get("expected_items"):
+                items = await check_list_items(graphiti, driver, map_client, map_model,
+                                               settings, q, shape)
+                r["items"] = items
+                r["pass"] = r["pass"] and items["pass"]
+                extra = f"items {items['found']}/{items['total']} missing={items['missing']} "
+                if items.get("error"):
+                    extra += f"error={items['error']!r} "
             results.append(r)
             print(f"{'PASS' if r['pass'] else 'FAIL'} {shape.kind:11} "
                   f"facets {r['facets_with_evidence']}/{r['facets']} "
                   f"expected={r['expected_hit']} vendors={r['vendors_found']} "
                   + (f"other={r['other_vendors']} " if "other_vendors" in r else "")
+                  + extra
                   + f"| {q['question']}", flush=True)
         passed = sum(r["pass"] for r in results)
         print(f"PASS {passed}/{len(results)}")
