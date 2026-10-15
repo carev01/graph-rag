@@ -7,10 +7,18 @@ domain knowledge only steers which facts are searched for; the answer states onl
 what retrieved facts say."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 
+from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
+from answer_api.fact_dedup import collapse_near_duplicates
+from answer_api.search import _rerank_top, search_local
+from answer_api.shape import raise_if_cancelled
+from answer_api.synthesize import _REFUSAL, _complete_or_none, _finalize_answer
 from graph_extract.usage import usable_content
 
 logger = logging.getLogger(__name__)
@@ -42,6 +50,21 @@ _EXPAND_PROMPT = (
     "databases, SaaS, Kubernetes). Keep the vendor and product names from the "
     "question in every query. Reply with ONLY a JSON list of strings.\n\n"
     "QUESTION: {q}\nJSON:")
+
+_LIST_PROMPT = (
+    "You are answering a question that asks for a LIST, about backup products, using "
+    "ONLY the numbered facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
+    "List EVERY item the SUPPORTED FACTS state as an answer -- no item limit -- grouped "
+    "under a few short headings that the facts suggest. Give each item one short line "
+    "with its [N] marker; when several facts state the same item, put it on one line "
+    "with their markers. After the list, add a section titled \"Not supported / "
+    "limitations\" summarising the LIMITATION FACTS briefly with their markers; omit "
+    "that section when there are none. Do not pad, do not repeat items, and do not "
+    "claim anything is undocumented beyond what the facts show. Do NOT use outside "
+    "knowledge. Do NOT write any URL or link. If no fact answers the question, reply "
+    "exactly: \"" + _REFUSAL + "\"\n\n"
+    "SUPPORTED FACTS:\n{supported}\n\nLIMITATION FACTS:\n{limitations}\n\n"
+    "QUESTION: {q}\n\nAnswer:")
 
 
 def is_list_question(q: str) -> bool:
@@ -75,3 +98,80 @@ async def expand_queries(client, model: str, q: str, max_n: int) -> list[str]:
         if isinstance(item, str) and item.strip() and item.strip() not in out:
             out.append(item.strip())
     return out[:max_n]
+
+
+@dataclass
+class ListRetrieval:
+    results: list[dict]
+    limitations: list[dict]
+    expansion_queries: list[str] = field(default_factory=list)
+    degraded: list[str] = field(default_factory=list)
+
+
+async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, group_id,
+                        settings) -> ListRetrieval:
+    expansions = await expand_queries(map_client, map_model, q,
+                                      settings.list_expansion_queries_max)
+    queries = [q] + [x for x in expansions if x != q]
+    found = await asyncio.gather(*[
+        search_local(graphiti, driver, q=sq, k=settings.list_per_query_k, scope=scope,
+                     group_id=group_id, fetch_cap=settings.local_scoped_fetch_cap,
+                     scan_max_episodes=settings.local_scoped_scan_max_episodes,
+                     settings=settings, rerank_pool=settings.list_per_query_pool)
+        for sq in queries], return_exceptions=True)
+    raise_if_cancelled(found)
+    merged: list[dict] = []
+    degraded: list[str] = []
+    for sq, res in zip(queries, found):
+        if isinstance(res, BaseException):
+            logger.warning("list retrieval failed for %r: %s", sq, res)
+            degraded.append(f"retrieval failed for: {sq}")
+            continue
+        merged.extend(res["results"])
+    if len(degraded) == len(queries):
+        raise RuntimeError("every list retrieval failed")
+    distinct = await collapse_near_duplicates(driver, merged,
+                                              cosine=settings.list_dedup_cosine)
+    cands = [SimpleNamespace(fact=r["fact"], item=r) for r in distinct]
+    ranked = await _rerank_top(q, cands, k=len(cands), settings=settings,
+                               what="list answer", order_name="merge order")
+    supported: list[dict] = []
+    limits: list[dict] = []
+    for c in ranked:
+        (limits if is_limitation(c.fact) else supported).append(c.item)
+    return ListRetrieval(results=supported[:settings.list_supported_k],
+                         limitations=limits[:settings.list_limitations_k],
+                         expansion_queries=expansions, degraded=degraded)
+
+
+async def answer_list(graphiti, driver, map_client, map_model, synth_client, synth_model,
+                      *, q, scope, group_id, settings) -> dict:
+    got = await retrieve_list(graphiti, driver, map_client, map_model, q=q, scope=scope,
+                              group_id=group_id, settings=settings)
+    facts = got.results + got.limitations
+    base: dict = {"query": q, "list_mode": True, "expansion_queries": got.expansion_queries}
+    if got.degraded:
+        base["degraded"] = got.degraded
+    if not facts:
+        return {**base, "answer": _REFUSAL, "citations": [], "retrieved": 0, "cited": 0,
+                "applies_to": []}
+    marker_map = {i: r for i, r in enumerate(facts, 1)}
+    n_sup = len(got.results)
+    sup = "\n".join(fact_line(i, r["fact"], r["sources"])
+                    for i, r in marker_map.items() if i <= n_sup) or "(none)"
+    lim = "\n".join(fact_line(i, r["fact"], r["sources"])
+                    for i, r in marker_map.items() if i > n_sup) or "(none)"
+    raw = await _complete_or_none(synth_client, synth_model,
+                                  _LIST_PROMPT.format(supported=sup, limitations=lim, q=q),
+                                  max_tokens=6000)
+    if raw is None:
+        return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
+                "cited": 0, "applies_to": []}
+    answer, cited = _finalize_answer(raw, marker_map)
+    citations = [{"marker": m, "fact": marker_map[m]["fact"],
+                  "fact_uuid": marker_map[m]["fact_uuid"],
+                  "valid_at": marker_map[m].get("valid_at"),
+                  "invalid_at": marker_map[m].get("invalid_at"),
+                  "sources": marker_map[m]["sources"]} for m in cited]
+    return {**base, "answer": answer, "citations": citations, "retrieved": len(facts),
+            "cited": len(cited), "applies_to": applies_to(citations)}
