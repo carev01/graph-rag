@@ -370,8 +370,19 @@ class ExtractSettings(BaseSettings):
     list_expansion_queries_max: int = 10
     list_per_query_pool: int = 40
     list_per_query_k: int = 20
-    list_supported_k: int = 50
+    # Raised 50 -> 80 with diversity-aware (MMR) selection (2026-10-15 amendment §10.3).
+    list_supported_k: int = 80
     list_limitations_k: int = 12
+    # Relation expansion (§10.1): the (subject entity, relation name) pairs of the top
+    # list_relation_seed_facts round-one facts are grouped; the list_relation_groups
+    # most frequent pairs pull up to list_relation_group_cap current sibling edges each.
+    list_relation_seed_facts: int = 40
+    list_relation_groups: int = 6
+    list_relation_group_cap: int = 300
+    # MMR: rerank score minus list_mmr_lambda x highest raw cosine to a chosen fact.
+    list_mmr_lambda: float = 0.5
+    # Documents per final-rerank call (Voyage accepts ~1000 at most).
+    list_rerank_batch: int = 900
     # Raw cosine of fact embeddings at or above which two facts are one (sources merged).
     # 0.92 merged "VMware Cloud Director" into a vSphere fact (2026-10-15 amendment).
     list_dedup_cosine: float = 0.96

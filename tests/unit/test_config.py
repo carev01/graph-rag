@@ -186,5 +186,8 @@ def test_list_mode_defaults():
                         neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
     assert s.list_mode_enabled is True
     assert (s.list_expansion_queries_max, s.list_per_query_pool, s.list_per_query_k) == (10, 40, 20)
-    assert (s.list_supported_k, s.list_limitations_k) == (50, 12)
+    assert (s.list_supported_k, s.list_limitations_k) == (80, 12)
+    assert (s.list_relation_seed_facts, s.list_relation_groups,
+            s.list_relation_group_cap) == (40, 6, 300)
+    assert s.list_mmr_lambda == 0.5 and s.list_rerank_batch == 900
     assert s.list_dedup_cosine == 0.96 and s.local_single_rerank_pool == 80

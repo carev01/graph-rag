@@ -130,7 +130,15 @@ def patched(monkeypatch):
 
         monkeypatch.setattr(lm, "search_local", _search)
         monkeypatch.setattr(lm, "collapse_near_duplicates", _collapse)
+        async def _no_siblings(driver, seeds, *, scope, settings, exclude):
+            return []
+
+        async def _no_vectors(driver, uuids):
+            return {}
+
         monkeypatch.setattr(lm, "rerank", _rerank)
+        monkeypatch.setattr(lm, "relation_siblings", _no_siblings)
+        monkeypatch.setattr(lm, "_fact_vectors", _no_vectors)
         return _Client(expansion)
     return install, calls
 
@@ -280,3 +288,115 @@ def test_expansion_prompt_forbids_placeholders_and_keeps_the_question_terms():
     p = lm._EXPAND_PROMPT
     assert "never write placeholder words" in p.lower()
     assert "keep the question's own terms" in p.lower()
+
+
+class _GraphDriver:
+    """Answers the relation-expansion queries; records calls."""
+    def __init__(self, meta, siblings):
+        self.meta, self.siblings, self.calls = meta, siblings, []
+
+    async def execute_query(self, query, **p):
+        self.calls.append(query)
+        if query is lm.SEED_EDGES_QUERY:
+            return ([m for m in self.meta if m["uuid"] in p["uuids"]], None, None)
+        if query is lm.SIBLINGS_QUERY:
+            return (self.siblings.get((p["src"], p["rel"]), [])[: p["cap"]], None, None)
+        return ([], None, None)
+
+
+async def test_relation_siblings_follow_the_top_subject_relation_groups(monkeypatch):
+    seeds = [_fact("s1", "VBR supports Hyper-V"), _fact("s2", "VBR supports Nutanix AHV")]
+    drv = _GraphDriver(
+        meta=[{"uuid": "s1", "src": "vbr", "rel": "Supports"},
+              {"uuid": "s2", "src": "vbr", "rel": "Supports"}],
+        siblings={("vbr", "Supports"): [
+            {"uuid": "s1", "fact": "VBR supports Hyper-V", "episodes": ["e1"]},
+            {"uuid": "x1", "fact": "VBR supports Sangfor aSV", "episodes": ["e2"]},
+            {"uuid": "x2", "fact": "VBR supports Scale Computing HyperCore", "episodes": ["e3"]}]})
+
+    class _Prov:
+        def __init__(self, driver):
+            pass
+
+        async def resolve_citations(self, uuids):
+            return {u: {"sources": [{"url": f"https://d/{u}", "vendor": "Veeam"}],
+                        "valid_at": None, "invalid_at": None} for u in uuids}
+
+    async def _allowed(driver, scope, candidates=None):
+        return {"e2"}                      # e3 is out of scope
+
+    monkeypatch.setattr(lm, "Provenance", _Prov)
+    monkeypatch.setattr(lm, "scope_episode_uuids", _allowed)
+    out = await lm.relation_siblings(drv, seeds, scope=Scope(vendors=("Veeam",)),
+                                     settings=_settings(), exclude={"s1", "s2"})
+    assert [r["fact_uuid"] for r in out] == ["x1"]
+    assert out[0]["sources"][0]["url"] == "https://d/x1"
+
+
+def test_mmr_prefers_a_new_item_over_a_near_copy():
+    a, a2, b = _fact("a", "A item"), _fact("a2", "A item again"), _fact("b", "B item")
+    vecs = {"a": [1.0, 0.0], "a2": [0.99, 0.01], "b": [0.0, 1.0]}
+    got = lm.select_diverse([(a, 0.9), (a2, 0.89), (b, 0.6)], vecs, k=2, lam=0.5)
+    assert [r["fact_uuid"] for r in got] == ["a", "b"]
+
+
+def test_mmr_without_vectors_keeps_rerank_order():
+    facts = [(_fact(u, u), s) for u, s in (("a", 0.9), ("b", 0.8), ("c", 0.7))]
+    assert [r["fact_uuid"] for r in lm.select_diverse(facts, {}, k=2, lam=0.5)] == ["a", "b"]
+
+
+async def test_final_order_batches_and_merges_by_score(monkeypatch):
+    calls = []
+
+    async def _rerank(q, docs, *, top_k, settings):
+        calls.append(len(docs))
+        return [(i, float(int(d.split()[-1]))) for i, d in enumerate(docs)]
+
+    monkeypatch.setattr(lm, "rerank", _rerank)
+    monkeypatch.setattr(lm, "rerank_configured", lambda s: True)
+    facts = [_fact(f"f{i}", f"fact {i}") for i in range(5)]
+    out = await lm._final_order("q", facts, settings=_settings(list_rerank_batch=2),
+                                degraded=[])
+    assert calls == [2, 2, 1]
+    assert [f["fact_uuid"] for f, _ in out] == ["f4", "f3", "f2", "f1", "f0"]
+
+
+async def test_a_relation_expansion_failure_degrades_and_keeps_round_one(patched, monkeypatch):
+    install, _ = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+
+    async def _boom(*a, **k):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(lm, "relation_siblings", _boom)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert [r["fact_uuid"] for r in got.results] == ["a"]
+    assert lm.RELATION_EXPANSION_DEGRADED in got.degraded
+
+
+async def test_siblings_join_the_final_rerank_and_a_degraded_note_is_recorded_once(
+        patched, monkeypatch):
+    install, calls = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    seen = {}
+
+    async def _siblings(driver, seeds, *, scope, settings, exclude):
+        seen["seeds"], seen["exclude"] = [s["fact_uuid"] for s in seeds], exclude
+        return [_fact("x1", "Sangfor aSV is supported.")]
+
+    async def _down(rq, documents, *, top_k, settings):
+        calls.append({"rerank_docs": list(documents)})
+        return None
+
+    monkeypatch.setattr(lm, "relation_siblings", _siblings)
+    monkeypatch.setattr(lm, "rerank", _down)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert seen == {"seeds": ["a"], "exclude": {"a"}}
+    assert [c["rerank_docs"] for c in calls if "rerank_docs" in c] == [
+        ["vSphere is supported."], ["vSphere is supported.", "Sangfor aSV is supported."]]
+    assert [r["fact_uuid"] for r in got.results] == ["a", "x1"]
+    assert got.degraded == [lm.FINAL_RERANK_DEGRADED]
