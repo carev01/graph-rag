@@ -400,3 +400,9 @@ async def test_siblings_join_the_final_rerank_and_a_degraded_note_is_recorded_on
         ["vSphere is supported."], ["vSphere is supported.", "Sangfor aSV is supported."]]
     assert [r["fact_uuid"] for r in got.results] == ["a", "x1"]
     assert got.degraded == [lm.FINAL_RERANK_DEGRADED]
+
+
+def test_mmr_without_scores_keeps_retrieval_order_even_with_vectors():
+    facts = [(_fact(u, u), None) for u in ("a", "b", "c", "z")]
+    vecs = {"a": [1.0, 0.0], "b": [0.99, 0.01], "c": [0.98, 0.02], "z": [0.0, 1.0]}
+    assert [r["fact_uuid"] for r in lm.select_diverse(facts, vecs, k=2, lam=0.5)] == ["a", "b"]

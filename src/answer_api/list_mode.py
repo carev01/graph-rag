@@ -228,10 +228,12 @@ def select_diverse(scored: list[tuple[dict, float | None]], vectors: dict[str, l
     """Maximal marginal relevance (spec §10.3): greedily the fact with the best rerank
     score minus `lam` x its highest RAW cosine to an already chosen fact. A fact
     without a usable vector is never penalised and never penalises; with no vectors
-    at all this is rerank order. Ties go to the earlier (better-ranked) fact."""
+    at all, or no scores at all (degraded rerank), this is the given order. Ties go to the earlier (better-ranked) fact."""
     if not scored or k <= 0:
         return []
-    if not vectors:
+    if not vectors or all(sc is None for _, sc in scored):
+        # No relevance signal (degraded rerank): MMR would become farthest-point
+        # sampling and favour outliers; keep retrieval order, as the note says.
         return [f for f, _ in scored[:k]]
     dim = len(next(iter(vectors.values())))
     n = len(scored)
