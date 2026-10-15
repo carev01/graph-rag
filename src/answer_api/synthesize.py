@@ -16,6 +16,7 @@ from answer_api.attribution import (
     applies_to,
     fact_line,
 )
+from answer_api.fact_dedup import collapse_near_duplicates
 from answer_api.scope import Scope
 from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from graph_extract.config import ExtractSettings
@@ -269,10 +270,17 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
             graphiti, driver, synth_client, synth_model, q=q, k=k, group_id=group_id,
             facets=facets, min_per_facet=min_per_facet, fetch_cap=fetch_cap,
             scan_max_episodes=scan_max_episodes, settings=settings)
+    pool = settings.local_single_rerank_pool if settings is not None else 0
     res = await search_mod.search_local(
-        graphiti, driver, q=q, k=k, scope=scope, group_id=group_id, fetch_cap=fetch_cap,
-        scan_max_episodes=scan_max_episodes, settings=settings)
+        graphiti, driver, q=q, k=2 * k if pool else k, scope=scope, group_id=group_id,
+        fetch_cap=fetch_cap, scan_max_episodes=scan_max_episodes, settings=settings,
+        rerank_pool=pool)
     results = res["results"]
+    if settings is not None:
+        # Reranked pool + near-duplicate collapse (spec 2026-10-15 §6): over-fetch 2k
+        # so k distinct facts survive the collapse.
+        results = (await collapse_near_duplicates(
+            driver, results, cosine=settings.list_dedup_cosine))[:k]
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [],
                 "retrieved": 0, "cited": 0, "applies_to": []}

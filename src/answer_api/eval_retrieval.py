@@ -27,6 +27,7 @@ from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
 
+from answer_api.fact_dedup import collapse_near_duplicates
 from answer_api.global_search import _map_client_and_model, shortlist_communities
 from answer_api.scope import ScopeResolver
 from answer_api.search import search_local
@@ -77,11 +78,16 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
         k = max(settings.local_min_per_facet, math.ceil(15 / n))
         top_n = settings.global_facet_top_n
     else:
-        k, top_n = 15, None
+        k, top_n = 30, None
     # Facet shapes rerank a wider pool, as the router's facet callers do; a single
-    # question searches exactly as /answer's single path does.
-    pool: dict = ({"rerank_pool": settings.local_facet_rerank_pool}
-                  if shape.kind in ("comparison", "enumeration") else {})
+    # question mirrors /answer's single path: rerank a pool of
+    # local_single_rerank_pool candidates, collapse near-duplicates, and keep 15.
+    if shape.kind in ("comparison", "enumeration"):
+        pool: dict = {"rerank_pool": settings.local_facet_rerank_pool}
+    elif shape.kind == "single":
+        pool = {"rerank_pool": settings.local_single_rerank_pool}
+    else:
+        pool = {}
     out = []
     for f in shape.facets:
         scope = f.scope if not f.scope.is_empty() else None
@@ -91,15 +97,19 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
                                  fetch_cap=settings.local_scoped_fetch_cap,
                                  scan_max_episodes=settings.local_scoped_scan_max_episodes,
                                  settings=settings, **pool)
+        results = loc["results"]
+        if shape.kind == "single":
+            results = (await collapse_near_duplicates(
+                driver, results, cosine=settings.list_dedup_cosine))[:15]
         hits = await shortlist_communities(
             driver, embedder, fq, level=settings.global_default_level,
             k=top_n or settings.global_shortlist_k, group_id=settings.group_id,
             settings=settings, scope=scope, top_n=top_n)
-        srcs = [s for r in loc["results"] for s in r["sources"]]
+        srcs = [s for r in results for s in r["sources"]]
         out.append({"label": f.label,
                     "articles": {s.get("article_id") for s in srcs},
                     "vendors": {s.get("vendor") for s in srcs if s.get("vendor")},
-                    "communities": len(hits), "facts": loc["count"]})
+                    "communities": len(hits), "facts": len(results)})
     return out
 
 
