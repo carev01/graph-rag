@@ -12,27 +12,35 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import collapse_near_duplicates
-from answer_api.search import _rerank_top, search_local
+from answer_api.rerank import rerank, rerank_configured
+from answer_api.search import search_local
 from answer_api.shape import raise_if_cancelled
 from answer_api.synthesize import _REFUSAL, _complete_or_none, _finalize_answer
 from graph_extract.usage import usable_content
 
 logger = logging.getLogger(__name__)
 
+# A plural noun: ends in -s but not -ss/-us/-is ("process", "status", "analysis").
+_PLURAL = r"\w+s(?<!ss)(?<!us)(?<!is)"
+# What may follow "which/what <plural>" in a list question: a helper or support verb
+# ("Which hypervisors does ...", "What destinations can ...", "Which databases are
+# supported?"). "What happens when ..." / "What causes a job to fail?" have none.
+_HELPER = (r"(does|do|did|can|could|are|were|will|would|should|must|may|might|"
+           r"support|supports|is\s+supported)")
+_ITEM_NOUNS = (r"(options|ways|methods|types|kinds|destinations|targets|choices|"
+               r"alternatives|modes|tiers|levels|formats|platforms|locations)")
 _LIST_RE = re.compile(
-    r"^\s*(which|what)\s+(\w+\s+){0,3}?\w+s\b(?!\s+(is|was)\b)"     # which/what ... <plural>
+    r"^\s*(which|what)\s+(\w+\s+){0,3}?" + _PLURAL + r"\s+" + _HELPER + r"\b"
     r"|^\s*where\s+can\s+(i|you|we)\b"                             # where can I ...
-    r"|^\s*what\s+are\s+the\s+(\w+\s+)?(options|ways|methods|types|kinds|destinations|targets)\b"
+    r"|^\s*what\s+are\s+the\s+(\w+\s+)?" + _ITEM_NOUNS + r"\b"
     r"|^\s*list\b"
-    r"|\bsupported\s+\w+s\b",
+    r"|^\s*supported\s+" + _PLURAL + r"\b",
     re.IGNORECASE)
-# "What should I consider ..." / "What is ..." start with what + a non-plural; the
-# pattern needs a plural noun within the first words. Questions that are clearly
-# single-answer are excluded explicitly.
+# Questions that are clearly single-answer ("What is ...", "What should I consider
+# ...") are excluded explicitly.
 _NOT_LIST_RE = re.compile(r"^\s*(what|which)\s+(is|was|should|does|do|did|can)\b",
                           re.IGNORECASE)
 
@@ -57,8 +65,8 @@ _LIST_PROMPT = (
     "List EVERY item the SUPPORTED FACTS state as an answer -- no item limit -- grouped "
     "under a few short headings that the facts suggest. Give each item one short line "
     "with its [N] marker; when several facts state the same item, put it on one line "
-    "with their markers. After the list, add a section titled \"Not supported / "
-    "limitations\" summarising the LIMITATION FACTS briefly with their markers; omit "
+    "with up to three of their markers. After the list, add a section titled \"Not "
+    "supported / limitations\" summarising the LIMITATION FACTS briefly with their markers; omit "
     "that section when there are none. Do not pad, do not repeat items, and do not "
     "claim anything is undocumented beyond what the facts show. Do NOT use outside "
     "knowledge. Do NOT write any URL or link. If no fact answers the question, reply "
@@ -100,6 +108,46 @@ async def expand_queries(client, model: str, q: str, max_n: int) -> list[str]:
     return out[:max_n]
 
 
+FINAL_RERANK_DEGRADED = "final rerank unavailable: items ordered by retrieval"
+_warned_unconfigured = False
+
+
+async def _final_order(q: str, facts: list[dict], *, settings,
+                       degraded: list[str]) -> list[dict]:
+    """Every fact, best first by the cross-encoder against the original question.
+    An unconfigured, failed or unreadable rerank keeps the merge order and records
+    FINAL_RERANK_DEGRADED in `degraded`: the budgets then cut by retrieval order,
+    and the answer must say so."""
+    global _warned_unconfigured
+    if not facts:
+        return []
+    if not rerank_configured(settings):
+        if not _warned_unconfigured:
+            _warned_unconfigured = True
+            logger.warning("no reranker configured; list answers keep retrieval order")
+        degraded.append(FINAL_RERANK_DEGRADED)
+        return facts
+    try:
+        ranked = await rerank(q, [r["fact"] for r in facts], top_k=len(facts),
+                              settings=settings)
+    except Exception as exc:
+        logger.warning("list answer rerank failed (%s); keeping retrieval order", exc)
+        ranked = None
+    if ranked is None:
+        degraded.append(FINAL_RERANK_DEGRADED)
+        return facts
+    order = list(dict.fromkeys(i for i, _ in ranked if 0 <= i < len(facts)))
+    chosen = set(order)
+    # A short rerank reply keeps the unranked facts, after the ranked ones.
+    order += [i for i in range(len(facts)) if i not in chosen]
+    return [facts[i] for i in order]
+
+
+def degraded_note(degraded: list[str]) -> str:
+    return (f"Some searches could not be completed ({'; '.join(degraded)}); "
+            "this list may be incomplete.") if degraded else ""
+
+
 @dataclass
 class ListRetrieval:
     results: list[dict]
@@ -132,13 +180,11 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
         raise RuntimeError("every list retrieval failed")
     distinct = await collapse_near_duplicates(driver, merged,
                                               cosine=settings.list_dedup_cosine)
-    cands = [SimpleNamespace(fact=r["fact"], item=r) for r in distinct]
-    ranked = await _rerank_top(q, cands, k=len(cands), settings=settings,
-                               what="list answer", order_name="merge order")
+    ranked = await _final_order(q, distinct, settings=settings, degraded=degraded)
     supported: list[dict] = []
     limits: list[dict] = []
-    for c in ranked:
-        (limits if is_limitation(c.fact) else supported).append(c.item)
+    for r in ranked:
+        (limits if is_limitation(r["fact"]) else supported).append(r)
     return ListRetrieval(results=supported[:settings.list_supported_k],
                          limitations=limits[:settings.list_limitations_k],
                          expansion_queries=expansions, degraded=degraded)
@@ -168,6 +214,9 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
                 "cited": 0, "applies_to": []}
     answer, cited = _finalize_answer(raw, marker_map)
+    note = degraded_note(got.degraded)
+    if note and cited:
+        answer = f"{answer}\n\n{note}"
     citations = [{"marker": m, "fact": marker_map[m]["fact"],
                   "fact_uuid": marker_map[m]["fact_uuid"],
                   "valid_at": marker_map[m].get("valid_at"),

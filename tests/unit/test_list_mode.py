@@ -25,6 +25,14 @@ NOT_LISTS = [
     "Does AWS Backup support Amazon S3?",
     "What should I consider when enabling backup immutability for Veeam Agent backups?",
     "Why does a backup copy job fail?",
+    "What happens when a Veeam backup job fails?",
+    "What process does Veeam use to merge increments?",
+    "What causes a Veeam job to fail?",
+    "What access does the Veeam service account need?",
+    "What status does a failed job show?",
+    "Does Veeam support immutability for supported hypervisors?",
+    "How do I restore supported workloads in Veeam?",
+    "What are the key considerations for cross-region disaster recovery of cloud backups?",
 ]
 
 
@@ -86,6 +94,7 @@ async def test_expansion_drops_blank_and_duplicate_queries():
 
 
 def _settings(**kw):
+    kw = {"rerank_base_url": "http://rerank", "rerank_model": "r", **kw}
     return ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
                            neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p", **kw)
 
@@ -115,12 +124,13 @@ def patched(monkeypatch):
                     out.append(r)
             return out
 
-        async def _rerank_top(q, cands, *, k, settings, what, order_name):
-            return list(cands)[:k]
+        async def _rerank(q, documents, *, top_k, settings):
+            calls.append({"rerank_q": q, "docs": list(documents)})
+            return [(i, 1.0) for i in range(len(documents))][:top_k]
 
         monkeypatch.setattr(lm, "search_local", _search)
         monkeypatch.setattr(lm, "collapse_near_duplicates", _collapse)
-        monkeypatch.setattr(lm, "_rerank_top", _rerank_top)
+        monkeypatch.setattr(lm, "rerank", _rerank)
         return _Client(expansion)
     return install, calls
 
@@ -137,6 +147,7 @@ async def test_retrieve_list_merges_every_query_and_budgets_limitations(patched)
     s = _settings(list_supported_k=50, list_limitations_k=12)
     got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
                                  settings=s)
+    calls = [c for c in calls if "q" in c]
     assert [c["q"] for c in calls] == [q, "q-hyperv", "q-ec2"]
     assert all(c["k"] == 20 and c["pool"] == 40 for c in calls)
     assert [r["fact_uuid"] for r in got.results] == ["az", "hv", "ec2"]
@@ -192,3 +203,65 @@ async def test_answer_list_with_no_facts_refuses_without_an_llm_call(patched):
     out = await lm.answer_list(None, None, map_client, "m", synth, "s", q="Which X?",
                                scope=Scope(), group_id="g", settings=_settings())
     assert out["citations"] == [] and synth.prompts == []
+
+
+async def test_the_final_rerank_order_drives_the_split_and_budgets(patched, monkeypatch):
+    install, calls = patched
+    q = "Which hypervisors does Veeam support?"
+    facts = [_fact(f"s{i}", f"Hypervisor {i} is supported.") for i in range(4)]
+    facts += [_fact(f"l{i}", f"Hypervisor {i} is not supported for replicas.") for i in range(3)]
+    client = install({q: facts}, expansion='["q-hyperv"]')
+
+    async def _reverse(rq, documents, *, top_k, settings):
+        calls.append({"rerank_q": rq})
+        return [(i, 1.0) for i in reversed(range(len(documents)))][:top_k]
+    monkeypatch.setattr(lm, "rerank", _reverse)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings(list_supported_k=2, list_limitations_k=2))
+    assert [c["rerank_q"] for c in calls if "rerank_q" in c] == [q]
+    assert [r["fact_uuid"] for r in got.results] == ["s3", "s2"]
+    assert [r["fact_uuid"] for r in got.limitations] == ["l2", "l1"]
+    assert got.degraded == []
+
+
+@pytest.mark.parametrize("how", ["none", "raises", "unconfigured"])
+async def test_an_unavailable_final_rerank_is_recorded_as_degraded(patched, monkeypatch, caplog,
+                                                                   how):
+    install, calls = patched
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported."), _fact("b", "Hyper-V is supported.")]},
+                     expansion="[]")
+
+    async def _down(rq, documents, *, top_k, settings):
+        calls.append({"rerank_q": rq})
+        if how == "raises":
+            raise RuntimeError("rerank down")
+        return None
+    monkeypatch.setattr(lm, "rerank", _down)
+    monkeypatch.setattr(lm, "_warned_unconfigured", False)
+    s = _settings(rerank_base_url="") if how == "unconfigured" else _settings()
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                     settings=s)
+        if how == "unconfigured":
+            await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                   settings=s)
+    assert got.degraded == [lm.FINAL_RERANK_DEGRADED]
+    assert [r["fact_uuid"] for r in got.results] == ["a", "b"]
+    if how == "unconfigured":
+        assert not [c for c in calls if "rerank_q" in c]
+        assert caplog.text.count("no reranker configured") == 1
+        assert "transport" not in caplog.text
+
+
+async def test_a_degraded_list_answer_says_it_may_be_incomplete(patched):
+    install, _ = patched
+    q = "Which hypervisors does Veeam support?"
+    map_client = install({q: [_fact("a", "vSphere is supported.")]}, fail=("q-ec2",))
+    synth = _Client("- vSphere [1]")
+    out = await lm.answer_list(None, None, map_client, "m", synth, "s", q=q, scope=Scope(),
+                               group_id="g", settings=_settings())
+    assert out["degraded"] == ["retrieval failed for: q-ec2"]
+    assert out["answer"].endswith(
+        "Some searches could not be completed (retrieval failed for: q-ec2); "
+        "this list may be incomplete.")

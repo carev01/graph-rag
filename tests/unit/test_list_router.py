@@ -38,16 +38,16 @@ def wired(monkeypatch):
     return seen
 
 
-def _settings():
+def _settings(**kw):
     from graph_extract.config import ExtractSettings
     return ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
-                           neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+                           neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p", **kw)
 
 
-async def _route(q=Q, override=None, shape=None):
+async def _route(q=Q, override=None, shape=None, settings=None):
     return await router_mod.answer_router(
         None, None, None, None, "s", None, "m", None, "c", q=q, mode_override=override,
-        scope=Scope(), settings=_settings(),
+        scope=Scope(), settings=settings or _settings(),
         shape=shape or QuestionShape("single", (Facet("", Scope()),)))
 
 
@@ -95,3 +95,8 @@ async def test_a_list_answer_keeps_the_classifiers_pick(wired):
     env = await _route()
     assert env["routing"]["chosen"] == "local"
     assert env["routing"]["classified"] == "drift"
+
+
+async def test_list_mode_disabled_takes_the_normal_route(wired):
+    await _route(settings=_settings(list_mode_enabled=False))
+    assert wired["list"] == 0 and wired["modes"] == ["drift"]
