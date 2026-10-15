@@ -18,4 +18,4 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 WORKDIR /app
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "answer_api.app:main", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "answer_api.app:main", "--factory", "--loop", "asyncio", "--host", "0.0.0.0", "--port", "8000"]

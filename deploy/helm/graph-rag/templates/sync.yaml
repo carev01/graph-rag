@@ -19,7 +19,7 @@ spec:
         - name: sync
           image: {{ include "graph-rag.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["uvicorn", "graph_sync.app:main", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+          command: ["uvicorn", "graph_sync.app:main", "--factory", "--loop", "asyncio", "--host", "0.0.0.0", "--port", "8000"]
           {{- include "graph-rag.envFrom" . | nindent 10 }}
           {{- include "graph-rag.containerSecurity" . | nindent 10 }}
           ports: [{containerPort: 8000, name: http}]
