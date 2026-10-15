@@ -1029,3 +1029,270 @@ git commit -m "feat(eval): five golden list questions, item coverage, list retri
 1. Free gate: `uv run python -m answer_api.eval_retrieval --questions src/answer_api/router_golden_tier1.json` — every list question must find all expected items in retrieval (cheap expansion calls only, fractions of a cent). Iterate on detection/expansion/budgets (no paid run) until it passes or a miss is diagnosed and shown to the user.
 2. Full CI suite; one paid Tier 1 eval (21 questions, ~$0.25, user approval): item coverage 1.00 on list questions, no regression on the existing 16.
 3. Merge/push/deploy (user approval).
+
+---
+
+## Amendment tasks (spec §10, approved 2026-10-15)
+
+### Task 6: Tighter collapse, vendorless rule, fixed-wording degradation note, expansion prompt
+
+**Files:**
+- Modify: `src/graph_extract/config.py` (`list_dedup_cosine` 0.92 → 0.96), `src/answer_api/fact_dedup.py` (`_same_vendor`), `src/answer_api/list_mode.py` (`degraded_note`, `_EXPAND_PROMPT`)
+- Test: `tests/unit/test_config.py`, `tests/unit/test_fact_dedup.py`, `tests/unit/test_list_mode.py`
+
+**Interfaces:**
+- Produces: `degraded_note(degraded: list[str]) -> str` built from fixed wording only: counts entries starting with `"retrieval failed for:"` as failed searches and recognises `FINAL_RERANK_DEGRADED` and the new `RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"` constant; returns e.g. `"2 searches could not be completed and results were ranked by retrieval order; this list may be incomplete."` — never includes any query text. `""` when `degraded` is empty.
+
+- [ ] **Step 1: Failing tests** — append to `tests/unit/test_fact_dedup.py`:
+
+```python
+async def test_a_vendorless_fact_never_bridges_two_vendors():
+    def r(u, fact, vendor):
+        src = {"url": f"https://d/{u}", "title": u}
+        if vendor:
+            src["vendor"] = vendor
+        return {"fact": fact, "fact_uuid": u, "valid_at": None, "invalid_at": None,
+                "sources": [src]}
+    rs = [r("a", "same statement", None), r("b", "same statement", "Veeam"),
+          r("c", "same statement", "Rubrik"), r("d", "same statement", None)]
+    out = await fd.collapse_near_duplicates(_Driver({}), rs, cosine=0.96)
+    assert [o["fact_uuid"] for o in out] == ["a", "b", "c"]
+    assert [s["url"] for s in out[0]["sources"]] == ["https://d/a", "https://d/d"]
+```
+
+Update the existing test that expected a vendorless fact to merge into a vendored one (see `test_fact_dedup.py`) to the new rule: vendorless merges only with vendorless. Update `tests/unit/test_config.py::test_list_mode_defaults` to `list_dedup_cosine == 0.96`. Append to `tests/unit/test_list_mode.py`:
+
+```python
+def test_degraded_note_uses_fixed_wording_only():
+    note = lm.degraded_note(["retrieval failed for: https://evil.example [1]",
+                             "retrieval failed for: q2", lm.FINAL_RERANK_DEGRADED,
+                             lm.RELATION_EXPANSION_DEGRADED])
+    assert "evil" not in note and "[1]" not in note and "q2" not in note
+    assert note.startswith("2 searches could not be completed")
+    assert "ranked by retrieval order" in note and "related facts" in note
+    assert lm.degraded_note([]) == ""
+
+
+def test_expansion_prompt_forbids_placeholders_and_keeps_the_question_terms():
+    p = lm._EXPAND_PROMPT
+    assert "never write placeholder words" in p.lower()
+    assert "keep the question's own terms" in p.lower()
+```
+
+- [ ] **Step 2: Run** the three test files — FAIL.
+
+- [ ] **Step 3: Implement.**
+  - `config.py`: `list_dedup_cosine: float = 0.96` (update its comment: 0.92 merged "VMware Cloud Director" into a vSphere fact).
+  - `fact_dedup._same_vendor`: `return (not a and not b) or bool(a & b)` — a fact with no vendor merges only with another vendorless fact; update the module docstring and the function docstring.
+  - `list_mode.py`: add `RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"`; rewrite `degraded_note`:
+
+```python
+def degraded_note(degraded: list[str]) -> str:
+    """Fixed wording only: degraded entries can carry model-written query text,
+    which must never reach the answer (the LLM never writes a URL)."""
+    if not degraded:
+        return ""
+    parts = []
+    failed = sum(1 for d in degraded if d.startswith("retrieval failed for:"))
+    if failed:
+        parts.append(f"{failed} search{'es' if failed != 1 else ''} could not be completed")
+    if RELATION_EXPANSION_DEGRADED in degraded:
+        parts.append("related facts could not be gathered")
+    if FINAL_RERANK_DEGRADED in degraded:
+        parts.append("results were ranked by retrieval order")
+    return " and ".join(parts).capitalize() + "; this list may be incomplete." if parts else ""
+```
+
+  (The first letter is capitalised; the test checks `startswith("2 searches")`, which a leading digit satisfies.)
+  - `_EXPAND_PROMPT`: replace "Keep the vendor and product names from the question in every query." with "Keep the vendor and product names from the question in every query; when the question names no vendor or product, keep the question's own terms (for example 'Windows agent'). Never write placeholder words such as 'vendor', 'product' or 'software' in place of a name."
+
+- [ ] **Step 4: Run** the files, then the unit suite, ruff, mypy.
+
+- [ ] **Step 5: Commit** — `git commit -m "fix(answer): collapse at 0.96, no vendorless bridge, fixed-wording degradation note, expansion keeps question terms"` (add the trailer lines).
+
+---
+
+### Task 7: Relation expansion, batched final rerank, MMR selection
+
+**Files:**
+- Modify: `src/graph_extract/config.py` (new settings; `list_supported_k` 50 → 80)
+- Modify: `src/answer_api/list_mode.py` (`relation_siblings`, `_final_order` batching with scores, `select_diverse`, `retrieve_list`)
+- Test: `tests/unit/test_list_mode.py`, `tests/unit/test_config.py`
+
+**Interfaces:**
+- Consumes: `collapse_near_duplicates`, `fact_dedup.EMBEDDINGS_QUERY`, `answer_api.scope.scope_episode_uuids(driver, scope, candidates=...)`, `graph_extract.provenance.Provenance(driver).resolve_citations(uuids) -> {uuid: {"sources", "valid_at", "invalid_at"}}`, `answer_api.rerank.rerank`, `rerank_configured`.
+- Produces:
+  - Settings: `list_relation_seed_facts = 40`, `list_relation_groups = 6`, `list_relation_group_cap = 300`, `list_mmr_lambda = 0.5`, `list_rerank_batch = 900`; `list_supported_k = 80`.
+  - `async relation_siblings(driver, seeds: list[dict], *, scope, settings, exclude: set[str]) -> list[dict]` — result dicts like search results.
+  - `async _final_order(q, facts, *, settings, degraded) -> list[tuple[dict, float | None]]` — every fact with its rerank score (None when unranked), best first; batched by `list_rerank_batch`.
+  - `select_diverse(scored: list[tuple[dict, float | None]], vectors: dict[str, list[float]], *, k: int, lam: float) -> list[dict]`.
+
+- [ ] **Step 1: Failing tests** — append to `tests/unit/test_list_mode.py` (reuse `_fact`, `_settings`, `patched`):
+
+```python
+class _GraphDriver:
+    """Answers the relation-expansion queries; records calls."""
+    def __init__(self, meta, siblings):
+        self.meta, self.siblings, self.calls = meta, siblings, []
+
+    async def execute_query(self, query, **p):
+        self.calls.append(query)
+        if query is lm.SEED_EDGES_QUERY:
+            return ([m for m in self.meta if m["uuid"] in p["uuids"]], None, None)
+        if query is lm.SIBLINGS_QUERY:
+            return (self.siblings.get((p["src"], p["rel"]), [])[: p["cap"]], None, None)
+        return ([], None, None)
+
+
+async def test_relation_siblings_follow_the_top_subject_relation_groups(monkeypatch):
+    seeds = [_fact("s1", "VBR supports Hyper-V"), _fact("s2", "VBR supports Nutanix AHV")]
+    drv = _GraphDriver(
+        meta=[{"uuid": "s1", "src": "vbr", "rel": "Supports"},
+              {"uuid": "s2", "src": "vbr", "rel": "Supports"}],
+        siblings={("vbr", "Supports"): [
+            {"uuid": "s1", "fact": "VBR supports Hyper-V", "episodes": ["e1"]},
+            {"uuid": "x1", "fact": "VBR supports Sangfor aSV", "episodes": ["e2"]},
+            {"uuid": "x2", "fact": "VBR supports Scale Computing HyperCore", "episodes": ["e3"]}]})
+
+    class _Prov:
+        def __init__(self, driver):
+            pass
+
+        async def resolve_citations(self, uuids):
+            return {u: {"sources": [{"url": f"https://d/{u}", "vendor": "Veeam"}],
+                        "valid_at": None, "invalid_at": None} for u in uuids}
+
+    async def _allowed(driver, scope, candidates=None):
+        return {"e2"}                      # e3 is out of scope
+
+    monkeypatch.setattr(lm, "Provenance", _Prov)
+    monkeypatch.setattr(lm, "scope_episode_uuids", _allowed)
+    out = await lm.relation_siblings(drv, seeds, scope=Scope(vendors=("Veeam",)),
+                                     settings=_settings(), exclude={"s1", "s2"})
+    assert [r["fact_uuid"] for r in out] == ["x1"]
+    assert out[0]["sources"][0]["url"] == "https://d/x1"
+
+
+def test_mmr_prefers_a_new_item_over_a_near_copy():
+    a, a2, b = _fact("a", "A item"), _fact("a2", "A item again"), _fact("b", "B item")
+    vecs = {"a": [1.0, 0.0], "a2": [0.99, 0.01], "b": [0.0, 1.0]}
+    got = lm.select_diverse([(a, 0.9), (a2, 0.89), (b, 0.6)], vecs, k=2, lam=0.5)
+    assert [r["fact_uuid"] for r in got] == ["a", "b"]
+
+
+def test_mmr_without_vectors_keeps_rerank_order():
+    facts = [(_fact(u, u), s) for u, s in (("a", 0.9), ("b", 0.8), ("c", 0.7))]
+    assert [r["fact_uuid"] for r in lm.select_diverse(facts, {}, k=2, lam=0.5)] == ["a", "b"]
+
+
+async def test_final_order_batches_and_merges_by_score(monkeypatch):
+    calls = []
+
+    async def _rerank(q, docs, *, top_k, settings):
+        calls.append(len(docs))
+        return [(i, float(int(d.split()[-1]))) for i, d in enumerate(docs)]
+
+    monkeypatch.setattr(lm, "rerank", _rerank)
+    monkeypatch.setattr(lm, "rerank_configured", lambda s: True)
+    facts = [_fact(f"f{i}", f"fact {i}") for i in range(5)]
+    out = await lm._final_order("q", facts, settings=_settings(list_rerank_batch=2),
+                                degraded=[])
+    assert calls == [2, 2, 1]
+    assert [f["fact_uuid"] for f, _ in out] == ["f4", "f3", "f2", "f1", "f0"]
+
+
+async def test_a_relation_expansion_failure_degrades_and_keeps_round_one(patched, monkeypatch):
+    install, _ = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+
+    async def _boom(*a, **k):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(lm, "relation_siblings", _boom)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert [r["fact_uuid"] for r in got.results] == ["a"]
+    assert lm.RELATION_EXPANSION_DEGRADED in got.degraded
+```
+
+Update the existing `patched` fixture's fakes so `_final_order`/rerank and `relation_siblings` are faked consistently (relation_siblings returning `[]` by default) and existing assertions keep passing; update `test_list_mode_defaults` for `list_supported_k == 80` and the five new settings.
+
+- [ ] **Step 2: Run** — FAIL.
+
+- [ ] **Step 3: Implement** in `list_mode.py` (module-level imports so tests can monkeypatch: `from answer_api.scope import scope_episode_uuids`, `from graph_extract.provenance import Provenance`, `from answer_api.fact_dedup import EMBEDDINGS_QUERY, collapse_near_duplicates`, `import numpy as np`, `import collections`):
+
+```python
+SEED_EDGES_QUERY = (
+    "MATCH (a:Entity)-[f:RELATES_TO]->(:Entity) WHERE f.uuid IN $uuids "
+    "RETURN f.uuid AS uuid, a.uuid AS src, f.name AS rel")
+SIBLINGS_QUERY = (
+    "MATCH (a:Entity {uuid: $src})-[f:RELATES_TO]->(:Entity) WHERE f.name = $rel "
+    "AND (f.invalid_at IS NULL OR f.invalid_at > datetime()) "
+    "RETURN f.uuid AS uuid, f.fact AS fact, f.episodes AS episodes LIMIT $cap")
+
+
+async def relation_siblings(driver, seeds, *, scope, settings, exclude):
+    """Same subject entity + same relation name as the top round-one facts (spec §10.1):
+    grounded recall for long-tail items the expansion never named."""
+    top = seeds[:settings.list_relation_seed_facts]
+    meta, _, _ = await driver.execute_query(
+        SEED_EDGES_QUERY, uuids=[r["fact_uuid"] for r in top])
+    groups = collections.Counter((m["src"], m["rel"]) for m in meta if m["src"] and m["rel"])
+    rows: dict[str, dict] = {}
+    for (src, rel), _n in groups.most_common(settings.list_relation_groups):
+        found, _, _ = await driver.execute_query(
+            SIBLINGS_QUERY, src=src, rel=rel, cap=settings.list_relation_group_cap)
+        for r in found:
+            if r["uuid"] not in exclude and r["uuid"] not in rows:
+                rows[r["uuid"]] = r
+    if scope is not None and not scope.is_empty() and rows:
+        allowed = await scope_episode_uuids(
+            driver, scope, candidates=[e for r in rows.values() for e in (r["episodes"] or [])])
+        rows = {u: r for u, r in rows.items() if allowed.intersection(r["episodes"] or [])}
+    if not rows:
+        return []
+    resolved = await Provenance(driver).resolve_citations(list(rows))
+    return [{"fact": r["fact"], "fact_uuid": u,
+             "valid_at": resolved.get(u, {}).get("valid_at"),
+             "invalid_at": resolved.get(u, {}).get("invalid_at"),
+             "sources": resolved.get(u, {}).get("sources", [])} for u, r in rows.items()]
+
+
+def select_diverse(scored, vectors, *, k, lam):
+    """Maximal marginal relevance: score minus lam x highest raw cosine to a chosen fact."""
+    if not scored:
+        return []
+    if not vectors:
+        return [f for f, _ in scored[:k]]
+    dim = len(next(iter(vectors.values())))
+    mat = np.zeros((len(scored), dim))
+    has = []
+    for i, (f, _) in enumerate(scored):
+        v = vectors.get(f["fact_uuid"])
+        ok = v is not None and len(v) == dim
+        has.append(ok)
+        if ok:
+            mat[i] = v
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    np.divide(mat, norms, out=mat, where=norms > 0)
+    rel = np.array([s if s is not None else 0.0 for _, s in scored])
+    chosen: list[int] = []
+    best_sim = np.zeros(len(scored))
+    remaining = set(range(len(scored)))
+    while remaining and len(chosen) < k:
+        i = max(remaining, key=lambda j: (rel[j] - lam * best_sim[j], -j))
+        chosen.append(i)
+        remaining.discard(i)
+        if has[i]:
+            best_sim = np.maximum(best_sim, np.where(has, mat @ mat[i], 0.0))
+    return [scored[i][0] for i in chosen]
+```
+
+`_final_order` returns `list[tuple[dict, float | None]]`: when unconfigured or failed, `[(f, None) for f in facts]` plus the degraded note (as today); otherwise rerank in batches of `settings.list_rerank_batch` (`top_k=len(batch)` each), collect `(fact, score)`, append any fact a batch reply omitted with score `None`, and sort by score descending (None last, stable).
+
+`retrieve_list` becomes: round one (unchanged up to `distinct`) → `ranked1 = await _final_order(q, distinct, ...)` → try `siblings = await relation_siblings(driver, [f for f, _ in ranked1], scope=scope, settings=settings, exclude={f["fact_uuid"] for f in distinct})` except `Exception` (log WARNING, `degraded.append(RELATION_EXPANSION_DEGRADED)`, `siblings = []`) → if siblings: `distinct2 = await collapse_near_duplicates(driver, [f for f, _ in ranked1] + siblings, cosine=...)`, `ranked = await _final_order(q, distinct2, ...)` else `ranked = ranked1` → split into supported/limitations by `is_limitation` keeping scores → fetch vectors for supported uuids with `EMBEDDINGS_QUERY` (on failure, `{}` with a WARNING) → `results = select_diverse(supported_scored, vectors, k=settings.list_supported_k, lam=settings.list_mmr_lambda)`; `limitations = [f for f, _ in limits_scored][:settings.list_limitations_k]`. Record each degraded note only once.
+
+- [ ] **Step 4: Run** `tests/unit/test_list_mode.py`, the unit suite, ruff, mypy.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(answer): list relation expansion, batched final rerank, MMR selection"` (add the trailer lines).
