@@ -230,3 +230,19 @@ async def test_score_one_retrieves_a_named_subject_question_with_its_facet_scope
     await er._score_one((None,) * 11, q, None, _S, resolver)
     assert seen["shape"].kind == "single"
     assert seen["scope"].vendors == ("Veeam",) and seen["scope"].source == "detected"
+
+
+async def test_classifier_hit_scores_the_classified_mode_when_present(monkeypatch):
+    """A list answer is labelled local, but the classifier picked drift: the
+    classifier metric must score the classifier's pick (routing.classified)."""
+    async def _list_router(*a, q, mode_override, scope, settings, **kw):
+        env = _env("local", "A1")
+        env["routing"]["classified"] = "drift"
+        return env
+    monkeypatch.setattr(er.router_mod, "answer_router", _list_router)
+    questions = [{"question": "lst", "intent": "drift", "expected_modes": ["drift"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S, _RESOLVER)
+    rec = summary["per_question"][0]
+    assert rec["routing_hit"] is False
+    assert rec["classifier_hit"] is True

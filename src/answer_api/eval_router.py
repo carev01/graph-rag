@@ -321,7 +321,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             # >=8-marker sentence and all of them scored 4-5.
             mps = markers_per_sentence(env["answer"])
             scope_d = env.get("scope") or {}
-            classifier_mode = env["routing"].get("fallback_from") or chosen
+            classifier_mode = (env["routing"].get("classified")
+                               or env["routing"].get("fallback_from") or chosen)
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
                          "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),

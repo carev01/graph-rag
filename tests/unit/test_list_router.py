@@ -89,3 +89,9 @@ async def test_comparisons_never_take_list_mode(wired, monkeypatch):
                                          Facet("B", Scope(vendors=("B",)))))
     await _route(q="Which features differ between A and B?", shape=shape)
     assert wired["list"] == 0
+
+
+async def test_a_list_answer_keeps_the_classifiers_pick(wired):
+    env = await _route()
+    assert env["routing"]["chosen"] == "local"
+    assert env["routing"]["classified"] == "drift"

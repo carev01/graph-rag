@@ -227,6 +227,9 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
         if raw.get("citations"):
             env = _normalize("local", via, None, raw, q, scope)
             env["routing"]["path"] = "list"
+            # The classifier's own pick, before list mode took over (the eval
+            # harness scores the classifier against it, not the "local" label).
+            env["routing"]["classified"] = mode
             env["list_mode"] = True
             env["expansion_queries"] = raw.get("expansion_queries", [])
             _shape_fields(env, shape, raw, requested)
