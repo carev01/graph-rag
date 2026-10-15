@@ -107,7 +107,7 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
         results = loc["results"]
         if shape.kind == "single":
             results = (await collapse_near_duplicates(
-                driver, results, cosine=settings.list_dedup_cosine))[:15]
+                driver, results, cosine=settings.local_single_dedup_cosine))[:15]
         hits = await shortlist_communities(
             driver, embedder, fq, level=settings.global_default_level,
             k=top_n or settings.global_shortlist_k, group_id=settings.group_id,

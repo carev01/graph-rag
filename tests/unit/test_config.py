@@ -191,3 +191,4 @@ def test_list_mode_defaults():
             s.list_relation_group_cap) == (40, 6, 300)
     assert s.list_mmr_lambda == 0.5 and s.list_rerank_batch == 900
     assert s.list_dedup_cosine == 0.96 and s.local_single_rerank_pool == 80
+    assert s.local_single_dedup_cosine == 0.92

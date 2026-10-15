@@ -386,6 +386,8 @@ class ExtractSettings(BaseSettings):
     # Raw cosine of fact embeddings at or above which two facts are one (sources merged).
     # 0.92 merged "VMware Cloud Director" into a vSphere fact (2026-10-15 amendment).
     list_dedup_cosine: float = 0.96
+    # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
+    local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw
     # hybrid order: Q1/Q2 of 2026-10-15 retrieved mostly limitations and duplicates).
     local_single_rerank_pool: int = 80

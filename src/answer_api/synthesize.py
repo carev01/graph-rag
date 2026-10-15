@@ -280,7 +280,7 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
         # Reranked pool + near-duplicate collapse (spec 2026-10-15 §6): over-fetch 2k
         # so k distinct facts survive the collapse.
         results = (await collapse_near_duplicates(
-            driver, results, cosine=settings.list_dedup_cosine))[:k]
+            driver, results, cosine=settings.local_single_dedup_cosine))[:k]
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [],
                 "retrieved": 0, "cited": 0, "applies_to": []}

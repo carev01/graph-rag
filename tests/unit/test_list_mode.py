@@ -1,10 +1,12 @@
 """List-mode detection, limitation classifier and expansion (spec 2026-10-15 §3-§4)."""
+import asyncio
 import logging
 from types import SimpleNamespace
 
 import pytest
 
 import answer_api.list_mode as lm
+import answer_api.synthesize as synth_mod
 from answer_api.scope import Scope
 from graph_extract.config import ExtractSettings
 
@@ -93,6 +95,9 @@ async def test_expansion_drops_blank_and_duplicate_queries():
     assert await lm.expand_queries(c, "m", "Which X?", 10) == ["a", "b"]
 
 
+_REAL_FACT_VECTORS = lm._fact_vectors
+
+
 def _settings(**kw):
     kw = {"rerank_base_url": "http://rerank", "rerank_model": "r", **kw}
     return ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
@@ -130,10 +135,10 @@ def patched(monkeypatch):
 
         monkeypatch.setattr(lm, "search_local", _search)
         monkeypatch.setattr(lm, "collapse_near_duplicates", _collapse)
-        async def _no_siblings(driver, seeds, *, scope, settings, exclude):
+        async def _no_siblings(driver, seeds, *, scope, settings, exclude, degraded):
             return []
 
-        async def _no_vectors(driver, uuids):
+        async def _no_vectors(driver, uuids, *, degraded):
             return {}
 
         monkeypatch.setattr(lm, "rerank", _rerank)
@@ -291,46 +296,118 @@ def test_expansion_prompt_forbids_placeholders_and_keeps_the_question_terms():
 
 
 class _GraphDriver:
-    """Answers the relation-expansion queries; records calls."""
-    def __init__(self, meta, siblings):
+    """Answers the relation-expansion queries; records calls. The scoped siblings
+    query keeps only edges with an episode in `in_scope` BEFORE the cap, as the
+    real EXISTS filter does; `fail` makes one (src, rel) group raise."""
+    def __init__(self, meta, siblings, in_scope=(), fail=()):
         self.meta, self.siblings, self.calls = meta, siblings, []
+        self.in_scope, self.fail = set(in_scope), set(fail)
 
     async def execute_query(self, query, **p):
-        self.calls.append(query)
+        self.calls.append((query, p))
         if query is lm.SEED_EDGES_QUERY:
             return ([m for m in self.meta if m["uuid"] in p["uuids"]], None, None)
-        if query is lm.SIBLINGS_QUERY:
-            return (self.siblings.get((p["src"], p["rel"]), [])[: p["cap"]], None, None)
+        if query in (lm.SIBLINGS_QUERY, lm.SCOPED_SIBLINGS_QUERY):
+            if (p["src"], p["rel"]) in self.fail:
+                raise RuntimeError("group query failed")
+            rows = sorted(self.siblings.get((p["src"], p["rel"]), []), key=lambda r: r["uuid"])
+            if query is lm.SCOPED_SIBLINGS_QUERY:
+                rows = [r for r in rows if self.in_scope.intersection(r["episodes"])]
+            return (rows[: p["cap"]], None, None)
         return ([], None, None)
 
 
+class _Prov:
+    def __init__(self, driver):
+        pass
+
+    async def resolve_citations(self, uuids):
+        return {u: {"sources": [{"url": f"https://d/{u}", "vendor": "Veeam"}],
+                    "valid_at": None, "invalid_at": None} for u in uuids}
+
+
+_SEEDS = [_fact("s1", "VBR supports Hyper-V"), _fact("s2", "VBR supports Nutanix AHV")]
+_META = [{"uuid": "s1", "src": "vbr", "rel": "Supports"},
+         {"uuid": "s2", "src": "vbr", "rel": "Supports"}]
+_SIBS = {("vbr", "Supports"): [
+    {"uuid": "s1", "fact": "VBR supports Hyper-V", "episodes": ["e1"]},
+    {"uuid": "x1", "fact": "VBR supports Sangfor aSV", "episodes": ["e2"]},
+    {"uuid": "x0", "fact": "VBR supports Scale Computing HyperCore", "episodes": ["e3"]}]}
+
+
 async def test_relation_siblings_follow_the_top_subject_relation_groups(monkeypatch):
-    seeds = [_fact("s1", "VBR supports Hyper-V"), _fact("s2", "VBR supports Nutanix AHV")]
-    drv = _GraphDriver(
-        meta=[{"uuid": "s1", "src": "vbr", "rel": "Supports"},
-              {"uuid": "s2", "src": "vbr", "rel": "Supports"}],
-        siblings={("vbr", "Supports"): [
-            {"uuid": "s1", "fact": "VBR supports Hyper-V", "episodes": ["e1"]},
-            {"uuid": "x1", "fact": "VBR supports Sangfor aSV", "episodes": ["e2"]},
-            {"uuid": "x2", "fact": "VBR supports Scale Computing HyperCore", "episodes": ["e3"]}]})
-
-    class _Prov:
-        def __init__(self, driver):
-            pass
-
-        async def resolve_citations(self, uuids):
-            return {u: {"sources": [{"url": f"https://d/{u}", "vendor": "Veeam"}],
-                        "valid_at": None, "invalid_at": None} for u in uuids}
-
-    async def _allowed(driver, scope, candidates=None):
-        return {"e2"}                      # e3 is out of scope
-
+    drv = _GraphDriver(meta=_META, siblings=_SIBS, in_scope={"e1", "e2"})   # e3 out of scope
     monkeypatch.setattr(lm, "Provenance", _Prov)
-    monkeypatch.setattr(lm, "scope_episode_uuids", _allowed)
-    out = await lm.relation_siblings(drv, seeds, scope=Scope(vendors=("Veeam",)),
-                                     settings=_settings(), exclude={"s1", "s2"})
+    degraded: list[str] = []
+    out = await lm.relation_siblings(drv, _SEEDS, scope=Scope(vendors=("Veeam",),
+                                                              products=("VBR",)),
+                                     settings=_settings(list_relation_group_cap=2),
+                                     exclude={"s1", "s2"}, degraded=degraded)
+    # The scope filter runs before the cap: out-of-scope x0 sorts first but never
+    # takes one of the two slots, so in-scope x1 survives.
     assert [r["fact_uuid"] for r in out] == ["x1"]
     assert out[0]["sources"][0]["url"] == "https://d/x1"
+    [(query, p)] = [c for c in drv.calls if c[0] is not lm.SEED_EDGES_QUERY]
+    assert query is lm.SCOPED_SIBLINGS_QUERY
+    assert (p["vendors"], p["products"], p["sources"]) == (["veeam"], ["vbr"], [])
+    assert p["cap"] == 2 and degraded == []
+
+
+def test_siblings_query_is_deterministic_and_scope_filters_before_the_limit():
+    for q in (lm.SIBLINGS_QUERY, lm.SCOPED_SIBLINGS_QUERY):
+        assert q.index("ORDER BY f.uuid") < q.index("LIMIT $cap")
+    sq = lm.SCOPED_SIBLINGS_QUERY
+    assert sq.index("EXISTS") < sq.index("RETURN")
+    for name in ("$vendors", "$products", "$sources"):
+        assert name in sq and name not in lm.SIBLINGS_QUERY
+
+
+async def test_unscoped_relation_siblings_keep_every_sibling(monkeypatch):
+    drv = _GraphDriver(meta=_META, siblings=_SIBS)
+    monkeypatch.setattr(lm, "Provenance", _Prov)
+    out = await lm.relation_siblings(drv, _SEEDS, scope=Scope(), settings=_settings(),
+                                     exclude={"s1", "s2"}, degraded=[])
+    assert [r["fact_uuid"] for r in out] == ["x0", "x1"]
+    assert all(c[0] is not lm.SCOPED_SIBLINGS_QUERY for c in drv.calls)
+
+
+async def test_one_failed_group_query_degrades_once_and_keeps_the_others(monkeypatch):
+    meta = _META + [{"uuid": "s3", "src": "vbr", "rel": "Backs up"},
+                    {"uuid": "s4", "src": "vbr", "rel": "Restores to"}]
+    sibs = {**_SIBS, ("vbr", "Backs up"): [{"uuid": "y1", "fact": "VBR backs up Y",
+                                            "episodes": ["e9"]}]}
+    drv = _GraphDriver(meta=meta, siblings=sibs, fail={("vbr", "Supports"),
+                                                       ("vbr", "Restores to")})
+    monkeypatch.setattr(lm, "Provenance", _Prov)
+    degraded: list[str] = []
+    seeds = _SEEDS + [_fact("s3", "VBR backs up X"), _fact("s4", "VBR restores to Z")]
+    out = await lm.relation_siblings(drv, seeds, scope=Scope(), settings=_settings(),
+                                     exclude={"s1", "s2", "s3", "s4"}, degraded=degraded)
+    assert [r["fact_uuid"] for r in out] == ["y1"]
+    assert degraded == [lm.RELATION_EXPANSION_DEGRADED]
+
+
+async def test_group_queries_run_concurrently_and_cancellation_propagates(monkeypatch):
+    started = []
+    gate = asyncio.Event()
+
+    class _Slow(_GraphDriver):
+        async def execute_query(self, query, **p):
+            if query is lm.SIBLINGS_QUERY:
+                started.append(p["rel"])
+                if len(started) == 2:
+                    gate.set()
+                await gate.wait()             # deadlocks unless both run at once
+                raise asyncio.CancelledError() if p["rel"] == "B" else RuntimeError("x")
+            return await super().execute_query(query, **p)
+
+    meta = [{"uuid": "s1", "src": "vbr", "rel": "A"}, {"uuid": "s2", "src": "vbr", "rel": "B"}]
+    drv = _Slow(meta=meta, siblings={})
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(lm.relation_siblings(drv, _SEEDS, scope=Scope(),
+                                                    settings=_settings(), exclude=set(),
+                                                    degraded=[]), timeout=2)
+    assert sorted(started) == ["A", "B"]
 
 
 def test_mmr_prefers_a_new_item_over_a_near_copy():
@@ -383,7 +460,7 @@ async def test_siblings_join_the_final_rerank_and_a_degraded_note_is_recorded_on
     client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
     seen = {}
 
-    async def _siblings(driver, seeds, *, scope, settings, exclude):
+    async def _siblings(driver, seeds, *, scope, settings, exclude, degraded):
         seen["seeds"], seen["exclude"] = [s["fact_uuid"] for s in seeds], exclude
         return [_fact("x1", "Sangfor aSV is supported.")]
 
@@ -396,8 +473,10 @@ async def test_siblings_join_the_final_rerank_and_a_degraded_note_is_recorded_on
     got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
                                  settings=_settings())
     assert seen == {"seeds": ["a"], "exclude": {"a"}}
+    # Round one failed (no scores at all): the siblings follow in retrieval order
+    # without a second rerank call.
     assert [c["rerank_docs"] for c in calls if "rerank_docs" in c] == [
-        ["vSphere is supported."], ["vSphere is supported.", "Sangfor aSV is supported."]]
+        ["vSphere is supported."]]
     assert [r["fact_uuid"] for r in got.results] == ["a", "x1"]
     assert got.degraded == [lm.FINAL_RERANK_DEGRADED]
 
@@ -406,3 +485,88 @@ def test_mmr_without_scores_keeps_retrieval_order_even_with_vectors():
     facts = [(_fact(u, u), None) for u in ("a", "b", "c", "z")]
     vecs = {"a": [1.0, 0.0], "b": [0.99, 0.01], "c": [0.98, 0.02], "z": [0.0, 1.0]}
     assert [r["fact_uuid"] for r in lm.select_diverse(facts, vecs, k=2, lam=0.5)] == ["a", "b"]
+
+
+async def test_round_two_reranks_only_the_siblings_and_merges_by_score(patched, monkeypatch):
+    install, calls = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported."),
+                          _fact("b", "Hyper-V is supported.")]}, expansion="[]")
+    scores = {"vSphere is supported.": 0.9, "Hyper-V is supported.": 0.3,
+              "Sangfor aSV is supported.": 0.5, "Morpheus is supported.": 0.1}
+
+    async def _siblings(driver, seeds, *, scope, settings, exclude, degraded):
+        return [_fact("x1", "Sangfor aSV is supported."), _fact("x2", "Morpheus is supported.")]
+
+    async def _scored(rq, documents, *, top_k, settings):
+        calls.append({"rerank_docs": list(documents)})
+        return [(i, scores[d]) for i, d in enumerate(documents)]
+
+    monkeypatch.setattr(lm, "relation_siblings", _siblings)
+    monkeypatch.setattr(lm, "rerank", _scored)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert [c["rerank_docs"] for c in calls if "rerank_docs" in c] == [
+        ["vSphere is supported.", "Hyper-V is supported."],
+        ["Sangfor aSV is supported.", "Morpheus is supported."]]
+    assert [r["fact_uuid"] for r in got.results] == ["a", "x1", "b", "x2"]
+    assert got.degraded == []
+
+
+async def test_a_failed_round_two_keeps_round_one_scores_and_puts_siblings_last(
+        patched, monkeypatch):
+    install, calls = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported."),
+                          _fact("b", "Hyper-V is supported.")]}, expansion="[]")
+
+    async def _siblings(driver, seeds, *, scope, settings, exclude, degraded):
+        return [_fact("x1", "Sangfor aSV is supported.")]
+
+    async def _first_only(rq, documents, *, top_k, settings):
+        if "Sangfor aSV is supported." in documents:
+            return None
+        return [(1, 0.8), (0, 0.4)]
+
+    monkeypatch.setattr(lm, "relation_siblings", _siblings)
+    monkeypatch.setattr(lm, "rerank", _first_only)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert [r["fact_uuid"] for r in got.results] == ["b", "a", "x1"]
+    assert got.degraded == [lm.FINAL_RERANK_DEGRADED]
+
+
+async def test_a_failed_embedding_fetch_is_recorded_and_noted(patched, monkeypatch):
+    install, _ = patched
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    monkeypatch.setattr(lm, "_fact_vectors", _REAL_FACT_VECTORS)
+
+    class _Broken:
+        async def execute_query(self, query, **p):
+            raise RuntimeError("neo4j down")
+
+    got = await lm.retrieve_list(None, _Broken(), client, "m", q=q, scope=Scope(),
+                                 group_id="g", settings=_settings())
+    assert [r["fact_uuid"] for r in got.results] == ["a"]
+    assert got.degraded == [lm.DIVERSITY_DEGRADED]
+    note = lm.degraded_note(got.degraded)
+    assert note == "Repeated items could not be filtered out; this list may be incomplete."
+
+
+async def test_single_answers_collapse_at_their_own_threshold(monkeypatch):
+    seen = {}
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        return {"results": [_fact("a", "vSphere is supported.")], "count": 1}
+
+    async def _collapse(driver, results, *, cosine):
+        seen["cosine"] = cosine
+        return results
+
+    monkeypatch.setattr(synth_mod.search_mod, "search_local", _search)
+    monkeypatch.setattr(synth_mod, "collapse_near_duplicates", _collapse)
+    s = _settings(local_single_dedup_cosine=0.92, list_dedup_cosine=0.96)
+    await synth_mod.answer_local(None, None, _Client("- vSphere [1]"), "s", q="q",
+                                 group_id="g", settings=s)
+    assert seen["cosine"] == 0.92

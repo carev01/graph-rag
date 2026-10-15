@@ -19,7 +19,6 @@ import numpy as np
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import EMBEDDINGS_QUERY, collapse_near_duplicates
 from answer_api.rerank import rerank, rerank_configured
-from answer_api.scope import scope_episode_uuids
 from answer_api.search import search_local
 from answer_api.shape import raise_if_cancelled
 from answer_api.synthesize import _REFUSAL, _complete_or_none, _finalize_answer
@@ -118,6 +117,7 @@ async def expand_queries(client, model: str, q: str, max_n: int) -> list[str]:
 
 FINAL_RERANK_DEGRADED = "final rerank unavailable: items ordered by retrieval"
 RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"
+DIVERSITY_DEGRADED = "diversity selection unavailable"
 _warned_unconfigured = False
 
 
@@ -172,34 +172,65 @@ async def _final_order(q: str, facts: list[dict], *, settings,
 SEED_EDGES_QUERY = (
     "MATCH (a:Entity)-[f:RELATES_TO]->(:Entity) WHERE f.uuid IN $uuids "
     "RETURN f.uuid AS uuid, a.uuid AS src, f.name AS rel")
-SIBLINGS_QUERY = (
+_SIBLINGS_MATCH = (
     "MATCH (a:Entity {uuid: $src})-[f:RELATES_TO]->(:Entity) WHERE f.name = $rel "
-    "AND (f.invalid_at IS NULL OR f.invalid_at > datetime()) "
-    "RETURN f.uuid AS uuid, f.fact AS fact, f.episodes AS episodes LIMIT $cap")
+    "AND (f.invalid_at IS NULL OR f.invalid_at > datetime()) ")
+# ORDER BY before LIMIT: a heavily connected subject keeps the same `cap` edges on
+# every run, not an arbitrary unordered slice.
+_SIBLINGS_RETURN = (
+    "RETURN f.uuid AS uuid, f.fact AS fact, f.episodes AS episodes "
+    "ORDER BY f.uuid LIMIT $cap")
+SIBLINGS_QUERY = _SIBLINGS_MATCH + _SIBLINGS_RETURN
+# Scoped: the scope filter runs BEFORE the limit, so the cap is spent on in-scope
+# edges only -- an edge qualifies when one of its episodes is reached through the
+# structural chain of a scoped vendor, product or source (names lower-cased, as in
+# search._SCAN and scope._EPISODES_AMONG).
+SCOPED_SIBLINGS_QUERY = (
+    _SIBLINGS_MATCH +
+    "AND EXISTS { "
+    "  MATCH (e:Episodic)<-[:HAS_EPISODE]-(:Article)<-[:HAS_ARTICLE]-(s:Source)"
+    "<-[:HAS_SOURCE]-(p:Product)<-[:HAS_PRODUCT]-(v:Vendor) "
+    "  WHERE e.uuid IN f.episodes AND v.id IS NOT NULL AND p.id IS NOT NULL "
+    "  AND (toLower(v.name) IN $vendors OR toLower(p.name) IN $products "
+    "  OR toLower(s.name) IN $sources) } " +
+    _SIBLINGS_RETURN)
 
 
 async def relation_siblings(driver, seeds: list[dict], *, scope, settings,
-                            exclude: set[str]) -> list[dict]:
+                            exclude: set[str], degraded: list[str]) -> list[dict]:
     """Same subject entity + same relation name as the top round-one facts (spec §10.1):
-    grounded recall for long-tail items the expansion never named. Sources resolve
-    deterministically through the provenance chain; no LLM is involved."""
+    grounded recall for long-tail items the expansion never named. The group queries
+    run concurrently; a failed one records RELATION_EXPANSION_DEGRADED (once) and the
+    other groups still count. Sources resolve deterministically through the
+    provenance chain; no LLM is involved."""
     top = seeds[:settings.list_relation_seed_facts]
     if not top:
         return []
     meta, _, _ = await driver.execute_query(
         SEED_EDGES_QUERY, uuids=[r["fact_uuid"] for r in top])
     groups = collections.Counter((m["src"], m["rel"]) for m in meta if m["src"] and m["rel"])
+    pairs = [pair for pair, _n in groups.most_common(settings.list_relation_groups)]
+    if scope is not None and not scope.is_empty():
+        query = SCOPED_SIBLINGS_QUERY
+        names = {"vendors": [v.lower() for v in scope.vendors],
+                 "products": [p.lower() for p in scope.products],
+                 "sources": [x.lower() for x in scope.sources]}
+    else:
+        query, names = SIBLINGS_QUERY, {}
+    found = await asyncio.gather(*[
+        driver.execute_query(query, src=src, rel=rel, cap=settings.list_relation_group_cap,
+                             **names)
+        for src, rel in pairs], return_exceptions=True)
+    raise_if_cancelled(found)
     rows: dict[str, dict] = {}
-    for (src, rel), _n in groups.most_common(settings.list_relation_groups):
-        found, _, _ = await driver.execute_query(
-            SIBLINGS_QUERY, src=src, rel=rel, cap=settings.list_relation_group_cap)
-        for r in found:
+    for (src, rel), got in zip(pairs, found):
+        if isinstance(got, BaseException):
+            logger.warning("list relation expansion failed for one group (%s)", got)
+            _degrade(degraded, RELATION_EXPANSION_DEGRADED)
+            continue
+        for r in got[0]:
             if r["uuid"] not in exclude and r["uuid"] not in rows:
                 rows[r["uuid"]] = r
-    if scope is not None and not scope.is_empty() and rows:
-        allowed = await scope_episode_uuids(
-            driver, scope, candidates=[e for r in rows.values() for e in (r["episodes"] or [])])
-        rows = {u: r for u, r in rows.items() if allowed.intersection(r["episodes"] or [])}
     if not rows:
         return []
     resolved = await Provenance(driver).resolve_citations(list(rows))
@@ -209,9 +240,28 @@ async def relation_siblings(driver, seeds: list[dict], *, scope, settings,
              "sources": resolved.get(u, {}).get("sources", [])} for u, r in rows.items()]
 
 
-async def _fact_vectors(driver, uuids: list[str]) -> dict[str, list[float]]:
-    """fact_embedding per uuid; {} (logged) when the fetch fails -- selection then
-    keeps rerank order."""
+async def _merge_round_two(q: str, round_one: list[tuple[dict, float | None]],
+                           new: list[dict], *, settings,
+                           degraded: list[str]) -> list[tuple[dict, float | None]]:
+    """Rerank only the NEW (sibling) facts and merge them with round one's scores --
+    same model, same question, so the scores are comparable. When round one has no
+    scores at all (degraded rerank, already recorded) the siblings follow in
+    retrieval order without a second call; a failed round two keeps round one's
+    scores and puts the siblings last, unscored (FINAL_RERANK_DEGRADED recorded)."""
+    if not new:
+        return round_one
+    if all(sc is None for _, sc in round_one):
+        return round_one + [(f, None) for f in new]
+    merged = round_one + await _final_order(q, new, settings=settings, degraded=degraded)
+    # Stable: equal scores keep round one first; unscored facts go last.
+    merged.sort(key=lambda fs: (fs[1] is None, -(fs[1] or 0.0)))
+    return merged
+
+
+async def _fact_vectors(driver, uuids: list[str], *,
+                        degraded: list[str]) -> dict[str, list[float]]:
+    """fact_embedding per uuid; {} when the fetch fails -- selection then keeps rerank
+    order, and DIVERSITY_DEGRADED is recorded so the answer says so."""
     if not uuids:
         return {}
     try:
@@ -219,6 +269,7 @@ async def _fact_vectors(driver, uuids: list[str]) -> dict[str, list[float]]:
     except Exception as exc:
         logger.warning("fact embedding fetch failed (%s); list selection keeps rerank order",
                        exc)
+        _degrade(degraded, DIVERSITY_DEGRADED)
         return {}
     return {r["uuid"]: list(r["embedding"]) for r in records if r["embedding"]}
 
@@ -273,6 +324,8 @@ def degraded_note(degraded: list[str]) -> str:
         parts.append("related facts could not be gathered")
     if FINAL_RERANK_DEGRADED in degraded:
         parts.append("results were ranked by retrieval order")
+    if DIVERSITY_DEGRADED in degraded:
+        parts.append("repeated items could not be filtered out")
     return " and ".join(parts).capitalize() + "; this list may be incomplete." if parts else ""
 
 
@@ -312,20 +365,26 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
     try:
         siblings = await relation_siblings(
             driver, [f for f, _ in ranked], scope=scope, settings=settings,
-            exclude={f["fact_uuid"] for f in distinct})
+            exclude={f["fact_uuid"] for f in distinct}, degraded=degraded)
     except Exception as exc:
         logger.warning("list relation expansion failed (%s); answering from round one", exc)
         _degrade(degraded, RELATION_EXPANSION_DEGRADED)
         siblings = []
     if siblings:
+        scores = {f["fact_uuid"]: sc for f, sc in ranked}
         distinct = await collapse_near_duplicates(driver, [f for f, _ in ranked] + siblings,
                                                   cosine=settings.list_dedup_cosine)
-        ranked = await _final_order(q, distinct, settings=settings, degraded=degraded)
+        # A sibling merged into a round-one fact keeps that fact's slot and score.
+        ranked = await _merge_round_two(
+            q, [(f, scores[f["fact_uuid"]]) for f in distinct if f["fact_uuid"] in scores],
+            [f for f in distinct if f["fact_uuid"] not in scores],
+            settings=settings, degraded=degraded)
     supported: list[tuple[dict, float | None]] = []
     limits: list[tuple[dict, float | None]] = []
     for fs in ranked:
         (limits if is_limitation(fs[0]["fact"]) else supported).append(fs)
-    vectors = await _fact_vectors(driver, [f["fact_uuid"] for f, _ in supported])
+    vectors = await _fact_vectors(driver, [f["fact_uuid"] for f, _ in supported],
+                                  degraded=degraded)
     results = await asyncio.to_thread(select_diverse, supported, vectors,
                                       k=settings.list_supported_k,
                                       lam=settings.list_mmr_lambda)
