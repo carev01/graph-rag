@@ -113,3 +113,33 @@ prompts and answer length are unchanged.
 ## 9. Out of scope
 
 Cross-vendor enumerations, global/DRIFT internals, theme reports.
+
+## 10. Amendment (2026-10-15, approved in conversation): grounded recall and diverse selection
+
+The free gate after the first build found 52/67 expected items. Per missing item: 10 were
+never retrieved (the expansion's domain knowledge misses long-tail items — Sangfor,
+Morpheus, Scale Computing, DocumentDB, Neptune — and with no vendor named it wrote
+placeholders like "Vendor backup software"), 4 were cut by the 50-fact budget (filled by
+repeats about popular items), 1 was merged away at cosine 0.92 ("VMware Cloud Director"
+into a vSphere fact). A free prototype showed following the graph recovers 12 of the 15.
+
+1. **Relation expansion (grounded, no LLM).** After round one (§4 steps 1–4), take the
+   subject entity and relation name of the top `list_relation_seed_facts` (40) facts,
+   group them, and for the `list_relation_groups` (6) most frequent (subject, relation)
+   pairs pull every current sibling edge (same subject entity, same relation name), at
+   most `list_relation_group_cap` (300) per group. Keep only siblings with an episode in
+   the question's scope (when scoped), resolve their sources deterministically, and add
+   them to the candidates. A failure records "relation expansion unavailable" in
+   `degraded` and the answer proceeds from round one.
+2. **Batched final rerank** of every candidate against the original question, at most
+   `list_rerank_batch` (900) documents per call, merged by score.
+3. **Diversity-aware selection.** Supported facts are chosen greedily by maximal marginal
+   relevance — rerank score minus `list_mmr_lambda` (0.5) times the highest raw cosine to
+   an already chosen fact — up to `list_supported_k`, now **80**. Limitations keep rerank
+   order. Without embeddings, rerank order.
+4. **Collapse threshold** `list_dedup_cosine` raised to **0.96**; a fact with no vendor
+   merges only with another fact with no vendor (no vendorless bridge between vendors).
+5. **Expansion prompt:** never write placeholder words; when the question names no
+   vendor or product, keep the question's own terms.
+6. **Degradation note** uses fixed wording ("N searches could not be completed";
+   "results ranked by retrieval order") — no model-written text in the note.
