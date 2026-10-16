@@ -142,9 +142,9 @@ def _strip_markers(text: str, keep: set[int]) -> str:
         lambda m: m.group(0) if int(m.group(1)) in keep else _SENTINEL, text)
     text = _PAIRED_SEP_RE.sub(lambda m: m.group(1) or m.group(2), text)
     text = _LONE_SENTINEL_RE.sub(" ", text)
-    # Repair spacing WITHOUT touching line breaks: this runs on every answer, and
-    # paragraph structure is part of a correct one.
-    text = re.sub(r"[ \t]{2,}", " ", text)
+    # Repair spacing WITHOUT touching line breaks or leading indentation: this runs
+    # on every answer, and paragraph and nested-list structure are part of a correct one.
+    text = re.sub(r"(?<=\S)[ \t]{2,}", " ", text)
     text = re.sub(r"[ \t]+([.,;:!?])", r"\1", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     return text.strip()
