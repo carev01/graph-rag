@@ -327,3 +327,67 @@ def test_each_dropped_item_is_logged_with_its_reason(caplog):
         in caplog.text
     assert long_item[:81] not in caplog.text
     assert "list item dropped (no_marker): Sangfor aSV" in caplog.text
+
+
+# --- Follow-up: bulleted group headings, distinctive-word fallback -----------------
+
+_BULLETED = ("- **Hypervisors**\n"
+             "  - **Nutanix AHV** — y [1]\n"
+             "  - **Oracle KVM** — x [1]\n"
+             "- **Clouds:**\n"
+             "  - **Oracle Cloud** — z [1]\n"
+             "- **Other**:\n"
+             "  - plain nested note")
+
+
+def test_bulleted_group_headings_are_not_items_and_keep_their_nested_items():
+    got = ig.grade_items(_BULLETED, {1: _fact("nx", NUTANIX)}, q=Q_AGENT, terms=T_AGENT,
+                         scores={"nx": 0.6}, floor=0.1, unnamed_floor=0.65)
+    assert [(g.item, g.grade) for g in got.grades] == [
+        ("Nutanix AHV", ig.CONFIRMED), ("Oracle KVM", ig.DROPPED),
+        ("Oracle Cloud", ig.DROPPED)]
+    assert sum(g.grade == ig.DROPPED for g in got.grades) == 2     # headings not counted
+    assert got.ungraded == 1                                         # the plain nested note
+    # "Clouds:" lost every nested item and goes; "Other" keeps its plain note.
+    assert got.text == ("- **Hypervisors**\n  - **Nutanix AHV** — y [1]\n"
+                        "- **Other**:\n  - plain nested note")
+
+
+def test_a_bulleted_group_whose_items_all_drop_empties_the_answer():
+    raw = "- **Clouds**\n  - **Oracle Cloud** — z [1]\n  - **Oracle KVM** — x [1]"
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.grade for g in grades] == [ig.DROPPED, ig.DROPPED] and text == ""
+
+
+def test_a_bulleted_group_under_a_heading_and_a_top_level_item_after_it():
+    raw = ("## Targets\n- **Clouds**\n  - **Oracle Cloud** — z [1]\n"
+           "- **Nutanix AHV** — y [1]\n## Other\n- **Oracle KVM** — x [1]")
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.item for g in grades] == ["Oracle Cloud", "Nutanix AHV", "Oracle KVM"]
+    assert text == "## Targets\n- **Nutanix AHV** — y [1]"
+
+
+def test_a_dropped_item_keeps_the_nested_items_graded_on_their_own():
+    raw = "- **Oracle KVM** — x [1]\n  - **Nutanix AHV** — y [1]\n  wrapped note"
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.grade for g in grades] == [ig.DROPPED, ig.CONFIRMED]
+    assert text == "  - **Nutanix AHV** — y [1]\n  wrapped note"
+
+
+def test_a_bulleted_limitations_heading_ends_the_graded_region():
+    raw = ("- **Nutanix AHV** — y [1]\n- **Not supported / limitations**\n"
+           "  - **Oracle KVM** — not supported [1]")
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.item for g in grades] == ["Nutanix AHV"] and text == raw
+
+
+def test_an_item_made_only_of_excluded_words_still_needs_its_words_named():
+    scope = Scope(products=("Veeam Backup & Replication",))
+    unrelated = _fact("ax", "Restore to Nutanix AHV is possible for Windows agents.")
+    _, grades, _ = _grade("- **Veeam Backup** — x [1]", [unrelated], scores={"ax": 0.5},
+                          floor=0.4, scope=scope)
+    assert grades[0].grade == ig.DROPPED
+    named = _fact("vb", "Veeam Backup restores Windows agent backups to Nutanix AHV.")
+    _, grades, _ = _grade("- **Veeam Backup** — x [1]", [named], scores={"vb": 0.5},
+                          floor=0.4, scope=scope)
+    assert grades[0].grade == ig.CONFIRMED

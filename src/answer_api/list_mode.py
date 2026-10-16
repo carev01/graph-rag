@@ -455,25 +455,31 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
 async def _list_synthesis(client, model: str, prompt: str, *,
                           degraded: list[str]) -> str | None:
     """The list answer; None when the model gave nothing usable. A reply cut short at
-    the budget (finish_reason "length") is retried ONCE wider; cut short again, its
-    text is kept and LIST_TRUNCATED recorded, so the answer says it was cut short
-    rather than reading as the whole list."""
-    raw, finish = await _complete_with_finish_reason(client, model, prompt,
-                                                     max_tokens=_LIST_MAX_TOKENS)
-    if raw is None or finish != "length":
-        return raw
+    its budget (finish_reason "length") is retried ONCE at `_LIST_RETRY_MAX_TOKENS`,
+    unless its budget was already that large; cut short again (or unusable), the
+    longer partial text is kept and LIST_TRUNCATED recorded, so the answer says it
+    was cut short rather than reading as the whole list."""
+    first = await _complete_with_finish_reason(client, model, prompt,
+                                               max_tokens=_LIST_MAX_TOKENS)
+    if first.content is None or first.finish_reason != "length":
+        return first.content
+    if first.max_tokens >= _LIST_RETRY_MAX_TOKENS:
+        logger.warning("list answer cut short (finish_reason=length) at max_tokens=%d; "
+                       "prompt %d chars; no wider retry, keeping the partial list",
+                       first.max_tokens, len(prompt))
+        _degrade(degraded, LIST_TRUNCATED)
+        return first.content
     logger.warning("list answer cut short (finish_reason=length) at max_tokens=%d; "
                    "prompt %d chars; retrying with max_tokens=%d",
-                   _LIST_MAX_TOKENS, len(prompt), _LIST_RETRY_MAX_TOKENS)
-    retry, finish = await _complete_with_finish_reason(client, model, prompt,
-                                                       max_tokens=_LIST_RETRY_MAX_TOKENS)
-    if retry is not None:
-        raw = retry
-    if retry is None or finish == "length":
-        logger.warning("list answer still cut short at max_tokens=%d; prompt %d chars; "
-                       "keeping the partial list", _LIST_RETRY_MAX_TOKENS, len(prompt))
-        _degrade(degraded, LIST_TRUNCATED)
-    return raw
+                   first.max_tokens, len(prompt), _LIST_RETRY_MAX_TOKENS)
+    retry = await _complete_with_finish_reason(client, model, prompt,
+                                               max_tokens=_LIST_RETRY_MAX_TOKENS)
+    if retry.content is not None and retry.finish_reason != "length":
+        return retry.content
+    logger.warning("list answer still cut short at max_tokens=%d; prompt %d chars; "
+                   "keeping the longer partial list", retry.max_tokens, len(prompt))
+    _degrade(degraded, LIST_TRUNCATED)
+    return max((first.content, retry.content or ""), key=len)
 
 
 async def answer_list(graphiti, driver, map_client, map_model, synth_client, synth_model,

@@ -858,13 +858,63 @@ def test_the_truncation_note_is_fixed_wording():
         "The answer was cut short; this list may be incomplete.")
 
 
-async def test_complete_with_finish_reason_returns_the_reply_finish_reason():
-    content, finish = await synth_mod._complete_with_finish_reason(
+async def test_complete_with_finish_reason_returns_the_reply_finish_reason_and_budget():
+    got = await synth_mod._complete_with_finish_reason(
         _SeqClient([("text", "length")]), "m", "p", max_tokens=10)
-    assert (content, finish) == ("text", "length")
+    assert tuple(got) == ("text", "length", 10)
     seq = _SeqClient([(None, "length"), ("  ", "stop")])
-    content, finish = await synth_mod._complete_with_finish_reason(seq, "m", "p", max_tokens=10)
-    assert (content, finish) == (None, "stop") and seq.max_tokens == [10, 30]
+    got = await synth_mod._complete_with_finish_reason(seq, "m", "p", max_tokens=10)
+    assert tuple(got) == (None, "stop", 30) and seq.max_tokens == [10, 30]
+    seq = _SeqClient([(None, "length"), ("wide", "length")])
+    got = await synth_mod._complete_with_finish_reason(seq, "m", "p", max_tokens=10)
+    assert tuple(got) == ("wide", "length", 30)
+
+
+async def test_completion_helpers_accept_replies_without_a_finish_reason():
+    class _Bare:
+        def __init__(self, content):
+            self.content = content
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            choice = SimpleNamespace(message=SimpleNamespace(content=self.content))
+            return SimpleNamespace(choices=[choice])
+
+    assert await synth_mod._complete_or_none(_Bare("ok"), "m", "p", max_tokens=5) == "ok"
+    assert await synth_mod._complete_or_none(_Bare(None), "m", "p", max_tokens=5) is None
+    got = await synth_mod._complete_with_finish_reason(_Bare("ok"), "m", "p", max_tokens=5)
+    assert tuple(got) == ("ok", None, 5)
+
+
+async def test_a_list_cut_short_at_a_budget_already_wide_is_not_retried(patched, caplog):
+    install, _ = patched
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    # Empty at 10000 -> the completion's own retry at 30000 -> cut short there.
+    synth = _SeqClient([(None, "length"), ("- vSphere [1]\n- Hyp", "length")])
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                                   group_id="g", settings=_settings())
+    assert synth.max_tokens == [10000, 30000]
+    assert out["degraded"] == [lm.LIST_TRUNCATED]
+    assert out["answer"].startswith("- vSphere [1]\n- Hyp")
+    assert "max_tokens=30000" in caplog.text and "no wider retry" in caplog.text
+
+
+@pytest.mark.parametrize("retry_reply", [("- vS", "length"), (None, "length")])
+async def test_a_list_cut_short_twice_keeps_the_longer_partial_text(patched, retry_reply):
+    install, _ = patched
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    replies = [("- vSphere [1]\n- Hyp", "length"), retry_reply]
+    if retry_reply[0] is None:            # unusable at 16000 -> its own retry at 48000
+        replies.append((None, "length"))
+    synth = _SeqClient(replies)
+    out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                               group_id="g", settings=_settings())
+    assert synth.max_tokens[:2] == [10000, 16000]
+    assert out["degraded"] == [lm.LIST_TRUNCATED]
+    assert out["answer"].startswith("- vSphere [1]\n- Hyp")
 
 
 async def test_final_order_batches_run_concurrently(monkeypatch):
@@ -947,3 +997,23 @@ async def test_answer_list_reports_ungraded_bullets_and_passes_the_scope(patched
                                "s", q="Which X?", scope=Scope(), group_id="g",
                                settings=_settings())
     assert out["items_ungraded"] == 0
+
+
+async def test_a_bulleted_group_layout_is_answered_not_refused(patched, monkeypatch):
+    install, _ = patched
+    q = "Where can I restore a Windows agent backup?"
+    client = install({q: [_fact(u, text) for text, (u, _s) in _GRADED_FACTS.items()]},
+                     expansion="[]")
+    monkeypatch.setattr(lm, "rerank", _scored_rerank)
+    synth = _Client("- **Hypervisors**\n  - **Sangfor aSV** — restore as a VM [1]\n"
+                    "  - **Oracle Linux KVM** — restore as a VM [3]\n"
+                    "- **Clouds:**\n  - **Oracle Linux KVM** — again [3]")
+    out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                               group_id="g", settings=_settings(list_item_floor=0.1))
+    assert [(g["item"], g["grade"]) for g in out["item_grades"]] == [
+        ("Sangfor aSV", "confirmed"), ("Oracle Linux KVM", "dropped"),
+        ("Oracle Linux KVM", "dropped")]
+    # (_finalize_answer collapses space runs, indentation included: compare stripped.)
+    assert [ln.strip() for ln in out["answer"].splitlines()] == [
+        "- **Hypervisors**", "- **Sangfor aSV** — restore as a VM [1]"]
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf"]

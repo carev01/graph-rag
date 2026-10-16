@@ -5,6 +5,7 @@ import logging
 import math
 import re
 from collections.abc import Sequence
+from typing import NamedTuple
 
 from openai import AsyncOpenAI
 
@@ -215,45 +216,31 @@ async def _complete_or_none(client: AsyncOpenAI, model: str, prompt: str, *,
     """Call the model once; if it returns nothing usable, retry ONCE with a
     3x larger token budget (a reasoning model can burn a small budget entirely
     on reasoning tokens) before giving up and returning None."""
-    resp = await client.chat.completions.create(
-        model=model, temperature=0, max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}])
-    content = _usable_content(resp)
-    if content is not None:
-        return content
-    finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
-    logger.warning(
-        "synthesis model %s returned no usable content (finish_reason=%s); "
-        "retrying with max_tokens=%d", model, finish_reason, max_tokens * 3)
-
-    resp = await client.chat.completions.create(
-        model=model, temperature=0, max_tokens=max_tokens * 3,
-        messages=[{"role": "user", "content": prompt}])
-    content = _usable_content(resp)
-    if content is not None:
-        return content
-    finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
-    logger.warning(
-        "synthesis model %s still returned no usable content after retry "
-        "(finish_reason=%s); giving up", model, finish_reason)
-    return None
+    return (await _complete_with_finish_reason(client, model, prompt,
+                                               max_tokens=max_tokens)).content
 
 
-def _finish_reason(resp) -> str:
-    return resp.choices[0].finish_reason if resp.choices else "no-choices"
+def _finish_reason(resp) -> str | None:
+    return getattr(resp.choices[0], "finish_reason", None) if resp.choices else "no-choices"
+
+
+class Completion(NamedTuple):
+    content: str | None        # None: nothing usable, even after the wider retry
+    finish_reason: str | None  # of the reply returned (or of the last one)
+    max_tokens: int            # the budget that reply was given
 
 
 async def _complete_with_finish_reason(client: AsyncOpenAI, model: str, prompt: str, *,
-                                       max_tokens: int) -> tuple[str | None, str]:
-    """`_complete_or_none`, but also returning the finish reason of the reply whose
-    content is returned (or of the last reply, when none was usable), so a caller
-    can tell a complete answer from one cut short at `max_tokens` ("length")."""
+                                       max_tokens: int) -> Completion:
+    """`_complete_or_none`'s call-and-retry, also reporting the reply's finish reason
+    and budget, so a caller can tell a complete answer from one cut short at its
+    `max_tokens` ("length") and knows what budget that was."""
     resp = await client.chat.completions.create(
         model=model, temperature=0, max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}])
     content = _usable_content(resp)
     if content is not None:
-        return content, _finish_reason(resp)
+        return Completion(content, _finish_reason(resp), max_tokens)
     logger.warning(
         "synthesis model %s returned no usable content (finish_reason=%s); "
         "retrying with max_tokens=%d", model, _finish_reason(resp), max_tokens * 3)
@@ -265,7 +252,7 @@ async def _complete_with_finish_reason(client: AsyncOpenAI, model: str, prompt: 
         logger.warning(
             "synthesis model %s still returned no usable content after retry "
             "(finish_reason=%s); giving up", model, _finish_reason(resp))
-    return content, _finish_reason(resp)
+    return Completion(content, _finish_reason(resp), max_tokens * 3)
 
 
 def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:

@@ -124,8 +124,12 @@ def _item_words(item: str, term_stems: set[str], excluded: set[str]) -> list[str
 
 
 def _names(item: str, text: str, term_stems: set[str], excluded: set[str]) -> bool:
-    """At least half (rounded up) of the item's distinctive words are present."""
-    words = _item_words(item, term_stems, excluded)
+    """At least half (rounded up) of the item's distinctive words are present. An item
+    made only of excluded words ("Veeam Backup" under the product scope "Veeam Backup &
+    Replication") falls back to its words minus stopwords, so it still has to be
+    named."""
+    words = (_item_words(item, term_stems, excluded)
+             or [w for w in _WORD_RE.findall(item.lower()) if w not in STOPWORDS])
     if not words:
         return True
     return sum(_present(w, text) for w in words) >= math.ceil(len(words) / 2)
@@ -182,22 +186,37 @@ def _indent(line: str) -> int:
     return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
 
 
+def _is_bullet_heading(line: str) -> bool:
+    """A group heading written as a bullet: `- **Hypervisors**` or `- **Clouds:**` /
+    `- **Clouds**:` -- item form with nothing after the bold name but an optional
+    colon, so no description and no marker. Never graded or counted; removed only
+    when the items nested under it are all dropped (`_emptied_headings`)."""
+    m = _ITEM_RE.match(line)
+    return m is not None and m.group("rest").strip() in ("", ":")
+
+
 def _children(lines: list[str], i: int, end: int) -> list[int]:
     """The lines that belong to item line `i`: following lines indented deeper than
     it (sub-bullets, wrapped continuation lines), across a blank line only when the
     next non-blank line is still deeper; stops at a line at the same or a lower
-    indent, a heading, or the end of the graded region."""
+    indent, a heading, an item-form line (a nested item is graded on its own), or
+    the end of the graded region."""
     base = _indent(lines[i])
+
+    def stops(ln: str) -> bool:
+        return (_indent(ln) <= base or _level(ln) is not None
+                or _ITEM_RE.match(ln) is not None)
+
     out: list[int] = []
     j = i + 1
     while j < end:
         ln = lines[j]
         if not ln.strip():
             k = next((k for k in range(j + 1, end) if lines[k].strip()), None)
-            if k is None or _indent(lines[k]) <= base or _level(lines[k]) is not None:
+            if k is None or stops(lines[k]):
                 break
             out.append(j)
-        elif _indent(ln) <= base or _level(ln) is not None:
+        elif stops(ln):
             break
         else:
             out.append(j)
@@ -227,6 +246,8 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
         if m is None:
             if _BULLET_RE.match(lines[i]):
                 ungraded += 1
+            continue
+        if _is_bullet_heading(lines[i]):
             continue
         g = _grade_line(m.group("item").strip(), _markers(lines[i], marker_map), marker_map,
                         terms=terms, term_stems=term_stems, excluded=excluded, scores=scores,
@@ -272,6 +293,8 @@ def _is_limits_heading(line: str) -> bool:
     sentence or a bullet does not end the graded region."""
     if _LIMITS_LINE_RE.match(line):     # "Not supported / limitations:" on its own
         return True
+    if _is_bullet_heading(line):        # "- **Not supported / limitations**"
+        return bool(_LIMITS_RE.search(line))
     shaped = bool(_HEADING_RE.match(line)) or line.lstrip().startswith(("#", "**"))
     return shaped and bool(_LIMITS_RE.search(line))
 
@@ -288,12 +311,29 @@ def _emptied_headings(lines: list[str], end: int, removed: set[int]) -> set[int]
     heading of the same or a higher level, the limitations line or the end, deeper
     headings included -- had content and has none once the dropped lines (and the
     headings they empty, repeated until stable) are gone. A heading the model wrote
-    with nothing beneath it stays."""
-    levels = {i: lv for i in range(end) if (lv := _level(lines[i])) is not None}
+    with nothing beneath it stays.
+
+    A bulleted group heading (`- **Clouds**`) sits one level deeper than the
+    enclosing heading; its section also ends at the first non-blank line indented
+    no deeper than it (the items nested under it are the indented ones)."""
+    levels: dict[int, int] = {}
+    bulleted: set[int] = set()
+    enclosing = 0
+    for i in range(end):
+        if (lv := _level(lines[i])) is not None:
+            levels[i] = enclosing = lv
+        elif _is_bullet_heading(lines[i]):
+            levels[i] = enclosing + 1
+            bulleted.add(i)
 
     def section(i: int) -> range:
-        stop = next((j for j in range(i + 1, end) if j in levels and levels[j] <= levels[i]),
-                    end)
+        def ends(j: int) -> bool:
+            if j in levels and j not in bulleted and levels[j] <= levels[i]:
+                return True
+            if i in bulleted:
+                return bool(lines[j].strip()) and _indent(lines[j]) <= _indent(lines[i])
+            return False
+        stop = next((j for j in range(i + 1, end) if ends(j)), end)
         return range(i + 1, stop)
 
     gone = set(removed)
