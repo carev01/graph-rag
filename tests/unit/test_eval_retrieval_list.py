@@ -8,8 +8,14 @@ from answer_api.scope import Scope
 from answer_api.shape import Facet, QuestionShape
 from graph_extract.config import ExtractSettings
 
-_S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
-                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+
+
+def _settings():
+    # Built per test, never at collection time (hermetic-test rule).
+    return ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                           neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+
+
 _SHAPE = QuestionShape("single", (Facet("", Scope()),))
 Q = {"question": "Where can I restore a Windows agent backup?",
     "expected_items": [{"item": "Sangfor aSV", "aliases": ["Sangfor aSV"]},
@@ -40,7 +46,7 @@ async def test_item_scores_pick_the_best_matching_fact(monkeypatch):
     got = list_mode.ListRetrieval(results=[F1, F3], limitations=[F2],
                                   scores={"f1": 0.5, "f2": 0.9, "f3": 0.3})
     _patch_retrieve_list(monkeypatch, got)
-    out = await check_list_items(None, None, None, None, _S, Q, _SHAPE)
+    out = await check_list_items(None, None, None, None, _settings(), Q, _SHAPE)
     assert out["item_scores"]["Sangfor aSV"] == 0.9
     assert out["item_grades"]["Sangfor aSV"] == "confirmed"
 
@@ -50,7 +56,7 @@ async def test_an_unmatched_item_scores_none_and_grades_unretrieved(monkeypatch)
     got = list_mode.ListRetrieval(results=[F1, F3], limitations=[],
                                   scores={"f1": 0.5, "f3": 0.3})
     _patch_retrieve_list(monkeypatch, got)
-    out = await check_list_items(None, None, None, None, _S, Q, _SHAPE)
+    out = await check_list_items(None, None, None, None, _settings(), Q, _SHAPE)
     assert out["item_scores"]["Oracle Linux KVM"] is None
     assert out["item_grades"]["Oracle Linux KVM"] == "unretrieved"
 
@@ -61,7 +67,7 @@ async def test_a_matching_fact_with_no_score_still_scores_none(monkeypatch):
     score None rather than crashing or picking an arbitrary fallback."""
     got = list_mode.ListRetrieval(results=[F1], limitations=[], scores={})
     _patch_retrieve_list(monkeypatch, got)
-    out = await check_list_items(None, None, None, None, _S, Q, _SHAPE)
+    out = await check_list_items(None, None, None, None, _settings(), Q, _SHAPE)
     assert out["item_scores"]["Sangfor aSV"] is None
 
 
@@ -74,7 +80,7 @@ async def test_retrieve_list_raising_still_fails_with_the_error(monkeypatch):
         raise RuntimeError("every list retrieval failed")
 
     monkeypatch.setattr(list_mode, "retrieve_list", _raise)
-    out = await check_list_items(None, None, None, None, _S, Q, _SHAPE)
+    out = await check_list_items(None, None, None, None, _settings(), Q, _SHAPE)
     assert out["pass"] is False
     assert out["found"] == 0 and out["total"] == 2
     assert sorted(out["missing"]) == ["Oracle Linux KVM", "Sangfor aSV"]
@@ -96,6 +102,6 @@ async def test_the_grader_simulation_gets_the_questions_scope(monkeypatch):
 
     monkeypatch.setattr(er_mod, "grade_items", _spy)
     scope = Scope(vendors=("Veeam",))
-    await check_list_items(None, None, None, None, _S, Q,
+    await check_list_items(None, None, None, None, _settings(), Q,
                            QuestionShape("single", (Facet("", scope),)))
     assert seen == [scope]
