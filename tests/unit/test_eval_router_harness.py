@@ -210,10 +210,10 @@ async def test_report_and_progress_show_facet_and_enumeration_columns(monkeypatc
     report = er.format_report(summary).splitlines()
     header = next(ln for ln in report if ln.startswith("| intent |"))
     assert ("| misattributed | facet_coverage | enumeration_complete | item_coverage "
-            "| question |" in header)
+            "| flagged/dropped | question |" in header)
     assert header.count("|") == next(ln for ln in report if ln.startswith("|---")).count("|")
     row = next(ln for ln in report if ln.endswith("| loc |"))
-    assert "| True | False | - | loc |" in row
+    assert "| True | False | - | - | loc |" in row
 
 
 async def test_score_one_retrieves_a_named_subject_question_with_its_facet_scope(
@@ -247,3 +247,34 @@ async def test_classifier_hit_scores_the_classified_mode_when_present(monkeypatc
     rec = summary["per_question"][0]
     assert rec["routing_hit"] is False
     assert rec["classifier_hit"] is True
+
+
+async def test_item_grade_counts_are_recorded_summed_and_reported(monkeypatch):
+    def _graded(*grades):
+        return [{"item": f"i{n}", "grade": g, "missing_terms": [], "markers": [1],
+                 "fact_uuids": ["f1"]} for n, g in enumerate(grades)]
+
+    async def _router(*a, q, mode_override, scope, settings, **kw):
+        env = _env("local", "A1")
+        if q == "list1":
+            env["item_grades"] = _graded("confirmed", "needs_validation", "dropped", "dropped")
+        elif q == "list2":
+            env["item_grades"] = _graded("needs_validation")
+        return env
+
+    monkeypatch.setattr(er.router_mod, "answer_router", _router)
+    questions = [{"question": q, "intent": "local", "expected_modes": ["local"],
+                  "expected_article_ids": ["A1"]} for q in ("list1", "list2", "loc")]
+    summary = await er.run_eval((None,) * 11, questions, _S, _RESOLVER)
+    recs = {r["question"]: r for r in summary["per_question"]}
+    assert (recs["list1"]["items_flagged"], recs["list1"]["items_dropped"]) == (1, 2)
+    assert (recs["list2"]["items_flagged"], recs["list2"]["items_dropped"]) == (1, 0)
+    assert recs["loc"]["items_flagged"] is None and recs["loc"]["items_dropped"] is None
+    assert (summary["items_flagged"], summary["items_dropped"],
+            summary["items_graded_n"]) == (2, 2, 2)
+    report = er.format_report(summary).splitlines()
+    header = next(ln for ln in report if ln.startswith("| intent |"))
+    assert "| item_coverage | flagged/dropped | question |" in header
+    assert header.count("|") == next(ln for ln in report if ln.startswith("|---")).count("|")
+    assert next(ln for ln in report if ln.endswith("| list1 |")).endswith("| 1/2 | list1 |")
+    assert next(ln for ln in report if ln.endswith("| loc |")).endswith("| - | loc |")

@@ -339,6 +339,13 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                 if q.get("bonus_items"):
                     bonus_hits, _ = match_items(env["answer"], q["bonus_items"])
                     bonus_found = len(bonus_hits)
+            # Per-item evidence grades (spec §12.2): list answers only; None when the
+            # envelope carries no grades (not a list answer).
+            items_flagged = None
+            items_dropped = None
+            if "item_grades" in env:
+                items_flagged = sum(g["grade"] == "needs_validation" for g in env["item_grades"])
+                items_dropped = sum(g["grade"] == "dropped" for g in env["item_grades"])
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
                          "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),
@@ -357,6 +364,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "item_coverage": item_coverage,
                          "items_missing": items_missing,
                          "bonus_found": bonus_found,
+                         "items_flagged": items_flagged,
+                         "items_dropped": items_dropped,
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -379,6 +388,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                    "bag_share": None, "misattributed": None,
                    "facet_coverage": None, "enumeration_complete": None,
                    "item_coverage": None, "items_missing": None, "bonus_found": None,
+                   "items_flagged": None, "items_dropped": None,
                    "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
@@ -405,6 +415,10 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     ic = [r["item_coverage"] for r in per_question if r.get("item_coverage") is not None]
     summary["item_coverage"] = round(sum(ic) / len(ic), 2) if ic else None
     summary["item_coverage_n"] = len(ic)
+    graded = [r for r in per_question if r.get("items_flagged") is not None]
+    summary["items_flagged"] = sum(r["items_flagged"] for r in graded)
+    summary["items_dropped"] = sum(r["items_dropped"] for r in graded)
+    summary["items_graded_n"] = len(graded)
     summary["raw"] = raw
     return summary
 
@@ -426,6 +440,14 @@ def _mps_cell(rec: dict) -> str:
     if rec.get("mps_mean") is None:
         return "-"
     return f"{rec['mps_mean']}/{rec['mps_max']}"
+
+
+def _graded_cell(rec: dict) -> str:
+    """`flagged/dropped` item counts, or `-` (no item grades: not a list answer, or
+    a record written before the grades existed)."""
+    if rec.get("items_flagged") is None:
+        return "-"
+    return f"{rec['items_flagged']}/{rec['items_dropped']}"
 
 
 def format_report(summary: dict) -> str:
@@ -456,14 +478,16 @@ def format_report(summary: dict) -> str:
              f"(n={summary.get('facet_coverage_n')})** | **Enumeration completeness: "
              f"{summary.get('enumeration_completeness')} "
              f"(n={summary.get('enumeration_n')})** | **Item coverage (list questions): "
-             f"{summary.get('item_coverage')} (n={summary.get('item_coverage_n')})**",
+             f"{summary.get('item_coverage')} (n={summary.get('item_coverage_n')})** | "
+             f"Items flagged / dropped (list answers): {summary.get('items_flagged')} / "
+             f"{summary.get('items_dropped')} (n={summary.get('items_graded_n')})",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
              "| mps | bag | misattributed | facet_coverage | enumeration_complete "
-             "| item_coverage | question |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| item_coverage | flagged/dropped | question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
@@ -475,7 +499,8 @@ def format_report(summary: dict) -> str:
                      f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
                      f"{_cell(r.get('facet_coverage'))} | "
                      f"{_cell(r.get('enumeration_complete'))} | "
-                     f"{_cell(r.get('item_coverage'))} | {r['question']} |")
+                     f"{_cell(r.get('item_coverage'))} | {_graded_cell(r)} | "
+                     f"{r['question']} |")
     return "\n".join(lines) + "\n"
 
 

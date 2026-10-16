@@ -82,13 +82,16 @@ async def test_answer_text_ends_with_sources_built_from_citations(patch):
 async def test_answer_structured_output_carries_routing_and_list_fields(patch):
     env = {**_ENV, "routing": {"chosen": "local", "path": "list",
                                "degraded": ["retrieval failed for: q1"]},
-           "list_mode": True, "expansion_queries": ["q1", "q2"]}
+           "list_mode": True, "expansion_queries": ["q1", "q2"],
+           "item_grades": [{"item": "Azure", "grade": "confirmed", "missing_terms": [],
+                            "markers": [1], "fact_uuids": ["f1"]}]}
     patch(answer=env)
     async with Client(ms.build_mcp_server(_app())) as c:
         r = await c.call_tool("answer_question", {"question": "q"})
     assert r.structured_content["routing"] == env["routing"]
     assert r.structured_content["list_mode"] is True
     assert r.structured_content["expansion_queries"] == ["q1", "q2"]
+    assert r.structured_content["item_grades"] == env["item_grades"]
 
 
 async def test_answer_structured_output_omits_absent_list_fields(patch):
@@ -98,6 +101,7 @@ async def test_answer_structured_output_omits_absent_list_fields(patch):
     assert r.structured_content["routing"] == {"chosen": "local"}
     assert "list_mode" not in r.structured_content
     assert "expansion_queries" not in r.structured_content
+    assert "item_grades" not in r.structured_content
 
 
 def test_format_answer_text_never_invents_a_url():

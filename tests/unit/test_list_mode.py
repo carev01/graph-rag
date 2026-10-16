@@ -713,3 +713,62 @@ async def test_a_failed_sweep_alone_never_triggers_every_retrieval_failed(patche
                                  settings=_settings())
     assert [r["fact_uuid"] for r in got.results] == ["a"]
     assert got.degraded == [lm.SWEEP_DEGRADED]
+
+
+_GRADED_FACTS = {
+    "VBR supports backups created by Veeam Agent for Microsoft Windows for restore to "
+    "Sangfor aSV.": ("sf", 0.9),
+    "VBR can restore physical machines from backups created by Veeam Agents to the HPE "
+    "Morpheus VM Essentials environment.": ("hpe", 0.5),
+    "Restore of Windows agent backups to Oracle Linux KVM is possible.": ("low", 0.05),
+}
+
+
+async def _scored_rerank(rq, documents, *, top_k, settings):
+    return [(i, _GRADED_FACTS[d][1]) for i, d in enumerate(documents)][:top_k]
+
+
+async def test_list_retrieval_carries_the_final_rerank_scores(patched, monkeypatch):
+    install, _ = patched
+    q = "Where can I restore a Windows agent backup?"
+    client = install({q: [_fact(u, text) for text, (u, _s) in _GRADED_FACTS.items()]},
+                     expansion="[]")
+    monkeypatch.setattr(lm, "rerank", _scored_rerank)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert got.scores == {"sf": 0.9, "hpe": 0.5, "low": 0.05}
+
+
+async def test_answer_list_grades_bold_items_before_citing(patched, monkeypatch):
+    install, _ = patched
+    q = "Where can I restore a Windows agent backup?"
+    client = install({q: [_fact(u, text) for text, (u, _s) in _GRADED_FACTS.items()]},
+                     expansion="[]")
+    monkeypatch.setattr(lm, "rerank", _scored_rerank)
+    synth = _Client("**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]\n"
+                    "- **HPE Morpheus VM Essentials** — restore as a VM [2]\n"
+                    "- **Oracle Linux KVM** — restore as a VM [3]")
+    out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                               group_id="g", settings=_settings(list_item_floor=0.1))
+    assert "- **<item name>** —" in synth.prompts[0]
+    assert [(g["item"], g["grade"], g["missing_terms"], g["fact_uuids"])
+            for g in out["item_grades"]] == [
+        ("Sangfor aSV", "confirmed", [], ["sf"]),
+        ("HPE Morpheus VM Essentials", "needs_validation", ["windows"], ["hpe"]),
+        ("Oracle Linux KVM", "dropped", [], ["low"])]
+    assert "Oracle" not in out["answer"]
+    assert ("restore as a VM [2] *(needs validation: the cited source does not mention "
+            "Windows)*") in out["answer"]
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "hpe"]
+
+
+async def test_the_refusal_paths_carry_empty_item_grades(patched):
+    install, _ = patched
+    out = await lm.answer_list(None, None, install({}, expansion="[]"), "m", _Client("x"), "s",
+                               q="Which X?", scope=Scope(), group_id="g", settings=_settings())
+    assert out["item_grades"] == []
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    out = await lm.answer_list(None, None, client, "m", _Client(""), "s", q=q, scope=Scope(),
+                               group_id="g", settings=_settings())
+    assert out["citations"] == [] and out["item_grades"] == []

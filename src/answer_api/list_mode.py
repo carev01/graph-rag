@@ -19,7 +19,8 @@ import numpy as np
 
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import collapse_near_duplicates, fetch_vectors
-from answer_api.list_sweep import _ITEM_NOUNS, _PLURAL, keyword_sweep
+from answer_api.item_grades import grade_items
+from answer_api.list_sweep import _ITEM_NOUNS, _PLURAL, keyword_sweep, question_terms
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import scope_episode_uuids
 from answer_api.search import search_local
@@ -69,8 +70,11 @@ _LIST_PROMPT = (
     "You are answering a question that asks for a LIST, about backup products, using "
     "ONLY the numbered facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
     "List EVERY item the SUPPORTED FACTS state as an answer -- no item limit -- grouped "
-    "under a few short headings that the facts suggest. Give each item one short line "
-    "with its [N] marker; when several facts state the same item, put it on one line "
+    "under a few short headings that the facts suggest. Write each item as one line in "
+    "exactly this form: - **<item name>** — <short description> [N]. Include an item even "
+    "when its fact states it more generally than the question asks (for example for every "
+    "agent rather than one); such items are checked and flagged automatically. When "
+    "several facts state the same item, put it on one line "
     "with up to three of their markers. After the list, add a section titled \"Not "
     "supported / limitations\" summarising the LIMITATION FACTS briefly with their markers; omit "
     "that section when there are none. Do not pad, do not repeat items, and do not "
@@ -332,6 +336,8 @@ class ListRetrieval:
     limitations: list[dict]
     expansion_queries: list[str] = field(default_factory=list)
     degraded: list[str] = field(default_factory=list)
+    # Final rerank score per fact_uuid (None: unscored); the item grades' floor.
+    scores: dict[str, float | None] = field(default_factory=dict)
 
 
 async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, group_id,
@@ -424,7 +430,8 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
                 len(ranked), len(siblings), len(swept))
     return ListRetrieval(results=results,
                          limitations=[f for f, _ in limits][:settings.list_limitations_k],
-                         expansion_queries=expansions, degraded=degraded)
+                         expansion_queries=expansions, degraded=degraded,
+                         scores={f["fact_uuid"]: sc for f, sc in ranked})
 
 
 async def answer_list(graphiti, driver, map_client, map_model, synth_client, synth_model,
@@ -437,7 +444,7 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
         base["degraded"] = got.degraded
     if not facts:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": 0, "cited": 0,
-                "applies_to": []}
+                "applies_to": [], "item_grades": []}
     marker_map = {i: r for i, r in enumerate(facts, 1)}
     n_sup = len(got.results)
     sup = "\n".join(fact_line(i, r["fact"], r["sources"])
@@ -451,7 +458,11 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
                                   max_tokens=10000)
     if raw is None:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
-                "cited": 0, "applies_to": []}
+                "cited": 0, "applies_to": [], "item_grades": []}
+    # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
+    # dropped item's markers are never cited.
+    raw, grades = grade_items(raw, marker_map, q=q, terms=question_terms(q, scope),
+                              scores=got.scores, floor=settings.list_item_floor)
     answer, cited = _finalize_answer(raw, marker_map)
     note = degraded_note(got.degraded)
     if note and cited:
@@ -462,4 +473,5 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
                   "invalid_at": marker_map[m].get("invalid_at"),
                   "sources": marker_map[m]["sources"]} for m in cited]
     return {**base, "answer": answer, "citations": citations, "retrieved": len(facts),
-            "cited": len(cited), "applies_to": applies_to(citations)}
+            "cited": len(cited), "applies_to": applies_to(citations),
+            "item_grades": [g.as_dict(marker_map) for g in grades]}

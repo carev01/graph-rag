@@ -394,6 +394,9 @@ class ExtractSettings(BaseSettings):
     # the question's own distinctive words, run alongside the per-query searches.
     list_sweep_cap: int = 2000
     list_sweep_scoped_overfetch: int = 4
+    # Best-supporting fact's rerank score below which a listed item is dropped;
+    # calibrated on the free gate, spec §12.3.
+    list_item_floor: float = 0.1
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw

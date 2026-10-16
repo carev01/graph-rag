@@ -58,6 +58,16 @@ async def test_a_single_list_question_takes_list_mode(wired):
     assert env["mode"] == "local" and env["expansion_queries"] == ["q1"]
 
 
+async def test_the_list_branch_copies_item_grades_into_the_envelope(wired):
+    grades = [{"item": "Azure", "grade": "needs_validation", "missing_terms": ["windows"],
+               "markers": [1], "fact_uuids": ["az"]}]
+    wired["raw"] = {**_ENV_RAW, "item_grades": grades}
+    env = await _route()
+    assert env["item_grades"] == grades
+    wired["raw"] = None
+    assert (await _route())["item_grades"] == []
+
+
 async def test_an_explicit_mode_skips_list_mode(wired):
     await _route(override="global")
     assert wired["list"] == 0 and wired["modes"] == ["local"]
