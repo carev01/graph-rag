@@ -194,3 +194,16 @@ facts for all of them within the top 2000.
 3. **Calibration.** The free gate reports, per expected item, the best rerank score of
    a retrieved fact naming it; `list_item_floor` is set below every expected item's
    score. The paid eval reports flagged and dropped item counts per question.
+4. **Calibration result (2026-10-16 free gate) and adjustments.** Retrieval found 65/67
+   expected items. Every expected item's best rerank score was >= 0.689. Facts that are
+   clearly off-topic but name an item scored 0.33–0.48. Three changes followed:
+   - **Inflected exact forms in the sweep.** Lucene wildcards are constant-score, so
+     "agent*" barely ranked "Veeam Agents". Each term also adds its plural/singular and,
+     for verbs, -ed/-ing forms as exact words. The Morpheus agent fact moved from #2774
+     to #325.
+   - **Unnamed but relevant is flagged, not dropped** (the user's original intent: keep
+     a weakly grounded claim, flagged). A cited fact that does not name the item but
+     scores >= `list_item_unnamed_floor` (0.65) makes the item *needs validation* with
+     the fixed note *(needs validation: the cited source does not name this item)*.
+     Named support needs >= `list_item_floor` (0.4). Anything else is dropped.
+   - The list prompt names each item as the facts name it.
