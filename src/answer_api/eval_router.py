@@ -344,8 +344,10 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             items_graded = None
             items_flagged = None
             items_dropped = None
+            items_ungraded = None
             if "item_grades" in env:
                 items_graded = len(env["item_grades"])
+                items_ungraded = env.get("items_ungraded")
                 items_flagged = sum(g["grade"] == "needs_validation" for g in env["item_grades"])
                 items_dropped = sum(g["grade"] == "dropped" for g in env["item_grades"])
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
@@ -369,6 +371,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "items_graded": items_graded,
                          "items_flagged": items_flagged,
                          "items_dropped": items_dropped,
+                         "items_ungraded": items_ungraded,
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -392,7 +395,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                    "facet_coverage": None, "enumeration_complete": None,
                    "item_coverage": None, "items_missing": None, "bonus_found": None,
                    "items_graded": None, "items_flagged": None, "items_dropped": None,
-                   "failed": True}
+                   "items_ungraded": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.

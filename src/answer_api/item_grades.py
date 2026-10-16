@@ -15,6 +15,11 @@ plus the source article titles -- with no model involved:
   exist but none clears its floor (reason "below_floor"; an unscored fact never
   clears the unnamed floor).
 
+A dropped line takes its deeper-indented children (sub-bullets, wrapped lines) with
+it, and each drop is logged with its reason. Words of the scope's vendor/product/
+source names never count towards naming an item. If every item is dropped, the
+caller treats the answer as ungrounded (list_mode.answer_list refuses).
+
 No grade text is model-written: the note is fixed wording plus the question's own
 words. Lines from the "Not supported / limitations" section on are never graded."""
 from __future__ import annotations
@@ -23,8 +28,17 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
-from answer_api.list_sweep import _WORD_RE, STOPWORDS, is_limitation, stem, stem_prefixes
+from answer_api.list_sweep import (
+    _WORD_RE,
+    STOPWORDS,
+    is_limitation,
+    scope_words,
+    stem,
+    stem_prefixes,
+)
+from answer_api.scope import Scope
 from answer_api.synthesize import _MARKER_LIST_RE
 
 logger = logging.getLogger(__name__)
@@ -38,6 +52,10 @@ _BULLET = r"(?:[-*]|\d+[.)])"
 _ITEM_RE = re.compile(r"^(\s*" + _BULLET + r"\s+)\*\*(?P<item>[^*]+)\*\*(?P<rest>.*)$")
 _BULLET_RE = re.compile(r"^\s*" + _BULLET + r"\s+")
 _LIMITS_RE = re.compile(r"not supported\s*/\s*limitations", re.IGNORECASE)
+# The phrase alone on its line: optional "#"s, optional "**" around it, optional colon.
+_LIMITS_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*not supported\s*/\s*limitations\s*:?\s*(?:\*\*)?"
+    r"\s*:?\s*$", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s*(#{1,6}\s+\S.*|\*\*[^*]+\*\*:?)\s*$")
 # A bold-line heading ("**Clouds**") nests under every "#" heading.
 _BOLD_LEVEL = 7
@@ -96,10 +114,18 @@ def _markers(line: str, marker_map: dict[int, dict]) -> list[int]:
     return out
 
 
-def _names(item: str, text: str, term_stems: set[str]) -> bool:
+def _item_words(item: str, term_stems: set[str], excluded: set[str]) -> list[str]:
+    """The item's distinctive words: no stopwords, no generic kind-of-thing words, no
+    question term and no word of the scope's names (`excluded`) -- "Veeam" says
+    nothing about which Veeam item a fact names."""
+    return [w for w in _WORD_RE.findall(item.lower())
+            if w not in STOPWORDS and w not in _GENERIC and w not in excluded
+            and stem(w) not in term_stems]
+
+
+def _names(item: str, text: str, term_stems: set[str], excluded: set[str]) -> bool:
     """At least half (rounded up) of the item's distinctive words are present."""
-    words = [w for w in _WORD_RE.findall(item.lower())
-             if w not in STOPWORDS and w not in _GENERIC and stem(w) not in term_stems]
+    words = _item_words(item, term_stems, excluded)
     if not words:
         return True
     return sum(_present(w, text) for w in words) >= math.ceil(len(words) / 2)
@@ -111,8 +137,9 @@ def _as_in_question(term: str, q: str) -> str:
 
 
 def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
-                terms: list[str], term_stems: set[str], scores: dict[str, float | None],
-                floor: float, unnamed_floor: float) -> ItemGrade:
+                terms: list[str], term_stems: set[str], excluded: set[str],
+                scores: dict[str, float | None], floor: float,
+                unnamed_floor: float) -> ItemGrade:
     candidates: list[dict] = []        # every non-limitation cited fact, named or not
     first_missing: list[str] | None = None
     for m in markers:
@@ -125,7 +152,7 @@ def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
         if score is not None and score < floor:
             continue
         text = _evidence(fact)
-        if not _names(item, text, term_stems):
+        if not _names(item, text, term_stems, excluded):
             continue
         missing = [t for t in terms if not _present(t, text)]
         if not missing:
@@ -145,30 +172,72 @@ def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
     return ItemGrade(item, DROPPED, [], markers, "below_floor")
 
 
+class GradedAnswer(NamedTuple):
+    text: str                  # dropped lines removed, flagged lines annotated
+    grades: list[ItemGrade]    # one per item line, in text order
+    ungraded: int              # bullet lines in the graded region not in item form
+
+
+def _indent(line: str) -> int:
+    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
+
+
+def _children(lines: list[str], i: int, end: int) -> list[int]:
+    """The lines that belong to item line `i`: following lines indented deeper than
+    it (sub-bullets, wrapped continuation lines), across a blank line only when the
+    next non-blank line is still deeper; stops at a line at the same or a lower
+    indent, a heading, or the end of the graded region."""
+    base = _indent(lines[i])
+    out: list[int] = []
+    j = i + 1
+    while j < end:
+        ln = lines[j]
+        if not ln.strip():
+            k = next((k for k in range(j + 1, end) if lines[k].strip()), None)
+            if k is None or _indent(lines[k]) <= base or _level(lines[k]) is not None:
+                break
+            out.append(j)
+        elif _indent(ln) <= base or _level(ln) is not None:
+            break
+        else:
+            out.append(j)
+        j += 1
+    return out
+
+
 def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[str],
-                scores: dict[str, float | None], floor: float,
-                unnamed_floor: float) -> tuple[str, list[ItemGrade]]:
+                scores: dict[str, float | None], floor: float, unnamed_floor: float,
+                scope: Scope | None = None) -> GradedAnswer:
     """Grade every `- **<item>** ... [N]` line before the limitations section; return
-    the text with dropped lines (and headings they leave empty) removed and flagged
-    lines annotated, plus one grade per item line in text order."""
+    the text with dropped lines -- their deeper-indented children, and the headings
+    they leave empty -- removed and flagged lines annotated, one grade per graded
+    item line in text order, and the count of bullet lines not in item form. Words
+    of the `scope`'s names never count towards naming an item."""
     lines = raw.split("\n")
     end = next((i for i, ln in enumerate(lines) if _is_limits_heading(ln)), len(lines))
     term_stems = {stem(t) for t in terms}
+    excluded = scope_words(scope)
     grades: list[ItemGrade] = []
     removed: set[int] = set()
     ungraded = 0
     for i in range(end):
+        if i in removed:               # a child of a dropped item goes with it
+            continue
         m = _ITEM_RE.match(lines[i])
         if m is None:
             if _BULLET_RE.match(lines[i]):
                 ungraded += 1
             continue
         g = _grade_line(m.group("item").strip(), _markers(lines[i], marker_map), marker_map,
-                        terms=terms, term_stems=term_stems, scores=scores, floor=floor,
-                        unnamed_floor=unnamed_floor)
+                        terms=terms, term_stems=term_stems, excluded=excluded, scores=scores,
+                        floor=floor, unnamed_floor=unnamed_floor)
         grades.append(g)
         if g.grade == DROPPED:
+            children = _children(lines, i, end)
             removed.add(i)
+            removed.update(children)
+            logger.info("list item dropped (%s): %s%s", g.reason, g.item[:80],
+                        f" (+{len(children)} indented line(s))" if children else "")
         elif g.grade == NEEDS_VALIDATION:
             if g.reason == "unnamed":
                 lines[i] = lines[i].rstrip() + _NOTE_UNNAMED
@@ -195,12 +264,14 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
                 sum(g.grade == CONFIRMED for g in grades),
                 sum(g.grade == NEEDS_VALIDATION for g in grades),
                 sum(g.grade == DROPPED for g in grades))
-    return raw, grades
+    return GradedAnswer(raw, grades, ungraded)
 
 
 def _is_limits_heading(line: str) -> bool:
     """The "Not supported / limitations" section heading; the same phrase inside a
     sentence or a bullet does not end the graded region."""
+    if _LIMITS_LINE_RE.match(line):     # "Not supported / limitations:" on its own
+        return True
     shaped = bool(_HEADING_RE.match(line)) or line.lstrip().startswith(("#", "**"))
     return shaped and bool(_LIMITS_RE.search(line))
 

@@ -3,12 +3,16 @@ Neo4j: an unordered bounded fetch, then the scope filter (one bounded episode lo
 and the uuid sort + cap in Python -- deterministic for a static graph, the scope
 filter applied before the cap. Fixture: one subject entity with three current
 `SUPPORTS` edges -- two from Veeam episodes, one from a Cohesity episode that sorts
-first -- plus one invalidated edge."""
+first -- plus one invalidated edge. The keyword sweep's full-text query (spec §12.1) runs
+against the same container, on the index graphiti creates."""
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
 import answer_api.list_mode as lm
+import answer_api.list_sweep as ls
 from answer_api.scope import Scope
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
@@ -70,3 +74,62 @@ async def test_scoped_siblings_filter_before_the_cap(extract_driver):
     rows = await lm._group_siblings(extract_driver, "subj", "SUPPORTS",
                                     scope=Scope(products=("vbr",)), cap=1)
     assert [r["uuid"] for r in rows] == ["f1"]
+
+
+# graphiti's own definition of the index the sweep queries.
+_FULLTEXT = ("CREATE FULLTEXT INDEX edge_name_and_fact IF NOT EXISTS "
+             "FOR ()-[e:RELATES_TO]-() ON EACH [e.name, e.fact, e.group_id]")
+_SWEEP_SETTINGS = SimpleNamespace(list_sweep_cap=10, list_sweep_scoped_overfetch=4)
+
+
+async def _seed_sweep(driver):
+    await _seed(driver)
+    async with driver.session() as s:
+        await s.run(_FULLTEXT)
+        await s.run("CALL db.awaitIndexes(60)")
+        await s.run(
+            "CREATE (a:Entity {uuid:'sw'}) "
+            "CREATE (a)-[:RELATES_TO {uuid:'plural', name:'RESTORES_TO', group_id:'g', "
+            "fact:'Backups created by Veeam Agents can be restored to Proxmox VE.', "
+            "episodes:['ev1']}]->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'hyperv', name:'RESTORES_TO', group_id:'g', "
+            "fact:'Instant Recovery to Hyper-V hosts is supported.', episodes:['ev1']}]"
+            "->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'cohesity', name:'RESTORES_TO', group_id:'g', "
+            "fact:'The Cohesity agent restores to Nutanix AHV.', episodes:['ec1']}]"
+            "->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'invalid', name:'RESTORES_TO', group_id:'g', "
+            "fact:'The Veeam agent restored to Xen.', episodes:['ev1'], "
+            "invalid_at: datetime('2020-01-01T00:00:00Z')}]->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'othergroup', name:'RESTORES_TO', "
+            "group_id:'other', fact:'The Veeam agent restores to Oracle KVM.', "
+            "episodes:['ev1']}]->(:Entity)")
+
+
+async def test_the_sweep_returns_only_current_same_group_edges(extract_driver):
+    await _seed_sweep(extract_driver)
+    got = await ls.keyword_sweep(extract_driver, "Which hypervisors does the agent support?",
+                                 scope=None, group_id="g", settings=_SWEEP_SETTINGS)
+    # "agents" is found for the term "agent"; the invalidated and other-group edges never.
+    assert sorted(f["fact_uuid"] for f in got) == ["cohesity", "plural"]
+    plural = next(f for f in got if f["fact_uuid"] == "plural")
+    assert plural["sources"][0]["vendor"] == "Veeam"          # real provenance chain
+
+
+async def test_a_hyphenated_term_is_searched_without_error(extract_driver):
+    await _seed_sweep(extract_driver)
+    assert ls.question_terms("Which targets can Hyper-V restores reach?", None) == [
+        "hyper-v", "restores", "reach"]
+    got = await ls.keyword_sweep(extract_driver, "Which targets can Hyper-V restores reach?",
+                                 scope=None, group_id="g", settings=_SWEEP_SETTINGS)
+    uuids = [f["fact_uuid"] for f in got]
+    assert "hyperv" in uuids
+    assert "invalid" not in uuids and "othergroup" not in uuids
+
+
+async def test_a_scoped_sweep_keeps_only_in_scope_edges(extract_driver):
+    await _seed_sweep(extract_driver)
+    got = await ls.keyword_sweep(extract_driver, "Which hypervisors does the agent support?",
+                                 scope=Scope(vendors=("Veeam",)), group_id="g",
+                                 settings=_SWEEP_SETTINGS)
+    assert [f["fact_uuid"] for f in got] == ["plural"]

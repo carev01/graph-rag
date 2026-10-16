@@ -19,7 +19,7 @@ import numpy as np
 
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import collapse_near_duplicates, fetch_vectors
-from answer_api.item_grades import grade_items
+from answer_api.item_grades import CONFIRMED, NEEDS_VALIDATION, grade_items
 from answer_api.list_sweep import (
     _ITEM_NOUNS,
     _PLURAL,
@@ -31,7 +31,7 @@ from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import scope_episode_uuids
 from answer_api.search import search_local
 from answer_api.shape import raise_if_cancelled
-from answer_api.synthesize import _REFUSAL, _complete_or_none, _finalize_answer
+from answer_api.synthesize import _REFUSAL, _complete_with_finish_reason, _finalize_answer
 from graph_extract.provenance import Provenance
 from graph_extract.usage import usable_content
 
@@ -121,6 +121,11 @@ FINAL_RERANK_DEGRADED = "final rerank unavailable: items ordered by retrieval"
 RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"
 DIVERSITY_DEGRADED = "diversity selection unavailable"
 SWEEP_DEGRADED = "keyword search unavailable"
+LIST_TRUNCATED = "list answer cut short"
+# The list synthesis budget (spec §11), and the one wider retry when the reply is cut
+# short at it (finish_reason "length").
+_LIST_MAX_TOKENS = 10000
+_LIST_RETRY_MAX_TOKENS = 16000
 _warned_unconfigured = False
 
 
@@ -148,23 +153,35 @@ async def _final_order(q: str, facts: list[dict], *, settings,
         _degrade(degraded, FINAL_RERANK_DEGRADED)
         return unranked
     size = max(1, settings.list_rerank_batch)
+    batches = [facts[start:start + size] for start in range(0, len(facts), size)]
+    # The batches run concurrently: scores are absolute (same model, same question),
+    # so merging them by score does not depend on which batch finished first.
+    replies = await asyncio.gather(*[
+        rerank(q, [r["fact"] for r in batch], top_k=len(batch), settings=settings)
+        for batch in batches], return_exceptions=True)
+    raise_if_cancelled(replies)
     scored: list[tuple[dict, float | None]] = []
-    for start in range(0, len(facts), size):
-        batch = facts[start:start + size]
-        try:
-            ranked = await rerank(q, [r["fact"] for r in batch], top_k=len(batch),
-                                  settings=settings)
-        except Exception as exc:
-            logger.warning("list answer rerank failed (%s); keeping retrieval order", exc)
+    for batch, ranked in zip(batches, replies):
+        if isinstance(ranked, BaseException):
+            logger.warning("list answer rerank failed (%s); keeping retrieval order", ranked)
             ranked = None
         if ranked is None:
             _degrade(degraded, FINAL_RERANK_DEGRADED)
             return unranked
         seen: set[int] = set()
+        batch_scored: list[tuple[dict, float | None]] = []
         for i, score in ranked:
             if 0 <= i < len(batch) and i not in seen:
                 seen.add(i)
-                scored.append((batch[i], score))
+                batch_scored.append((batch[i], score))
+        if not seen:
+            # A reply without one valid index ranked nothing: a failed rerank, not a
+            # batch of facts that all scored nothing.
+            logger.warning("list answer rerank returned no valid index for a batch of %d; "
+                           "keeping retrieval order", len(batch))
+            _degrade(degraded, FINAL_RERANK_DEGRADED)
+            return unranked
+        scored += batch_scored
         # A short rerank reply keeps the unranked facts, after every ranked one.
         scored += [(batch[i], None) for i in range(len(batch)) if i not in seen]
     # Stable: equal scores keep reply order; unscored facts go last.
@@ -326,6 +343,8 @@ def degraded_note(degraded: list[str]) -> str:
         parts.append("repeated items could not be filtered out")
     if SWEEP_DEGRADED in degraded:
         parts.append("the keyword search could not be completed")
+    if LIST_TRUNCATED in degraded:
+        parts.append("the answer was cut short")
     return " and ".join(parts).capitalize() + "; this list may be incomplete." if parts else ""
 
 
@@ -433,6 +452,30 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
                          scores={f["fact_uuid"]: sc for f, sc in ranked})
 
 
+async def _list_synthesis(client, model: str, prompt: str, *,
+                          degraded: list[str]) -> str | None:
+    """The list answer; None when the model gave nothing usable. A reply cut short at
+    the budget (finish_reason "length") is retried ONCE wider; cut short again, its
+    text is kept and LIST_TRUNCATED recorded, so the answer says it was cut short
+    rather than reading as the whole list."""
+    raw, finish = await _complete_with_finish_reason(client, model, prompt,
+                                                     max_tokens=_LIST_MAX_TOKENS)
+    if raw is None or finish != "length":
+        return raw
+    logger.warning("list answer cut short (finish_reason=length) at max_tokens=%d; "
+                   "prompt %d chars; retrying with max_tokens=%d",
+                   _LIST_MAX_TOKENS, len(prompt), _LIST_RETRY_MAX_TOKENS)
+    retry, finish = await _complete_with_finish_reason(client, model, prompt,
+                                                       max_tokens=_LIST_RETRY_MAX_TOKENS)
+    if retry is not None:
+        raw = retry
+    if retry is None or finish == "length":
+        logger.warning("list answer still cut short at max_tokens=%d; prompt %d chars; "
+                       "keeping the partial list", _LIST_RETRY_MAX_TOKENS, len(prompt))
+        _degrade(degraded, LIST_TRUNCATED)
+    return raw
+
+
 async def answer_list(graphiti, driver, map_client, map_model, synth_client, synth_model,
                       *, q, scope, group_id, settings) -> dict:
     got = await retrieve_list(graphiti, driver, map_client, map_model, q=q, scope=scope,
@@ -443,27 +486,38 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
         base["degraded"] = got.degraded
     if not facts:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": 0, "cited": 0,
-                "applies_to": [], "item_grades": []}
+                "applies_to": [], "item_grades": [], "items_ungraded": 0}
     marker_map = {i: r for i, r in enumerate(facts, 1)}
     n_sup = len(got.results)
     sup = "\n".join(fact_line(i, r["fact"], r["sources"])
                     for i, r in marker_map.items() if i <= n_sup) or "(none)"
     lim = "\n".join(fact_line(i, r["fact"], r["sources"])
                     for i, r in marker_map.items() if i > n_sup) or "(none)"
-    raw = await _complete_or_none(synth_client, synth_model,
-                                  _LIST_PROMPT.format(supported=sup, limitations=lim, q=q),
-                                  # Up to 250 supported facts: room for a long grouped
-                                  # list plus the synthesis tier's reasoning tokens.
-                                  max_tokens=10000)
+    # Up to 250 supported facts: room for a long grouped list plus the synthesis
+    # tier's reasoning tokens.
+    raw = await _list_synthesis(synth_client, synth_model,
+                                _LIST_PROMPT.format(supported=sup, limitations=lim, q=q),
+                                degraded=got.degraded)
+    if got.degraded:
+        base["degraded"] = got.degraded
     if raw is None:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
-                "cited": 0, "applies_to": [], "item_grades": []}
+                "cited": 0, "applies_to": [], "item_grades": [], "items_ungraded": 0}
     # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
     # dropped item's markers are never cited.
-    raw, grades = grade_items(raw, marker_map, q=q, terms=question_terms(q, scope),
-                              scores=got.scores, floor=settings.list_item_floor,
-                              unnamed_floor=settings.list_item_unnamed_floor)
-    answer, cited = _finalize_answer(raw, marker_map)
+    graded = grade_items(raw, marker_map, q=q, terms=question_terms(q, scope),
+                         scores=got.scores, floor=settings.list_item_floor,
+                         unnamed_floor=settings.list_item_unnamed_floor, scope=scope)
+    item_grades = [g.as_dict(marker_map) for g in graded.grades]
+    if graded.grades and not any(g.grade in (CONFIRMED, NEEDS_VALIDATION)
+                                 for g in graded.grades):
+        # Every item was dropped: whatever text remains is not a grounded list, so
+        # refuse and let the router take its normal route.
+        logger.info("list answer: every item dropped by grading; taking the normal route")
+        return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
+                "cited": 0, "applies_to": [], "item_grades": item_grades,
+                "items_ungraded": graded.ungraded}
+    answer, cited = _finalize_answer(graded.text, marker_map)
     note = degraded_note(got.degraded)
     if note and cited:
         answer = f"{answer}\n\n{note}"
@@ -474,4 +528,4 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
                   "sources": marker_map[m]["sources"]} for m in cited]
     return {**base, "answer": answer, "citations": citations, "retrieved": len(facts),
             "cited": len(cited), "applies_to": applies_to(citations),
-            "item_grades": [g.as_dict(marker_map) for g in grades]}
+            "item_grades": item_grades, "items_ungraded": graded.ungraded}

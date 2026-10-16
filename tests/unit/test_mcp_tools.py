@@ -84,7 +84,8 @@ async def test_answer_structured_output_carries_routing_and_list_fields(patch):
                                "degraded": ["retrieval failed for: q1"]},
            "list_mode": True, "expansion_queries": ["q1", "q2"],
            "item_grades": [{"item": "Azure", "grade": "confirmed", "missing_terms": [],
-                            "markers": [1], "fact_uuids": ["f1"]}]}
+                            "markers": [1], "fact_uuids": ["f1"]}],
+           "items_ungraded": 2}
     patch(answer=env)
     async with Client(ms.build_mcp_server(_app())) as c:
         r = await c.call_tool("answer_question", {"question": "q"})
@@ -92,6 +93,7 @@ async def test_answer_structured_output_carries_routing_and_list_fields(patch):
     assert r.structured_content["list_mode"] is True
     assert r.structured_content["expansion_queries"] == ["q1", "q2"]
     assert r.structured_content["item_grades"] == env["item_grades"]
+    assert r.structured_content["items_ungraded"] == 2
 
 
 async def test_answer_structured_output_omits_absent_list_fields(patch):
@@ -102,6 +104,7 @@ async def test_answer_structured_output_omits_absent_list_fields(patch):
     assert "list_mode" not in r.structured_content
     assert "expansion_queries" not in r.structured_content
     assert "item_grades" not in r.structured_content
+    assert "items_ungraded" not in r.structured_content
 
 
 def test_format_answer_text_never_invents_a_url():

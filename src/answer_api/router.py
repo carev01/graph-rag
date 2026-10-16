@@ -233,6 +233,7 @@ async def answer_router(graphiti, driver, embedder, synth_client, synth_model,
             env["list_mode"] = True
             env["expansion_queries"] = raw.get("expansion_queries", [])
             env["item_grades"] = raw.get("item_grades", [])
+            env["items_ungraded"] = raw.get("items_ungraded", 0)
             _shape_fields(env, shape, raw, requested)
             env["freshness"] = await freshness_mod.freshness(
                 driver, settings.group_id, reports=False)

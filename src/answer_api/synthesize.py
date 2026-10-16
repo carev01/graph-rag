@@ -239,6 +239,35 @@ async def _complete_or_none(client: AsyncOpenAI, model: str, prompt: str, *,
     return None
 
 
+def _finish_reason(resp) -> str:
+    return resp.choices[0].finish_reason if resp.choices else "no-choices"
+
+
+async def _complete_with_finish_reason(client: AsyncOpenAI, model: str, prompt: str, *,
+                                       max_tokens: int) -> tuple[str | None, str]:
+    """`_complete_or_none`, but also returning the finish reason of the reply whose
+    content is returned (or of the last reply, when none was usable), so a caller
+    can tell a complete answer from one cut short at `max_tokens` ("length")."""
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}])
+    content = _usable_content(resp)
+    if content is not None:
+        return content, _finish_reason(resp)
+    logger.warning(
+        "synthesis model %s returned no usable content (finish_reason=%s); "
+        "retrying with max_tokens=%d", model, _finish_reason(resp), max_tokens * 3)
+    resp = await client.chat.completions.create(
+        model=model, temperature=0, max_tokens=max_tokens * 3,
+        messages=[{"role": "user", "content": prompt}])
+    content = _usable_content(resp)
+    if content is None:
+        logger.warning(
+            "synthesis model %s still returned no usable content after retry "
+            "(finish_reason=%s); giving up", model, _finish_reason(resp))
+    return content, _finish_reason(resp)
+
+
 def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
     """Synthesis LLM = GLM-5.2 via the judge_* config (shared endpoint for now;
     point at a dedicated synthesis model later without touching the judge)."""

@@ -258,6 +258,7 @@ async def test_item_grade_counts_are_recorded_summed_and_reported(monkeypatch):
         env = _env("local", "A1")
         if q == "list1":
             env["item_grades"] = _graded("confirmed", "needs_validation", "dropped", "dropped")
+            env["items_ungraded"] = 3
         elif q == "list2":
             env["item_grades"] = _graded("needs_validation")
         return env
@@ -271,6 +272,7 @@ async def test_item_grade_counts_are_recorded_summed_and_reported(monkeypatch):
     assert (recs["list2"]["items_flagged"], recs["list2"]["items_dropped"]) == (1, 0)
     assert recs["loc"]["items_flagged"] is None and recs["loc"]["items_dropped"] is None
     assert (recs["list1"]["items_graded"], recs["loc"]["items_graded"]) == (4, None)
+    assert (recs["list1"]["items_ungraded"], recs["loc"]["items_ungraded"]) == (3, None)
     assert (summary["items_flagged"], summary["items_dropped"],
             summary["items_graded_n"]) == (2, 2, 2)
     report = er.format_report(summary).splitlines()

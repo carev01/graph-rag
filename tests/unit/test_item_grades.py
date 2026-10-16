@@ -1,7 +1,11 @@
 """Per-item evidence grades for list answers (spec 2026-10-15 §12.2)."""
 import logging
 
+import pytest
+
 import answer_api.item_grades as ig
+import answer_api.list_sweep as ls
+from answer_api.scope import Scope
 
 Q_AGENT = "Where can I restore a Windows agent backup?"
 T_AGENT = ["restore", "windows", "agent", "backup"]
@@ -18,13 +22,13 @@ def _fact(uuid, text, title=None):
 
 
 def _grade(raw, facts, *, q=Q_AGENT, terms=T_AGENT, scores=None, floor=0.1,
-          unnamed_floor=0.65):
+          unnamed_floor=0.65, scope=None):
     marker_map = {i: f for i, f in enumerate(facts, 1)}
     if scores is None:
         scores = {f["fact_uuid"]: 0.6 for f in facts}
-    text, grades = ig.grade_items(raw, marker_map, q=q, terms=terms, scores=scores,
-                                  floor=floor, unnamed_floor=unnamed_floor)
-    return text, grades, marker_map
+    got = ig.grade_items(raw, marker_map, q=q, terms=terms, scores=scores, floor=floor,
+                         unnamed_floor=unnamed_floor, scope=scope)
+    return got.text, got.grades, marker_map
 
 
 def test_a_fact_with_every_question_term_confirms_the_item():
@@ -239,3 +243,87 @@ def test_recover_and_copy_word_families_match():
     assert ig._present("copies", "a copy job")
     assert ig._present("copy", "backup copies are kept")
     assert ig._present("policies", "a retention policy")
+
+
+# --- Fix wave 2 -------------------------------------------------------------------
+
+@pytest.mark.parametrize("line", [
+    "Not supported / limitations:", "Not supported / limitations", "**Not supported / "
+    "limitations:**", "**Not supported / limitations**:", "## Not supported / limitations:",
+    "  not supported / limitations  "])
+def test_the_limitations_phrase_alone_on_its_line_is_the_heading(line):
+    assert ig._is_limits_heading(line)
+
+
+def test_items_after_a_plain_limitations_line_are_untouched():
+    raw = ("- **Nutanix AHV** — y [1]\n\nNot supported / limitations:\n"
+           "- **Oracle KVM** — not supported [1]")
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.item for g in grades] == ["Nutanix AHV"]
+    assert text == raw
+
+
+def test_sub_bullets_of_a_dropped_item_go_with_it():
+    raw = ("- **Oracle KVM** — x [1]\n  - restore as a VM\n    - with a nested note\n"
+           "- **Nutanix AHV** — y [1]\n  - instant recovery")
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.grade for g in grades] == [ig.DROPPED, ig.CONFIRMED]
+    assert text == "- **Nutanix AHV** — y [1]\n  - instant recovery"
+
+
+def test_wrapped_continuation_lines_of_a_dropped_item_go_with_it():
+    raw = ("**Hypervisors**\n- **Oracle KVM** — a long description that\n"
+           "  wraps onto a second line\n\n  and a third after a blank [1]\n\n"
+           "- **Nutanix AHV** — y [1]\nAn unindented closing line.")
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.grade for g in grades] == [ig.DROPPED, ig.CONFIRMED]
+    # The blank separating the dropped item from the next one stays (one blank).
+    assert text == ("**Hypervisors**\n\n- **Nutanix AHV** — y [1]\n"
+                    "An unindented closing line.")
+
+
+def test_children_stop_at_a_heading_or_a_blank_then_unindented_line():
+    raw = ("- **Oracle KVM** — x [1]\n  wrapped\n\nPlain paragraph.\n"
+           "- **Oracle KVM 2** — x [1]\n  ## Deeper heading\n- **Nutanix AHV** — y [1]")
+    text, _, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert text == "Plain paragraph.\n  ## Deeper heading\n- **Nutanix AHV** — y [1]"
+
+
+def test_the_ungraded_bullet_count_is_returned():
+    raw = ("- **Nutanix AHV** — y [1]\n- plain bullet [1]\n* another plain [1]\n\n"
+           "**Not supported / limitations**\n- plain limitation [1]")
+    got = ig.grade_items(raw, {1: _fact("nx", NUTANIX)}, q=Q_AGENT, terms=T_AGENT,
+                         scores={"nx": 0.6}, floor=0.1, unnamed_floor=0.65)
+    assert got.ungraded == 2 and len(got.grades) == 1
+    assert ig.grade_items("- **Nutanix AHV** — y [1]", {1: _fact("nx", NUTANIX)}, q=Q_AGENT,
+                          terms=T_AGENT, scores={"nx": 0.6}, floor=0.1,
+                          unnamed_floor=0.65).ungraded == 0
+
+
+def test_scope_name_words_are_not_distinctive_item_words():
+    excluded = ls.scope_words(Scope(vendors=("Veeam",)))
+    assert excluded == {"veeam"}
+    assert ig._item_words("Veeam Agent for Linux", set(), excluded) == ["agent", "linux"]
+    assert ig._item_words("Veeam Agent for Linux", set(), set()) == ["veeam", "agent", "linux"]
+
+
+def test_an_item_whose_only_overlap_is_the_vendor_word_is_not_named():
+    fact = _fact("vw", "Veeam Agent for Microsoft Windows backups can be restored to Azure.")
+    raw = "- **Veeam Kasten** — x [1]"
+    # Unscoped, "veeam" is one of two distinctive words and tips the item to named.
+    _, grades, _ = _grade(raw, [fact], scores={"vw": 0.5}, floor=0.4)
+    assert grades[0].grade != ig.DROPPED
+    _, grades, _ = _grade(raw, [fact], scores={"vw": 0.5}, floor=0.4,
+                          scope=Scope(vendors=("Veeam",)))
+    assert grades[0].grade == ig.DROPPED and grades[0].reason == "below_floor"
+
+
+def test_each_dropped_item_is_logged_with_its_reason(caplog):
+    long_item = "Oracle KVM " + "x" * 100
+    raw = f"- **{long_item}** — x [1]\n  wrapped\n- **Sangfor aSV** — y [99]"
+    with caplog.at_level(logging.INFO, logger="answer_api.item_grades"):
+        _grade(raw, [_fact("nx", NUTANIX)])
+    assert f"list item dropped (below_floor): {long_item[:80]} (+1 indented line(s))" \
+        in caplog.text
+    assert long_item[:81] not in caplog.text
+    assert "list item dropped (no_marker): Sangfor aSV" in caplog.text

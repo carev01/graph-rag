@@ -85,6 +85,26 @@ async def test_an_ungrounded_list_answer_falls_back_to_the_normal_route(wired):
     assert env["routing"].get("path") != "list"
 
 
+async def test_an_all_dropped_list_answer_takes_the_normal_route(wired):
+    # answer_list's refusal envelope when grading dropped every item (fix wave 2).
+    wired["raw"] = {**_ENV_RAW, "answer": "I don't have enough information to answer that "
+                    "from the available sources.", "citations": [], "cited": 0,
+                    "applies_to": [], "items_ungraded": 0,
+                    "item_grades": [{"item": "Xen", "grade": "dropped", "missing_terms": [],
+                                     "markers": [1], "fact_uuids": ["az"]}]}
+    env = await _route()
+    assert wired["list"] == 1 and wired["modes"] == ["drift"]
+    assert env["routing"].get("path") != "list" and env["answer"] == "normal"
+    assert "item_grades" not in env
+
+
+async def test_the_list_branch_copies_the_ungraded_count(wired):
+    wired["raw"] = {**_ENV_RAW, "items_ungraded": 3}
+    assert (await _route())["items_ungraded"] == 3
+    wired["raw"] = None
+    assert (await _route())["items_ungraded"] == 0
+
+
 async def test_list_degradation_reaches_the_envelope(wired):
     wired["raw"] = {**_ENV_RAW, "degraded": ["retrieval failed for: q1"]}
     env = await _route()

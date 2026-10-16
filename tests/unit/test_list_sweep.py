@@ -1,4 +1,6 @@
 """Keyword sweep (spec 2026-10-15 §12.1)."""
+import logging
+
 import pytest
 
 import answer_api.list_mode as lm
@@ -125,3 +127,16 @@ async def test_a_question_with_no_distinctive_words_runs_no_query():
                                  scope=Scope(products=("Veeam Backup & Replication",)),
                                  group_id="g", settings=_settings())
     assert got == [] and drv.calls == []
+
+
+async def test_the_sweep_logs_its_terms_and_counts(monkeypatch, caplog):
+    monkeypatch.setattr(ls, "Provenance", _Prov)
+    rows = [_row("a", 1.0, ["e1"]), _row("b", 3.0, ["e2"]), _row("c", 2.0, ["e3"])]
+    drv = _Driver(rows, in_scope={"e2", "e3"})
+    with caplog.at_level(logging.INFO, logger="answer_api.list_sweep"):
+        await ls.keyword_sweep(drv, "Which workloads does Veeam support immutability for?",
+                               scope=Scope(vendors=("Veeam",)), group_id="g",
+                               settings=_settings(list_sweep_cap=1,
+                                                  list_sweep_scoped_overfetch=4))
+    assert ("list keyword sweep: terms=['immutability'] fetched=3 in_scope=2 kept=1"
+            in caplog.text)

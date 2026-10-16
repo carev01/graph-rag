@@ -140,7 +140,7 @@ def build_mcp_server(app: FastAPI) -> MCPServer:
                       ("mode", "scope", "shape", "facets", "applies_to", "citations")}
         # Routing (incl. any degradation) and list-mode details, when present.
         structured.update({k: env[k] for k in ("routing", "list_mode", "expansion_queries",
-                                                  "item_grades")
+                                                  "item_grades", "items_ungraded")
                            if k in env})
         return CallToolResult(content=[TextContent(type="text", text=format_answer_text(env))],
                               structured_content=structured)

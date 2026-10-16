@@ -6,10 +6,13 @@ at 250 facts had a fact naming it, e.g. "... backups created by Veeam Agents to 
 Morpheus VM Essentials environment")."""
 from __future__ import annotations
 
+import logging
 import re
 
 from answer_api.scope import Scope, scope_episode_uuids
 from graph_extract.provenance import Provenance
+
+logger = logging.getLogger(__name__)
 
 # A plural noun: ends in -s but not -ss/-us/-is ("process", "status", "analysis").
 _PLURAL = r"\w+s(?<!ss)(?<!us)(?<!is)"
@@ -98,17 +101,23 @@ def stem_prefixes(word: str) -> list[str]:
     return [s, s[:-1] + "ie"] if s.endswith("y") and len(s) >= 4 else [s]
 
 
+def scope_words(scope: Scope | None) -> set[str]:
+    """Every lower-cased word of the scope's vendor/product/source names: never
+    distinctive, since the scope already restricts to them."""
+    if scope is None:
+        return set()
+    return {w for name in (*scope.vendors, *scope.products, *scope.sources)
+            for w in _WORD_RE.findall(name.lower())}
+
+
 def question_terms(q: str, scope: Scope | None) -> list[str]:
     """The question's distinctive words: no stopwords or generic verbs, no list item
     noun, no word of the scope's vendor/product/source names (the scope already
     restricts to them)."""
-    drop = set(STOPWORDS) | _ITEM_NOUN_WORDS
+    drop = set(STOPWORDS) | _ITEM_NOUN_WORDS | scope_words(scope)
     m = _ITEM_NOUN_RE.search(q)
     if m:
         drop.add(m.group(1).lower())
-    if scope is not None:
-        for name in (*scope.vendors, *scope.products, *scope.sources):
-            drop.update(_WORD_RE.findall(name.lower()))
     out: list[str] = []
     for w in _WORD_RE.findall(q.lower()):
         if w not in drop and w not in out:
@@ -145,6 +154,7 @@ async def keyword_sweep(driver, q: str, *, scope: Scope | None, group_id: str,
         SWEEP_QUERY, index=FULLTEXT_INDEX, query=lucene_query(terms), fetch=fetch,
         group_id=group_id)
     rows = sorted(rows, key=lambda r: -r["score"])        # stable: BM25 order
+    fetched = len(rows)
     if scoped:
         assert scope is not None
         allowed = await scope_episode_uuids(
@@ -155,6 +165,8 @@ async def keyword_sweep(driver, q: str, *, scope: Scope | None, group_id: str,
         if len(kept) >= cap:
             break
         kept.setdefault(r["uuid"], r)
+    logger.info("list keyword sweep: terms=%s fetched=%d in_scope=%d kept=%d",
+                terms, fetched, len(rows), len(kept))
     if not kept:
         return []
     resolved = await Provenance(driver).resolve_citations(list(kept))

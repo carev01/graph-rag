@@ -1,6 +1,7 @@
 """Free-gate calibration output for list questions (spec 2026-10-15 §7, task 11)."""
 import pytest
 
+import answer_api.eval_retrieval as er_mod
 from answer_api import list_mode
 from answer_api.eval_retrieval import check_list_items
 from answer_api.scope import Scope
@@ -80,3 +81,21 @@ async def test_retrieve_list_raising_still_fails_with_the_error(monkeypatch):
     assert out["error"] == "every list retrieval failed"
     assert out["item_scores"] == {}
     assert out["item_grades"] == {}
+
+
+@pytest.mark.asyncio
+async def test_the_grader_simulation_gets_the_questions_scope(monkeypatch):
+    got = list_mode.ListRetrieval(results=[F1], limitations=[], scores={"f1": 0.9})
+    _patch_retrieve_list(monkeypatch, got)
+    seen = []
+    real = er_mod.grade_items
+
+    def _spy(*a, **kw):
+        seen.append(kw.get("scope"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(er_mod, "grade_items", _spy)
+    scope = Scope(vendors=("Veeam",))
+    await check_list_items(None, None, None, None, _S, Q,
+                           QuestionShape("single", (Facet("", scope),)))
+    assert seen == [scope]

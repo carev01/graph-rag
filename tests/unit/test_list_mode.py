@@ -774,3 +774,176 @@ async def test_the_refusal_paths_carry_empty_item_grades(patched):
     out = await lm.answer_list(None, None, client, "m", _Client(""), "s", q=q, scope=Scope(),
                                group_id="g", settings=_settings())
     assert out["citations"] == [] and out["item_grades"] == []
+
+
+# --- Fix wave 2 -------------------------------------------------------------------
+
+async def test_an_answer_whose_every_item_is_dropped_refuses(patched, monkeypatch, caplog):
+    install, _ = patched
+    q = "Where can I restore a Windows agent backup?"
+    client = install({q: [_fact(u, text) for text, (u, _s) in _GRADED_FACTS.items()]},
+                     expansion="[]", fail=())
+    monkeypatch.setattr(lm, "rerank", _scored_rerank)
+    synth = _Client("**Hypervisors**\n- **Oracle Linux KVM** — restore as a VM [3]\n"
+                    "- plain bullet [1]")
+    with caplog.at_level(logging.INFO, logger="answer_api.list_mode"):
+        out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                                   group_id="g", settings=_settings(list_item_floor=0.1))
+    assert out["answer"] == synth_mod._REFUSAL
+    assert out["citations"] == [] and out["cited"] == 0 and out["applies_to"] == []
+    assert [g["grade"] for g in out["item_grades"]] == ["dropped"]
+    assert out["items_ungraded"] == 1
+    assert out["list_mode"] is True and out["expansion_queries"] == []
+    assert "every item dropped by grading; taking the normal route" in caplog.text
+
+
+async def test_an_all_dropped_answer_keeps_the_degraded_entries(patched, monkeypatch):
+    install, _ = patched
+    q = "Where can I restore a Windows agent backup?"
+    client = install({q: [_fact(u, text) for text, (u, _s) in _GRADED_FACTS.items()]},
+                     fail=("q-ec2",))
+    monkeypatch.setattr(lm, "rerank", _scored_rerank)
+    synth = _Client("- **Oracle Linux KVM** — restore as a VM [3]")
+    out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                               group_id="g", settings=_settings(list_item_floor=0.1))
+    assert out["citations"] == [] and out["degraded"] == ["retrieval failed for: q-ec2"]
+
+
+class _SeqClient:
+    """Replies with (content, finish_reason) in turn; records each max_tokens."""
+
+    def __init__(self, replies):
+        self.replies, self.max_tokens = list(replies), []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kw):
+        self.max_tokens.append(kw["max_tokens"])
+        content, finish = self.replies.pop(0)
+        msg = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish)])
+
+
+async def test_a_list_cut_short_once_is_retried_wider_without_a_note(patched, caplog):
+    install, _ = patched
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    synth = _SeqClient([("- vSph", "length"), ("- vSphere [1]", "stop")])
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                                   group_id="g", settings=_settings())
+    assert synth.max_tokens == [10000, 16000]
+    assert out["answer"] == "- vSphere [1]" and "degraded" not in out
+    assert "max_tokens=10000" in caplog.text and "chars" in caplog.text
+
+
+async def test_a_list_cut_short_twice_keeps_the_text_and_says_so(patched, caplog):
+    install, _ = patched
+    q = "Which hypervisors does Veeam support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+    synth = _SeqClient([("- vSph", "length"), ("- vSphere [1]\n- Hyp", "length")])
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
+                                   group_id="g", settings=_settings())
+    assert synth.max_tokens == [10000, 16000]
+    assert out["degraded"] == [lm.LIST_TRUNCATED]
+    assert out["answer"].startswith("- vSphere [1]\n- Hyp")
+    assert out["answer"].endswith(
+        "The answer was cut short; this list may be incomplete.")
+    assert "still cut short at max_tokens=16000" in caplog.text
+
+
+def test_the_truncation_note_is_fixed_wording():
+    assert lm.LIST_TRUNCATED == "list answer cut short"
+    assert lm.degraded_note([lm.LIST_TRUNCATED]) == (
+        "The answer was cut short; this list may be incomplete.")
+
+
+async def test_complete_with_finish_reason_returns_the_reply_finish_reason():
+    content, finish = await synth_mod._complete_with_finish_reason(
+        _SeqClient([("text", "length")]), "m", "p", max_tokens=10)
+    assert (content, finish) == ("text", "length")
+    seq = _SeqClient([(None, "length"), ("  ", "stop")])
+    content, finish = await synth_mod._complete_with_finish_reason(seq, "m", "p", max_tokens=10)
+    assert (content, finish) == (None, "stop") and seq.max_tokens == [10, 30]
+
+
+async def test_final_order_batches_run_concurrently(monkeypatch):
+    started: list[int] = []
+    both = asyncio.Event()
+
+    async def _rerank(q, docs, *, top_k, settings):
+        started.append(len(docs))
+        if len(started) == 2:
+            both.set()
+        # Each batch waits until BOTH have started: sequential calls would hang here.
+        await asyncio.wait_for(both.wait(), timeout=2)
+        return [(i, float(int(d.split()[-1]))) for i, d in enumerate(docs)]
+
+    monkeypatch.setattr(lm, "rerank", _rerank)
+    monkeypatch.setattr(lm, "rerank_configured", lambda s: True)
+    facts = [_fact(f"f{i}", f"fact {i}") for i in range(4)]
+    degraded: list[str] = []
+    out = await lm._final_order("q", facts, settings=_settings(list_rerank_batch=2),
+                                degraded=degraded)
+    assert sorted(started) == [2, 2] and degraded == []
+    assert [f["fact_uuid"] for f, _ in out] == ["f3", "f2", "f1", "f0"]
+
+
+@pytest.mark.parametrize("how", ["raises", "none"])
+async def test_one_failed_rerank_batch_degrades_the_whole_order(monkeypatch, how):
+    async def _rerank(q, docs, *, top_k, settings):
+        if docs[0] == "fact 2":
+            if how == "raises":
+                raise RuntimeError("batch down")
+            return None
+        return [(i, 1.0) for i in range(len(docs))]
+
+    monkeypatch.setattr(lm, "rerank", _rerank)
+    monkeypatch.setattr(lm, "rerank_configured", lambda s: True)
+    facts = [_fact(f"f{i}", f"fact {i}") for i in range(4)]
+    degraded: list[str] = []
+    out = await lm._final_order("q", facts, settings=_settings(list_rerank_batch=2),
+                                degraded=degraded)
+    assert degraded == [lm.FINAL_RERANK_DEGRADED]
+    assert [(f["fact_uuid"], s) for f, s in out] == [(f"f{i}", None) for i in range(4)]
+
+
+@pytest.mark.parametrize("reply", [[], [(7, 0.9), (-1, 0.8)]])
+async def test_a_rerank_reply_with_no_valid_index_is_a_failed_rerank(monkeypatch, caplog, reply):
+    async def _rerank(q, docs, *, top_k, settings):
+        return list(reply)
+
+    monkeypatch.setattr(lm, "rerank", _rerank)
+    monkeypatch.setattr(lm, "rerank_configured", lambda s: True)
+    facts = [_fact(f"f{i}", f"fact {i}") for i in range(3)]
+    degraded: list[str] = []
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out = await lm._final_order("q", facts, settings=_settings(), degraded=degraded)
+    assert degraded == [lm.FINAL_RERANK_DEGRADED]
+    assert [s for _, s in out] == [None, None, None]
+    assert "no valid index" in caplog.text
+
+
+async def test_answer_list_reports_ungraded_bullets_and_passes_the_scope(patched, monkeypatch):
+    install, _ = patched
+    q = "Where can I restore a Windows agent backup?"
+    client = install({q: [_fact(u, text) for text, (u, _s) in _GRADED_FACTS.items()]},
+                     expansion="[]")
+    monkeypatch.setattr(lm, "rerank", _scored_rerank)
+    seen = {}
+    real = lm.grade_items
+
+    def _spy(*a, **kw):
+        seen["scope"] = kw.get("scope")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(lm, "grade_items", _spy)
+    synth = _Client("- **Sangfor aSV** — restore as a VM [1]\n- plain bullet [2]")
+    scope = Scope(vendors=("Veeam",))
+    out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=scope,
+                               group_id="g", settings=_settings(list_item_floor=0.1))
+    assert out["items_ungraded"] == 1 and seen["scope"] is scope
+    out = await lm.answer_list(None, None, install({}, expansion="[]"), "m", _Client("x"),
+                               "s", q="Which X?", scope=Scope(), group_id="g",
+                               settings=_settings())
+    assert out["items_ungraded"] == 0
