@@ -151,3 +151,46 @@ The free gate went 59/67 -> 63/67: most missing items were retrieved but ranked 
 Still missing: Entra ID (Q1); Scale Computing HyperCore, HPE Morpheus VM Essentials and
 "publish disks" (Q2) — the hypervisor ones rest only on generic "different workloads"
 facts, which grounding deliberately does not stretch to.
+
+## 12. Keyword sweep and per-item evidence grades (2026-10-16, approved in conversation)
+
+The user's bar is a complete answer, with any claim whose support is weaker kept but
+flagged. A free trace (2026-10-16) found that every item still missing at 250 facts has
+a fact naming it, e.g. "VBR can restore physical machines from backups created by Veeam
+Agents to the HPE Morpheus VM Essentials environment" and "Veeam Data Cloud for
+Microsoft Entra ID offers service-level immutability". These facts hang off subjects the
+relation expansion never visits, and the expansion queries never name the items. Entity
+name embeddings cannot find peers (the nearest names to Proxmox VE / Nutanix AHV are
+noise). A full-text OR query over the question's own words, ranked by BM25, returns
+facts for all of them within the top 2000.
+
+1. **Keyword sweep (recall, no LLM).** `question_terms(q, scope)` keeps the question's
+   distinctive words: lower-cased, without stopwords, generic verbs ("support",
+   "offer"), the list's item noun ("workloads", "options") or words of the scope's
+   vendor/product/source names. A Lucene OR query over those words, each also as a
+   suffix-stripped prefix ("restore restor*"), runs on graphiti's `edge_name_and_fact`
+   full-text index: current edges of the question's group, BM25 order, at most
+   `list_sweep_cap` (2000) facts kept. When scoped, `list_sweep_scoped_overfetch` (4) x
+   the cap are fetched and filtered by scope before the cap. No words → no sweep. The
+   sweep runs concurrently with the per-query searches and joins round one; a failure
+   records "keyword search unavailable" in `degraded` and the answer proceeds.
+2. **Per-item grades (deterministic, list mode only).** The list prompt writes each
+   item as `- **<item>** — <short description> [N]`, and includes items whose fact
+   states them more generally than the question asks. After synthesis, each item line
+   before the "Not supported / limitations" section is graded from its cited facts
+   (fact text plus the source article titles):
+   - **confirmed**: a cited fact names the item (at least half of the item's
+     distinctive words), its rerank score is at least `list_item_floor` (or unscored
+     after a degraded rerank), and the fact contains every question term (stem prefix
+     match, small synonym groups such as restore ~ recover);
+   - **needs validation**: as confirmed, but some question terms are missing; the line
+     is kept with the fixed note *(needs validation: the cited source does not mention
+     <terms>)*, the terms spelled as in the question;
+   - **dropped**: no cited fact names the item at or above the floor; the line is
+     removed (headings left empty are removed too) and logged.
+   No grade text is model-written. The envelope gains `item_grades`
+   (`[{item, grade, missing_terms, markers, fact_uuids}]`), also in the MCP structured
+   output. The answer-level confidence proposed earlier is not built.
+3. **Calibration.** The free gate reports, per expected item, the best rerank score of
+   a retrieved fact naming it; `list_item_floor` is set below every expected item's
+   score. The paid eval reports flagged and dropped item counts per question.

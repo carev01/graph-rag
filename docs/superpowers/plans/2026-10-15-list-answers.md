@@ -1311,3 +1311,314 @@ Measured stage times per list question (6 relation groups): searches ~13-20 s wa
 3. **Timing log:** `retrieve_list` logs one INFO line with per-stage durations (expansion, searches, collapse, rerank, relations, selection) so latency is visible in production logs.
 
 Tests: fetch_vectors fetches only missing uuids and reuses the cache; collapse with a supplied cache issues no embeddings query; retrieve_list issues at most one embeddings query per distinct uuid across the whole call (count via the fake driver); sibling fetch with the unordered cap*4 + Python scope filter keeps only in-scope siblings and respects both caps; the stage-timing log line is emitted. Keep every existing assertion that still describes intended behaviour.
+
+---
+
+## Amendment 2 tasks (spec §12, approved 2026-10-16)
+
+### Task 9: Keyword sweep
+
+**Files:** create `src/answer_api/list_sweep.py`; modify `src/answer_api/list_mode.py`, `src/graph_extract/config.py`; tests: create `tests/unit/test_list_sweep.py`, modify `tests/unit/test_list_mode.py`, `tests/unit/test_config.py`.
+
+**Interfaces produced (Task 10 relies on them):**
+- `list_sweep.STOPWORDS: frozenset[str]`, `list_sweep.stem(word: str) -> str`, `list_sweep.question_terms(q: str, scope: Scope | None) -> list[str]` (lower-case words, question order, deduplicated).
+- `list_sweep._PLURAL` and `list_sweep._ITEM_NOUNS` — MOVED here from `list_mode.py` (list_mode imports them; list_sweep must never import list_mode).
+- `list_sweep.lucene_query(terms: list[str]) -> str`, `list_sweep.SWEEP_QUERY`, `list_sweep.FULLTEXT_INDEX = "edge_name_and_fact"`.
+- `async list_sweep.keyword_sweep(driver, q: str, *, scope: Scope | None, group_id: str, settings) -> list[dict]` — fact dicts shaped exactly like `relation_siblings` output (`fact, fact_uuid, valid_at, invalid_at, sources`).
+- `list_mode.SWEEP_DEGRADED = "keyword search unavailable"`.
+
+**Settings** (in the list-mode block of `ExtractSettings`, with a comment citing spec §12.1): `list_sweep_cap: int = 2000`, `list_sweep_scoped_overfetch: int = 4`.
+
+**`list_sweep.py` content:**
+
+```python
+"""Keyword sweep for list mode (spec 2026-10-15 §12.1): a full-text search of fact text
+for the question's own distinctive words. Every word comes from the question and every
+hit is a stored fact -- nothing is inferred. It reaches long-tail items whose facts hang
+off subjects the relation expansion never visits (2026-10-16: every item still missing
+at 250 facts had a fact naming it, e.g. "... backups created by Veeam Agents to the HPE
+Morpheus VM Essentials environment")."""
+from __future__ import annotations
+
+import re
+
+from answer_api.scope import Scope, scope_episode_uuids
+from graph_extract.provenance import Provenance
+
+# A plural noun: ends in -s but not -ss/-us/-is ("process", "status", "analysis").
+_PLURAL = r"\w+s(?<!ss)(?<!us)(?<!is)"
+_ITEM_NOUNS = (r"(options|ways|methods|types|kinds|destinations|targets|choices|"
+               r"alternatives|modes|tiers|levels|formats|platforms|locations)")
+
+STOPWORDS = frozenset((
+    "a an the and or not of for to in on at by with from into via as is are was were be "
+    "been can could do does did will would should must may might shall i you we they it "
+    "its my our your me us which what where when how who whom whose why list all any "
+    "every each some there their this that these those than then also about between "
+    "other support supports supported supporting provide provides offer offers use uses "
+    "using allow allows enable enables available possible").split())
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9\-]*")
+# The list's own item noun ("Which workloads ...", "What recovery options ...").
+_ITEM_NOUN_RE = re.compile(r"^\s*(?:which|what)\s+(?:[\w\-]+\s+){0,3}?(" + _PLURAL + r")\b",
+                           re.IGNORECASE)
+_ITEM_NOUN_WORDS = frozenset(_ITEM_NOUNS.strip("()").split("|"))
+# Longest first; a stem keeps at least 4 characters.
+_SUFFIXES = ("ility", "ations", "ation", "ions", "ion", "ings", "ing", "ies", "es", "ed",
+             "er", "s", "e", "y")
+
+FULLTEXT_INDEX = "edge_name_and_fact"
+SWEEP_QUERY = (
+    "CALL db.index.fulltext.queryRelationships($index, $query, {limit: $fetch}) "
+    "YIELD relationship AS f, score "
+    "WHERE f.group_id = $group_id AND (f.invalid_at IS NULL OR f.invalid_at > datetime()) "
+    "RETURN f.uuid AS uuid, f.fact AS fact, f.episodes AS episodes, score")
+
+
+def stem(word: str) -> str:
+    """Crude suffix strip for prefix matching: immutability -> immutab, restore ->
+    restor, recovery -> recover, databases -> databas; agent stays agent."""
+    for suf in _SUFFIXES:
+        if word.endswith(suf) and len(word) - len(suf) >= 4:
+            return word[: -len(suf)]
+    return word
+
+
+def question_terms(q: str, scope: Scope | None) -> list[str]:
+    """The question's distinctive words: no stopwords or generic verbs, no list item
+    noun, no word of the scope's vendor/product/source names (the scope already
+    restricts to them)."""
+    drop = set(STOPWORDS) | _ITEM_NOUN_WORDS
+    m = _ITEM_NOUN_RE.search(q)
+    if m:
+        drop.add(m.group(1).lower())
+    if scope is not None:
+        for name in (*scope.vendors, *scope.products, *scope.sources):
+            drop.update(_WORD_RE.findall(name.lower()))
+    out: list[str] = []
+    for w in _WORD_RE.findall(q.lower()):
+        if w not in drop and w not in out:
+            out.append(w)
+    return out
+
+
+def lucene_query(terms: list[str]) -> str:
+    """OR of every term, plus its stem as a prefix when the stem is a plain word of at
+    least 4 characters; '-' is escaped (Lucene syntax) and never wildcarded."""
+    parts: list[str] = []
+    for t in terms:
+        if "-" in t:
+            parts.append(t.replace("-", "\\-"))
+            continue
+        parts.append(t)
+        s = stem(t)
+        if len(s) >= 4:
+            parts.append(f"{s}*")
+    return " ".join(parts)
+
+
+async def keyword_sweep(driver, q: str, *, scope: Scope | None, group_id: str,
+                        settings) -> list[dict]:
+    """Up to `list_sweep_cap` current facts matching the question's words, best BM25
+    first; scoped questions over-fetch `list_sweep_scoped_overfetch` x the cap and keep
+    only facts with an episode in scope. Sources resolve through the provenance chain."""
+    terms = question_terms(q, scope)
+    cap = settings.list_sweep_cap
+    if not terms or cap <= 0:
+        return []
+    scoped = scope is not None and not scope.is_empty()
+    fetch = cap * (settings.list_sweep_scoped_overfetch if scoped else 1)
+    rows, _, _ = await driver.execute_query(
+        SWEEP_QUERY, index=FULLTEXT_INDEX, query=lucene_query(terms), fetch=fetch,
+        group_id=group_id)
+    rows = sorted(rows, key=lambda r: -r["score"])        # stable: BM25 order
+    if scoped:
+        assert scope is not None
+        allowed = await scope_episode_uuids(
+            driver, scope, candidates=[e for r in rows for e in r["episodes"] or ()])
+        rows = [r for r in rows if allowed.intersection(r["episodes"] or ())]
+    kept: dict[str, dict] = {}
+    for r in rows:
+        if len(kept) >= cap:
+            break
+        kept.setdefault(r["uuid"], r)
+    if not kept:
+        return []
+    resolved = await Provenance(driver).resolve_citations(list(kept))
+    return [{"fact": r["fact"], "fact_uuid": u,
+             "valid_at": resolved.get(u, {}).get("valid_at"),
+             "invalid_at": resolved.get(u, {}).get("invalid_at"),
+             "sources": resolved.get(u, {}).get("sources", [])} for u, r in kept.items()]
+```
+
+**`list_mode.py` changes:**
+- Delete the `_PLURAL` and `_ITEM_NOUNS` definitions; `from answer_api.list_sweep import _ITEM_NOUNS, _PLURAL, keyword_sweep`.
+- Add `SWEEP_DEGRADED = "keyword search unavailable"` next to the other degraded constants; `degraded_note` adds the part `"the keyword search could not be completed"` when it is present.
+- In `retrieve_list`, run the sweep in the SAME `asyncio.gather` as the per-query searches (append `keyword_sweep(driver, q, scope=scope, group_id=group_id, settings=settings)` as the last awaitable; `return_exceptions=True` already set; `raise_if_cancelled` already called). Split its result off before the per-query loop: an exception → WARNING `"list keyword sweep failed (%s); continuing without it"` + `_degrade(degraded, SWEEP_DEGRADED)`; otherwise extend `merged` with the swept facts AFTER the per-query results. The "every list retrieval failed" check still counts only the per-query searches. Add `swept=%d` to the stage-timing INFO line.
+
+**Tests (`tests/unit/test_list_sweep.py`, hermetic):**
+
+```python
+"""Keyword sweep (spec 2026-10-15 §12.1)."""
+import pytest
+
+import answer_api.list_sweep as ls
+from answer_api.scope import _EPISODES_AMONG, Scope
+from graph_extract.config import ExtractSettings
+
+
+def _settings(**kw):
+    return ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                           neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p", **kw)
+
+
+@pytest.mark.parametrize("q,scope,terms", [
+    ("Which workloads does Veeam support immutability for?", Scope(vendors=("Veeam",)),
+     ["immutability"]),
+    ("Where can I restore a Windows agent backup?", Scope(),
+     ["restore", "windows", "agent", "backup"]),
+    ("Which hypervisors does Veeam Backup & Replication support?",
+     Scope(products=("Veeam Backup & Replication",)), []),
+    ("Which resource types can AWS Backup protect?", Scope(products=("AWS Backup",)),
+     ["resource", "protect"]),
+    ("What recovery options does Azure Backup offer for Azure VMs?",
+     Scope(vendors=("Microsoft",), products=("Azure Backup",)), ["recovery", "vms"]),
+])
+def test_question_terms_keep_only_distinctive_words(q, scope, terms):
+    assert ls.question_terms(q, scope) == terms
+
+
+@pytest.mark.parametrize("word,stemmed", [
+    ("immutability", "immutab"), ("restore", "restor"), ("recovery", "recover"),
+    ("databases", "databas"), ("restores", "restor"), ("agent", "agent"), ("vms", "vms")])
+def test_stem(word, stemmed):
+    assert ls.stem(word) == stemmed
+
+
+def test_lucene_query_adds_stem_prefixes_and_escapes_hyphens():
+    assert (ls.lucene_query(["restore", "windows", "agent", "vms", "hyper-v"])
+            == "restore restor* windows window* agent agent* vms hyper\\-v")
+
+
+class _Driver:
+    def __init__(self, rows, in_scope=()):
+        self.rows, self.in_scope, self.calls = rows, set(in_scope), []
+
+    async def execute_query(self, query, **p):
+        self.calls.append((query, p))
+        if query is ls.SWEEP_QUERY:
+            return (self.rows[: p["fetch"]], None, None)
+        if query is _EPISODES_AMONG:
+            return ([{"u": [e for e in p["eps"] if e in self.in_scope]}], None, None)
+        raise AssertionError(query)
+
+
+class _Prov:
+    def __init__(self, driver):
+        pass
+
+    async def resolve_citations(self, uuids):
+        return {u: {"sources": [{"url": f"https://d/{u}", "vendor": "Veeam"}],
+                    "valid_at": None, "invalid_at": None} for u in uuids}
+
+
+def _row(u, score, eps):
+    return {"uuid": u, "fact": f"fact {u}", "episodes": eps, "score": score}
+
+
+async def test_scoped_sweep_overfetches_filters_by_scope_and_caps(monkeypatch):
+    monkeypatch.setattr(ls, "Provenance", _Prov)
+    rows = [_row("a", 1.0, ["e1"]), _row("b", 3.0, ["e2"]), _row("c", 2.0, ["e3"]),
+            _row("d", 0.5, ["e4"])]
+    drv = _Driver(rows, in_scope={"e2", "e3", "e4"})
+    got = await ls.keyword_sweep(drv, "Which workloads does Veeam support immutability for?",
+                                 scope=Scope(vendors=("Veeam",)), group_id="g",
+                                 settings=_settings(list_sweep_cap=2,
+                                                    list_sweep_scoped_overfetch=4))
+    query, p = drv.calls[0]
+    assert p["index"] == "edge_name_and_fact" and p["fetch"] == 8 and p["group_id"] == "g"
+    assert p["query"] == "immutability immutab*"
+    assert [f["fact_uuid"] for f in got] == ["b", "c"]          # BM25 order, in scope, cap 2
+    assert got[0]["sources"][0]["url"] == "https://d/b"
+
+
+async def test_unscoped_sweep_fetches_the_cap_and_skips_the_scope_query(monkeypatch):
+    monkeypatch.setattr(ls, "Provenance", _Prov)
+    drv = _Driver([_row("a", 1.0, ["e1"]), _row("b", 2.0, [])])
+    got = await ls.keyword_sweep(drv, "Where can I restore a Windows agent backup?",
+                                 scope=None, group_id="g", settings=_settings())
+    assert [c[0] for c in drv.calls] == [ls.SWEEP_QUERY]
+    assert drv.calls[0][1]["fetch"] == 2000
+    assert [f["fact_uuid"] for f in got] == ["b", "a"]
+
+
+async def test_a_question_with_no_distinctive_words_runs_no_query():
+    drv = _Driver([])
+    got = await ls.keyword_sweep(drv, "Which hypervisors does Veeam Backup & Replication support?",
+                                 scope=Scope(products=("Veeam Backup & Replication",)),
+                                 group_id="g", settings=_settings())
+    assert got == [] and drv.calls == []
+```
+
+**`tests/unit/test_list_mode.py` changes:** the `patched` fixture and `test_retrieve_list_fetches_each_embedding_at_most_once` stub `lm.keyword_sweep` (an `async def _no_sweep(driver, q, *, scope, group_id, settings): return []`), so existing assertions keep holding. New tests: (1) swept facts join round one — stub the sweep to return `[_fact("sw", "Restore to Sangfor aSV is supported.")]`; assert `"sw"` is among `got.results` and that the first rerank call's documents include its text; (2) a sweep that raises records `lm.SWEEP_DEGRADED` exactly once, the per-query results are still returned, and `lm.degraded_note([lm.SWEEP_DEGRADED])` contains `"keyword search could not be completed"`; (3) a sweep failure alone never triggers the "every list retrieval failed" error. `tests/unit/test_config.py`: assert `(s.list_sweep_cap, s.list_sweep_scoped_overfetch) == (2000, 4)`.
+
+- [ ] **Step 1:** Write the tests above; run them; they fail (no module).
+- [ ] **Step 2:** Create `list_sweep.py`, move `_PLURAL`/`_ITEM_NOUNS`, wire `retrieve_list`, add the settings.
+- [ ] **Step 3:** Run `uv run --extra dev pytest tests/unit -q`, `uv run ruff check src tests`, `uv run mypy src` — all green.
+- [ ] **Step 4:** Commit — `feat(answer): list keyword sweep over the question's own words` (with the trailer lines).
+
+---
+
+### Task 10: Per-item evidence grades
+
+**Files:** create `src/answer_api/item_grades.py`; modify `src/answer_api/list_mode.py`, `src/answer_api/router.py`, `src/answer_api/mcp_server.py`, `src/answer_api/eval_router.py`, `src/graph_extract/config.py`; tests: create `tests/unit/test_item_grades.py`, modify `tests/unit/test_list_mode.py`, `tests/unit/test_list_router.py`, `tests/unit/test_config.py` (and the MCP test file that pins the structured keys, if one does).
+
+**Interfaces:**
+- Consumes (Task 9): `list_sweep.question_terms(q, scope)`, `list_sweep.stem`, `list_sweep.STOPWORDS`.
+- Produces: `item_grades.CONFIRMED = "confirmed"`, `NEEDS_VALIDATION = "needs_validation"`, `DROPPED = "dropped"`; `@dataclass ItemGrade(item: str, grade: str, missing_terms: list[str], markers: list[int])` with `as_dict(marker_map) -> dict` returning `{"item", "grade", "missing_terms", "markers", "fact_uuids"}`; `grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[str], scores: dict[str, float | None], floor: float) -> tuple[str, list[ItemGrade]]`.
+- `ListRetrieval` gains `scores: dict[str, float | None] = field(default_factory=dict)` — the final rerank score per fact_uuid (`{f["fact_uuid"]: sc for f, sc in ranked}`), set in `retrieve_list`.
+- `answer_list` return dict gains `"item_grades": [g.as_dict(marker_map) for g in grades]` (also `[]` on the refusal paths).
+- Setting: `list_item_floor: float = 0.1` (comment: "best-supporting fact's rerank score below which a listed item is dropped; calibrated on the free gate, spec §12.3").
+
+**`item_grades.py` rules:**
+- An item line matches `^(\s*[-*]\s+)\*\*(?P<item>[^*]+)\*\*(?P<rest>.*)$`. Only lines BEFORE the first line matching `not supported\s*/\s*limitations` (case-insensitive) are graded; everything from that line on is untouched. A bullet line (`^\s*[-*]\s+`) in the graded region that does not match the item form is left untouched and counted; log one WARNING per answer `"list answer: %d bullet line(s) not in item form; left ungraded"` when the count > 0.
+- Markers on a line: every integer inside `\[(\d+(?:\s*,\s*\d+)*)\]`, in order, deduplicated, kept only when in `marker_map`.
+- Evidence text of a fact: `fact` + " " + every source `title`, lower-cased.
+- `_present(term, text)`: true when `re.search(r"(?<![a-z0-9])" + re.escape(stem(term)), text)` matches, OR any member of the term's synonym group does. Synonym groups (by stem): `({"restor", "recover"}, {"protect", "backup"}, {"vms", "vm", "virtual machine"})`.
+- Item's distinctive words: `_WORD_RE` words of the item (lower-cased) minus `STOPWORDS`, minus words whose stem equals the stem of a question term, minus `{"vm", "vms", "machine", "machines", "instance", "instances", "environment", "backup", "backups", "restore", "recovery"}`. The fact NAMES the item when at least `ceil(n / 2)` of its n distinctive words are `_present` in the evidence text; n == 0 counts as named.
+- Supporting facts: cited facts that name the item and whose score is `None` or `>= floor`. None → DROPPED. Otherwise compute, per supporting fact (in marker order), the question terms NOT `_present` in its evidence; a fact with none missing → CONFIRMED; else NEEDS_VALIDATION with the first supporting fact's missing terms.
+- A line with no usable marker → DROPPED.
+- Output text: DROPPED lines removed; NEEDS_VALIDATION lines get ` *(needs validation: the cited source does not mention {terms})*` appended, where `{terms}` joins with ", " each missing term spelled as in the question (`re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", q, re.I).group(0)`, falling back to the term). A heading line (`^\s*(#{1,6}\s+\S.*|\*\*[^*]+\*\*:?)\s*$`) in the graded region left with no non-blank line before the next heading (or the limitations line, or the end) is removed too. Log INFO `"list items: %d confirmed, %d needs validation, %d dropped"`.
+
+**`list_mode.py` changes:** in `_LIST_PROMPT`, replace `"Give each item one short line with its [N] marker; "` with `"Write each item as one line in exactly this form: - **<item name>** — <short description> [N]. Include an item even when its fact states it more generally than the question asks (for example for every agent rather than one); such items are checked and flagged automatically. "` (keep the rest). In `answer_list`, after `raw` is obtained and BEFORE `_finalize_answer`: `raw, grades = grade_items(raw, marker_map, q=q, terms=question_terms(q, scope), scores=got.scores, floor=settings.list_item_floor)`.
+
+**Router / MCP / eval:** router list branch sets `env["item_grades"] = raw.get("item_grades", [])`; MCP `answer_question` adds `"item_grades"` to the structured keys copied when present; `eval_router` per-question record adds `"items_flagged"` (count of `needs_validation`) and `"items_dropped"` (count of `dropped`), `None` when the envelope has no `item_grades`; the summary adds their totals and the markdown table gains a `flagged/dropped` column.
+
+**Tests (`tests/unit/test_item_grades.py`)** — build `marker_map` with `_fact`-style dicts (fact, fact_uuid, sources with title); cover:
+1. Confirmed: q "Where can I restore a Windows agent backup?", terms `["restore","windows","agent","backup"]`, fact 1 "VBR supports backups created by Veeam Agent for Microsoft Windows for restore to Sangfor aSV." scored 0.6; raw `"**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]"` → text unchanged, grade confirmed, missing [].
+2. Needs validation: fact "VBR can restore physical machines from backups created by Veeam Agents to the HPE Morpheus VM Essentials environment." → item `HPE Morpheus VM Essentials` flagged, missing `["windows"]`, line ends with `*(needs validation: the cited source does not mention Windows)*` (capital W, as in the question).
+3. Article title counts as evidence: fact lacks "agent" but source title "Restoring Veeam Agent Backup to Proxmox VM" supplies it → confirmed.
+4. Dropped — not named: item `Oracle Linux KVM` citing the Sangfor fact → line removed, grade dropped.
+5. Dropped — below floor: named fact with score 0.05 at floor 0.1 → dropped; the same with score `None` → kept.
+6. No usable marker (`[99]` not in map, or none) → dropped.
+7. Synonym: q "What recovery options does Azure Backup offer for Azure VMs?", terms `["recovery","vms"]`, fact "Azure Backup can restore an Azure VM to an alternate location." for item `Alternate location restore` → confirmed (restore ~ recover, VM ~ vms).
+8. Lines in and after "Not supported / limitations" are untouched even when they would drop; a heading whose only item was dropped is removed, other headings stay.
+9. Comma marker list `[1, 2]` reads both markers; a non-item bullet line is left untouched and the WARNING is logged.
+
+`tests/unit/test_list_mode.py`: the `answer_list` test with a bold-item synth reply returns `item_grades`; `ListRetrieval.scores` carries the rerank scores; the prompt contains `- **<item name>** —`. `tests/unit/test_list_router.py`: the list branch copies `item_grades` into the envelope. `tests/unit/test_config.py`: `list_item_floor == 0.1`.
+
+- [ ] **Step 1:** Write the tests; run; they fail.
+- [ ] **Step 2:** Implement `item_grades.py`, wire `answer_list`, router, MCP, eval_router, the setting.
+- [ ] **Step 3:** Full unit suite, ruff (src AND tests), mypy — green.
+- [ ] **Step 4:** Commit — `feat(answer): per-item evidence grades for list answers` (with the trailer lines).
+
+---
+
+### Task 11: Free-gate calibration output
+
+**Files:** modify `src/answer_api/eval_retrieval.py`; create `tests/unit/test_eval_retrieval_list.py`.
+
+`check_list_items` adds `"item_scores": {item: best_score_or_None}` — for each expected item, the highest `got.scores[fact_uuid]` over retrieved facts (`got.results + got.limitations`) whose text matches the item via `match_items(fact_text, [item])`; `None` when no retrieved fact matches or none is scored. The printed per-question line appends `min_item_score=<lowest non-None score, 3 decimals>`. Hermetic tests (monkeypatch `list_mode.retrieve_list` to return a `ListRetrieval` with scores): item scores pick the best matching fact; an unmatched item is `None`; a raising `retrieve_list` still returns FAIL with the error (closes the Task 5 deferred minor).
+
+- [ ] **Step 1:** Tests; fail. **Step 2:** Implement. **Step 3:** Unit suite, ruff, mypy. **Step 4:** Commit — `feat(eval): list gate reports each expected item's best rerank score`.
+
+**Controller after Task 11:** run the free gate; set `list_item_floor` just below the lowest expected-item score (ledger ruling with the numbers), keeping it above the score of clearly irrelevant facts; record coverage (target 67/67) and per-question latency.
