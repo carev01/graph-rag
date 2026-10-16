@@ -17,12 +17,13 @@ def _fact(uuid, text, title=None):
                          "vendor": "Veeam", "product": "Veeam Backup & Replication"}]}
 
 
-def _grade(raw, facts, *, q=Q_AGENT, terms=T_AGENT, scores=None, floor=0.1):
+def _grade(raw, facts, *, q=Q_AGENT, terms=T_AGENT, scores=None, floor=0.1,
+          unnamed_floor=0.65):
     marker_map = {i: f for i, f in enumerate(facts, 1)}
     if scores is None:
         scores = {f["fact_uuid"]: 0.6 for f in facts}
     text, grades = ig.grade_items(raw, marker_map, q=q, terms=terms, scores=scores,
-                                  floor=floor)
+                                  floor=floor, unnamed_floor=unnamed_floor)
     return text, grades, marker_map
 
 
@@ -33,7 +34,7 @@ def test_a_fact_with_every_question_term_confirms_the_item():
     assert [(g.item, g.grade, g.missing_terms, g.markers) for g in grades] == [
         ("Sangfor aSV", ig.CONFIRMED, [], [1])]
     assert grades[0].as_dict(mm) == {"item": "Sangfor aSV", "grade": "confirmed",
-                                     "missing_terms": [], "markers": [1],
+                                     "missing_terms": [], "markers": [1], "reason": "named",
                                      "fact_uuids": ["sf"]}
 
 
@@ -71,10 +72,41 @@ def test_a_naming_fact_below_the_floor_is_dropped_and_an_unscored_one_kept():
     assert grades[0].grade == ig.CONFIRMED and text == raw
 
 
+def test_named_support_at_or_above_the_floor_is_kept_below_it_falls_to_unnamed():
+    raw = "- **Sangfor aSV** — x [1]"
+    text, grades, _ = _grade(raw, [_fact("sf", SANGFOR)], scores={"sf": 0.45}, floor=0.4,
+                             unnamed_floor=0.65)
+    assert grades[0].grade == ig.CONFIRMED and grades[0].reason == "named" and text == raw
+
+    # Below the named floor, the same (named) fact is re-checked against the unnamed
+    # floor instead; still too low, so the item is dropped.
+    text, grades, _ = _grade(raw, [_fact("sf", SANGFOR)], scores={"sf": 0.35}, floor=0.4,
+                             unnamed_floor=0.65)
+    assert grades[0].grade == ig.DROPPED and grades[0].reason == "below_floor" and text == ""
+
+
+def test_an_unnamed_relevant_fact_flags_the_item_instead_of_dropping_it():
+    other = _fact("rel", "VBR can restore Windows agent backups to many supported platforms.")
+    raw = "- **Sangfor aSV** — x [1]"
+    text, grades, _ = _grade(raw, [other], scores={"rel": 0.7}, floor=0.4, unnamed_floor=0.65)
+    assert grades[0].grade == ig.NEEDS_VALIDATION and grades[0].reason == "unnamed"
+    assert grades[0].missing_terms == []
+    assert text == raw + " *(needs validation: the cited source does not name this item)*"
+
+    # Relevant but below the unnamed floor: dropped.
+    text, grades, _ = _grade(raw, [other], scores={"rel": 0.5}, floor=0.4, unnamed_floor=0.65)
+    assert grades[0].grade == ig.DROPPED and grades[0].reason == "below_floor" and text == ""
+
+    # Unscored and unnamed never keeps an item.
+    text, grades, _ = _grade(raw, [other], scores={"rel": None}, floor=0.4, unnamed_floor=0.65)
+    assert grades[0].grade == ig.DROPPED and text == ""
+
+
 def test_an_item_without_a_usable_marker_is_dropped():
     raw = "- **Sangfor aSV** — x [99]\n- **Sangfor aSV again** — no marker"
     text, grades, mm = _grade(raw, [_fact("sf", SANGFOR)])
     assert [g.grade for g in grades] == [ig.DROPPED, ig.DROPPED]
+    assert [g.reason for g in grades] == ["no_marker", "no_marker"]
     assert [g.markers for g in grades] == [[], []]
     assert grades[0].as_dict(mm)["fact_uuids"] == []
     assert text == ""

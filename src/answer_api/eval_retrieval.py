@@ -171,7 +171,8 @@ async def check_list_items(graphiti, driver, map_client, map_model, settings,
         marker_map = {i: f for i, f in enumerate(matching[:3], 1)}
         raw = f"- **{item['item']}** — x [1][2][3]"
         _, grades = grade_items(raw, marker_map, q=qtext, terms=terms,
-                                scores=got.scores, floor=settings.list_item_floor)
+                                scores=got.scores, floor=settings.list_item_floor,
+                                unnamed_floor=settings.list_item_unnamed_floor)
         item_grades[item["item"]] = grades[0].grade if grades else "unretrieved"
     return {"pass": not missing, "found": len(found), "total": len(items),
             "missing": missing, "item_scores": item_scores, "item_grades": item_grades}

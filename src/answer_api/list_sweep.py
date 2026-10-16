@@ -63,6 +63,34 @@ def stem(word: str) -> str:
     return word
 
 
+def word_forms(term: str) -> list[str]:
+    """`term`'s exact inflected forms for the sweep (deduplicated, order kept): the
+    term itself; its plural (`term + "s"`, or `term + "es"` when it ends in
+    s/x/z/ch/sh) -- unless `term` already ends in "s" and is longer than 4
+    characters, in which case its singular (`term[:-1]`) instead, since a plural
+    noun needs no double plural; and, when that singular/unchanged base stems to
+    something shorter (a verb), that stem's -ed and -ing forms. restore -> restore,
+    restores, restored, restoring; agent -> agent, agents; windows -> windows,
+    window (the singular stems to itself, so no verb forms); box -> box, boxes."""
+    forms = [term]
+    if term.endswith("s") and len(term) > 4:
+        base = term[:-1]
+    else:
+        base = term
+        variant = term + "es" if term.endswith(("s", "x", "z", "ch", "sh")) else term + "s"
+        if variant not in forms:
+            forms.append(variant)
+    if base not in forms:
+        forms.append(base)
+    s = stem(base)
+    if s != base:
+        for suf in ("ed", "ing"):
+            w = s + suf
+            if w not in forms:
+                forms.append(w)
+    return forms
+
+
 def stem_prefixes(word: str) -> list[str]:
     """The prefixes a word's forms share: its stem, plus the -ie- form of a stem
     ending in y (copy -> copie, so "copies" is found as well as "copying")."""
@@ -89,14 +117,15 @@ def question_terms(q: str, scope: Scope | None) -> list[str]:
 
 
 def lucene_query(terms: list[str]) -> str:
-    """OR of every term, plus its stem as a prefix when the stem is a plain word of at
-    least 4 characters; '-' is escaped (Lucene syntax) and never wildcarded."""
+    """OR of every term's inflected exact forms (`word_forms`), plus its stem as a
+    prefix wildcard when the stem is a plain word of at least 4 characters; '-' is
+    escaped (Lucene syntax) and never wildcarded."""
     parts: list[str] = []
     for t in terms:
         if "-" in t:
             parts.append(t.replace("-", "\\-"))
             continue
-        parts.append(t)
+        parts.extend(word_forms(t))
         parts.extend(f"{s}*" for s in stem_prefixes(t) if len(s) >= 4)
     return " ".join(parts)
 

@@ -394,9 +394,13 @@ class ExtractSettings(BaseSettings):
     # the question's own distinctive words, run alongside the per-query searches.
     list_sweep_cap: int = 2000
     list_sweep_scoped_overfetch: int = 4
-    # Best-supporting fact's rerank score below which a listed item is dropped;
-    # calibrated on the free gate, spec §12.3.
-    list_item_floor: float = 0.1
+    # Best-supporting fact's rerank score below which a listed item is dropped, when
+    # that fact names the item; calibrated 2026-10-16: expected items' best scores
+    # >= 0.689, off-topic named facts 0.33-0.48 (spec §12.4).
+    list_item_floor: float = 0.4
+    # A relevant cited fact that does not name the item still flags it (needs
+    # validation) above this score, rather than dropping it (spec §12.4).
+    list_item_unnamed_floor: float = 0.65
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw

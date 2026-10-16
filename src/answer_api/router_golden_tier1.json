@@ -50,7 +50,7 @@
    {"item": "Files and folders", "aliases": ["files and folders", "file-level", "individual files", "guest os file"]},
    {"item": "Application items", "aliases": ["application item", "application items", "veeam explorer", "veeam explorers"]},
    {"item": "Disk export (VMDK/VHD/VHDX)", "aliases": ["vmdk", "vhd", "vhdx", "export disks", "disk export"]},
-   {"item": "Publish disks", "aliases": ["publish", "publishing"]}]},
+   {"item": "Publish disks", "aliases": ["publish", "publishing", "publishes"]}]},
  {"question": "Which hypervisors does Veeam Backup & Replication support?", "intent": "local",
   "expected_modes": ["local"], "kind": "single_list", "expected_article_ids": [],
   "expected_items": [

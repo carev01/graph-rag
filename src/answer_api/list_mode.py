@@ -72,7 +72,9 @@ _LIST_PROMPT = (
     "ONLY the numbered facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
     "List EVERY item the SUPPORTED FACTS state as an answer -- no item limit -- grouped "
     "under a few short headings that the facts suggest. Write each item as one line in "
-    "exactly this form: - **<item name>** — <short description> [N]. Include an item even "
+    "exactly this form: - **<item name>** — <short description> [N]. Name each item the "
+    "way the facts name it (the product, platform or feature the fact names), not by a "
+    "broader category. Include an item even "
     "when its fact states it more generally than the question asks (for example for every "
     "agent rather than one); such items are checked and flagged automatically. When "
     "several facts state the same item, put it on one line "
@@ -459,7 +461,8 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
     # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
     # dropped item's markers are never cited.
     raw, grades = grade_items(raw, marker_map, q=q, terms=question_terms(q, scope),
-                              scores=got.scores, floor=settings.list_item_floor)
+                              scores=got.scores, floor=settings.list_item_floor,
+                              unnamed_floor=settings.list_item_unnamed_floor)
     answer, cited = _finalize_answer(raw, marker_map)
     note = degraded_note(got.degraded)
     if note and cited:

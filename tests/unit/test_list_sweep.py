@@ -36,14 +36,27 @@ def test_stem(word, stemmed):
     assert ls.stem(word) == stemmed
 
 
+@pytest.mark.parametrize("term,forms", [
+    ("restore", ["restore", "restores", "restored", "restoring"]),
+    ("agent", ["agent", "agents"]),
+    ("windows", ["windows", "window"]),
+    ("backup", ["backup", "backups"]),
+    ("box", ["box", "boxes"]),
+])
+def test_word_forms(term, forms):
+    assert ls.word_forms(term) == forms
+
+
 def test_lucene_query_adds_stem_prefixes_and_escapes_hyphens():
     assert (ls.lucene_query(["restore", "windows", "agent", "vms", "hyper-v"])
-            == "restore restor* windows window* agent agent* vms hyper\\-v")
+            == "restore restores restored restoring restor* windows window window* "
+               "agent agents agent* vms vmses hyper\\-v")
 
 
 
 def test_lucene_query_finds_both_y_and_ies_forms():
-    assert ls.lucene_query(["copies", "copy"]) == "copies copy* copie* copy copy* copie*"
+    assert (ls.lucene_query(["copies", "copy"])
+            == "copies copie copied copiing copy* copie* copy copys copy* copie*")
 
 
 def test_is_limitation_lives_in_list_sweep_and_list_mode_reexports_it():
@@ -91,7 +104,7 @@ async def test_scoped_sweep_overfetches_filters_by_scope_and_caps(monkeypatch):
                                                     list_sweep_scoped_overfetch=4))
     query, p = drv.calls[0]
     assert p["index"] == "edge_name_and_fact" and p["fetch"] == 8 and p["group_id"] == "g"
-    assert p["query"] == "immutability immutab*"
+    assert p["query"] == "immutability immutabilitys immutabed immutabing immutab*"
     assert [f["fact_uuid"] for f in got] == ["b", "c"]          # BM25 order, in scope, cap 2
     assert got[0]["sources"][0]["url"] == "https://d/b"
 

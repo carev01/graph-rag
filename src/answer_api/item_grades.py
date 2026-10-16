@@ -3,11 +3,17 @@
 Every item line of a list answer is graded from the facts it cites -- the fact text
 plus the source article titles -- with no model involved:
 
-- confirmed: a cited fact names the item, its rerank score is at least the floor (or
+- confirmed: a cited fact names the item, its rerank score is at least `floor` (or
   unscored after a degraded rerank), and it contains every question term;
-- needs validation: as confirmed but some question terms are missing; the line is kept
-  with a fixed note naming them, spelled as in the question;
-- dropped: no cited fact names the item at or above the floor; the line is removed.
+- needs validation: as confirmed but some question terms are missing (reason
+  "missing_terms"); the line is kept with a fixed note naming them, spelled as in the
+  question. Or: no cited fact names the item, but a non-limitation cited fact scores
+  at least `unnamed_floor` (reason "unnamed"); the line is kept with a fixed note
+  saying the source does not name the item. Named support always wins when both would
+  apply;
+- dropped: neither of the above -- no cited fact at all (reason "no_marker"), or some
+  exist but none clears its floor (reason "below_floor"; an unscored fact never
+  clears the unnamed floor).
 
 No grade text is model-written: the note is fixed wording plus the question's own
 words. Lines from the "Not supported / limitations" section on are never graded."""
@@ -41,6 +47,7 @@ _SYNONYMS = ({"restor", "recover"}, {"protect", "backup"}, {"vms", "vm", "virtua
 _GENERIC = frozenset({"vm", "vms", "machine", "machines", "instance", "instances",
                       "environment", "backup", "backups", "restore", "recovery"})
 _NOTE = " *(needs validation: the cited source does not mention {terms})*"
+_NOTE_UNNAMED = " *(needs validation: the cited source does not name this item)*"
 
 
 @dataclass
@@ -49,10 +56,12 @@ class ItemGrade:
     grade: str
     missing_terms: list[str] = field(default_factory=list)
     markers: list[int] = field(default_factory=list)
+    reason: str = ""
 
     def as_dict(self, marker_map: dict[int, dict]) -> dict:
         return {"item": self.item, "grade": self.grade,
                 "missing_terms": list(self.missing_terms), "markers": list(self.markers),
+                "reason": self.reason,
                 "fact_uuids": [marker_map[m]["fact_uuid"] for m in self.markers
                                if m in marker_map]}
 
@@ -103,13 +112,15 @@ def _as_in_question(term: str, q: str) -> str:
 
 def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
                 terms: list[str], term_stems: set[str], scores: dict[str, float | None],
-                floor: float) -> ItemGrade:
+                floor: float, unnamed_floor: float) -> ItemGrade:
+    candidates: list[dict] = []        # every non-limitation cited fact, named or not
     first_missing: list[str] | None = None
     for m in markers:
         fact = marker_map[m]
-        # A limitation ("X is not supported for ...") never confirms an item.
+        # A limitation ("X is not supported for ...") never supports an item.
         if is_limitation(fact.get("fact") or ""):
             continue
+        candidates.append(fact)
         score = scores.get(fact["fact_uuid"])
         if score is not None and score < floor:
             continue
@@ -118,16 +129,25 @@ def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
             continue
         missing = [t for t in terms if not _present(t, text)]
         if not missing:
-            return ItemGrade(item, CONFIRMED, [], markers)
+            return ItemGrade(item, CONFIRMED, [], markers, "named")
         if first_missing is None:
             first_missing = missing
-    if first_missing is None:
-        return ItemGrade(item, DROPPED, [], markers)
-    return ItemGrade(item, NEEDS_VALIDATION, first_missing, markers)
+    if first_missing is not None:
+        return ItemGrade(item, NEEDS_VALIDATION, first_missing, markers, "missing_terms")
+    if not candidates:
+        return ItemGrade(item, DROPPED, [], markers, "no_marker")
+    # No fact names the item at or above the floor: an unscored or low-scoring fact
+    # still flags the item (never drops it) once it clears the unnamed floor.
+    for fact in candidates:
+        score = scores.get(fact["fact_uuid"])
+        if score is not None and score >= unnamed_floor:
+            return ItemGrade(item, NEEDS_VALIDATION, [], markers, "unnamed")
+    return ItemGrade(item, DROPPED, [], markers, "below_floor")
 
 
 def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[str],
-                scores: dict[str, float | None], floor: float) -> tuple[str, list[ItemGrade]]:
+                scores: dict[str, float | None], floor: float,
+                unnamed_floor: float) -> tuple[str, list[ItemGrade]]:
     """Grade every `- **<item>** ... [N]` line before the limitations section; return
     the text with dropped lines (and headings they leave empty) removed and flagged
     lines annotated, plus one grade per item line in text order."""
@@ -144,13 +164,17 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
                 ungraded += 1
             continue
         g = _grade_line(m.group("item").strip(), _markers(lines[i], marker_map), marker_map,
-                        terms=terms, term_stems=term_stems, scores=scores, floor=floor)
+                        terms=terms, term_stems=term_stems, scores=scores, floor=floor,
+                        unnamed_floor=unnamed_floor)
         grades.append(g)
         if g.grade == DROPPED:
             removed.add(i)
         elif g.grade == NEEDS_VALIDATION:
-            shown = ", ".join(_as_in_question(t, q) for t in g.missing_terms)
-            lines[i] = lines[i].rstrip() + _NOTE.format(terms=shown)
+            if g.reason == "unnamed":
+                lines[i] = lines[i].rstrip() + _NOTE_UNNAMED
+            else:
+                shown = ", ".join(_as_in_question(t, q) for t in g.missing_terms)
+                lines[i] = lines[i].rstrip() + _NOTE.format(terms=shown)
     if ungraded:
         logger.warning("list answer: %d bullet line(s) not in item form; left ungraded",
                        ungraded)

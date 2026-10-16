@@ -208,6 +208,8 @@ async def test_answer_list_groups_supported_then_limitations_and_cites_by_marker
     prompt = synth.prompts[0]
     assert "SUPPORTED FACTS:\n[1] " in prompt and "LIMITATION FACTS:\n[2] " in prompt
     assert "every item" in prompt.lower() and "Not supported / limitations" in prompt
+    assert ("Name each item the way the facts name it (the product, platform or feature "
+            "the fact names), not by a broader category.") in prompt
     assert out["list_mode"] is True and out["expansion_queries"] == []
     assert [c["fact_uuid"] for c in out["citations"]] == ["az", "lim"]
     assert out["citations"][0]["sources"][0]["url"] == "https://d/az"
