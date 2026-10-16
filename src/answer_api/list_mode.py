@@ -436,7 +436,9 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
                     for i, r in marker_map.items() if i > n_sup) or "(none)"
     raw = await _complete_or_none(synth_client, synth_model,
                                   _LIST_PROMPT.format(supported=sup, limitations=lim, q=q),
-                                  max_tokens=6000)
+                                  # Up to 250 supported facts: room for a long grouped
+                                  # list plus the synthesis tier's reasoning tokens.
+                                  max_tokens=10000)
     if raw is None:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
                 "cited": 0, "applies_to": []}

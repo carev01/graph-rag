@@ -143,3 +143,11 @@ into a vSphere fact). A free prototype showed following the graph recovers 12 of
    vendor or product, keep the question's own terms.
 6. **Degradation note** uses fixed wording ("N searches could not be completed";
    "results ranked by retrieval order") — no model-written text in the note.
+
+## 11. Synthesis budget (2026-10-16, approved in conversation)
+
+`list_supported_k` raised 80 -> **250** and the list synthesis `max_tokens` 6000 -> 10000.
+The free gate went 59/67 -> 63/67: most missing items were retrieved but ranked past #80.
+Still missing: Entra ID (Q1); Scale Computing HyperCore, HPE Morpheus VM Essentials and
+"publish disks" (Q2) — the hypervisor ones rest only on generic "different workloads"
+facts, which grounding deliberately does not stretch to.

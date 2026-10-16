@@ -370,8 +370,10 @@ class ExtractSettings(BaseSettings):
     list_expansion_queries_max: int = 10
     list_per_query_pool: int = 40
     list_per_query_k: int = 20
-    # Raised 50 -> 80 with diversity-aware (MMR) selection (2026-10-15 amendment §10.3).
-    list_supported_k: int = 80
+    # Raised 50 -> 80 with diversity-aware (MMR) selection (2026-10-15 amendment §10.3),
+    # then 80 -> 250 (2026-10-16): the free gate went 59/67 -> 63/67 expected items, as
+    # most missing items were retrieved but ranked past #80.
+    list_supported_k: int = 250
     list_limitations_k: int = 12
     # Relation expansion (§10.1): the (subject entity, relation name) pairs of the top
     # list_relation_seed_facts round-one facts are grouped; the list_relation_groups
