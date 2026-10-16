@@ -379,6 +379,8 @@ class ExtractSettings(BaseSettings):
     list_relation_seed_facts: int = 40
     list_relation_groups: int = 6
     list_relation_group_cap: int = 300
+    # Siblings kept across all groups (group order, then uuid within a group).
+    list_relation_total_cap: int = 600
     # MMR: rerank score minus list_mmr_lambda x highest raw cosine to a chosen fact.
     list_mmr_lambda: float = 0.5
     # Documents per final-rerank call (Voyage accepts ~1000 at most).

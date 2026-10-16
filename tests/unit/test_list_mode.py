@@ -7,7 +7,8 @@ import pytest
 
 import answer_api.list_mode as lm
 import answer_api.synthesize as synth_mod
-from answer_api.scope import Scope
+from answer_api.fact_dedup import EMBEDDINGS_QUERY
+from answer_api.scope import _EPISODES_AMONG, Scope
 from graph_extract.config import ExtractSettings
 
 LISTS = [
@@ -121,7 +122,7 @@ def patched(monkeypatch):
                 raise RuntimeError(f"search failed for {q}")
             return {"results": per_query.get(q, []), "count": 0}
 
-        async def _collapse(driver, results, *, cosine):
+        async def _collapse(driver, results, *, cosine, vectors=None):
             seen, out = set(), []
             for r in results:
                 if r["fact_uuid"] not in seen:
@@ -138,7 +139,7 @@ def patched(monkeypatch):
         async def _no_siblings(driver, seeds, *, scope, settings, exclude, degraded):
             return []
 
-        async def _no_vectors(driver, uuids, *, degraded):
+        async def _no_vectors(driver, uuids, *, cache, degraded):
             return {}
 
         monkeypatch.setattr(lm, "rerank", _rerank)
@@ -296,24 +297,28 @@ def test_expansion_prompt_forbids_placeholders_and_keeps_the_question_terms():
 
 
 class _GraphDriver:
-    """Answers the relation-expansion queries; records calls. The scoped siblings
-    query keeps only edges with an episode in `in_scope` BEFORE the cap, as the
-    real EXISTS filter does; `fail` makes one (src, rel) group raise."""
-    def __init__(self, meta, siblings, in_scope=(), fail=()):
+    """Answers the relation-expansion queries; records calls. The siblings query
+    returns edges UNORDERED (reverse uuid order here) up to `fetch`, as the real
+    unordered LIMIT may; the scope query keeps the candidate episodes in
+    `in_scope`; `fail` makes one (src, rel) group raise, `fail_scope` the scope query."""
+    def __init__(self, meta, siblings, in_scope=(), fail=(), fail_scope=False):
         self.meta, self.siblings, self.calls = meta, siblings, []
-        self.in_scope, self.fail = set(in_scope), set(fail)
+        self.in_scope, self.fail, self.fail_scope = set(in_scope), set(fail), fail_scope
 
     async def execute_query(self, query, **p):
         self.calls.append((query, p))
         if query is lm.SEED_EDGES_QUERY:
             return ([m for m in self.meta if m["uuid"] in p["uuids"]], None, None)
-        if query in (lm.SIBLINGS_QUERY, lm.SCOPED_SIBLINGS_QUERY):
+        if query is lm.SIBLINGS_QUERY:
             if (p["src"], p["rel"]) in self.fail:
                 raise RuntimeError("group query failed")
-            rows = sorted(self.siblings.get((p["src"], p["rel"]), []), key=lambda r: r["uuid"])
-            if query is lm.SCOPED_SIBLINGS_QUERY:
-                rows = [r for r in rows if self.in_scope.intersection(r["episodes"])]
-            return (rows[: p["cap"]], None, None)
+            rows = sorted(self.siblings.get((p["src"], p["rel"]), []),
+                          key=lambda r: r["uuid"], reverse=True)
+            return (rows[: p["fetch"]], None, None)
+        if query is _EPISODES_AMONG:
+            if self.fail_scope:
+                raise RuntimeError("scope query failed")
+            return ([{"u": [e for e in p["eps"] if e in self.in_scope]}], None, None)
         return ([], None, None)
 
 
@@ -347,19 +352,53 @@ async def test_relation_siblings_follow_the_top_subject_relation_groups(monkeypa
     # takes one of the two slots, so in-scope x1 survives.
     assert [r["fact_uuid"] for r in out] == ["x1"]
     assert out[0]["sources"][0]["url"] == "https://d/x1"
-    [(query, p)] = [c for c in drv.calls if c[0] is not lm.SEED_EDGES_QUERY]
-    assert query is lm.SCOPED_SIBLINGS_QUERY
+    [(sq, sp)] = [c for c in drv.calls if c[0] is lm.SIBLINGS_QUERY]
+    assert sp["fetch"] == 8                               # group cap x 4, unordered
+    [(_, p)] = [c for c in drv.calls if c[0] is _EPISODES_AMONG]
     assert (p["vendors"], p["products"], p["sources"]) == (["veeam"], ["vbr"], [])
-    assert p["cap"] == 2 and degraded == []
+    assert sorted(p["eps"]) == ["e1", "e2", "e3"]         # bounded by the fetched edges
+    assert degraded == []
 
 
-def test_siblings_query_is_deterministic_and_scope_filters_before_the_limit():
-    for q in (lm.SIBLINGS_QUERY, lm.SCOPED_SIBLINGS_QUERY):
-        assert q.index("ORDER BY f.uuid") < q.index("LIMIT $cap")
-    sq = lm.SCOPED_SIBLINGS_QUERY
-    assert sq.index("EXISTS") < sq.index("RETURN")
-    for name in ("$vendors", "$products", "$sources"):
-        assert name in sq and name not in lm.SIBLINGS_QUERY
+def test_siblings_query_is_an_unordered_bounded_fetch_without_a_scope_filter():
+    q = lm.SIBLINGS_QUERY
+    assert "LIMIT $fetch" in q
+    for absent in ("ORDER BY", "EXISTS", "$vendors", "$products", "$sources"):
+        assert absent not in q
+
+
+async def test_sibling_groups_are_sorted_and_capped_per_group_and_in_total(monkeypatch):
+    meta = [{"uuid": "s1", "src": "vbr", "rel": "A"}, {"uuid": "s2", "src": "vbr", "rel": "A"},
+            {"uuid": "s3", "src": "vbr", "rel": "B"}]
+    sibs = {("vbr", "A"): [{"uuid": f"a{i:02d}", "fact": f"A {i}", "episodes": ["e"]}
+                           for i in range(20)],
+            ("vbr", "B"): [{"uuid": f"b{i}", "fact": f"B {i}", "episodes": ["e"]}
+                           for i in range(5)]}
+    monkeypatch.setattr(lm, "Provenance", _Prov)
+    seeds = _SEEDS + [_fact("s3", "VBR B")]
+    drv = _GraphDriver(meta=meta, siblings=sibs)
+    s = _settings(list_relation_group_cap=3, list_relation_total_cap=5)
+    out = await lm.relation_siblings(drv, seeds, scope=Scope(), settings=s,
+                                     exclude=set(), degraded=[])
+    # Group A (most frequent) first. Its fetch stops at 12 of 20 edges (a19..a08, in
+    # the fake's reverse order); sorted by uuid, its cap of 3 keeps a08-a10. The total
+    # cap of 5 then cuts group B after b0, b1.
+    assert [r["fact_uuid"] for r in out] == ["a08", "a09", "a10", "b0", "b1"]
+    assert all(c[1]["fetch"] == 12 for c in drv.calls if c[0] is lm.SIBLINGS_QUERY)
+
+
+def test_total_sibling_cap_default():
+    assert _settings().list_relation_total_cap == 600
+
+
+async def test_a_failed_scope_filter_degrades_once(monkeypatch):
+    drv = _GraphDriver(meta=_META, siblings=_SIBS, fail_scope=True)
+    monkeypatch.setattr(lm, "Provenance", _Prov)
+    degraded: list[str] = []
+    out = await lm.relation_siblings(drv, _SEEDS, scope=Scope(vendors=("Veeam",)),
+                                     settings=_settings(), exclude={"s1", "s2"},
+                                     degraded=degraded)
+    assert out == [] and degraded == [lm.RELATION_EXPANSION_DEGRADED]
 
 
 async def test_unscoped_relation_siblings_keep_every_sibling(monkeypatch):
@@ -368,7 +407,7 @@ async def test_unscoped_relation_siblings_keep_every_sibling(monkeypatch):
     out = await lm.relation_siblings(drv, _SEEDS, scope=Scope(), settings=_settings(),
                                      exclude={"s1", "s2"}, degraded=[])
     assert [r["fact_uuid"] for r in out] == ["x0", "x1"]
-    assert all(c[0] is not lm.SCOPED_SIBLINGS_QUERY for c in drv.calls)
+    assert all(c[0] is not _EPISODES_AMONG for c in drv.calls)
 
 
 async def test_one_failed_group_query_degrades_once_and_keeps_the_others(monkeypatch):
@@ -560,8 +599,8 @@ async def test_single_answers_collapse_at_their_own_threshold(monkeypatch):
     async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
         return {"results": [_fact("a", "vSphere is supported.")], "count": 1}
 
-    async def _collapse(driver, results, *, cosine):
-        seen["cosine"] = cosine
+    async def _collapse(driver, results, *, cosine, vectors=None):
+        seen["cosine"], seen["vectors"] = cosine, vectors
         return results
 
     monkeypatch.setattr(synth_mod.search_mod, "search_local", _search)
@@ -569,4 +608,52 @@ async def test_single_answers_collapse_at_their_own_threshold(monkeypatch):
     s = _settings(local_single_dedup_cosine=0.92, list_dedup_cosine=0.96)
     await synth_mod.answer_local(None, None, _Client("- vSphere [1]"), "s", q="q",
                                  group_id="g", settings=s)
-    assert seen["cosine"] == 0.92
+    assert seen["cosine"] == 0.92 and seen["vectors"] is None     # no cache on this path
+
+
+class _EmbeddingDriver:
+    """Counts every uuid asked of EMBEDDINGS_QUERY; vectors keep all facts distinct."""
+    def __init__(self, uuids):
+        self.vectors = {u: [1.0 if j == i else 0.0 for j in range(len(uuids))]
+                        for i, u in enumerate(uuids)}
+        self.asked: list[str] = []
+        self.queries = 0
+
+    async def execute_query(self, query, **p):
+        assert query is EMBEDDINGS_QUERY
+        self.queries += 1
+        self.asked += list(p["uuids"])
+        return ([{"uuid": u, "embedding": self.vectors.get(u)} for u in p["uuids"]],
+                None, None)
+
+
+async def test_retrieve_list_fetches_each_embedding_at_most_once(monkeypatch, caplog):
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    per_query = {q: [_fact("a", "vSphere is supported."), _fact("b", "Hyper-V is supported.")],
+                 "q-ahv": [_fact("b", "Hyper-V is supported."),
+                           _fact("c", "Nutanix AHV is supported.")]}
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        return {"results": per_query.get(q, []), "count": 0}
+
+    async def _rerank(rq, documents, *, top_k, settings):
+        return [(i, 1.0 - i / 100) for i in range(len(documents))]
+
+    async def _siblings(driver, seeds, *, scope, settings, exclude, degraded):
+        return [_fact("x1", "Sangfor aSV is supported."), _fact("a", "vSphere is supported.")]
+
+    monkeypatch.setattr(lm, "search_local", _search)
+    monkeypatch.setattr(lm, "rerank", _rerank)
+    monkeypatch.setattr(lm, "relation_siblings", _siblings)
+    drv = _EmbeddingDriver(["a", "b", "c", "x1"])
+    with caplog.at_level(logging.INFO, logger="answer_api.list_mode"):
+        got = await lm.retrieve_list(None, drv, _Client('["q-ahv"]'), "m", q=q, scope=Scope(),
+                                     group_id="g", settings=_settings())
+    assert sorted(drv.asked) == ["a", "b", "c", "x1"]      # once each, across both
+    assert drv.queries == 2                                # collapses and the MMR selection
+    assert {r["fact_uuid"] for r in got.results} == {"a", "b", "c", "x1"}
+    assert got.degraded == []
+    [line] = [r.getMessage() for r in caplog.records if "list stages" in r.getMessage()]
+    for stage in ("expansion=", "searches=", "collapse=", "rerank=", "relations=",
+                  "selection="):
+        assert stage in line

@@ -89,15 +89,37 @@ def _collapse(results: list[dict], vectors: dict[str, list[float]],
     return out
 
 
-async def collapse_near_duplicates(driver, results: list[dict], *, cosine: float) -> list[dict]:
+async def fetch_vectors(driver, uuids: list[str], cache: dict[str, list[float]]
+                        ) -> dict[str, list[float]]:
+    """fact_embedding of each of `uuids`, fetched at most once per uuid: only the
+    uuids missing from `cache` are queried (one EMBEDDINGS_QUERY), and the cache is
+    updated -- a fact with no embedding is remembered as an empty list, so it is
+    never asked for again. Returns the usable vectors of `uuids` only (empty ones
+    left out). A failed query raises and leaves the cache unchanged."""
+    wanted = list(dict.fromkeys(uuids))
+    missing = [u for u in wanted if u not in cache]
+    if missing:
+        records, _, _ = await driver.execute_query(EMBEDDINGS_QUERY, uuids=missing)
+        got = {r["uuid"]: list(r["embedding"]) for r in records if r["embedding"]}
+        cache.update({u: got.get(u, []) for u in missing})
+    return {u: cache[u] for u in wanted if cache[u]}
+
+
+async def collapse_near_duplicates(driver, results: list[dict], *, cosine: float,
+                                   vectors: dict[str, list[float]] | None = None
+                                   ) -> list[dict]:
+    """`vectors` is an optional per-question embedding cache (list mode collapses
+    twice and selects by MMR over the same facts): only uuids it lacks are fetched,
+    into it. Without one, every vector is fetched (the single-question path). A
+    failed fetch collapses identical text only (plus any vectors already cached)."""
     if not results:
         return []
-    vectors: dict[str, list[float]] = {}
+    cache = vectors if vectors is not None else {}
+    uuids = [r["fact_uuid"] for r in results]
     try:
-        records, _, _ = await driver.execute_query(
-            EMBEDDINGS_QUERY, uuids=[r["fact_uuid"] for r in results])
-        vectors = {r["uuid"]: list(r["embedding"]) for r in records if r["embedding"]}
+        usable = await fetch_vectors(driver, uuids, cache)
     except Exception as exc:
         logger.warning("fact embedding fetch failed (%s); collapsing identical text only", exc)
+        usable = {u: cache[u] for u in dict.fromkeys(uuids) if cache.get(u)}
     # O(n^2) over ~200+ facts of 768-1024 dims: off the event loop.
-    return await asyncio.to_thread(_collapse, results, vectors, cosine)
+    return await asyncio.to_thread(_collapse, results, usable, cosine)
