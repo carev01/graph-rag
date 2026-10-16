@@ -1635,3 +1635,23 @@ async def test_a_question_with_no_distinctive_words_runs_no_query():
 4. **Golden alias.** In `router_golden_tier1.json`, the expected item `Publish disks` gains the alias `"publishes"` (the retrieved fact says "publishes disks"; `match_items` is whole-word).
 
 - [ ] Tests first; implement; full unit suite, ruff src tests, mypy src green; commit `fix(answer): list calibration -- inflected sweep terms, unnamed-but-relevant flagged` (trailer lines).
+
+---
+
+### Task 13: Compact embedding transfer (latency, 2026-10-16)
+
+**Measured (free gate after the fix wave):** the collapse stage costs 44–71 s per swept list question. The cause is the transfer of `fact_embedding`: Neo4j reads 1000 vectors in 0.6 s, but sending them as float lists takes 20 s from the answer-api pod (RTT ~0.4 s; this machine 179 ms), and the cost scales with bytes. The neo4j-rust-ext driver extension does not help. Quantized in Cypher to `vector(..., INTEGER8)`, the same 1000 take 3.3 s. Accuracy on 44,850 real pairs: mean |Δcos| 0.0008, at most 0.0018 for pairs above 0.9, and 1 flip at 0.96 / 0 at 0.92.
+
+**Files:** `src/answer_api/fact_dedup.py` (and any type hints that consume the vectors in `src/answer_api/list_mode.py`); tests `tests/unit/test_fact_dedup.py`, `tests/unit/test_list_mode.py`, plus an integration test in `tests/integration/test_list_siblings.py`.
+
+1. `EMBEDDINGS_QUERY` becomes a per-vector max-abs-scaled INTEGER8 vector (cosine is scale-invariant, so per-vector scaling is model-agnostic):
+   `MATCH ()-[f:RELATES_TO]->() WHERE f.uuid IN $uuids WITH f, f.fact_embedding AS e WHERE e IS NOT NULL WITH f, e, reduce(m = 0.0, x IN e | CASE WHEN abs(x) > m THEN abs(x) ELSE m END) AS mx RETURN f.uuid AS uuid, CASE WHEN mx = 0 THEN null ELSE vector([x IN e | toInteger(round(x * 127.0 / mx))], size(e), INTEGER8) END AS embedding`.
+   Keep the old float query as `EMBEDDINGS_QUERY_FLOAT`.
+2. `fetch_vectors` decodes the returned `neo4j.vector.Vector` to a float numpy array (use the driver's numpy/native conversion; check the installed neo4j 6.2 API). Rows whose value is still a plain list (the float query) are converted the same way. The cache holds `np.ndarray` (float32 is fine); update the type hints (`dict[str, np.ndarray]`) and any consumer (`_collapse`, `select_diverse`, `_fact_vectors`) so arrays work. `select_diverse` already builds a matrix, so make sure it accepts arrays without per-element Python loops.
+3. **Fallback:** if the INTEGER8 query raises a Neo4j client/syntax error (servers without `vector()` or INTEGER8, e.g. the Neo4j 5.x testcontainer), log WARNING once per process ("compact embedding transfer unavailable (%s); fetching float vectors") and use `EMBEDDINGS_QUERY_FLOAT` for the rest of the process (a module-level flag). Other exceptions propagate as today; the existing degraded handling stays.
+4. Tests:
+   - Unit: a fake driver returning a Vector-like value decodes to the right array, and the collapse result on decoded vectors matches the float result.
+   - Unit: the fallback switches once and logs once.
+   - Unit: no per-question behaviour changes apart from the type (the existing tests stay green).
+   - Integration: whichever Neo4j image the fixture runs, `fetch_vectors` returns usable vectors for inserted edges. Assert the cosine of two inserted vectors is within 0.01 of the float cosine.
+- [ ] Tests first; implement; unit suite + `tests/integration/test_list_siblings.py`, ruff src tests, mypy src green; commit `perf(answer): fetch fact embeddings as int8 vectors` (trailer lines).
