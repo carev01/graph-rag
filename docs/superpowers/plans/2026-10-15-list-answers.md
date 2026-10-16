@@ -1296,3 +1296,18 @@ def select_diverse(scored, vectors, *, k, lam):
 - [ ] **Step 4: Run** `tests/unit/test_list_mode.py`, the unit suite, ruff, mypy.
 
 - [ ] **Step 5: Commit** — `git commit -m "feat(answer): list relation expansion, batched final rerank, MMR selection"` (add the trailer lines).
+
+---
+
+### Task 8: List-mode latency (user-approved option 1, 2026-10-16)
+
+Measured stage times per list question (6 relation groups): searches ~13-20 s wall (11 concurrent), `relation_siblings` 6-9 s unscoped/small scope but **434 s** for "Which hypervisors does Veeam Backup & Replication support?" (scoped `EXISTS` chain walk on every edge of a big group before ORDER BY/LIMIT), `collapse_near_duplicates` 35-39 s over 2 calls, `_fact_vectors` 18-33 s — the same `fact_embedding` vectors (~2000 x 768) are fetched three times. Target: < 45 s per list question with unchanged item coverage.
+
+**Files:** `src/answer_api/list_mode.py`, `src/answer_api/fact_dedup.py`, `src/graph_extract/config.py`; tests `tests/unit/test_list_mode.py`, `tests/unit/test_fact_dedup.py`, `tests/integration/test_list_siblings.py`.
+
+**Changes:**
+1. **Sibling fetch:** per group, run an UNORDERED bounded fetch `LIMIT $cap * 4` (no `ORDER BY`, no in-query scope `EXISTS`), then — when scoped — filter in Python with `scope_episode_uuids(driver, scope, candidates=<episodes of the fetched edges>)` (bounded by the fetched set), then sort the survivors by `uuid` and keep `list_relation_group_cap`. Keep groups concurrent. Add `list_relation_total_cap: int = 600` (siblings kept across all groups, in group order then uuid). Update the integration test to the new queries (deterministic output for a static graph, scope respected, caps respected).
+2. **Embeddings once:** add `async fetch_vectors(driver, uuids, cache: dict[str, list[float]]) -> dict[str, list[float]]` in `fact_dedup` that queries only uuids missing from `cache` (one `EMBEDDINGS_QUERY`), updates the cache and returns it; `collapse_near_duplicates(driver, results, *, cosine, vectors: dict | None = None)` uses a supplied cache instead of fetching (behaviour otherwise identical; a failed fetch still degrades to text-only). `retrieve_list` creates one cache per question and passes it to both collapses and to MMR selection (`_fact_vectors` reuses the cache; only uuids not yet cached are fetched). The single-question path keeps calling `collapse_near_duplicates` without a cache (unchanged).
+3. **Timing log:** `retrieve_list` logs one INFO line with per-stage durations (expansion, searches, collapse, rerank, relations, selection) so latency is visible in production logs.
+
+Tests: fetch_vectors fetches only missing uuids and reuses the cache; collapse with a supplied cache issues no embeddings query; retrieve_list issues at most one embeddings query per distinct uuid across the whole call (count via the fake driver); sibling fetch with the unordered cap*4 + Python scope filter keeps only in-scope siblings and respects both caps; the stage-timing log line is emitted. Keep every existing assertion that still describes intended behaviour.
