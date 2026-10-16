@@ -272,8 +272,8 @@ async def _merge_round_two(q: str, round_one: list[tuple[dict, float | None]],
     return merged
 
 
-async def _fact_vectors(driver, uuids: list[str], *, cache: dict[str, list[float]],
-                        degraded: list[str]) -> dict[str, list[float]]:
+async def _fact_vectors(driver, uuids: list[str], *, cache: dict[str, np.ndarray],
+                        degraded: list[str]) -> dict[str, np.ndarray]:
     """fact_embedding per uuid, from the question's cache (the collapses already
     fetched nearly all of them; only uuids not yet cached are queried). {} when the
     fetch fails -- selection then keeps rerank order, and DIVERSITY_DEGRADED is
@@ -289,7 +289,7 @@ async def _fact_vectors(driver, uuids: list[str], *, cache: dict[str, list[float
         return {}
 
 
-def select_diverse(scored: list[tuple[dict, float | None]], vectors: dict[str, list[float]],
+def select_diverse(scored: list[tuple[dict, float | None]], vectors: dict[str, np.ndarray],
                    *, k: int, lam: float) -> list[dict]:
     """Maximal marginal relevance (spec §10.3): greedily the fact with the best rerank
     score minus `lam` x its highest RAW cosine to an already chosen fact. A fact
@@ -303,13 +303,12 @@ def select_diverse(scored: list[tuple[dict, float | None]], vectors: dict[str, l
         return [f for f, _ in scored[:k]]
     dim = len(next(iter(vectors.values())))
     n = len(scored)
+    rows = [vectors.get(f["fact_uuid"]) for f, _ in scored]
+    has = np.array([v is not None and len(v) == dim for v in rows], dtype=bool)
     mat = np.zeros((n, dim))
-    has = np.zeros(n, dtype=bool)
-    for i, (f, _) in enumerate(scored):
-        v = vectors.get(f["fact_uuid"])
-        if v is not None and len(v) == dim:
-            has[i] = True
-            mat[i] = v
+    picked = [v for v in rows if v is not None and len(v) == dim]
+    if picked:
+        mat[has] = np.stack(picked)
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
     np.divide(mat, norms, out=mat, where=norms > 0)
     rel = np.array([s if s is not None else 0.0 for _, s in scored], dtype=np.float64)
@@ -403,7 +402,7 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
         merged.extend(swept)
     # One embedding cache per question: both collapses and the MMR selection read the
     # same fact vectors, each fetched at most once (was three fetches, ~50-70 s).
-    vectors: dict[str, list[float]] = {}
+    vectors: dict[str, np.ndarray] = {}
     distinct = await collapse_near_duplicates(driver, merged,
                                               cosine=settings.list_dedup_cosine,
                                               vectors=vectors)

@@ -3,6 +3,7 @@ import asyncio
 import logging
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import answer_api.list_mode as lm
@@ -458,6 +459,14 @@ async def test_group_queries_run_concurrently_and_cancellation_propagates(monkey
 def test_mmr_prefers_a_new_item_over_a_near_copy():
     a, a2, b = _fact("a", "A item"), _fact("a2", "A item again"), _fact("b", "B item")
     vecs = {"a": [1.0, 0.0], "a2": [0.99, 0.01], "b": [0.0, 1.0]}
+    got = lm.select_diverse([(a, 0.9), (a2, 0.89), (b, 0.6)], vecs, k=2, lam=0.5)
+    assert [r["fact_uuid"] for r in got] == ["a", "b"]
+
+
+def test_mmr_accepts_decoded_float32_arrays():
+    a, a2, b = _fact("a", "A item"), _fact("a2", "A item again"), _fact("b", "B item")
+    vecs = {u: np.asarray(v, dtype=np.float32)
+            for u, v in {"a": [127, 0], "a2": [126, 1], "b": [0, 127]}.items()}
     got = lm.select_diverse([(a, 0.9), (a2, 0.89), (b, 0.6)], vecs, k=2, lam=0.5)
     assert [r["fact_uuid"] for r in got] == ["a", "b"]
 

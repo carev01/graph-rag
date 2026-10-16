@@ -4,13 +4,18 @@ and the uuid sort + cap in Python -- deterministic for a static graph, the scope
 filter applied before the cap. Fixture: one subject entity with three current
 `SUPPORTS` edges -- two from Veeam episodes, one from a Cohesity episode that sorts
 first -- plus one invalidated edge. The keyword sweep's full-text query (spec §12.1) runs
-against the same container, on the index graphiti creates."""
+against the same container, on the index graphiti creates, and so does the compact
+INTEGER8 embedding fetch (Task 13)."""
 from __future__ import annotations
 
+import random
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from neo4j.vector import Vector, VectorDType
 
+import answer_api.fact_dedup as fd
 import answer_api.list_mode as lm
 import answer_api.list_sweep as ls
 from answer_api.scope import Scope
@@ -133,3 +138,44 @@ async def test_a_scoped_sweep_keeps_only_in_scope_edges(extract_driver):
                                  scope=Scope(vendors=("Veeam",)), group_id="g",
                                  settings=_SWEEP_SETTINGS)
     assert [f["fact_uuid"] for f in got] == ["plural"]
+
+
+def _cos(a, b) -> float:
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+async def test_fetched_embeddings_keep_the_float_cosine(extract_driver, monkeypatch):
+    monkeypatch.setattr(fd, "_compact_unavailable", False)
+    rng = random.Random(5)
+    e1 = [rng.gauss(0, 0.05) for _ in range(1024)]
+    e2 = [x + rng.gauss(0, 0.02) for x in e1]                 # a near-duplicate
+    e3 = [rng.gauss(0, 0.05) for _ in range(1024)]            # unrelated
+    async with extract_driver.session() as s:
+        await s.run("MATCH (n) DETACH DELETE n")
+        await s.run(
+            "CREATE (a:Entity {uuid:'emb'}) "
+            "CREATE (a)-[:RELATES_TO {uuid:'e1', fact_embedding:$e1}]->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'e2', fact_embedding:$e2}]->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'e3', fact_embedding:$e3}]->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'none'}]->(:Entity) "
+            "CREATE (a)-[:RELATES_TO {uuid:'zero', fact_embedding:[0.0, 0.0]}]->(:Entity)",
+            e1=e1, e2=e2, e3=e3)
+    cache: dict = {}
+    got = await fd.fetch_vectors(extract_driver, ["e1", "e2", "e3", "none", "zero"], cache)
+    assert sorted(got) == ["e1", "e2", "e3"]
+    assert sorted(cache) == ["e1", "e2", "e3", "none", "zero"]
+    assert all(v.dtype == np.float32 and v.shape == (1024,) for v in got.values())
+    floats = {"e1": e1, "e2": e2, "e3": e3}
+    assert _cos(e1, e2) > 0.9                                # the pair worth deduplicating
+    for a, b in (("e1", "e2"), ("e1", "e3")):
+        assert abs(_cos(got[a], got[b]) - _cos(floats[a], floats[b])) < 0.01
+    # Neo4j 2025+ (the fixture image, as production) must take the compact path: a
+    # silent fallback would pass the cosine check above and lose the whole speed-up.
+    info = await extract_driver.get_server_info()
+    major = int(info.agent.split("/")[1].split(".")[0])
+    if major >= 2025:
+        assert fd._compact_unavailable is False
+        rows, _, _ = await extract_driver.execute_query(fd.EMBEDDINGS_QUERY, uuids=["e1"])
+        assert isinstance(rows[0]["embedding"], Vector)
+        assert rows[0]["embedding"].dtype == VectorDType.I8

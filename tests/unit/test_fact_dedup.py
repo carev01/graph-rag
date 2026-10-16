@@ -1,10 +1,18 @@
 """Near-duplicate collapse keeps every source (spec 2026-10-15 §4.3, §6)."""
+import logging
 import random
 import time
 
+import numpy as np
 import pytest
+from neo4j.exceptions import AuthError, CypherSyntaxError
+from neo4j.vector import Vector
 
 import answer_api.fact_dedup as fd
+
+
+def _lists(vectors):
+    return {u: np.asarray(v).tolist() for u, v in vectors.items()}
 
 
 def _r(uuid, fact, url, vendor="Veeam"):
@@ -129,12 +137,12 @@ async def test_fetch_vectors_fetches_only_missing_uuids_and_reuses_the_cache():
     drv = _Recording({"a": [1.0, 0.0], "b": [0.0, 1.0], "c": None})
     cache: dict[str, list[float]] = {}
     got = await fd.fetch_vectors(drv, ["a", "c"], cache)
-    assert got == {"a": [1.0, 0.0]}
+    assert _lists(got) == {"a": [1.0, 0.0]}
     got = await fd.fetch_vectors(drv, ["a", "b", "c", "b"], cache)
     # "c" has no embedding: remembered as fetched, never asked for again.
-    assert got == {"a": [1.0, 0.0], "b": [0.0, 1.0]}
+    assert _lists(got) == {"a": [1.0, 0.0], "b": [0.0, 1.0]}
     assert drv.asked == [["a", "c"], ["b"]]
-    assert await fd.fetch_vectors(drv, ["a", "b", "c"], cache) == got
+    assert _lists(await fd.fetch_vectors(drv, ["a", "b", "c"], cache)) == _lists(got)
     assert drv.calls == 2
 
 
@@ -165,7 +173,7 @@ async def test_collapse_with_a_cache_fetches_only_the_new_uuids_into_it():
     drv = _Recording({"a": [1.0, 0.0], "b": [1.0, 0.0]})
     cache = {"a": [1.0, 0.0]}
     out = await fd.collapse_near_duplicates(drv, rs, cosine=0.92, vectors=cache)
-    assert drv.asked == [["b"]] and cache["b"] == [1.0, 0.0]
+    assert drv.asked == [["b"]] and cache["b"].tolist() == [1.0, 0.0]
     assert [o["fact_uuid"] for o in out] == ["a"]
 
 
@@ -177,3 +185,81 @@ async def test_collapse_with_a_cache_falls_back_to_text_when_the_fetch_fails(cap
     out = await fd.collapse_near_duplicates(_Broken(), rs, cosine=0.92, vectors={})
     assert [o["fact_uuid"] for o in out] == ["a", "c"]
     assert "embedding" in caplog.text
+
+
+def _int8(v):
+    """The INTEGER8 encoding EMBEDDINGS_QUERY computes in Cypher: per-vector max-abs
+    scaled to +-127 and rounded."""
+    a = np.asarray(v, dtype=np.float64)
+    return Vector(np.round(a * 127.0 / np.abs(a).max()).astype(np.int8))
+
+
+class _VectorDriver(_Driver):
+    """Returns each embedding as a neo4j INTEGER8 Vector, as the compact query does."""
+    async def execute_query(self, query, **params):
+        self.calls += 1
+        assert query is fd.EMBEDDINGS_QUERY
+        return ([{"uuid": u, "embedding": None if self.vectors.get(u) is None
+                  else _int8(self.vectors[u])} for u in params["uuids"]], None, None)
+
+
+async def test_an_int8_vector_decodes_to_a_float_array():
+    got = await fd.fetch_vectors(_VectorDriver({"a": [0.5, -0.25, 0.0], "b": None}),
+                                 ["a", "b"], {})
+    assert list(got) == ["a"]
+    assert isinstance(got["a"], np.ndarray) and got["a"].dtype == np.float32
+    assert got["a"].tolist() == [127.0, -64.0, 0.0]
+
+
+async def test_collapse_on_int8_vectors_matches_the_float_result():
+    rng = random.Random(11)
+    vec = {f"f{i}": [rng.gauss(0, 1) for _ in range(256)] for i in range(60)}
+    for i in range(0, 60, 7):                  # near-duplicates of every 7th fact
+        vec[f"f{i + 1}"] = [x + rng.gauss(0, 0.05) for x in vec[f"f{i}"]]
+    rs = [_r(u, f"fact {u}", f"https://d/{u}") for u in vec]
+    floats = await fd.collapse_near_duplicates(_Driver(vec), rs, cosine=0.92)
+    compact = await fd.collapse_near_duplicates(_VectorDriver(vec), rs, cosine=0.92)
+    assert len(floats) < len(rs)               # the near-duplicates did merge
+    assert [(o["fact_uuid"], [s["url"] for s in o["sources"]]) for o in compact] == [
+        (o["fact_uuid"], [s["url"] for s in o["sources"]]) for o in floats]
+
+
+class _NoVectorType:
+    """A server without vector()/INTEGER8: the compact query is a syntax error."""
+    def __init__(self, vectors):
+        self.vectors, self.asked = vectors, []
+
+    async def execute_query(self, query, **params):
+        self.asked.append(query)
+        if query is fd.EMBEDDINGS_QUERY:
+            raise CypherSyntaxError("Unknown function 'vector'")
+        assert query is fd.EMBEDDINGS_QUERY_FLOAT
+        return ([{"uuid": u, "embedding": self.vectors.get(u)} for u in params["uuids"]],
+                None, None)
+
+
+async def test_the_float_fallback_switches_once_and_logs_once(monkeypatch, caplog):
+    monkeypatch.setattr(fd, "_compact_unavailable", False)
+    drv = _NoVectorType({"a": [1.0, 0.0], "b": [0.0, 1.0]})
+    with caplog.at_level(logging.WARNING, logger="answer_api.fact_dedup"):
+        first = await fd.fetch_vectors(drv, ["a"], {})
+        second = await fd.fetch_vectors(drv, ["b"], {})
+    assert _lists(first) == {"a": [1.0, 0.0]} and _lists(second) == {"b": [0.0, 1.0]}
+    assert drv.asked == [fd.EMBEDDINGS_QUERY, fd.EMBEDDINGS_QUERY_FLOAT,
+                         fd.EMBEDDINGS_QUERY_FLOAT]
+    warnings = [r for r in caplog.records if "compact embedding transfer unavailable"
+                in r.getMessage()]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("neo4j down"), AuthError("expired")])
+async def test_other_errors_propagate_without_switching_to_floats(monkeypatch, exc):
+    monkeypatch.setattr(fd, "_compact_unavailable", False)
+
+    class _Failing:
+        async def execute_query(self, query, **params):
+            raise exc
+    cache: dict = {}
+    with pytest.raises(type(exc)):
+        await fd.fetch_vectors(_Failing(), ["a"], cache)
+    assert fd._compact_unavailable is False and cache == {}
