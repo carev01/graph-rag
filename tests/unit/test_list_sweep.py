@@ -1,6 +1,7 @@
 """Keyword sweep (spec 2026-10-15 §12.1)."""
 import pytest
 
+import answer_api.list_mode as lm
 import answer_api.list_sweep as ls
 from answer_api.scope import _EPISODES_AMONG, Scope
 from graph_extract.config import ExtractSettings
@@ -29,7 +30,8 @@ def test_question_terms_keep_only_distinctive_words(q, scope, terms):
 
 @pytest.mark.parametrize("word,stemmed", [
     ("immutability", "immutab"), ("restore", "restor"), ("recovery", "recover"),
-    ("databases", "databas"), ("restores", "restor"), ("agent", "agent"), ("vms", "vms")])
+    ("databases", "databas"), ("restores", "restor"), ("agent", "agent"), ("vms", "vms"),
+    ("copies", "copy"), ("policies", "policy"), ("ties", "ties")])
 def test_stem(word, stemmed):
     assert ls.stem(word) == stemmed
 
@@ -37,6 +39,16 @@ def test_stem(word, stemmed):
 def test_lucene_query_adds_stem_prefixes_and_escapes_hyphens():
     assert (ls.lucene_query(["restore", "windows", "agent", "vms", "hyper-v"])
             == "restore restor* windows window* agent agent* vms hyper\\-v")
+
+
+
+def test_lucene_query_finds_both_y_and_ies_forms():
+    assert ls.lucene_query(["copies", "copy"]) == "copies copy* copie* copy copy* copie*"
+
+
+def test_is_limitation_lives_in_list_sweep_and_list_mode_reexports_it():
+    assert lm.is_limitation is ls.is_limitation
+    assert ls.is_limitation("X is not supported for Y.") and not ls.is_limitation("X works.")
 
 
 class _Driver:

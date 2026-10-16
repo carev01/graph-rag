@@ -18,7 +18,7 @@ import math
 import re
 from dataclasses import dataclass, field
 
-from answer_api.list_sweep import _WORD_RE, STOPWORDS, stem
+from answer_api.list_sweep import _WORD_RE, STOPWORDS, is_limitation, stem, stem_prefixes
 from answer_api.synthesize import _MARKER_LIST_RE
 
 logger = logging.getLogger(__name__)
@@ -27,10 +27,14 @@ CONFIRMED = "confirmed"
 NEEDS_VALIDATION = "needs_validation"
 DROPPED = "dropped"
 
-_ITEM_RE = re.compile(r"^(\s*[-*]\s+)\*\*(?P<item>[^*]+)\*\*(?P<rest>.*)$")
-_BULLET_RE = re.compile(r"^\s*[-*]\s+")
+# A bulleted ("-", "*") or numbered ("1.", "1)") line.
+_BULLET = r"(?:[-*]|\d+[.)])"
+_ITEM_RE = re.compile(r"^(\s*" + _BULLET + r"\s+)\*\*(?P<item>[^*]+)\*\*(?P<rest>.*)$")
+_BULLET_RE = re.compile(r"^\s*" + _BULLET + r"\s+")
 _LIMITS_RE = re.compile(r"not supported\s*/\s*limitations", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s*(#{1,6}\s+\S.*|\*\*[^*]+\*\*:?)\s*$")
+# A bold-line heading ("**Clouds**") nests under every "#" heading.
+_BOLD_LEVEL = 7
 # By stem; a term in a group is present when any member is.
 _SYNONYMS = ({"restor", "recover"}, {"protect", "backup"}, {"vms", "vm", "virtual machine"})
 # Words that describe the kind of thing listed, never which item it is.
@@ -54,14 +58,17 @@ class ItemGrade:
 
 
 def _hit(needle: str, text: str) -> bool:
-    return re.search(r"(?<![a-z0-9])" + re.escape(needle), text) is not None
+    """`needle` as a word prefix; a needle shorter than 4 characters must be the
+    whole word, optionally plural ("vm" matches "VM" and "VMs", never "VMware")."""
+    tail = r"s?(?![a-z0-9])" if len(needle) < 4 else ""
+    return re.search(r"(?<![a-z0-9])" + re.escape(needle) + tail, text) is not None
 
 
 def _present(term: str, text: str) -> bool:
     """The term's stem as a word prefix in `text`, or any member of its synonym group."""
-    s = stem(term)
-    if _hit(s, text):
+    if any(_hit(p, text) for p in stem_prefixes(term)):
         return True
+    s = stem(term)
     return any(_hit(member, text) for group in _SYNONYMS
                if s in group or term in group for member in group)
 
@@ -100,6 +107,9 @@ def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
     first_missing: list[str] | None = None
     for m in markers:
         fact = marker_map[m]
+        # A limitation ("X is not supported for ...") never confirms an item.
+        if is_limitation(fact.get("fact") or ""):
+            continue
         score = scores.get(fact["fact_uuid"])
         if score is not None and score < floor:
             continue
@@ -122,7 +132,7 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
     the text with dropped lines (and headings they leave empty) removed and flagged
     lines annotated, plus one grade per item line in text order."""
     lines = raw.split("\n")
-    end = next((i for i, ln in enumerate(lines) if _LIMITS_RE.search(ln)), len(lines))
+    end = next((i for i, ln in enumerate(lines) if _is_limits_heading(ln)), len(lines))
     term_stems = {stem(t) for t in terms}
     grades: list[ItemGrade] = []
     removed: set[int] = set()
@@ -164,21 +174,38 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
     return raw, grades
 
 
+def _is_limits_heading(line: str) -> bool:
+    """The "Not supported / limitations" section heading; the same phrase inside a
+    sentence or a bullet does not end the graded region."""
+    shaped = bool(_HEADING_RE.match(line)) or line.lstrip().startswith(("#", "**"))
+    return shaped and bool(_LIMITS_RE.search(line))
+
+
+def _level(line: str) -> int | None:
+    if not _HEADING_RE.match(line):
+        return None
+    hashes = len(line.lstrip()) - len(line.lstrip().lstrip("#"))
+    return hashes if hashes else _BOLD_LEVEL
+
+
 def _emptied_headings(lines: list[str], end: int, removed: set[int]) -> set[int]:
-    """Headings in the graded region whose section had content and has none once the
-    dropped lines are gone (up to the next heading, the limitations line or the end).
-    A heading that was already empty, e.g. one directly above a sub-heading, stays."""
-    out: set[int] = set()
-    for i in range(end):
-        if not _HEADING_RE.match(lines[i]) or i in removed:
-            continue
-        had = has = False
-        for j in range(i + 1, end):
-            if _HEADING_RE.match(lines[j]) and j not in removed:
-                break
-            if lines[j].strip():
-                had = True
-                has = has or j not in removed
-        if had and not has:
-            out.add(i)
-    return out
+    """Headings in the graded region whose section -- every line up to the next
+    heading of the same or a higher level, the limitations line or the end, deeper
+    headings included -- had content and has none once the dropped lines (and the
+    headings they empty, repeated until stable) are gone. A heading the model wrote
+    with nothing beneath it stays."""
+    levels = {i: lv for i in range(end) if (lv := _level(lines[i])) is not None}
+
+    def section(i: int) -> range:
+        stop = next((j for j in range(i + 1, end) if j in levels and levels[j] <= levels[i]),
+                    end)
+        return range(i + 1, stop)
+
+    gone = set(removed)
+    while True:
+        newly = {i for i in levels if i not in gone
+                 and any(lines[j].strip() for j in section(i))
+                 and all(j in gone for j in section(i) if lines[j].strip())}
+        if not newly:
+            return gone - removed
+        gone |= newly

@@ -32,6 +32,13 @@ _ITEM_NOUN_WORDS = frozenset(_ITEM_NOUNS.strip("()").split("|"))
 _SUFFIXES = ("ility", "ations", "ation", "ions", "ion", "ings", "ing", "ies", "es", "ed",
              "er", "s", "e", "y")
 
+# A fact stating a limitation ("not supported", "only for ..."): list mode budgets these
+# separately and the item grades never let one confirm an item.
+_LIMIT_RE = re.compile(
+    r"\b(not supported|does not|doesn't|do not|don't|cannot|can't|can not|is not|are not|"
+    r"unsupported|only (available|supported|for|when|if|with|on|in)|not available)\b",
+    re.IGNORECASE)
+
 FULLTEXT_INDEX = "edge_name_and_fact"
 SWEEP_QUERY = (
     "CALL db.index.fulltext.queryRelationships($index, $query, {limit: $fetch}) "
@@ -40,13 +47,27 @@ SWEEP_QUERY = (
     "RETURN f.uuid AS uuid, f.fact AS fact, f.episodes AS episodes, score")
 
 
+def is_limitation(fact: str) -> bool:
+    return bool(_LIMIT_RE.search(fact))
+
+
 def stem(word: str) -> str:
     """Crude suffix strip for prefix matching: immutability -> immutab, restore ->
-    restor, recovery -> recover, databases -> databas; agent stays agent."""
+    restor, recovery -> recover, databases -> databas, copies -> copy, policies ->
+    policy; agent stays agent. The result keeps at least 4 characters."""
     for suf in _SUFFIXES:
-        if word.endswith(suf) and len(word) - len(suf) >= 4:
-            return word[: -len(suf)]
+        if word.endswith(suf):
+            out = word[: -len(suf)] + ("y" if suf == "ies" else "")
+            if len(out) >= 4:
+                return out
     return word
+
+
+def stem_prefixes(word: str) -> list[str]:
+    """The prefixes a word's forms share: its stem, plus the -ie- form of a stem
+    ending in y (copy -> copie, so "copies" is found as well as "copying")."""
+    s = stem(word)
+    return [s, s[:-1] + "ie"] if s.endswith("y") and len(s) >= 4 else [s]
 
 
 def question_terms(q: str, scope: Scope | None) -> list[str]:
@@ -76,9 +97,7 @@ def lucene_query(terms: list[str]) -> str:
             parts.append(t.replace("-", "\\-"))
             continue
         parts.append(t)
-        s = stem(t)
-        if len(s) >= 4:
-            parts.append(f"{s}*")
+        parts.extend(f"{s}*" for s in stem_prefixes(t) if len(s) >= 4)
     return " ".join(parts)
 
 

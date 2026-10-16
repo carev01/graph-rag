@@ -20,7 +20,13 @@ import numpy as np
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import collapse_near_duplicates, fetch_vectors
 from answer_api.item_grades import grade_items
-from answer_api.list_sweep import _ITEM_NOUNS, _PLURAL, keyword_sweep, question_terms
+from answer_api.list_sweep import (
+    _ITEM_NOUNS,
+    _PLURAL,
+    is_limitation,
+    keyword_sweep,
+    question_terms,
+)
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import scope_episode_uuids
 from answer_api.search import search_local
@@ -47,11 +53,6 @@ _LIST_RE = re.compile(
 # ...") are excluded explicitly.
 _NOT_LIST_RE = re.compile(r"^\s*(what|which)\s+(is|was|should|does|do|did|can)\b",
                           re.IGNORECASE)
-
-_LIMIT_RE = re.compile(
-    r"\b(not supported|does not|doesn't|do not|don't|cannot|can't|can not|is not|are not|"
-    r"unsupported|only (available|supported|for|when|if|with|on|in)|not available)\b",
-    re.IGNORECASE)
 
 _EXPAND_PROMPT = (
     "You help search vendor backup documentation. The QUESTION asks for a list. Write "
@@ -87,10 +88,6 @@ _LIST_PROMPT = (
 
 def is_list_question(q: str) -> bool:
     return bool(_LIST_RE.search(q)) and not _NOT_LIST_RE.search(q)
-
-
-def is_limitation(fact: str) -> bool:
-    return bool(_LIMIT_RE.search(fact))
 
 
 async def expand_queries(client, model: str, q: str, max_n: int) -> list[str]:

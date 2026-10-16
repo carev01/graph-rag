@@ -139,3 +139,71 @@ def test_a_missing_term_not_spelled_in_the_question_is_shown_as_is():
                              q="Where can I restore Windows backups?")
     assert grades[0].missing_terms == ["windows", "linuxes"]
     assert text.endswith("does not mention Windows, linuxes)*")
+
+
+NUTANIX = "Backups created by Veeam Agent for Microsoft Windows can be restored to Nutanix AHV."
+
+
+def test_a_parent_heading_emptied_through_its_sub_heading_is_removed():
+    raw = ("## A\n### A1\n- **Oracle KVM** — x [1]\n"
+           "## B\n- **Nutanix AHV** — y [1]")
+    text, _, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert text == "## B\n- **Nutanix AHV** — y [1]"
+
+
+def test_a_parent_heading_with_a_surviving_sub_section_stays():
+    raw = ("## A\n### A1\n- **Oracle KVM** — x [1]\n### A2\n- **Nutanix AHV** — y [1]\n"
+           "**Bold**\n- **Oracle KVM** — z [1]")
+    text, _, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert text == "## A\n### A2\n- **Nutanix AHV** — y [1]"
+
+
+def test_a_heading_the_model_wrote_empty_stays():
+    raw = "# Answer\n## A\n- **Oracle KVM** — x [1]\n## B\n- **Nutanix AHV** — y [1]"
+    text, _, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert text == "# Answer\n## B\n- **Nutanix AHV** — y [1]"
+
+
+def test_a_limitations_phrase_in_a_sentence_does_not_end_the_graded_region():
+    raw = ("Items follow; see Not supported / limitations at the end.\n"
+           "- **Oracle KVM** — x [1]\n- **Nutanix AHV** — y [1]\n\n"
+           "**Not supported / limitations**\n- **Oracle KVM** — no [1]")
+    text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.grade for g in grades] == [ig.DROPPED, ig.CONFIRMED]
+    assert text == ("Items follow; see Not supported / limitations at the end.\n"
+                    "- **Nutanix AHV** — y [1]\n\n"
+                    "**Not supported / limitations**\n- **Oracle KVM** — no [1]")
+
+
+def test_numbered_item_lines_are_graded_and_numbered_plain_lines_counted(caplog):
+    raw = "1. **Nutanix AHV** — y [1]\n2) **Oracle KVM** — x [1]\n3. plain line [1]"
+    with caplog.at_level(logging.WARNING, logger="answer_api.item_grades"):
+        text, grades, _ = _grade(raw, [_fact("nx", NUTANIX)])
+    assert [g.grade for g in grades] == [ig.CONFIRMED, ig.DROPPED]
+    assert text == "1. **Nutanix AHV** — y [1]\n3. plain line [1]"
+    assert "1 bullet line(s) not in item form" in caplog.text
+
+
+def test_a_cited_limitation_fact_never_supports_an_item():
+    lim = _fact("lim", "Restore of Veeam Agent for Windows backups to Nutanix AHV is not "
+                       "supported for encrypted backups.")
+    _, grades, _ = _grade("- **Nutanix AHV** — y [1]", [lim])
+    assert grades[0].grade == ig.DROPPED
+    _, grades, _ = _grade("- **Nutanix AHV** — y [1] [2]", [lim, _fact("nx", NUTANIX)])
+    assert grades[0].grade == ig.CONFIRMED
+
+
+def test_short_terms_and_synonyms_match_whole_words_only():
+    assert ig._present("vms", "restore an azure vm to a new place")
+    assert ig._present("vms", "restore azure vms")
+    assert not ig._present("vms", "restore a vmware machine from a vmdk")
+    assert ig._present("aws", "copy to aws regions")
+    assert not ig._present("aws", "awsome")
+    assert ig._present("windows", "microsoft windows server")
+
+
+def test_recover_and_copy_word_families_match():
+    assert ig._present("recover", "restore an azure vm")
+    assert ig._present("copies", "a copy job")
+    assert ig._present("copy", "backup copies are kept")
+    assert ig._present("policies", "a retention policy")

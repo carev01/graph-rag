@@ -270,6 +270,7 @@ async def test_item_grade_counts_are_recorded_summed_and_reported(monkeypatch):
     assert (recs["list1"]["items_flagged"], recs["list1"]["items_dropped"]) == (1, 2)
     assert (recs["list2"]["items_flagged"], recs["list2"]["items_dropped"]) == (1, 0)
     assert recs["loc"]["items_flagged"] is None and recs["loc"]["items_dropped"] is None
+    assert (recs["list1"]["items_graded"], recs["loc"]["items_graded"]) == (4, None)
     assert (summary["items_flagged"], summary["items_dropped"],
             summary["items_graded_n"]) == (2, 2, 2)
     report = er.format_report(summary).splitlines()
@@ -278,3 +279,17 @@ async def test_item_grade_counts_are_recorded_summed_and_reported(monkeypatch):
     assert header.count("|") == next(ln for ln in report if ln.startswith("|---")).count("|")
     assert next(ln for ln in report if ln.endswith("| list1 |")).endswith("| 1/2 | list1 |")
     assert next(ln for ln in report if ln.endswith("| loc |")).endswith("| - | loc |")
+
+
+async def test_a_list_answer_with_no_item_lines_renders_no_grade_cell(monkeypatch):
+    async def _router(*a, q, mode_override, scope, settings, **kw):
+        return {**_env("local", "A1"), "item_grades": []}
+
+    monkeypatch.setattr(er.router_mod, "answer_router", _router)
+    questions = [{"question": "loc", "intent": "local", "expected_modes": ["local"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S, _RESOLVER)
+    rec = summary["per_question"][0]
+    assert (rec["items_graded"], rec["items_flagged"], rec["items_dropped"]) == (0, 0, 0)
+    row = next(ln for ln in er.format_report(summary).splitlines() if ln.endswith("| loc |"))
+    assert row.endswith("| - | loc |")

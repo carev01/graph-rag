@@ -341,9 +341,11 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                     bonus_found = len(bonus_hits)
             # Per-item evidence grades (spec §12.2): list answers only; None when the
             # envelope carries no grades (not a list answer).
+            items_graded = None
             items_flagged = None
             items_dropped = None
             if "item_grades" in env:
+                items_graded = len(env["item_grades"])
                 items_flagged = sum(g["grade"] == "needs_validation" for g in env["item_grades"])
                 items_dropped = sum(g["grade"] == "dropped" for g in env["item_grades"])
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
@@ -364,6 +366,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "item_coverage": item_coverage,
                          "items_missing": items_missing,
                          "bonus_found": bonus_found,
+                         "items_graded": items_graded,
                          "items_flagged": items_flagged,
                          "items_dropped": items_dropped,
                          "failed": False}
@@ -388,7 +391,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                    "bag_share": None, "misattributed": None,
                    "facet_coverage": None, "enumeration_complete": None,
                    "item_coverage": None, "items_missing": None, "bonus_found": None,
-                   "items_flagged": None, "items_dropped": None,
+                   "items_graded": None, "items_flagged": None, "items_dropped": None,
                    "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
@@ -443,9 +446,9 @@ def _mps_cell(rec: dict) -> str:
 
 
 def _graded_cell(rec: dict) -> str:
-    """`flagged/dropped` item counts, or `-` (no item grades: not a list answer, or
-    a record written before the grades existed)."""
-    if rec.get("items_flagged") is None:
+    """`flagged/dropped` item counts, or `-` (no item graded: not a list answer, a
+    list answer with no item lines, or a record written before the grades existed)."""
+    if not rec.get("items_graded"):
         return "-"
     return f"{rec['items_flagged']}/{rec['items_dropped']}"
 
