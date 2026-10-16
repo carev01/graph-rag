@@ -32,10 +32,11 @@ from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
 
-from answer_api import list_mode
+from answer_api import list_mode, list_sweep
 from answer_api.fact_dedup import collapse_near_duplicates
 from answer_api.global_search import _map_client_and_model, shortlist_communities
 from answer_api.item_coverage import match_items
+from answer_api.item_grades import grade_items
 from answer_api.scope import ScopeResolver
 from answer_api.search import search_local
 from answer_api.shape import QuestionShape, classify_shape, facet_queries
@@ -128,7 +129,16 @@ async def check_list_items(graphiti, driver, map_client, map_model, settings,
     (classify_shape fills it from the detected or named-subject scope), so it is
     used directly rather than recomputed. `retrieve_list` raising (every
     expansion/retrieval attempt failed) must read as FAIL with the error, never
-    as a pass with zero items found."""
+    as a pass with zero items found.
+
+    Also simulates the production grader per expected item (spec §7 calibration):
+    `item_scores` is each item's best final-rerank score over the retrieved facts
+    that name it (None when nothing matches or nothing is scored); `item_grades`
+    is the one grade (`confirmed`/`needs_validation`/`dropped`/`unretrieved`)
+    `item_grades.grade_items` would give that item's line, built from up to its
+    three best-scoring matching facts -- the same inputs `answer_list` feeds the
+    grader, so a calibration run sees exactly which expected items the production
+    gate would flag or drop."""
     items = q["expected_items"]
     scope = None
     if shape.facets and not shape.facets[0].scope.is_empty():
@@ -139,11 +149,32 @@ async def check_list_items(graphiti, driver, map_client, map_model, settings,
             group_id=settings.group_id, settings=settings)
     except Exception as exc:
         return {"pass": False, "found": 0, "total": len(items),
-                "missing": [i["item"] for i in items], "error": str(exc)}
-    text = " || ".join(r["fact"] for r in got.results + got.limitations)
+                "missing": [i["item"] for i in items], "error": str(exc),
+                "item_scores": {}, "item_grades": {}}
+    facts = got.results + got.limitations
+    text = " || ".join(r["fact"] for r in facts)
     found, missing = match_items(text, items)
+    qtext = q["question"]
+    terms = list_sweep.question_terms(qtext, scope)
+    item_scores: dict[str, float | None] = {}
+    item_grades: dict[str, str] = {}
+    for item in items:
+        matching = [f for f in facts if match_items(f["fact"], [item])[0]]
+        matching.sort(key=lambda f: (got.scores.get(f["fact_uuid"]) is None,
+                                     -(got.scores.get(f["fact_uuid"]) or 0.0)))
+        item_scores[item["item"]] = next(
+            (got.scores.get(f["fact_uuid"]) for f in matching
+             if got.scores.get(f["fact_uuid"]) is not None), None)
+        if not matching:
+            item_grades[item["item"]] = "unretrieved"
+            continue
+        marker_map = {i: f for i, f in enumerate(matching[:3], 1)}
+        raw = f"- **{item['item']}** — x [1][2][3]"
+        _, grades = grade_items(raw, marker_map, q=qtext, terms=terms,
+                                scores=got.scores, floor=settings.list_item_floor)
+        item_grades[item["item"]] = grades[0].grade if grades else "unretrieved"
     return {"pass": not missing, "found": len(found), "total": len(items),
-            "missing": missing}
+            "missing": missing, "item_scores": item_scores, "item_grades": item_grades}
 
 
 async def main() -> int:
@@ -171,7 +202,15 @@ async def main() -> int:
                                                settings, q, shape)
                 r["items"] = items
                 r["pass"] = r["pass"] and items["pass"]
-                extra = f"items {items['found']}/{items['total']} missing={items['missing']} "
+                scored = [s for s in items["item_scores"].values() if s is not None]
+                min_score = f"{min(scored):.3f}" if scored else "None"
+                flagged = [name for name, g in items["item_grades"].items()
+                          if g == "needs_validation"]
+                would_drop = [name for name, g in items["item_grades"].items()
+                             if g == "dropped"]
+                extra = (f"items {items['found']}/{items['total']} missing={items['missing']} "
+                        f"min_item_score={min_score} flagged={flagged} "
+                        f"would_drop={would_drop} ")
                 if items.get("error"):
                     extra += f"error={items['error']!r} "
             results.append(r)
