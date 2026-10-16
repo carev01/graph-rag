@@ -142,9 +142,13 @@ def patched(monkeypatch):
         async def _no_vectors(driver, uuids, *, cache, degraded):
             return {}
 
+        async def _no_sweep(driver, q, *, scope, group_id, settings):
+            return []
+
         monkeypatch.setattr(lm, "rerank", _rerank)
         monkeypatch.setattr(lm, "relation_siblings", _no_siblings)
         monkeypatch.setattr(lm, "_fact_vectors", _no_vectors)
+        monkeypatch.setattr(lm, "keyword_sweep", _no_sweep)
         return _Client(expansion)
     return install, calls
 
@@ -642,9 +646,13 @@ async def test_retrieve_list_fetches_each_embedding_at_most_once(monkeypatch, ca
     async def _siblings(driver, seeds, *, scope, settings, exclude, degraded):
         return [_fact("x1", "Sangfor aSV is supported."), _fact("a", "vSphere is supported.")]
 
+    async def _no_sweep(driver, q, *, scope, group_id, settings):
+        return []
+
     monkeypatch.setattr(lm, "search_local", _search)
     monkeypatch.setattr(lm, "rerank", _rerank)
     monkeypatch.setattr(lm, "relation_siblings", _siblings)
+    monkeypatch.setattr(lm, "keyword_sweep", _no_sweep)
     drv = _EmbeddingDriver(["a", "b", "c", "x1"])
     with caplog.at_level(logging.INFO, logger="answer_api.list_mode"):
         got = await lm.retrieve_list(None, drv, _Client('["q-ahv"]'), "m", q=q, scope=Scope(),
@@ -657,3 +665,51 @@ async def test_retrieve_list_fetches_each_embedding_at_most_once(monkeypatch, ca
     for stage in ("expansion=", "searches=", "collapse=", "rerank=", "relations=",
                   "selection="):
         assert stage in line
+
+
+async def test_swept_facts_join_round_one(patched, monkeypatch):
+    install, calls = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+
+    async def _sweep(driver, qq, *, scope, group_id, settings):
+        return [_fact("sw", "Restore to Sangfor aSV is supported.")]
+
+    monkeypatch.setattr(lm, "keyword_sweep", _sweep)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert "sw" in [r["fact_uuid"] for r in got.results]
+    rerank_calls = [c["docs"] for c in calls if "docs" in c]
+    assert rerank_calls and "Restore to Sangfor aSV is supported." in rerank_calls[0]
+
+
+async def test_a_failed_sweep_is_degraded_once_and_keeps_the_per_query_results(
+        patched, monkeypatch):
+    install, _ = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+
+    async def _boom(driver, qq, *, scope, group_id, settings):
+        raise RuntimeError("fulltext index down")
+
+    monkeypatch.setattr(lm, "keyword_sweep", _boom)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert got.degraded.count(lm.SWEEP_DEGRADED) == 1
+    assert [r["fact_uuid"] for r in got.results] == ["a"]
+    assert "keyword search could not be completed" in lm.degraded_note([lm.SWEEP_DEGRADED])
+
+
+async def test_a_failed_sweep_alone_never_triggers_every_retrieval_failed(patched, monkeypatch):
+    install, _ = patched
+    q = "Which hypervisors does Veeam Backup & Replication support?"
+    client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
+
+    async def _boom(driver, qq, *, scope, group_id, settings):
+        raise RuntimeError("fulltext index down")
+
+    monkeypatch.setattr(lm, "keyword_sweep", _boom)
+    got = await lm.retrieve_list(None, None, client, "m", q=q, scope=Scope(), group_id="g",
+                                 settings=_settings())
+    assert [r["fact_uuid"] for r in got.results] == ["a"]
+    assert got.degraded == [lm.SWEEP_DEGRADED]

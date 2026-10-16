@@ -19,6 +19,7 @@ import numpy as np
 
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import collapse_near_duplicates, fetch_vectors
+from answer_api.list_sweep import _ITEM_NOUNS, _PLURAL, keyword_sweep
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import scope_episode_uuids
 from answer_api.search import search_local
@@ -29,15 +30,11 @@ from graph_extract.usage import usable_content
 
 logger = logging.getLogger(__name__)
 
-# A plural noun: ends in -s but not -ss/-us/-is ("process", "status", "analysis").
-_PLURAL = r"\w+s(?<!ss)(?<!us)(?<!is)"
 # What may follow "which/what <plural>" in a list question: a helper or support verb
 # ("Which hypervisors does ...", "What destinations can ...", "Which databases are
 # supported?"). "What happens when ..." / "What causes a job to fail?" have none.
 _HELPER = (r"(does|do|did|can|could|are|were|will|would|should|must|may|might|"
            r"support|supports|is\s+supported)")
-_ITEM_NOUNS = (r"(options|ways|methods|types|kinds|destinations|targets|choices|"
-               r"alternatives|modes|tiers|levels|formats|platforms|locations)")
 _LIST_RE = re.compile(
     r"^\s*(which|what)\s+(\w+\s+){0,3}?" + _PLURAL + r"\s+" + _HELPER + r"\b"
     r"|^\s*where\s+can\s+(i|you|we)\b"                             # where can I ...
@@ -120,6 +117,7 @@ async def expand_queries(client, model: str, q: str, max_n: int) -> list[str]:
 FINAL_RERANK_DEGRADED = "final rerank unavailable: items ordered by retrieval"
 RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"
 DIVERSITY_DEGRADED = "diversity selection unavailable"
+SWEEP_DEGRADED = "keyword search unavailable"
 _warned_unconfigured = False
 
 
@@ -323,6 +321,8 @@ def degraded_note(degraded: list[str]) -> str:
         parts.append("results were ranked by retrieval order")
     if DIVERSITY_DEGRADED in degraded:
         parts.append("repeated items could not be filtered out")
+    if SWEEP_DEGRADED in degraded:
+        parts.append("the keyword search could not be completed")
     return " and ".join(parts).capitalize() + "; this list may be incomplete." if parts else ""
 
 
@@ -354,12 +354,15 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
                      group_id=group_id, fetch_cap=settings.local_scoped_fetch_cap,
                      scan_max_episodes=settings.local_scoped_scan_max_episodes,
                      settings=settings, rerank_pool=settings.list_per_query_pool)
-        for sq in queries], return_exceptions=True)
+        for sq in queries] + [
+        keyword_sweep(driver, q, scope=scope, group_id=group_id, settings=settings)],
+        return_exceptions=True)
     raise_if_cancelled(found)
     lap("searches")
+    per_query, swept_result = found[:-1], found[-1]
     merged: list[dict] = []
     degraded: list[str] = []
-    for sq, res in zip(queries, found):
+    for sq, res in zip(queries, per_query):
         if isinstance(res, BaseException):
             logger.warning("list retrieval failed for %r: %s", sq, res)
             degraded.append(f"retrieval failed for: {sq}")
@@ -367,6 +370,13 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
         merged.extend(res["results"])
     if len(degraded) == len(queries):
         raise RuntimeError("every list retrieval failed")
+    if isinstance(swept_result, BaseException):
+        logger.warning("list keyword sweep failed (%s); continuing without it", swept_result)
+        _degrade(degraded, SWEEP_DEGRADED)
+        swept: list[dict] = []
+    else:
+        swept = swept_result
+        merged.extend(swept)
     # One embedding cache per question: both collapses and the MMR selection read the
     # same fact vectors, each fetched at most once (was three fetches, ~50-70 s).
     vectors: dict[str, list[float]] = {}
@@ -407,11 +417,11 @@ async def retrieve_list(graphiti, driver, map_client, map_model, *, q, scope, gr
                                       k=settings.list_supported_k,
                                       lam=settings.list_mmr_lambda)
     lap("selection")
-    logger.info("list stages (s): %s; candidates=%d siblings=%d",
+    logger.info("list stages (s): %s; candidates=%d siblings=%d swept=%d",
                 " ".join(f"{name}={stages[name]:.1f}" for name in
                          ("expansion", "searches", "collapse", "rerank", "relations",
                           "selection")),
-                len(ranked), len(siblings))
+                len(ranked), len(siblings), len(swept))
     return ListRetrieval(results=results,
                          limitations=[f for f, _ in limits][:settings.list_limitations_k],
                          expansion_queries=expansions, degraded=degraded)

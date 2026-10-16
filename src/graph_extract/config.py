@@ -390,6 +390,10 @@ class ExtractSettings(BaseSettings):
     # Raw cosine of fact embeddings at or above which two facts are one (sources merged).
     # 0.92 merged "VMware Cloud Director" into a vSphere fact (2026-10-15 amendment).
     list_dedup_cosine: float = 0.96
+    # Keyword sweep (spec 2026-10-15 §12.1): a Lucene full-text search of fact text for
+    # the question's own distinctive words, run alongside the per-query searches.
+    list_sweep_cap: int = 2000
+    list_sweep_scoped_overfetch: int = 4
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw
