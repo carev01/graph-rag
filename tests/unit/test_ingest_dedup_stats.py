@@ -152,6 +152,7 @@ async def test_each_episode_runs_inside_its_own_grounding_context(driver, monkey
         ctx = CURRENT_GROUNDING.get()
         assert ctx is not None, "the driver must open a grounding context per episode"
         seen.append((ctx.text, ctx.allowed, k["body"]))
+        assert ctx.product == "Veeam Backup & Replication"
         ctx.stats.calls += 1
         ctx.stats.dropped += 2
         ctx.stats.dropped_names.extend(["Hyper-V", "East US"])
@@ -172,6 +173,7 @@ async def test_empty_document_names_are_not_allowed_names(driver, monkeypatch):
 
     async def record(graphiti, s, **k):
         seen.append(CURRENT_GROUNDING.get().allowed)
+        assert CURRENT_GROUNDING.get().product == ""
         return SimpleNamespace(episode=SimpleNamespace(uuid="e"), nodes=[], edges=[])
 
     monkeypatch.setattr(ingest_driver, "add_text_episode", record)

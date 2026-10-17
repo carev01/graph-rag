@@ -27,7 +27,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
-from graph_extract.ontology import NAMING_ALIASES
+from graph_extract.ontology import ENTITY_TYPES, NAMING_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,13 @@ _E = r"(?![a-z0-9])"      # word end
 # match "hypervisor", "nas" does not match "nasa".
 _INFLECTION = r"(?:s|es|d|ed|ing|[a-z](?:ed|ing))?"
 
+# The entity_type_id graphiti assigns the Product type. graphiti numbers the types it
+# shows the extraction model as 0 = its default "Entity", then the custom types in
+# the order of the `entity_types` dict starting at 1 (node_operations.
+# _build_entity_types_context, 0.30.1); add_text_episode passes ENTITY_TYPES.
+# Computed, not hard-coded; a tripwire test builds graphiti's own context.
+PRODUCT_ENTITY_TYPE_ID = list(ENTITY_TYPES).index("Product") + 1
+
 # Warned once per process: an extraction call reached a guarded graphiti with no
 # grounding context open, i.e. the gate was bypassed (the call is counted either way).
 _unscoped_warned = False
@@ -58,6 +65,7 @@ class GroundingStats:
     calls: int = 0            # extract_text replies filtered
     dropped: int = 0          # entities removed from those replies
     parse_failures: int = 0   # replies not shaped like ExtractedEntities -> passed through
+    injected: int = 0         # documented-product entities supplied by the gate
     unscoped: int = 0         # extract_text calls with no grounding context open
     dropped_names: list[str] = field(default_factory=list)   # first DROPPED_NAMES_CAP
 
@@ -71,6 +79,7 @@ class GroundingStats:
         self.dropped += other.dropped
         self.parse_failures += other.parse_failures
         self.unscoped += other.unscoped
+        self.injected += other.injected
         self._add_names(other.dropped_names)
 
 
@@ -79,6 +88,10 @@ class GroundingContext:
     text: str                    # the episode body exactly as graphiti receives it
     allowed: tuple[str, ...]     # the document's product and vendor names
     stats: GroundingStats
+    # The documented product ("" when unknown). Supplied as an entity when the
+    # extraction reply omits it: the edge step names the implied subject anyway,
+    # and graphiti discards every edge whose source entity was not extracted.
+    product: str = ""
 
 
 # Set by IngestDriver around each add_text_episode; read by dedup_guard's wrapper.
@@ -132,6 +145,19 @@ def _present(token: str, text: str) -> bool:
                for form in [token, *_stems(token)])
 
 
+def same_name(a: str, b: str) -> bool:
+    """One name spelled two ways: equal ignoring case, or the same distinctive-token
+    sequence ("Veeam Backup and Replication" == "Veeam Backup & Replication").
+    Blank names are never the same as anything."""
+    la, lb = a.strip().lower(), b.strip().lower()
+    if not la or not lb:
+        return False
+    if la == lb:
+        return True
+    ta = _name_tokens(la)
+    return bool(ta) and ta == _name_tokens(lb)
+
+
 def note_unscoped(stats: GroundingStats) -> None:
     """Count an extract_text call made with no grounding context, and warn the
     first time it happens in this process."""
@@ -158,11 +184,8 @@ def is_grounded(name: str, text: str, allowed: tuple[str, ...]) -> bool:
     ltext = text.lower()
     if lname and _whole_word(lname, ltext):
         return True
-    ntoks = _name_tokens(lname)
-    for a in allowed:
-        a = a.strip().lower()
-        if a and (a == lname or (ntoks and _name_tokens(a) == ntoks)):
-            return True
+    if any(same_name(name, a) for a in allowed):
+        return True
     if any(_whole_word(alias, ltext) for alias in NAMING_ALIASES.get(lname, ())):
         return True
     toks = _distinctive_tokens(lname)
@@ -196,10 +219,20 @@ def filter_entities(response: Any, ctx: GroundingContext) -> Any:
             kept.append(ent)
         else:
             dropped.append(name)
-    if not dropped:
+    injected = bool(ctx.product.strip()) and not any(
+        isinstance(ent, dict) and isinstance(ent.get("name"), str)
+        and same_name(ent["name"], ctx.product) for ent in kept)
+    if injected:
+        # The model left out the implied subject; the edge step will use it as the
+        # source of the chunk's facts regardless (the 2026-10-17 smoke lost ~28
+        # facts to "Source entity not found in nodes"). Supply it deterministically.
+        kept.append({"name": ctx.product, "entity_type_id": PRODUCT_ENTITY_TYPE_ID})
+        stats.injected += 1
+    if not dropped and not injected:
         return response
-    stats.dropped += len(dropped)
-    stats._add_names(dropped)
-    logger.debug("grounding dropped %d of %d entities: %s",
-                 len(dropped), len(entities), dropped)
+    if dropped:
+        stats.dropped += len(dropped)
+        stats._add_names(dropped)
+        logger.debug("grounding dropped %d of %d entities: %s",
+                     len(dropped), len(entities), dropped)
     return {**response, "extracted_entities": kept}

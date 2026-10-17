@@ -258,10 +258,11 @@ async def run_worker_once(
             route = res.tier if res is not None and getattr(res, "routed", False) else "-"
             metrics.job_outcome("done", elapsed, route)
             logger.info("semantic job %s done: article=%s tier=%s worker_tier=%s %.0fs "
-                        "grounding_calls=%d grounding_dropped=%d",
+                        "grounding_calls=%d grounding_dropped=%d grounding_injected=%d",
                         job["id"], job["article_id"], route, metrics.TIER, elapsed,
                         res.grounding.calls if res is not None else 0,
-                        res.grounding.dropped if res is not None else 0)
+                        res.grounding.dropped if res is not None else 0,
+                        res.grounding.injected if res is not None else 0)
         except Exception as e:  # a poison job must not block the queue
             halt = "credits" if _is_out_of_credits(e) else None
             if halt is None:
@@ -454,10 +455,11 @@ async def run_worker_once(
     processed = len(jobs) - len(deferred) - len(not_ours)
     if processed:
         logger.info("semantic batch: jobs=%d deferred=%d reference_basis=%s dedup: %s "
-                    "grounding_calls=%d grounding_dropped=%d grounding_parse_failures=%d",
+                    "grounding_calls=%d grounding_dropped=%d grounding_injected=%d "
+                    "grounding_parse_failures=%d",
                     processed, len(deferred), dict(basis_counts), batch_dedup.summary(),
                     batch_grounding.calls, batch_grounding.dropped,
-                    batch_grounding.parse_failures)
+                    batch_grounding.injected, batch_grounding.parse_failures)
         # Phase B: per-batch proof the index path engaged; reset so each batch
         # reports its own counts.
         pt = batch_tokens.prompt_tokens

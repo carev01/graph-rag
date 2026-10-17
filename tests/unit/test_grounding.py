@@ -14,10 +14,16 @@ from datetime import datetime, timezone
 import pytest
 
 from graph_extract import grounding
-from graph_extract.ontology import EXTRACTION_INSTRUCTIONS, NAMING_ALIASES, NAMING_RULES
+from graph_extract.ontology import (
+    ENTITY_TYPES,
+    EXTRACTION_INSTRUCTIONS,
+    NAMING_ALIASES,
+    NAMING_RULES,
+)
 from graph_extract.grounding import (
     CURRENT_GROUNDING,
     EXTRACT_TEXT_PROMPT_NAME,
+    PRODUCT_ENTITY_TYPE_ID,
     GroundingContext,
     GroundingStats,
     filter_entities,
@@ -347,3 +353,85 @@ async def test_pin_graphiti_extracts_text_episodes_under_this_prompt_name():
     await node_operations._call_extraction_llm(_LLM(), ep, ctx)
     assert seen["prompt_name"] == EXTRACT_TEXT_PROMPT_NAME
     assert seen["response_model"] is ExtractedEntities
+
+
+# ------------------------------------------- documented-product injection (follow-up)
+
+def _pctx(text: str, product: str) -> GroundingContext:
+    return GroundingContext(text=text, allowed=tuple(n for n in (product, "Veeam") if n),
+                            stats=GroundingStats(), product=product)
+
+
+def test_an_omitted_product_is_appended_once_with_the_product_type_id():
+    ctx = _pctx(SECURITI_TEXT, "Securiti.ai")
+    out = filter_entities(_reply("Azure Blob Storage", "AWS Backup"), ctx)
+    assert out["extracted_entities"] == [
+        {"name": "Azure Blob Storage", "entity_type_id": 1},
+        {"name": "Securiti.ai", "entity_type_id": PRODUCT_ENTITY_TYPE_ID},
+    ]
+    assert (ctx.stats.injected, ctx.stats.dropped) == (1, 1)
+
+
+def test_the_product_is_appended_even_when_nothing_was_dropped():
+    ctx = _pctx(SECURITI_TEXT, "Securiti.ai")
+    out = filter_entities(_reply("Azure Blob Storage"), ctx)
+    assert [e["name"] for e in out["extracted_entities"]] == ["Azure Blob Storage", "Securiti.ai"]
+    assert (ctx.stats.injected, ctx.stats.dropped) == (1, 0)
+
+
+def test_the_product_is_appended_to_an_empty_reply():
+    ctx = _pctx("nothing named", "Securiti.ai")
+    out = filter_entities(_reply(), ctx)
+    assert out["extracted_entities"] == [
+        {"name": "Securiti.ai", "entity_type_id": PRODUCT_ENTITY_TYPE_ID}]
+
+
+@pytest.mark.parametrize("extracted", [
+    "Veeam Backup & Replication", "veeam backup & replication", "Veeam Backup and Replication",
+])
+def test_a_present_product_is_not_duplicated(extracted):
+    ctx = _pctx("Configure the job.", "Veeam Backup & Replication")
+    reply = _reply(extracted, "job")
+    out = filter_entities(reply, ctx)
+    assert [e["name"] for e in out["extracted_entities"]] == [extracted, "job"]
+    assert ctx.stats.injected == 0
+    assert out is reply, "nothing dropped, nothing injected: the reply is untouched"
+
+
+def test_an_unknown_product_injects_nothing():
+    ctx = _pctx("Azure Blob", "")
+    reply = _reply("Azure Blob")
+    assert filter_entities(reply, ctx) is reply
+    assert ctx.stats.injected == 0
+
+
+@pytest.mark.parametrize("reply", [None, {"entities": []}, {"extracted_entities": "x"}])
+def test_a_malformed_reply_gets_no_product(reply):
+    ctx = _pctx("anything", "Securiti.ai")
+    assert filter_entities(reply, ctx) is reply
+    assert (ctx.stats.parse_failures, ctx.stats.injected) == (1, 0)
+
+
+def test_the_injected_entity_validates_as_graphiti_s_extracted_entities():
+    from graphiti_core.prompts.extract_nodes import ExtractedEntities
+
+    ctx = _pctx("x", "Securiti.ai")
+    parsed = ExtractedEntities(**filter_entities(_reply(), ctx))
+    assert parsed.extracted_entities[0].name == "Securiti.ai"
+
+
+def test_tripwire_graphiti_numbers_entity_types_as_assumed():
+    """PRODUCT_ENTITY_TYPE_ID must be the id graphiti itself shows the model for
+    Product, and maps back to the Product label (node_operations, 0.30.1)."""
+    from graphiti_core.utils.maintenance.node_operations import _build_entity_types_context
+
+    context = _build_entity_types_context(ENTITY_TYPES)
+    assert context[0]["entity_type_name"] == "Entity"
+    assert context[PRODUCT_ENTITY_TYPE_ID]["entity_type_name"] == "Product"
+    assert context[PRODUCT_ENTITY_TYPE_ID]["entity_type_id"] == PRODUCT_ENTITY_TYPE_ID
+
+
+def test_injected_counts_merge():
+    a = GroundingStats(injected=2)
+    a.merge(GroundingStats(injected=3))
+    assert a.injected == 5

@@ -236,6 +236,7 @@ def test_report_formatting():
     rows = [
         _outcome("a1", title="Access | verification", prod_facts=37, test_facts=4,
                  prod_foreign=37, test_foreign=0, grounding_calls=1, grounding_dropped=21,
+                 grounding_injected=1,
                  dropped_names=[f"n{i}" for i in range(30)],
                  prod_foreign_subjects={"AWS Backup": 37}, episodes_added=1, tier="cheap",
                  prompt_tokens=1000, completion_tokens=200),
@@ -253,7 +254,8 @@ def test_report_formatting():
     # facts on articles production got right: a2 only, 10 -> 8
     assert "| facts on articles production got right | 10 | 8 |" in md
     assert "change -20.0%" in md
-    assert "grounding_calls=3 grounding_dropped=21" in md
+    assert "grounding_calls=3 grounding_dropped=21 grounding_injected=1" in md
+    assert "| 1 / 21 / 1 |" in md                    # per-article calls / dropped / injected
     assert "n19" in md and "n20" not in md            # dropped names capped at 20
     assert "AWS Backup x37" in md
     assert "- Azure Backup: it backs up" in md

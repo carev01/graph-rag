@@ -337,6 +337,7 @@ class ArticleOutcome:
     restores: list[tuple[str, str]] = field(default_factory=list)
     grounding_calls: int = 0
     grounding_dropped: int = 0
+    grounding_injected: int = 0
     dropped_names: list[str] = field(default_factory=list)
     episodes_added: int = 0
     tier: str = ""
@@ -438,6 +439,7 @@ def render_report(outcomes: list[ArticleOutcome], *, meta: dict,
         f"included articles={len(ok)} "
         f"grounding_calls={sum(o.grounding_calls for o in ok)} "
         f"grounding_dropped={sum(o.grounding_dropped for o in ok)} "
+        f"grounding_injected={sum(o.grounding_injected for o in ok)} "
         f"episodes_added={sum(o.episodes_added for o in ok)}", "",
         f"Spend (every article run, included or not): "
         f"prompt_tokens={sum(o.prompt_tokens for o in outcomes)} "
@@ -451,7 +453,7 @@ def render_report(outcomes: list[ArticleOutcome], *, meta: dict,
     lines += [
         "", "## Per article", "",
         "| article | title | group | product | facts prod -> test | foreign prod -> test "
-        "| grounding calls / dropped | RestoresTo | tier | est. $ | status |",
+        "| grounding calls / dropped / injected | RestoresTo | tier | est. $ | status |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for o in outcomes:
@@ -459,7 +461,8 @@ def render_report(outcomes: list[ArticleOutcome], *, meta: dict,
         lines.append(
             f"| `{o.article_id}` | {_cell(o.title)} | {o.group} | {_cell(o.product)} | "
             f"{o.prod_facts} -> {o.test_facts} | {o.prod_foreign} -> {o.test_foreign} | "
-            f"{o.grounding_calls} / {o.grounding_dropped} | {len(o.restores)} | "
+            f"{o.grounding_calls} / {o.grounding_dropped} / {o.grounding_injected} | "
+            f"{len(o.restores)} | "
             f"{o.tier or '-'} | {o.cost:.4f} | {_cell(status)} |")
     lines += ["", "## Details", ""]
     for o in outcomes:
@@ -557,6 +560,7 @@ async def ingest_sample(ingest, graph: ThrowawayGraph, outcomes: list[ArticleOut
             o.episodes_added, o.tier = res.episodes_added, res.tier
             o.grounding_calls = res.grounding.calls
             o.grounding_dropped = res.grounding.dropped
+            o.grounding_injected = res.grounding.injected
             o.dropped_names = list(res.grounding.dropped_names)
             if res.skipped_navigation:
                 o.excluded = NAVIGATION_SKIP
@@ -578,7 +582,8 @@ async def ingest_sample(ingest, graph: ThrowawayGraph, outcomes: list[ArticleOut
         abort = engagement_abort(o)
         print(f"[{n}/{len(outcomes)}] {o.article_id} facts {o.prod_facts}->{o.test_facts} "
               f"foreign {o.prod_foreign}->{o.test_foreign} grounding calls="
-              f"{o.grounding_calls} dropped={o.grounding_dropped} restores={len(o.restores)} "
+              f"{o.grounding_calls} dropped={o.grounding_dropped} "
+              f"injected={o.grounding_injected} restores={len(o.restores)} "
               f"est ${o.cost:.4f} tokens={spent()}"
               + (f" EXCLUDED {exclusion(o)}" if exclusion(o) else ""), flush=True)
         if abort is not None:

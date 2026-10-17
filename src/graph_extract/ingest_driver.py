@@ -214,7 +214,8 @@ class IngestDriver:
             # grounding.filter_entities) checks extracted entities against THIS
             # chunk's text. Reset in `finally` so it never outlives the episode.
             gtoken = CURRENT_GROUNDING.set(
-                GroundingContext(text=e.body, allowed=allowed, stats=res.grounding))
+                GroundingContext(text=e.body, allowed=allowed, stats=res.grounding,
+                                 product=product))
             try:
                 r = await add_text_episode(tier.graphiti, self._s, name=e.name, body=e.body,
                                            source_description=art.source_url,

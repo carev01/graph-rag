@@ -294,6 +294,7 @@ def ingest(
             # the chunk text never mentions them.
             typer.echo(f"grounding: grounding_calls={res.grounding.calls} "
                        f"grounding_dropped={res.grounding.dropped} "
+                       f"grounding_injected={res.grounding.injected} "
                        f"grounding_parse_failures={res.grounding.parse_failures}")
             # BACKLOG 31: where an episode's wall time actually goes, and whether
             # the provider runs our 20-wide concurrent dedup calls in parallel.
