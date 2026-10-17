@@ -23,6 +23,8 @@ from answer_api.drift import _REFUSAL as _DRIFT_REFUSAL
 from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
+from answer_api.item_coverage import match_items
+from answer_api.item_grades import _markers
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
     BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
@@ -41,10 +43,22 @@ from graph_extract.usage import bounded_llm_client
 logger = logging.getLogger(__name__)
 _QUESTIONS = Path(__file__).with_name("router_golden.json")
 
+# Run 13 (2026-10-17, spec §14.3): the judge saw unlabelled fact text, so a
+# correctly-sourced "Veeam Data Cloud states ..." line read as unsupported,
+# and it counted a disclosed "needs validation"/"†" line as unsupported
+# although the line discloses exactly which qualifier the fact does not
+# state. Both are fixed here: the judge gets the SAME (Vendor · Product)
+# labelled lines the attribution judge already gets (`_score_one`), and the
+# prompt tells it how to read a disclosed gap.
 _JUDGE_PROMPT = (
     "You are scoring a backup-products ANSWER for faithfulness to its CITED FACTS. "
     "Score 0-5 how fully the answer's claims are supported by ONLY these facts "
-    "(5 = every claim supported, 0 = unsupported/hallucinated). Reply with ONLY the "
+    "(5 = every claim supported, 0 = unsupported/hallucinated). "
+    "Each cited fact is labelled (Vendor · Product) with the documentation that "
+    "states it. A line carrying a '(needs validation: ...)' note or a '†' mark "
+    "discloses that its cited fact does not state the noted qualifier: judge such "
+    "a line only on whether its cited facts support the item apart from that "
+    "disclosed qualifier. Reply with ONLY the "
     "integer.\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
 
@@ -196,6 +210,107 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
     return None
 
 
+# Spec §13.4 (after paid run 12): run 12's judge returned nothing for three
+# answers citing 110-254 facts -- long enough that the single-call prompt
+# (whole answer + every cited fact) overran the judge's context/reasoning
+# budget. Above either threshold the answer is judged in chunks instead.
+_CHUNK_FACT_THRESHOLD = 60
+_CHUNK_CHAR_THRESHOLD = 6000
+_CHUNK_SIZE = 2500
+_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+
+
+def _split_blocks(text: str) -> list[str]:
+    """Split `text` into atomic blocks at markdown headings (each its own
+    block) and blank-line paragraph boundaries. Every line ends up inside
+    exactly one block, so grouping blocks into chunks later can never split a
+    line in half."""
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if _HEADING_LINE_RE.match(line):
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            blocks.append(line)
+            continue
+        if not line.strip():
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def _chunk_answer(text: str, limit: int = _CHUNK_SIZE) -> list[str]:
+    """Group consecutive blocks (spec §13.4) up to about `limit` characters
+    each. A single block already bigger than `limit` becomes its own
+    oversized chunk rather than being split mid-line."""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for block in _split_blocks(text):
+        blen = len(block)
+        if current and size + blen > limit:
+            chunks.append("\n\n".join(current))
+            current = []
+            size = 0
+        current.append(block)
+        size += blen
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+async def _chunked_faithfulness_judge(
+        client, model, q, answer, citations, texts) -> tuple[int | None, int]:
+    """Faithfulness for a long answer (spec §13.4): split into chunks of
+    consecutive paragraphs/sections and judge each against only the LABELLED
+    lines (spec §14.3 -- `_labelled_fact_lines`) of the facts its OWN markers
+    cite -- never the whole-answer fact bag, which is what made run 12's
+    110-254-fact answers unmeasurable in one call, and never the plain
+    (unlabelled) fact text, which made run 13's correctly-sourced lines read
+    as unsupported. The result is the minimum of the chunks that scored, so
+    "5" still means every claim in the WHOLE answer is supported, not just
+    one chunk's. A chunk whose markers cite no fact with text available is
+    skipped outright: never sent to the judge, never counted. If every chunk
+    is unscoreable the answer is unscored (None), never a fabricated 0 -- the
+    same rule `_faithfulness_judge` itself follows for a single-call answer.
+
+    Returns `(score, chunks_judged)` -- `chunks_judged` is the number of
+    chunks actually sent to the judge (skipped no-fact chunks do not count),
+    recorded as `faith_chunks` on the per-question record.
+    """
+    marker_map = {c["marker"]: c for c in citations}
+    scores: list[int] = []
+    judged = 0
+    for chunk in _chunk_answer(answer):
+        chunk_citations = [marker_map[m] for m in _markers(chunk, marker_map)
+                            if marker_map[m]["fact_uuid"] in texts]
+        if not chunk_citations:
+            continue
+        chunk_facts = _labelled_fact_lines(chunk_citations, texts)
+        judged += 1
+        score = await _faithfulness_judge(client, model, q, chunk, chunk_facts)
+        if score is not None:
+            scores.append(score)
+    return (min(scores) if scores else None), judged
+
+
+async def _judge_faithfulness(
+        client, model, q, answer, citations, facts, texts) -> tuple[int | None, int | None]:
+    """Dispatch to the chunked judge above `_CHUNK_FACT_THRESHOLD` cited facts
+    or `_CHUNK_CHAR_THRESHOLD` characters (spec §13.4); otherwise the original
+    single-call path, unchanged. `faith_chunks` is `None` on the single-call
+    path -- it was never chunked, not "chunked zero times"."""
+    if len(citations) > _CHUNK_FACT_THRESHOLD or len(answer) > _CHUNK_CHAR_THRESHOLD:
+        return await _chunked_faithfulness_judge(client, model, q, answer, citations, texts)
+    return await _faithfulness_judge(client, model, q, answer, facts), None
+
+
 async def judge_attribution(client, model, q, answer, labelled_facts: str) -> int | None:
     """Count claims the ANSWER attributes to a vendor/product not on its cited
     facts' (Vendor · Product) labels (spec §6). Uses the SAME independent
@@ -230,16 +345,25 @@ async def judge_attribution(client, model, q, answer, labelled_facts: str) -> in
     return None
 
 
-def _labelled_facts(citations: list[dict], texts: dict[str, str]) -> str:
+def _labelled_fact_lines(citations: list[dict], texts: dict[str, str]) -> list[str]:
     """One `fact_line` per citation, in citation order, paired by `fact_uuid`
     (R7) -- never by position. `_cited_fact_texts`'s Cypher `IN`-scan row order
     is not guaranteed to match the requested uuid list, and a fact_uuid shared
     by two citations would shift a positional pairing for every citation after
     it. A citation whose uuid has no text (edge gone) is skipped, not
-    mislabeled against a neighbour's fact."""
-    lines = [attribution.fact_line(c["marker"], texts[c["fact_uuid"]], c.get("sources", []))
-             for c in citations if c["fact_uuid"] in texts]
-    return "\n".join(lines) or "(none)"
+    mislabeled against a neighbour's fact.
+
+    Shared by the attribution judge (`_labelled_facts`, joined into one block)
+    and the faithfulness judge (spec §14.3): both must see the SAME labelled
+    lines, as a list here so the chunked faithfulness path can hand each
+    chunk only its own markers' lines."""
+    return [attribution.fact_line(c["marker"], texts[c["fact_uuid"]], c.get("sources", []))
+            for c in citations if c["fact_uuid"] in texts]
+
+
+def _labelled_facts(citations: list[dict], texts: dict[str, str]) -> str:
+    """The attribution judge's fact block: `_labelled_fact_lines`, joined."""
+    return "\n".join(_labelled_fact_lines(citations, texts)) or "(none)"
 
 
 async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
@@ -283,14 +407,19 @@ async def _score_one(clients, q, mode_override, settings, resolver):
         shape=shape)
     ghit = (precision_at_k(env["citations"], q["expected_article_ids"])
             if q["expected_article_ids"] else None)
-    facts = await _cited_fact_texts(driver, settings.group_id,
-                                    [c["fact_uuid"] for c in env["citations"]])
-    faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
-    texts = await _cited_fact_texts_by_uuid(driver, settings.group_id,
-                                            [c["fact_uuid"] for c in env["citations"]])
-    labelled = _labelled_facts(env["citations"], texts)
+    fact_uuids = [c["fact_uuid"] for c in env["citations"]]
+    facts = await _cited_fact_texts(driver, settings.group_id, fact_uuids)
+    texts = await _cited_fact_texts_by_uuid(driver, settings.group_id, fact_uuids)
+    # Task 18 (spec §14.3): the faithfulness judge gets the SAME labelled
+    # (Vendor · Product) lines as the attribution judge, not the plain `facts`
+    # bag -- `facts` itself is kept only for raw["cited_facts"] persistence.
+    labelled_lines = _labelled_fact_lines(env["citations"], texts)
+    faith, faith_chunks = await _judge_faithfulness(
+        jc, jm, q["question"], env["answer"], env["citations"], labelled_lines, texts)
+    labelled = "\n".join(labelled_lines) or "(none)"
     misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
-    return env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape)
+    return (env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape),
+            faith_chunks)
 
 
 async def run_eval(clients, questions, settings, resolver) -> dict:
@@ -305,7 +434,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts, misattributed, facet_cov = await _score_one(
+            env, ghit, faith, facts, misattributed, facet_cov, faith_chunks = await _score_one(
                 clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
@@ -321,13 +450,41 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             # >=8-marker sentence and all of them scored 4-5.
             mps = markers_per_sentence(env["answer"])
             scope_d = env.get("scope") or {}
-            classifier_mode = env["routing"].get("fallback_from") or chosen
+            classifier_mode = (env["routing"].get("classified")
+                               or env["routing"].get("fallback_from") or chosen)
+            # Item coverage (spec 2026-10-15 §7): golden list questions carry
+            # `expected_items`, confirmed exhaustive by the user. `bonus_items`,
+            # when present, are informational extras the documentation also
+            # supports -- counted but never scored, so an answer that surfaces
+            # them does not inflate coverage and one that omits them is not
+            # penalised.
+            item_coverage = None
+            items_missing = None
+            bonus_found = None
+            if q.get("expected_items"):
+                found_items, items_missing = match_items(env["answer"], q["expected_items"])
+                item_coverage = round(len(found_items) / len(q["expected_items"]), 2)
+                if q.get("bonus_items"):
+                    bonus_hits, _ = match_items(env["answer"], q["bonus_items"])
+                    bonus_found = len(bonus_hits)
+            # Per-item evidence grades (spec §12.2): list answers only; None when the
+            # envelope carries no grades (not a list answer).
+            items_graded = None
+            items_flagged = None
+            items_dropped = None
+            items_ungraded = None
+            if "item_grades" in env:
+                items_graded = len(env["item_grades"])
+                items_ungraded = env.get("items_ungraded")
+                items_flagged = sum(g["grade"] == "needs_validation" for g in env["item_grades"])
+                items_dropped = sum(g["grade"] == "dropped" for g in env["item_grades"])
             rec: dict = {"question": q["question"], "intent": q["intent"], "chosen": chosen,
                          "routing_hit": routing_hit(chosen, q["expected_modes"]),
                          "classifier_hit": routing_hit(classifier_mode, q["expected_modes"]),
                          "scoped": bool(scope_d.get("vendors") or scope_d.get("products")
                                         or scope_d.get("sources")),
                          "grounding_hit": ghit, "faithfulness": faith,
+                         "faith_chunks": faith_chunks,
                          "cited": len(env["citations"]),
                          "ranges": len(_range_markers(env["answer"])),
                          "mps_mean": round(sum(mps) / len(mps), 1) if mps else None,
@@ -337,6 +494,13 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "facet_coverage": facet_cov,
                          "enumeration_complete": enumeration_hit(
                              env, q.get("expected_vendors")),
+                         "item_coverage": item_coverage,
+                         "items_missing": items_missing,
+                         "bonus_found": bonus_found,
+                         "items_graded": items_graded,
+                         "items_flagged": items_flagged,
+                         "items_dropped": items_dropped,
+                         "items_ungraded": items_ungraded,
                          "failed": False}
             raw.append({"question": q["question"], "intent": q["intent"], "chosen": chosen,
                         "answer": env["answer"], "cited_facts": facts,
@@ -344,7 +508,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts, _mis, _fc = await _score_one(
+                    _e, _g, _f, _facts, _mis, _fc, _chunks = await _score_one(
                         clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
@@ -355,9 +519,13 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
+                   "faith_chunks": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
                    "bag_share": None, "misattributed": None,
-                   "facet_coverage": None, "enumeration_complete": None, "failed": True}
+                   "facet_coverage": None, "enumeration_complete": None,
+                   "item_coverage": None, "items_missing": None, "bonus_found": None,
+                   "items_graded": None, "items_flagged": None, "items_dropped": None,
+                   "items_ungraded": None, "failed": True}
         elapsed = time.monotonic() - started
         # A 2h09m run printed nothing until it finished, so a hung run and a working
         # one looked identical. One line per question makes progress visible.
@@ -369,7 +537,8 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
               f"bag={_cell(rec.get('bag_share'))} "
               f"misattributed={_cell(rec.get('misattributed'))} "
               f"facet={_cell(rec.get('facet_coverage'))} "
-              f"enum={_cell(rec.get('enumeration_complete'))} {elapsed:.0f}s", flush=True)
+              f"enum={_cell(rec.get('enumeration_complete'))} "
+              f"items={_cell(rec.get('item_coverage'))} {elapsed:.0f}s", flush=True)
         per_question.append(rec)
     summary = aggregate(per_question)
     fc = [r["facet_coverage"] for r in per_question if r.get("facet_coverage") is not None]
@@ -379,6 +548,13 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     summary["facet_coverage_n"] = len(fc)
     summary["enumeration_completeness"] = round(sum(ec) / len(ec), 2) if ec else None
     summary["enumeration_n"] = len(ec)
+    ic = [r["item_coverage"] for r in per_question if r.get("item_coverage") is not None]
+    summary["item_coverage"] = round(sum(ic) / len(ic), 2) if ic else None
+    summary["item_coverage_n"] = len(ic)
+    graded = [r for r in per_question if r.get("items_flagged") is not None]
+    summary["items_flagged"] = sum(r["items_flagged"] for r in graded)
+    summary["items_dropped"] = sum(r["items_dropped"] for r in graded)
+    summary["items_graded_n"] = len(graded)
     summary["raw"] = raw
     return summary
 
@@ -400,6 +576,14 @@ def _mps_cell(rec: dict) -> str:
     if rec.get("mps_mean") is None:
         return "-"
     return f"{rec['mps_mean']}/{rec['mps_max']}"
+
+
+def _graded_cell(rec: dict) -> str:
+    """`flagged/dropped` item counts, or `-` (no item graded: not a list answer, a
+    list answer with no item lines, or a record written before the grades existed)."""
+    if not rec.get("items_graded"):
+        return "-"
+    return f"{rec['items_flagged']}/{rec['items_dropped']}"
 
 
 def format_report(summary: dict) -> str:
@@ -429,14 +613,17 @@ def format_report(summary: dict) -> str:
              f"**Facet coverage (comparisons): {summary.get('facet_coverage')} "
              f"(n={summary.get('facet_coverage_n')})** | **Enumeration completeness: "
              f"{summary.get('enumeration_completeness')} "
-             f"(n={summary.get('enumeration_n')})**",
+             f"(n={summary.get('enumeration_n')})** | **Item coverage (list questions): "
+             f"{summary.get('item_coverage')} (n={summary.get('item_coverage_n')})** | "
+             f"Items flagged / dropped (list answers): {summary.get('items_flagged')} / "
+             f"{summary.get('items_dropped')} (n={summary.get('items_graded_n')})",
              f"Comparative (broad): {summary['comparative']}",
              f"drift_wins: {summary['drift_wins']}\n",
              "## Per question\n",
              "| intent | chosen | routing | grounding | faithfulness | cited | ranges "
              "| mps | bag | misattributed | facet_coverage | enumeration_complete "
-             "| question |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| item_coverage | flagged/dropped | question |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["per_question"]:
         faith_cell = r["faithfulness"] if r["faithfulness"] is not None else "-"
         routing_cell = "-" if r.get("failed") else r["routing_hit"]
@@ -447,7 +634,9 @@ def format_report(summary: dict) -> str:
                      f"{_cell(r.get('ranges'))} | {_mps_cell(r)} | "
                      f"{_cell(r.get('bag_share'))} | {_cell(r.get('misattributed'))} | "
                      f"{_cell(r.get('facet_coverage'))} | "
-                     f"{_cell(r.get('enumeration_complete'))} | {r['question']} |")
+                     f"{_cell(r.get('enumeration_complete'))} | "
+                     f"{_cell(r.get('item_coverage'))} | {_graded_cell(r)} | "
+                     f"{r['question']} |")
     return "\n".join(lines) + "\n"
 
 

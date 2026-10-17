@@ -179,3 +179,20 @@ def test_mcp_defaults_fail_closed():
     assert s.mcp_bearer_token == ""              # unset -> /mcp not served
     assert s.mcp_allowed_hosts == ["graphrag.k3s.home.lan", "localhost:*", "127.0.0.1:*"]
     assert s.mcp_progress_seconds == 10.0
+
+
+def test_list_mode_defaults():
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.list_mode_enabled is True
+    assert (s.list_expansion_queries_max, s.list_per_query_pool, s.list_per_query_k) == (10, 40, 20)
+    assert (s.list_supported_k, s.list_limitations_k) == (250, 12)
+    assert (s.list_relation_seed_facts, s.list_relation_groups,
+            s.list_relation_group_cap) == (40, 6, 300)
+    assert s.list_mmr_lambda == 0.5 and s.list_rerank_batch == 900
+    assert s.list_dedup_cosine == 0.96 and s.local_single_rerank_pool == 80
+    assert s.local_single_dedup_cosine == 0.92
+    assert (s.list_sweep_cap, s.list_sweep_scoped_overfetch) == (2000, 4)
+    assert s.list_item_floor == 0.4 and s.list_item_unnamed_floor == 0.65
+    assert s.list_flag_group_min == 5
+    assert s.list_completeness_pass is True

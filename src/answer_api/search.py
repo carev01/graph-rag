@@ -198,7 +198,7 @@ async def search_local(graphiti, driver, *, q, k=10, scope: Scope | None = None,
     """`settings` enables the cross-encoder rerank of the scoped scan's candidates;
     None keeps the scan in cosine order.
 
-    `rerank_pool` > 0 (facet searches only), with `settings` and a configured
+    `rerank_pool` > 0 (facet, single-question and list searches), with `settings` and a configured
     reranker: gather up to max(k, rerank_pool) edges the same way (adaptive limits
     and scan fallback aimed at the pool size) and return the cross-encoder's best k
     of them -- the hybrid order alone ranked large scopes poorly (gate run 2,

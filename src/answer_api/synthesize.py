@@ -5,6 +5,7 @@ import logging
 import math
 import re
 from collections.abc import Sequence
+from typing import NamedTuple
 
 from openai import AsyncOpenAI
 
@@ -16,6 +17,7 @@ from answer_api.attribution import (
     applies_to,
     fact_line,
 )
+from answer_api.fact_dedup import collapse_near_duplicates
 from answer_api.scope import Scope
 from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from graph_extract.config import ExtractSettings
@@ -140,9 +142,9 @@ def _strip_markers(text: str, keep: set[int]) -> str:
         lambda m: m.group(0) if int(m.group(1)) in keep else _SENTINEL, text)
     text = _PAIRED_SEP_RE.sub(lambda m: m.group(1) or m.group(2), text)
     text = _LONE_SENTINEL_RE.sub(" ", text)
-    # Repair spacing WITHOUT touching line breaks: this runs on every answer, and
-    # paragraph structure is part of a correct one.
-    text = re.sub(r"[ \t]{2,}", " ", text)
+    # Repair spacing WITHOUT touching line breaks or leading indentation: this runs
+    # on every answer, and paragraph and nested-list structure are part of a correct one.
+    text = re.sub(r"(?<=\S)[ \t]{2,}", " ", text)
     text = re.sub(r"[ \t]+([.,;:!?])", r"\1", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     return text.strip()
@@ -214,28 +216,43 @@ async def _complete_or_none(client: AsyncOpenAI, model: str, prompt: str, *,
     """Call the model once; if it returns nothing usable, retry ONCE with a
     3x larger token budget (a reasoning model can burn a small budget entirely
     on reasoning tokens) before giving up and returning None."""
+    return (await _complete_with_finish_reason(client, model, prompt,
+                                               max_tokens=max_tokens)).content
+
+
+def _finish_reason(resp) -> str | None:
+    return getattr(resp.choices[0], "finish_reason", None) if resp.choices else "no-choices"
+
+
+class Completion(NamedTuple):
+    content: str | None        # None: nothing usable, even after the wider retry
+    finish_reason: str | None  # of the reply returned (or of the last one)
+    max_tokens: int            # the budget that reply was given
+
+
+async def _complete_with_finish_reason(client: AsyncOpenAI, model: str, prompt: str, *,
+                                       max_tokens: int) -> Completion:
+    """`_complete_or_none`'s call-and-retry, also reporting the reply's finish reason
+    and budget, so a caller can tell a complete answer from one cut short at its
+    `max_tokens` ("length") and knows what budget that was."""
     resp = await client.chat.completions.create(
         model=model, temperature=0, max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}])
     content = _usable_content(resp)
     if content is not None:
-        return content
-    finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
+        return Completion(content, _finish_reason(resp), max_tokens)
     logger.warning(
         "synthesis model %s returned no usable content (finish_reason=%s); "
-        "retrying with max_tokens=%d", model, finish_reason, max_tokens * 3)
-
+        "retrying with max_tokens=%d", model, _finish_reason(resp), max_tokens * 3)
     resp = await client.chat.completions.create(
         model=model, temperature=0, max_tokens=max_tokens * 3,
         messages=[{"role": "user", "content": prompt}])
     content = _usable_content(resp)
-    if content is not None:
-        return content
-    finish_reason = resp.choices[0].finish_reason if resp.choices else "no-choices"
-    logger.warning(
-        "synthesis model %s still returned no usable content after retry "
-        "(finish_reason=%s); giving up", model, finish_reason)
-    return None
+    if content is None:
+        logger.warning(
+            "synthesis model %s still returned no usable content after retry "
+            "(finish_reason=%s); giving up", model, _finish_reason(resp))
+    return Completion(content, _finish_reason(resp), max_tokens * 3)
 
 
 def _synthesis_client_and_model(settings: ExtractSettings) -> tuple[AsyncOpenAI, str]:
@@ -269,10 +286,17 @@ async def answer_local(graphiti, driver, synth_client, synth_model, *,
             graphiti, driver, synth_client, synth_model, q=q, k=k, group_id=group_id,
             facets=facets, min_per_facet=min_per_facet, fetch_cap=fetch_cap,
             scan_max_episodes=scan_max_episodes, settings=settings)
+    pool = settings.local_single_rerank_pool if settings is not None else 0
     res = await search_mod.search_local(
-        graphiti, driver, q=q, k=k, scope=scope, group_id=group_id, fetch_cap=fetch_cap,
-        scan_max_episodes=scan_max_episodes, settings=settings)
+        graphiti, driver, q=q, k=2 * k if pool else k, scope=scope, group_id=group_id,
+        fetch_cap=fetch_cap, scan_max_episodes=scan_max_episodes, settings=settings,
+        rerank_pool=pool)
     results = res["results"]
+    if settings is not None:
+        # Reranked pool + near-duplicate collapse (spec 2026-10-15 §6): over-fetch 2k
+        # so k distinct facts survive the collapse.
+        results = (await collapse_near_duplicates(
+            driver, results, cosine=settings.local_single_dedup_cosine))[:k]
     if not results:
         return {"query": q, "answer": _REFUSAL, "citations": [],
                 "retrieved": 0, "cited": 0, "applies_to": []}

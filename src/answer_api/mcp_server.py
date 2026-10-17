@@ -138,6 +138,10 @@ def build_mcp_server(app: FastAPI) -> MCPServer:
             raise ToolError(f"answer_question failed: {type(exc).__name__}: {exc}") from exc
         structured = {k: env.get(k) for k in
                       ("mode", "scope", "shape", "facets", "applies_to", "citations")}
+        # Routing (incl. any degradation) and list-mode details, when present.
+        structured.update({k: env[k] for k in ("routing", "list_mode", "expansion_queries",
+                                                  "item_grades", "items_ungraded")
+                           if k in env})
         return CallToolResult(content=[TextContent(type="text", text=format_answer_text(env))],
                               structured_content=structured)
 

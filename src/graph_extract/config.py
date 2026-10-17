@@ -361,6 +361,60 @@ class ExtractSettings(BaseSettings):
     # question); reranking a 40-fact pool put the relevant facts on top (2026-10-13).
     # Single-shape searches never rerank this way.
     local_facet_rerank_pool: int = 40
+    # --- list mode (spec 2026-10-15) ---
+    # Single-vendor "list" questions ("Which workloads ...", "Where can I restore ...")
+    # are answered exhaustively: cheap-tier expansion into item-kind queries, a reranked
+    # local search per query, near-duplicate collapse, a final rerank, then up to
+    # list_supported_k supported facts plus list_limitations_k limitation facts.
+    list_mode_enabled: bool = True
+    list_expansion_queries_max: int = 10
+    list_per_query_pool: int = 40
+    list_per_query_k: int = 20
+    # Raised 50 -> 80 with diversity-aware (MMR) selection (2026-10-15 amendment §10.3),
+    # then 80 -> 250 (2026-10-16): the free gate went 59/67 -> 63/67 expected items, as
+    # most missing items were retrieved but ranked past #80.
+    list_supported_k: int = 250
+    list_limitations_k: int = 12
+    # Relation expansion (§10.1): the (subject entity, relation name) pairs of the top
+    # list_relation_seed_facts round-one facts are grouped; the list_relation_groups
+    # most frequent pairs pull up to list_relation_group_cap current sibling edges each.
+    list_relation_seed_facts: int = 40
+    list_relation_groups: int = 6
+    list_relation_group_cap: int = 300
+    # Siblings kept across all groups (group order, then uuid within a group).
+    list_relation_total_cap: int = 600
+    # MMR: rerank score minus list_mmr_lambda x highest raw cosine to a chosen fact.
+    list_mmr_lambda: float = 0.5
+    # Documents per final-rerank call (Voyage accepts ~1000 at most).
+    list_rerank_batch: int = 900
+    # Raw cosine of fact embeddings at or above which two facts are one (sources merged).
+    # 0.92 merged "VMware Cloud Director" into a vSphere fact (2026-10-15 amendment).
+    list_dedup_cosine: float = 0.96
+    # Keyword sweep (spec 2026-10-15 §12.1): a Lucene full-text search of fact text for
+    # the question's own distinctive words, run alongside the per-query searches.
+    list_sweep_cap: int = 2000
+    list_sweep_scoped_overfetch: int = 4
+    # Best-supporting fact's rerank score below which a listed item is dropped, when
+    # that fact names the item; calibrated 2026-10-16: expected items' best scores
+    # >= 0.689, off-topic named facts 0.33-0.48 (spec §12.4).
+    list_item_floor: float = 0.4
+    # A relevant cited fact that does not name the item still flags it (needs
+    # validation) above this score, rather than dropping it (spec §12.4).
+    list_item_unnamed_floor: float = 0.65
+    # A needs-validation item's missing term is grouped into one flag line (item lines
+    # get " †" instead of the full note) once it is the reason for at least this many
+    # items, and for at least half the kept (confirmed + needs_validation) ones (spec
+    # §13.2).
+    list_flag_group_min: int = 5
+    # After the list synthesis, the map tier names items stated by supported facts the
+    # answer did not cite; they are appended under "Also documented" and graded like
+    # every other line (spec §13.3).
+    list_completeness_pass: bool = True
+    # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
+    local_single_dedup_cosine: float = 0.92
+    # Every other single question reranks this many candidates down to k (was raw
+    # hybrid order: Q1/Q2 of 2026-10-15 retrieved mostly limitations and duplicates).
+    local_single_rerank_pool: int = 80
     # Comparison: communities per facet reaching the map step (single keeps rerank_top_n).
     global_facet_top_n: int = 3
     # Comparison: every facet also gets this many facts from a scoped, reranked local

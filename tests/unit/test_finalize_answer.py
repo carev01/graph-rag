@@ -257,3 +257,11 @@ def test_trailing_space_before_newline_is_removed():
     assert cited == []
     assert " \n" not in ans
     assert ans == "Line one\nLine two."
+
+
+def test_nested_list_indentation_survives_marker_cleanup():
+    raw = "- **Clouds**\n  - **Microsoft Azure** — restore as an Azure VM [1]  [9]\n  - **Amazon EC2** [1]"
+    answer, cited = _finalize_answer(raw, {1: {"fact": "f"}})
+    assert answer.splitlines()[1].startswith("  - **Microsoft Azure**")
+    assert answer.splitlines()[2] == "  - **Amazon EC2** [1]"
+    assert "[9]" not in answer and cited == [1]

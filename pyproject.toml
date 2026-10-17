@@ -16,6 +16,7 @@ dependencies = [
   "anthropic>=1.13,<2",
   "prometheus-client>=0.21",
   "mcp>=2.3,<3",
+  "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

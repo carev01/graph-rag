@@ -1,8 +1,10 @@
-"""Free retrieval gate (spec 2026-10-12 §6): per golden question, does per-facet
-retrieval find evidence for every facet, an expected article, and every expected
-vendor? No generative calls except the per-facet question rewrite (one cheap
-map-tier call per comparison/enumeration question, exactly as /answer makes it) --
-otherwise the local embedder, Neo4j and the reranker only. Run before any paid eval.
+"""Free retrieval gate (spec 2026-10-12 §6, list check added 2026-10-15 §7): per
+golden question, does per-facet retrieval find evidence for every facet, an
+expected article, and every expected vendor? No generative calls except the
+per-facet question rewrite (one cheap map-tier call per comparison/enumeration
+question, exactly as /answer makes it) and, for list questions,
+`list_mode.retrieve_list`'s cheap-tier item-kind expansion -- otherwise the
+local embedder, Neo4j and the reranker only. Run before any paid eval.
 
 Single and comparison questions pass when every facet has evidence and (if the
 golden entry lists expected articles) one of them is retrieved. Enumerations pass
@@ -11,7 +13,10 @@ check); the other content vendors' evidence counts are reported as information
 only, because a vendor that does not document the feature legitimately has none.
 This gate therefore cannot tell whether an enumeration answer is COMPLETE (no
 vendor missing, none extra): only the paid eval's enumeration_completeness metric
-measures that.
+measures that. A question carrying `expected_items` (a golden list question) must
+ALSO have `list_mode.retrieve_list` find every expected item among its results'
+and limitations' fact text -- a missing item fails the question even if its
+facets otherwise have evidence.
 
     uv run python -m answer_api.eval_retrieval --questions src/answer_api/router_golden_tier1.json
 """
@@ -27,7 +32,11 @@ from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
 
+from answer_api import list_mode, list_sweep
+from answer_api.fact_dedup import collapse_near_duplicates
 from answer_api.global_search import _map_client_and_model, shortlist_communities
+from answer_api.item_coverage import match_items
+from answer_api.item_grades import grade_items
 from answer_api.scope import ScopeResolver
 from answer_api.search import search_local
 from answer_api.shape import QuestionShape, classify_shape, facet_queries
@@ -77,11 +86,16 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
         k = max(settings.local_min_per_facet, math.ceil(15 / n))
         top_n = settings.global_facet_top_n
     else:
-        k, top_n = 15, None
+        k, top_n = 30, None
     # Facet shapes rerank a wider pool, as the router's facet callers do; a single
-    # question searches exactly as /answer's single path does.
-    pool: dict = ({"rerank_pool": settings.local_facet_rerank_pool}
-                  if shape.kind in ("comparison", "enumeration") else {})
+    # question mirrors /answer's single path: rerank a pool of
+    # local_single_rerank_pool candidates, collapse near-duplicates, and keep 15.
+    if shape.kind in ("comparison", "enumeration"):
+        pool: dict = {"rerank_pool": settings.local_facet_rerank_pool}
+    elif shape.kind == "single":
+        pool = {"rerank_pool": settings.local_single_rerank_pool}
+    else:
+        pool = {}
     out = []
     for f in shape.facets:
         scope = f.scope if not f.scope.is_empty() else None
@@ -91,16 +105,78 @@ async def _evidence(graphiti, driver, embedder, settings, q: str, shape) -> list
                                  fetch_cap=settings.local_scoped_fetch_cap,
                                  scan_max_episodes=settings.local_scoped_scan_max_episodes,
                                  settings=settings, **pool)
+        results = loc["results"]
+        if shape.kind == "single":
+            results = (await collapse_near_duplicates(
+                driver, results, cosine=settings.local_single_dedup_cosine))[:15]
         hits = await shortlist_communities(
             driver, embedder, fq, level=settings.global_default_level,
             k=top_n or settings.global_shortlist_k, group_id=settings.group_id,
             settings=settings, scope=scope, top_n=top_n)
-        srcs = [s for r in loc["results"] for s in r["sources"]]
+        srcs = [s for r in results for s in r["sources"]]
         out.append({"label": f.label,
                     "articles": {s.get("article_id") for s in srcs},
                     "vendors": {s.get("vendor") for s in srcs if s.get("vendor")},
-                    "communities": len(hits), "facts": loc["count"]})
+                    "communities": len(hits), "facts": len(results)})
     return out
+
+
+async def check_list_items(graphiti, driver, map_client, map_model, settings,
+                           q: dict, shape: QuestionShape) -> dict:
+    """List-retrieval check (spec 2026-10-15 §7): does `list_mode.retrieve_list`
+    find evidence for every `expected_items` entry? A single-shaped question's
+    one facet already carries the scope `retrieval_scope` would resolve to
+    (classify_shape fills it from the detected or named-subject scope), so it is
+    used directly rather than recomputed. `retrieve_list` raising (every
+    expansion/retrieval attempt failed) must read as FAIL with the error, never
+    as a pass with zero items found.
+
+    Also simulates the production grader per expected item (spec §7 calibration):
+    `item_scores` is each item's best final-rerank score over the retrieved facts
+    that name it (None when nothing matches or nothing is scored); `item_grades`
+    is the one grade (`confirmed`/`needs_validation`/`dropped`/`unretrieved`)
+    `item_grades.grade_items` would give that item's line, built from up to its
+    three best-scoring matching facts -- the same inputs `answer_list` feeds the
+    grader, so a calibration run sees exactly which expected items the production
+    gate would flag or drop."""
+    items = q["expected_items"]
+    scope = None
+    if shape.facets and not shape.facets[0].scope.is_empty():
+        scope = shape.facets[0].scope
+    try:
+        got = await list_mode.retrieve_list(
+            graphiti, driver, map_client, map_model, q=q["question"], scope=scope,
+            group_id=settings.group_id, settings=settings)
+    except Exception as exc:
+        return {"pass": False, "found": 0, "total": len(items),
+                "missing": [i["item"] for i in items], "error": str(exc),
+                "item_scores": {}, "item_grades": {}}
+    facts = got.results + got.limitations
+    text = " || ".join(r["fact"] for r in facts)
+    found, missing = match_items(text, items)
+    qtext = q["question"]
+    terms = list_sweep.grading_terms(qtext, scope)
+    item_scores: dict[str, float | None] = {}
+    item_grades: dict[str, str] = {}
+    for item in items:
+        matching = [f for f in facts if match_items(f["fact"], [item])[0]]
+        matching.sort(key=lambda f: (got.scores.get(f["fact_uuid"]) is None,
+                                     -(got.scores.get(f["fact_uuid"]) or 0.0)))
+        item_scores[item["item"]] = next(
+            (got.scores.get(f["fact_uuid"]) for f in matching
+             if got.scores.get(f["fact_uuid"]) is not None), None)
+        if not matching:
+            item_grades[item["item"]] = "unretrieved"
+            continue
+        marker_map = {i: f for i, f in enumerate(matching[:3], 1)}
+        raw = f"- **{item['item']}** — x [1][2][3]"
+        grades = grade_items(raw, marker_map, q=qtext, terms=terms,
+                             scores=got.scores, floor=settings.list_item_floor,
+                             unnamed_floor=settings.list_item_unnamed_floor,
+                             scope=scope, flag_group_min=settings.list_flag_group_min).grades
+        item_grades[item["item"]] = grades[0].grade if grades else "unretrieved"
+    return {"pass": not missing, "found": len(found), "total": len(items),
+            "missing": missing, "item_scores": item_scores, "item_grades": item_grades}
 
 
 async def main() -> int:
@@ -122,11 +198,29 @@ async def main() -> int:
             shape = await _with_facet_queries(map_client, map_model, q["question"], shape)
             ev = await _evidence(graphiti, driver, embedder, settings, q["question"], shape)
             r = check_question({**q, "_shape": shape.kind}, ev)
+            extra = ""
+            if q.get("expected_items"):
+                items = await check_list_items(graphiti, driver, map_client, map_model,
+                                               settings, q, shape)
+                r["items"] = items
+                r["pass"] = r["pass"] and items["pass"]
+                scored = [s for s in items["item_scores"].values() if s is not None]
+                min_score = f"{min(scored):.3f}" if scored else "None"
+                flagged = [name for name, g in items["item_grades"].items()
+                          if g == "needs_validation"]
+                would_drop = [name for name, g in items["item_grades"].items()
+                             if g == "dropped"]
+                extra = (f"items {items['found']}/{items['total']} missing={items['missing']} "
+                        f"min_item_score={min_score} flagged={flagged} "
+                        f"would_drop={would_drop} ")
+                if items.get("error"):
+                    extra += f"error={items['error']!r} "
             results.append(r)
             print(f"{'PASS' if r['pass'] else 'FAIL'} {shape.kind:11} "
                   f"facets {r['facets_with_evidence']}/{r['facets']} "
                   f"expected={r['expected_hit']} vendors={r['vendors_found']} "
                   + (f"other={r['other_vendors']} " if "other_vendors" in r else "")
+                  + extra
                   + f"| {q['question']}", flush=True)
         passed = sum(r["pass"] for r in results)
         print(f"PASS {passed}/{len(results)}")

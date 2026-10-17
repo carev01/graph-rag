@@ -251,7 +251,7 @@ async def test_a_non_pooled_scoped_search_keeps_the_scans_rerank(monkeypatch):
     assert _uuids(res)[:2] == ["e0", "s199"]
 
 
-# --- facet callers pass the pool; single callers do not -----------------------------
+# --- facet callers pass the facet pool; single callers pass the single pool ---------
 
 async def test_default_facet_rerank_pool():
     assert _settings().local_facet_rerank_pool == 40
@@ -267,7 +267,7 @@ class _Synth:
             message=SimpleNamespace(content=self.reply), finish_reason="stop")])
 
 
-async def test_local_facets_pass_the_pool_and_single_does_not(monkeypatch):
+async def test_local_facets_pass_the_facet_pool_and_single_passes_its_own(monkeypatch):
     calls = []
 
     async def _search(graphiti, driver, **kw):
@@ -275,14 +275,16 @@ async def test_local_facets_pass_the_pool_and_single_does_not(monkeypatch):
         return {"query": kw["q"], "count": 0, "results": []}
 
     monkeypatch.setattr(synth.search_mod, "search_local", _search)
-    s = _settings(local_facet_rerank_pool=33)
+    s = _settings(local_facet_rerank_pool=33, local_single_rerank_pool=80)
     await synth.answer_local(None, None, _Synth(), "m", q="q", group_id="g",
                              facets=[_V, _A], settings=s)
     assert [c.get("rerank_pool") for c in calls] == [33, 33]
     assert all(c["settings"] is s for c in calls)
     calls.clear()
+    # Single questions now rerank their own, larger pool (local_single_rerank_pool,
+    # task 2) rather than skipping the pool entirely.
     await synth.answer_local(None, None, _Synth(), "m", q="q", group_id="g", settings=s)
-    assert len(calls) == 1 and "rerank_pool" not in calls[0]
+    assert len(calls) == 1 and calls[0]["rerank_pool"] == 80
 
 
 async def test_drift_followup_forwards_the_pool_only_when_given(monkeypatch):
@@ -361,7 +363,7 @@ async def test_enumeration_gather_passes_the_pool(monkeypatch):
 
 
 @pytest.mark.parametrize("kind,pool", [("comparison", 19), ("enumeration", 19),
-                                       ("single", None)])
+                                       ("single", 80)])
 async def test_eval_evidence_passes_the_pool_for_facet_shapes(monkeypatch, kind, pool):
     calls = []
 
@@ -375,8 +377,10 @@ async def test_eval_evidence_passes_the_pool_for_facet_shapes(monkeypatch, kind,
     monkeypatch.setattr(er, "search_local", _search)
     monkeypatch.setattr(er, "shortlist_communities", _shortlist)
     facets = (_V, _A) if kind != "single" else (Facet("", Scope()),)
-    await er._evidence(None, None, None, _settings(local_facet_rerank_pool=19), "q",
-                       QuestionShape(kind, facets))
+    # Single mirrors /answer's single path (task 2): its own pool, not the facet one.
+    await er._evidence(None, None, None,
+                       _settings(local_facet_rerank_pool=19, local_single_rerank_pool=80),
+                       "q", QuestionShape(kind, facets))
     assert calls and all(c.get("rerank_pool") == pool for c in calls)
 
 

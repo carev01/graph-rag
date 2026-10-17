@@ -25,21 +25,27 @@ def test_router_golden_schema():
 
 def test_tier1_golden_schema():
     """The Tier 1 vendor set (spec 2026-09-25 vendor/product end to end, section 6):
-    6 scoped, 6 comparisons, 4 cross-vendor (one is a probe with no ground truth)."""
+    6 scoped, 6 comparisons, 4 cross-vendor (one is a probe with no ground truth),
+    5 single-vendor list questions (spec 2026-10-15 section 7, graded by
+    `expected_items` item coverage rather than `expected_article_ids`)."""
     path = _PATH.with_name("router_golden_tier1.json")
     data = json.loads(path.read_text())
-    kinds = {"scoped": 0, "comparison": 0, "cross_vendor": 0}
+    kinds = {"scoped": 0, "comparison": 0, "cross_vendor": 0, "single_list": 0}
     for e in data:
         assert set(e) >= {"question", "intent", "expected_modes", "expected_article_ids", "kind"}
         assert e["intent"] in _MODES and set(e["expected_modes"]) <= _MODES
         assert e["intent"] in e["expected_modes"]
-        # Empty expected_article_ids allowed only for cross_vendor (routing/faithfulness probes)
-        if e["kind"] == "cross_vendor":
+        # Empty expected_article_ids allowed only for cross_vendor (routing/faithfulness
+        # probes) and single_list (graded on expected_items instead).
+        if e["kind"] in ("cross_vendor", "single_list"):
             assert isinstance(e["expected_article_ids"], list)
         else:
             assert e["expected_article_ids"], "all non-probe Tier 1 questions must be grounded"
+        if e["kind"] == "single_list":
+            assert e["expected_items"] and all(
+                i["item"] and i["aliases"] for i in e["expected_items"])
         kinds[e["kind"]] += 1
-    assert kinds == {"scoped": 6, "comparison": 6, "cross_vendor": 4}
+    assert kinds == {"scoped": 6, "comparison": 6, "cross_vendor": 4, "single_list": 5}
 
 
 def test_tier1_cross_site_question_counts_cohesity():
