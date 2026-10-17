@@ -64,3 +64,24 @@ Tests:
 - The settings default is 120.
 
 - [ ] Tests first; implement; unit suite, ruff, mypy; commit `perf(answer): list answers merge versions and cap item lines` (trailer lines).
+
+---
+
+### Task 3: Completeness-pass precision (found in paid run 15)
+
+**Measured:** run 15's "Where can I restore a Windows agent backup?" answer was 31k characters, 24k of them in the completeness pass's "Also documented" section. It included generic facts from the Linux and AIX agent guides ("Veeam Agent supports restoring volumes to the hdisk1 disk", "+data02", "datalv"), renamed as "Veeam Agent for Microsoft Windows (…)". The grader flagged them "needs validation". The attribution judge counted 22 misattributions.
+
+**Files:** `src/answer_api/list_mode.py`, `src/answer_api/item_grades.py`, `src/graph_extract/config.py`; tests `tests/unit/test_list_mode.py`, `tests/unit/test_item_grades.py`, `tests/unit/test_config.py`.
+
+1. **Setting:** `list_completeness_max_items: int = 15`. `_completion_entries` keeps at most that many entries, in reply order.
+2. **`_COMPLETE_PROMPT`:** add `"Name each item exactly as its fact names it; never add the question's subject (or any product, platform or operating system the fact does not name) to an item's name. Return only items that are themselves an answer to the question, not details of how an already-listed item works. "`. Test that the sentence is present.
+3. **Stricter grading for added items:** `grade_items` gains `strict_from: str | None` (the default `None` changes nothing). `answer_list` passes `"Also documented"`. Every item line after a heading whose text contains `strict_from`, and before the limitations heading, must grade CONFIRMED; a line that would be NEEDS_VALIDATION becomes DROPPED with reason `"completion_unconfirmed"`. The heading-cleanup rule then removes the "Also documented" heading if every item under it was dropped.
+
+Tests:
+- A needs-validation line under "### Also documented" is dropped with the new reason.
+- A confirmed line there stays.
+- The same needs-validation line above the heading stays flagged.
+- The cap keeps at most 15.
+- Settings default 15.
+
+- [ ] Tests first; implement; unit suite, ruff, mypy; commit `fix(answer): completeness-pass additions must be confirmed, capped and named as the facts name them` (trailer lines).
