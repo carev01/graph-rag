@@ -435,7 +435,8 @@ class ExtractSettings(BaseSettings):
     enum_concurrency: int = 8
     # A vendor counts as documented only when its best supporting fact scores at
     # least this against the question; measured 2026-10-17, the false positive's
-    # best was 0.448, genuine vendors' best 0.633-0.824.
+    # best was 0.448, genuine vendors' best 0.633-0.824. Re-measure on the next
+    # enumeration eval from vendor_scores (margin to the lowest genuine vendor was 0.08).
     enumeration_min_score: float = 0.55
     # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
     # older than this (plan ruling 4 -- no separate freshness module exists).

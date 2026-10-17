@@ -366,6 +366,60 @@ async def test_enum_concurrency_bounds_the_vendor_fan_out(monkeypatch):
     assert res["checked_vendors"] == vendors   # results stay in facet order
 
 
+async def test_the_relevance_floor_reranks_are_bounded_by_enum_concurrency(monkeypatch):
+    # Final review (spec 2026-10-17): the floor used to fire one rerank per
+    # documented vendor at once; it now shares enum_concurrency with gather/check.
+    live, peak = {"rerank": 0}, {"rerank": 0}
+
+    async def _hold():
+        live["rerank"] += 1
+        peak["rerank"] = max(peak["rerank"], live["rerank"])
+        for _ in range(5):
+            await asyncio.sleep(0)
+        live["rerank"] -= 1
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        v = scope.vendors[0]
+        return {"results": [{"fact": f"{v} fact", "fact_uuid": f"lf-{v}",
+                             "valid_at": None, "invalid_at": None, "sources": _src(v)}]}
+
+    class _AllDocumented:
+        def __init__(self):
+            self.prompts = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            p = kw["messages"][0]["content"]
+            self.prompts.append(p)
+            if p.startswith("Decide whether"):
+                v = next(v for v in vendors if f"from {v}'s documentation" in p)
+                text = ('{"documented": true, "points": ["p"], '
+                       f'"fact_ids": ["lf-{v}"]}}')
+            else:
+                text = "stub [1]."
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=text), finish_reason="stop")])
+
+    async def _rerank(q, documents, *, top_k, settings):
+        await _hold()
+        return [(0, 0.9)]
+
+    monkeypatch.setattr(en, "search_local", _search)
+    monkeypatch.setattr(en, "rerank", _rerank)
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    monkeypatch.setattr(en, "Provenance", _AnyProv)
+    vendors = [f"V{i}" for i in range(7)]
+    facets = [Facet(v, Scope(vendors=(v,))) for v in vendors]
+    c = _AllDocumented()
+    settings = _S.model_copy(update={"enum_concurrency": 2})
+    res = await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
+                                     q="Which vendors lock backups?", facets=facets,
+                                     group_id="g", settings=settings)
+    assert peak == {"rerank": 2}
+    assert res["documented_vendors"] == vendors
+    assert res["vendor_scores"] == {v: 0.9 for v in vendors}
+
+
 class _AnyProv:
     def __init__(self, driver):
         pass

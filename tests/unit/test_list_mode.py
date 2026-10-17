@@ -80,21 +80,32 @@ def test_the_shared_rules_have_their_verbatim_wording():
         "Give at most {max_items} item lines in total. When several items are versions, "
         "editions or minor variants of one thing (for example several versions of one "
         "hypervisor), give them ONE line naming them together, with up to three markers. ")
+    assert lm._MERGE_VARIANTS_RULE == (
+        "When several items are versions, editions or minor variants of one thing, give "
+        "them ONE entry naming them together. ")
 
 
 def test_both_prompts_contain_both_shared_rules():
     for prompt in (lm._LIST_PROMPT, lm._COMPLETE_PROMPT):
         assert lm._FAITHFUL_DESCRIPTION_RULE in prompt
         assert lm._SUBJECT_RULE in prompt
-        assert lm._MERGE_RULE in prompt
+    # Only the list prompt caps item lines; the completeness pass adds items beyond
+    # that cap and gets the merge guidance without a limit (final review).
+    assert lm._MERGE_RULE in lm._LIST_PROMPT and lm._MERGE_RULE not in lm._COMPLETE_PROMPT
+    assert (lm._MERGE_VARIANTS_RULE in lm._COMPLETE_PROMPT
+            and lm._MERGE_VARIANTS_RULE not in lm._LIST_PROMPT)
 
 
-def test_both_prompts_format_the_merge_rule_with_the_configured_cap():
-    for prompt in (lm._LIST_PROMPT, lm._COMPLETE_PROMPT):
-        assert "Give at most 120 item lines in total" in prompt.format(
-            supported="s", limitations="l", q="q", items="i", facts="f", max_items=120)
-        assert "Give at most 37 item lines in total" in prompt.format(
-            supported="s", limitations="l", q="q", items="i", facts="f", max_items=37)
+def test_the_list_prompt_has_no_item_limit_wording():
+    # The merge rule gives a numeric cap; the prompt must not also claim no limit.
+    assert "no item limit" not in lm._LIST_PROMPT
+
+
+def test_the_list_prompt_formats_the_merge_rule_with_the_configured_cap():
+    assert "Give at most 120 item lines in total" in lm._LIST_PROMPT.format(
+        supported="s", limitations="l", q="q", max_items=120)
+    assert "Give at most 37 item lines in total" in lm._LIST_PROMPT.format(
+        supported="s", limitations="l", q="q", max_items=37)
 
 
 class _Client:
@@ -876,9 +887,9 @@ async def test_a_list_cut_short_once_is_retried_wider_without_a_note(patched, ca
     with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
         out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
                                    group_id="g", settings=_settings())
-    assert synth.max_tokens == [8000, 16000]
+    assert synth.max_tokens == [10000, 16000]
     assert out["answer"] == "- vSphere [1]" and "degraded" not in out
-    assert "max_tokens=8000" in caplog.text and "chars" in caplog.text
+    assert "max_tokens=10000" in caplog.text and "chars" in caplog.text
 
 
 async def test_a_list_cut_short_twice_keeps_the_text_and_says_so(patched, caplog):
@@ -889,7 +900,7 @@ async def test_a_list_cut_short_twice_keeps_the_text_and_says_so(patched, caplog
     with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
         out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
                                    group_id="g", settings=_settings())
-    assert synth.max_tokens == [8000, 16000]
+    assert synth.max_tokens == [10000, 16000]
     assert out["degraded"] == [lm.LIST_TRUNCATED]
     assert out["answer"].startswith("- vSphere [1]\n- Hyp")
     assert out["answer"].endswith(
@@ -935,15 +946,15 @@ async def test_a_list_cut_short_at_a_budget_already_wide_is_not_retried(patched,
     install, _ = patched
     q = "Which hypervisors does Veeam support?"
     client = install({q: [_fact("a", "vSphere is supported.")]}, expansion="[]")
-    # Empty at 8000 -> the completion's own retry at 24000 -> cut short there.
+    # Empty at 10000 -> the completion's own retry at 30000 -> cut short there.
     synth = _SeqClient([(None, "length"), ("- vSphere [1]\n- Hyp", "length")])
     with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
         out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
                                    group_id="g", settings=_settings())
-    assert synth.max_tokens == [8000, 24000]
+    assert synth.max_tokens == [10000, 30000]
     assert out["degraded"] == [lm.LIST_TRUNCATED]
     assert out["answer"].startswith("- vSphere [1]\n- Hyp")
-    assert "max_tokens=24000" in caplog.text and "no wider retry" in caplog.text
+    assert "max_tokens=30000" in caplog.text and "no wider retry" in caplog.text
 
 
 @pytest.mark.parametrize("retry_reply", [("- vS", "length"), (None, "length")])
@@ -957,7 +968,7 @@ async def test_a_list_cut_short_twice_keeps_the_longer_partial_text(patched, ret
     synth = _SeqClient(replies)
     out = await lm.answer_list(None, None, client, "m", synth, "s", q=q, scope=Scope(),
                                group_id="g", settings=_settings())
-    assert synth.max_tokens[:2] == [8000, 16000]
+    assert synth.max_tokens[:2] == [10000, 16000]
     assert out["degraded"] == [lm.LIST_TRUNCATED]
     assert out["answer"].startswith("- vSphere [1]\n- Hyp")
 
@@ -1121,7 +1132,7 @@ async def _answer_with_completion(patched, monkeypatch, reply, *, synth=_COMPLET
     return out, map_client
 
 
-async def test_a_configured_item_cap_reaches_both_prompts(patched, monkeypatch):
+async def test_a_configured_item_cap_reaches_the_list_prompt_only(patched, monkeypatch):
     install, _ = patched
     install({_COMPLETE_Q: [_fact(u, text) for u, (text, _s) in _COMPLETE_FACTS.items()]})
     monkeypatch.setattr(lm, "rerank", _complete_rerank)
@@ -1132,7 +1143,11 @@ async def test_a_configured_item_cap_reaches_both_prompts(patched, monkeypatch):
                                scope=Scope(), group_id="g",
                                settings=_settings(list_item_floor=0.1, list_max_items=37))
     assert "Give at most 37 item lines in total" in synth.prompts[0]
-    assert "Give at most 37 item lines in total" in map_client.calls[1]["messages"][0]["content"]
+    # The completeness pass adds items beyond the list prompt's own cap: it gets the
+    # cap-free merge guidance, never a numeric limit of its own.
+    completeness_prompt = map_client.calls[1]["messages"][0]["content"]
+    assert "Give at most" not in completeness_prompt
+    assert lm._MERGE_VARIANTS_RULE in completeness_prompt
     assert out["list_mode"] is True
 
 
@@ -1151,7 +1166,7 @@ async def test_missing_items_are_added_before_the_limitations_and_graded(
     assert "[2] " in prompt and "[3] " in prompt
     assert "[1] " not in prompt and "[4] " not in prompt
     assert "JSON" in prompt and "URL" in prompt and "15 words" in prompt
-    assert "Give at most 120 item lines in total" in prompt
+    assert "Give at most" not in prompt and lm._MERGE_VARIANTS_RULE in prompt
     lines = [ln.strip() for ln in out["answer"].splitlines()]
     also = lines.index("### Also documented")
     assert lines.index("- **Sangfor aSV** — restore as a VM [1]") < also
@@ -1349,7 +1364,7 @@ async def test_a_truncated_answer_still_gets_the_pass_and_both_notes(patched, mo
     out = await lm.answer_list(None, None, map_client, "m", synth, "s", q=_COMPLETE_Q,
                                scope=Scope(), group_id="g",
                                settings=_settings(list_item_floor=0.1))
-    assert synth.max_tokens == [8000, 16000] and len(map_client.calls) == 2
+    assert synth.max_tokens == [10000, 16000] and len(map_client.calls) == 2
     assert out["degraded"] == [lm.LIST_TRUNCATED]
     lines = [ln.strip() for ln in out["answer"].splitlines() if ln.strip()]
     assert lines[:3] == ["**Hypervisors**", "- **Sangfor aSV** — restore as a VM [1]",

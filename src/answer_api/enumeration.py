@@ -154,11 +154,14 @@ async def _check(client, model, *, q, vendor, evidence, valid) -> list[str] | No
 
 
 async def _relevance_floor(q: str, supported: dict[str, list[str]],
-                           texts: dict[str, str], *, settings
+                           texts: dict[str, str], *, settings,
+                           sem: asyncio.Semaphore
                            ) -> tuple[dict[str, float], list[str]]:
     """Reranks each documented vendor's best evidence against `q` and drops
     (from `supported`, in place) any vendor whose best score misses
     `settings.enumeration_min_score` -- it reads as checked, not documented.
+    The reranks share `sem`, the same per-vendor concurrency bound as the gather
+    and check phases, rather than firing unbounded.
 
     Returns `(vendor_scores, relevance_unchecked)`: `vendor_scores` holds every
     vendor whose evidence was actually scored; `relevance_unchecked` lists
@@ -179,8 +182,9 @@ async def _relevance_floor(q: str, supported: dict[str, list[str]],
 
     async def _one(v: str):
         ids = supported[v]
-        return await rerank(q, [texts[i] for i in ids], top_k=len(ids),
-                            settings=settings)
+        async with sem:
+            return await rerank(q, [texts[i] for i in ids], top_k=len(ids),
+                                settings=settings)
 
     results = await asyncio.gather(*[_one(v) for v in vendors], return_exceptions=True)
     raise_if_cancelled(results)
@@ -297,7 +301,7 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             degraded.add(v)
 
     vendor_scores, relevance_unchecked = await _relevance_floor(q, supported, texts,
-                                                                 settings=settings)
+                                                                 settings=settings, sem=sem)
 
     degraded_list = [v for v in attempted if v in degraded]
     checked = [v for v in attempted if v not in degraded]

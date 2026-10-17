@@ -100,11 +100,17 @@ _MERGE_RULE = (
     "Give at most {max_items} item lines in total. When several items are versions, "
     "editions or minor variants of one thing (for example several versions of one "
     "hypervisor), give them ONE line naming them together, with up to three markers. ")
+# The completeness pass adds items beyond the list prompt's own cap, so it gets the
+# merge guidance without a line limit.
+_MERGE_VARIANTS_RULE = (
+    "When several items are versions, editions or minor variants of one thing, give "
+    "them ONE entry naming them together. ")
 
 _LIST_PROMPT = (
     "You are answering a question that asks for a LIST, about backup products, using "
     "ONLY the numbered facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
-    "List EVERY item the SUPPORTED FACTS state as an answer -- no item limit -- grouped "
+    "List EVERY item the SUPPORTED FACTS state as an answer -- within the line limit "
+    "below, merging variants rather than dropping items -- grouped "
     "under a few short headings that the facts suggest. Write each item as one line in "
     "exactly this form: - **<item name>** — <short description> [N]. Name each item the "
     "way the facts name it (the product, platform or feature the fact names), not by a "
@@ -131,7 +137,7 @@ _COMPLETE_PROMPT = (
     "question and that is not already among the answer items. Name each item the way "
     "the facts name it, give a description of at most 15 words, and give at most 3 "
     "markers, only from the FACTS below, of the facts that state it. " +
-    _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE + _MERGE_RULE +
+    _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE + _MERGE_VARIANTS_RULE +
     "Do NOT use outside "
     "knowledge. Do NOT write any URL or link. Reply with ONLY a JSON list of objects "
     "{{\"item\": \"<item name>\", \"description\": \"<at most 15 words>\", "
@@ -175,10 +181,11 @@ SWEEP_DEGRADED = "keyword search unavailable"
 LIST_TRUNCATED = "list answer cut short"
 COMPLETENESS_DEGRADED = "completeness check unavailable"
 # The list synthesis budget (spec §11), and the one wider retry when the reply is cut
-# short at it (finish_reason "length"). Reduced 10000 -> 8000 (spec 2026-10-17 task 2):
-# the item cap and version merge shorten the answer without dropping items, so the
-# first call needs less headroom; the retry budget is unchanged.
-_LIST_MAX_TOKENS = 8000
+# short at it (finish_reason "length"). max_tokens is a ceiling, not a cost: lowering
+# it below what a full list needs only adds a truncation + regeneration round trip
+# (final review, spec 2026-10-17 task 2), so the item cap and merge rule shorten the
+# answer without touching this budget.
+_LIST_MAX_TOKENS = 10000
 _LIST_RETRY_MAX_TOKENS = 16000
 _warned_unconfigured = False
 
@@ -591,7 +598,7 @@ def _completion_entries(parsed: list, uncited: set[int], existing: list[str]) ->
 
 
 async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int, dict],
-                             n_sup: int, *, q: str, settings, degraded: list[str]) -> str:
+                             n_sup: int, *, q: str, degraded: list[str]) -> str:
     """`raw` with an "Also documented" section, before the limitations heading (at the
     end without one), of the items the map tier finds stated by supported facts that
     `raw` does not cite (spec §13.3). Nothing uncited: `raw`, with no call. A failed or
@@ -605,8 +612,7 @@ async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int,
     facts = "\n".join(fact_line(m, marker_map[m]["fact"], marker_map[m]["sources"])
                       for m in uncited)
     items = "\n".join(f"- {name}" for name in existing) or "(none)"
-    prompt = _COMPLETE_PROMPT.format(q=q, items=items, facts=facts,
-                                     max_items=settings.list_max_items)
+    prompt = _COMPLETE_PROMPT.format(q=q, items=items, facts=facts)
     try:
         # `_complete_with_finish_reason` itself retries once at 3x `max_tokens` when a
         # reply has no usable content at all -- that is the shared helper's own
@@ -685,7 +691,7 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
         # refusal: every supported fact would look uncited, and a refusal that gains
         # citations would stop the router falling through to the normal route.
         raw = await _completeness_pass(map_client, map_model, raw, marker_map, n_sup, q=q,
-                                       settings=settings, degraded=got.degraded)
+                                       degraded=got.degraded)
         if got.degraded:
             base["degraded"] = got.degraded
     # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
