@@ -39,6 +39,13 @@ from graph_extract.dedup_guard import (
     install_dedup_guard,
     parse_candidate_counts,
 )
+from graph_extract.grounding import (
+    CURRENT_GROUNDING,
+    EXTRACT_TEXT_PROMPT_NAME,
+    GroundingContext,
+    GroundingStats,
+)
+from graph_extract.usage import CURRENT_PROMPT_NAME
 
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _T_OLD = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -537,3 +544,100 @@ async def test_same_pair_contradiction_from_a_LATER_candidate_and_the_new_edge(s
     else:
         assert resolved.expired_at is not None
         assert resolved.invalid_at == _T_LATER
+
+
+# ------------------------------------------------- 4. the grounding gate (2026-10-17)
+
+def _entities(*names: str) -> dict:
+    return {"extracted_entities": [{"name": n, "entity_type_id": 1} for n in names]}
+
+
+async def _extract(client, prompt_name: str = EXTRACT_TEXT_PROMPT_NAME):
+    return await client.generate_response(
+        [Message(role="user", content="extract")], response_model=None,
+        prompt_name=prompt_name)
+
+
+async def test_grounding_filters_the_text_extraction_reply_inside_a_context():
+    llm = _ScriptedLLM(_entities("AWS Backup", "Azure Blob Storage"))
+    guard = install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
+                                unscoped=DedupIndexStats())
+    ctx = GroundingContext(text="+ Azure Blob + AWS RDS MySQL +", allowed=("Securiti.ai",),
+                           stats=GroundingStats())
+    token = CURRENT_GROUNDING.set(ctx)
+    try:
+        out = await _extract(llm)
+    finally:
+        CURRENT_GROUNDING.reset(token)
+    assert [e["name"] for e in out["extracted_entities"]] == ["Azure Blob Storage"]
+    assert (ctx.stats.calls, ctx.stats.dropped) == (1, 1)
+    # still timed under its own prompt name, like every other call
+    assert guard.timings.by_prompt[EXTRACT_TEXT_PROMPT_NAME].calls == 1
+
+
+async def test_grounding_without_a_context_is_a_counted_no_op():
+    reply = _entities("AWS Backup")
+    llm = _ScriptedLLM(reply)
+    guard = install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
+                                unscoped=DedupIndexStats())
+    out = await _extract(llm)
+    assert out is reply
+    assert guard.grounding_unscoped.unscoped == 1
+
+
+@pytest.mark.parametrize("prompt_name", [
+    "extract_nodes.extract_json", "extract_nodes.extract_message", "extract_edges.edge",
+    "dedupe_nodes.nodes",
+])
+async def test_grounding_leaves_every_other_prompt_untouched(prompt_name):
+    reply = _entities("AWS Backup")
+    llm = _ScriptedLLM(reply)
+    install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
+                        unscoped=DedupIndexStats())
+    ctx = GroundingContext(text="nothing relevant", allowed=(), stats=GroundingStats())
+    token = CURRENT_GROUNDING.set(ctx)
+    try:
+        out = await _extract(llm, prompt_name)
+    finally:
+        CURRENT_GROUNDING.reset(token)
+    assert out is reply
+    assert (ctx.stats.calls, ctx.stats.dropped) == (0, 0)
+
+
+async def test_grounding_publishes_the_prompt_name_for_usage_capture():
+    seen: list[str | None] = []
+
+    class _Peek:
+        async def generate_response(self, messages, *args, **kwargs):
+            seen.append(CURRENT_PROMPT_NAME.get())
+            return _entities()
+
+    llm = _Peek()
+    install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
+                        unscoped=DedupIndexStats())
+    ctx = GroundingContext(text="t", allowed=(), stats=GroundingStats())
+    token = CURRENT_GROUNDING.set(ctx)
+    try:
+        await _extract(llm)
+    finally:
+        CURRENT_GROUNDING.reset(token)
+    assert seen == [EXTRACT_TEXT_PROMPT_NAME]
+
+
+async def test_grounding_applies_on_both_tiers():
+    """cli._build_ingest_driver guards the strong AND the cheap graphiti; either
+    may extract an article, so the gate must be live on each."""
+    strong = _ScriptedLLM(_entities("Hyper-V"))
+    guard = install_dedup_guard(SimpleNamespace(llm_client=strong), fallback=None,
+                                unscoped=DedupIndexStats())
+    cheap = _ScriptedLLM(_entities("Hyper-V"))
+    install_dedup_guard(SimpleNamespace(llm_client=cheap), fallback=guard.raw,
+                        unscoped=DedupIndexStats())
+    ctx = GroundingContext(text="recovery points", allowed=(), stats=GroundingStats())
+    token = CURRENT_GROUNDING.set(ctx)
+    try:
+        assert (await _extract(strong))["extracted_entities"] == []
+        assert (await _extract(cheap))["extracted_entities"] == []
+    finally:
+        CURRENT_GROUNDING.reset(token)
+    assert ctx.stats.dropped == 2

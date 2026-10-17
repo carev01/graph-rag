@@ -290,6 +290,11 @@ def ingest(
             # hypothesis; `retry_clean` vs `retry_dirty` says whether the strong tier
             # reads the same prompt correctly.
             typer.echo(f"dedup indices: {res.dedup.summary()}")
+            # Extraction grounding (2026-10-17): entities the gate removed because
+            # the chunk text never mentions them.
+            typer.echo(f"grounding: grounding_dropped={res.grounding.dropped} "
+                       f"calls={res.grounding.calls} "
+                       f"parse_failures={res.grounding.parse_failures}")
             # BACKLOG 31: where an episode's wall time actually goes, and whether
             # the provider runs our 20-wide concurrent dedup calls in parallel.
             typer.echo(ingest_driver.timings.report())

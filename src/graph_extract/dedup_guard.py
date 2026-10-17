@@ -39,6 +39,10 @@ DUPLICATE indices, and it never adds a per-call `maximum` to the schema. Under c
 decoding a value bound would turn `[10, 11]` into an in-range token sequence such as
 `[1, 1]` -- a wrong dedup that merges two distinct facts and is invisible afterwards.
 A detectable drop is strictly better than an undetectable merge.
+
+The same wrapper also hosts the grounding gate (grounding.py, 2026-10-17): the
+`extract_nodes.extract_text` reply is filtered to the entities the chunk text
+mentions, inside a CURRENT_GROUNDING context only.
 """
 from __future__ import annotations
 
@@ -51,6 +55,12 @@ from typing import Any
 
 from graphiti_core.prompts.models import Message
 
+from graph_extract.grounding import (
+    CURRENT_GROUNDING,
+    EXTRACT_TEXT_PROMPT_NAME,
+    GroundingStats,
+    filter_entities,
+)
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.usage import CURRENT_PROMPT_NAME
 
@@ -194,6 +204,9 @@ class DedupIndexGuard:
     # `_extract_edge_timestamps` issues a second call per new fact that nothing
     # counted before (BACKLOG 31).
     timings: PromptTimings = field(default_factory=PromptTimings)
+    # Sink for extract_text calls made with no grounding context open (other
+    # callers than IngestDriver): the gate is a no-op there, but counted.
+    grounding_unscoped: GroundingStats = field(default_factory=GroundingStats)
 
     def stats(self) -> DedupIndexStats:
         return CURRENT_DEDUP_STATS.get() or self.unscoped
@@ -248,6 +261,13 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
         # why this must be a ContextVar reset in a finally, not a module global.
         token = CURRENT_PROMPT_NAME.set(name)
         try:
+            if name == EXTRACT_TEXT_PROMPT_NAME:
+                response = await _timed(orig, name, messages, *args, **kwargs)
+                ctx = CURRENT_GROUNDING.get()
+                if ctx is None:
+                    guard.grounding_unscoped.unscoped += 1
+                    return response
+                return filter_entities(response, ctx)
             if name != DEDUP_PROMPT_NAME:
                 return await _timed(orig, name, messages, *args, **kwargs)
             stats = guard.stats()

@@ -69,6 +69,20 @@ async def test_the_batch_reports_dedup_counters_and_the_basis_mix(caplog):
     assert "exact" in text and "lower_bound" in text
 
 
+async def test_the_job_and_batch_lines_report_grounding_dropped(caplog):
+    r1 = _result("a1", basis="exact")
+    r1.grounding.dropped = 4
+    r2 = _result("a2", basis="exact")
+    r2.grounding.dropped = 3
+    store = _Store([_job(1, "a1"), _job(2, "a2")])
+    with caplog.at_level(logging.INFO, logger="graph_sync.semantic_worker"):
+        await run_worker_once(store, _Ingest({"a1": r1, "a2": r2}), **_KW)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("done: article=a1" in m and "grounding_dropped=4" in m for m in msgs)
+    assert any(m.startswith("semantic batch: jobs=2") and "grounding_dropped=7" in m
+               for m in msgs)
+
+
 async def test_crawl_fallback_articles_are_called_out_as_untrustworthy(caplog):
     store = _Store([_job(1, "a1")])
     ingest = _Ingest({"a1": _result("a1", basis=CRAWL_FALLBACK)})

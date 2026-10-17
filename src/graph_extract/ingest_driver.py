@@ -11,6 +11,7 @@ from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
 from graph_extract.dedup_guard import CURRENT_DEDUP_STATS, DedupIndexStats
+from graph_extract.grounding import CURRENT_GROUNDING, GroundingContext, GroundingStats
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.graphiti_client import add_text_episode, document_context, ExtractionTier
 from graph_extract.provenance import Provenance
@@ -71,6 +72,8 @@ class IngestArticleResult:
     reference_basis: str = CRAWL_FALLBACK
     # Out-of-range dedup indices seen while extracting THIS article (dedup_guard).
     dedup: DedupIndexStats = field(default_factory=DedupIndexStats)
+    # Extracted entities the grounding gate removed from THIS article (grounding.py).
+    grounding: GroundingStats = field(default_factory=GroundingStats)
 
 
 @dataclass
@@ -79,6 +82,7 @@ class IngestResult:
     episodes_added: int = 0
     episodes_skipped: int = 0
     dedup: DedupIndexStats = field(default_factory=DedupIndexStats)
+    grounding: GroundingStats = field(default_factory=GroundingStats)
 
 
 def _parse_iso(raw: str | None) -> datetime | None:
@@ -175,6 +179,10 @@ class IngestDriver:
             if res.dedup.invalid_calls:
                 logger.warning("article %s (%s tier): out-of-range dedup indices -- %s",
                                article_id, res.tier, res.dedup.summary())
+            if res.grounding.dropped:
+                logger.info("article %s: grounding dropped %d entities: %s",
+                            article_id, res.grounding.dropped,
+                            res.grounding.dropped_names[:20])
 
     async def _ingest_article(self, article_id: str, res: IngestArticleResult) -> IngestArticleResult:
         art = await content_fetch.fetch_article(self._docext, article_id)
@@ -188,7 +196,10 @@ class IngestDriver:
         # content_hash: reuse the article's stored hash from the graph, else hash markdown
         content_hash = await self._content_hash(article_id) or _sha(art.content_markdown)
         chapter_path = await self._chapter_path(article_id)
-        context = document_context(*await self._document_context(article_id))
+        vendor, product, source = await self._document_context(article_id)
+        context = document_context(vendor, product, source)
+        # The grounding gate's implied subjects: the documented product and vendor.
+        allowed = tuple(n for n in (product, vendor) if n)
         async with httpx.AsyncClient(base_url=self._s.chonkie_base_url, timeout=120) as ch:
             chunks = await chonkie_client.neural_chunk(ch, art.content_markdown, self._s.chonkie_model)
         episodes = episode_builder.build_episodes(
@@ -199,9 +210,18 @@ class IngestDriver:
             if await self._prov.already_ingested(art.id, e.chunk_index, e.content_hash):
                 res.episodes_skipped += 1
                 continue
-            r = await add_text_episode(tier.graphiti, self._s, name=e.name, body=e.body,
-                                       source_description=art.source_url, reference_time=ref,
-                                       instructions=tier.instructions, context=context)
+            # One grounding context per episode: the gate (dedup_guard ->
+            # grounding.filter_entities) checks extracted entities against THIS
+            # chunk's text. Reset in `finally` so it never outlives the episode.
+            gtoken = CURRENT_GROUNDING.set(
+                GroundingContext(text=e.body, allowed=allowed, stats=res.grounding))
+            try:
+                r = await add_text_episode(tier.graphiti, self._s, name=e.name, body=e.body,
+                                           source_description=art.source_url,
+                                           reference_time=ref,
+                                           instructions=tier.instructions, context=context)
+            finally:
+                CURRENT_GROUNDING.reset(gtoken)
             await self._prov.link(art.id, r.episode.uuid, chunk_index=e.chunk_index,
                                   heading_path=e.heading_path, token_count=e.token_count,
                                   content_hash=e.content_hash,
@@ -268,6 +288,7 @@ class IngestDriver:
             out.episodes_added += r.episodes_added
             out.episodes_skipped += r.episodes_skipped
             out.dedup.merge(r.dedup)
+            out.grounding.merge(r.grounding)
         if failures:
             # Raised AFTER the batch rather than mid-loop. The pre-fan-out code
             # propagated immediately and silently abandoned every article after

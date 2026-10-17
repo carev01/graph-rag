@@ -15,6 +15,7 @@ from graph_extract import content_fetch, ingest_driver
 from graph_extract.config import ExtractSettings
 from graph_extract.dedup_guard import CURRENT_DEDUP_STATS
 from graph_extract.graphiti_client import ExtractionTier
+from graph_extract.grounding import CURRENT_GROUNDING
 from graph_extract.ingest_driver import IngestDriver
 
 pytestmark = pytest.mark.asyncio
@@ -132,3 +133,84 @@ async def test_a_clean_article_is_not_logged(driver, monkeypatch, caplog):
         res = await driver.ingest_article("a1")
     assert res.dedup.calls == 1 and res.dedup.invalid_calls == 0
     assert [r for r in caplog.records if r.name == "graph_extract.ingest_driver"] == []
+
+
+# ------------------------------------------------- grounding context (2026-10-17)
+
+def _two_episodes(**k):
+    return [SimpleNamespace(name=f"n{i}", body=f"body {i}", chunk_index=i, heading_path="",
+                            token_count=1, content_hash=f"h{i}") for i in range(2)]
+
+
+async def test_each_episode_runs_inside_its_own_grounding_context(driver, monkeypatch):
+    seen = []
+
+    async def chain(self, *a, **k):
+        return "Veeam", "Veeam Backup & Replication", "User Guide"
+
+    async def record(graphiti, s, **k):
+        ctx = CURRENT_GROUNDING.get()
+        assert ctx is not None, "the driver must open a grounding context per episode"
+        seen.append((ctx.text, ctx.allowed, k["body"]))
+        ctx.stats.calls += 1
+        ctx.stats.dropped += 2
+        ctx.stats.dropped_names.extend(["Hyper-V", "East US"])
+        return SimpleNamespace(episode=SimpleNamespace(uuid="e"), nodes=[], edges=[])
+
+    monkeypatch.setattr(IngestDriver, "_document_context", chain)
+    monkeypatch.setattr(ingest_driver.episode_builder, "build_episodes", _two_episodes)
+    monkeypatch.setattr(ingest_driver, "add_text_episode", record)
+    res = await driver.ingest_article("a1")
+    allowed = ("Veeam Backup & Replication", "Veeam")
+    assert seen == [("body 0", allowed, "body 0"), ("body 1", allowed, "body 1")]
+    assert (res.grounding.calls, res.grounding.dropped) == (2, 4)
+    assert CURRENT_GROUNDING.get() is None, "the context must be reset after each episode"
+
+
+async def test_empty_document_names_are_not_allowed_names(driver, monkeypatch):
+    seen = []
+
+    async def record(graphiti, s, **k):
+        seen.append(CURRENT_GROUNDING.get().allowed)
+        return SimpleNamespace(episode=SimpleNamespace(uuid="e"), nodes=[], edges=[])
+
+    monkeypatch.setattr(ingest_driver, "add_text_episode", record)
+    await driver.ingest_article("a1")     # the fixture's chain is ("", "", "")
+    assert seen == [()]
+
+
+async def test_the_grounding_context_is_reset_when_extraction_raises(driver, monkeypatch):
+    async def boom(graphiti, s, **k):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(ingest_driver, "add_text_episode", boom)
+    with pytest.raises(RuntimeError):
+        await driver.ingest_article("a1")
+    assert CURRENT_GROUNDING.get() is None
+
+
+async def test_dropped_names_are_logged_at_info_per_article(driver, monkeypatch, caplog):
+    async def drop(graphiti, s, **k):
+        st = CURRENT_GROUNDING.get().stats
+        st.dropped += 25
+        st.dropped_names.extend(f"E{i}" for i in range(25))
+        return SimpleNamespace(episode=SimpleNamespace(uuid="e"), nodes=[], edges=[])
+
+    monkeypatch.setattr(ingest_driver, "add_text_episode", drop)
+    with caplog.at_level(logging.INFO, logger="graph_extract.ingest_driver"):
+        await driver.ingest_article("a1")
+    msgs = [r.getMessage() for r in caplog.records
+            if r.name == "graph_extract.ingest_driver" and "grounding dropped" in r.getMessage()]
+    assert len(msgs) == 1
+    assert msgs[0].startswith("article a1: grounding dropped 25 entities: ")
+    assert "E19" in msgs[0] and "E20" not in msgs[0]
+
+
+async def test_ingest_source_aggregates_grounding_stats(driver, monkeypatch):
+    async def drop(graphiti, s, **k):
+        CURRENT_GROUNDING.get().stats.dropped += 3
+        return SimpleNamespace(episode=SimpleNamespace(uuid="e"), nodes=[], edges=[])
+
+    monkeypatch.setattr(ingest_driver, "add_text_episode", drop)
+    out = await driver.ingest_source("src")
+    assert out.grounding.dropped == 6
