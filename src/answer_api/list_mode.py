@@ -511,6 +511,13 @@ async def _list_synthesis(client, model: str, prompt: str, *,
     return max((first.content, retry.content or ""), key=len)
 
 
+def _item_key(name: str) -> str:
+    """An item name for the duplicate check, normalised the same way on both sides:
+    whitespace collapsed, trailing ':' and '*' stripped, lower-cased ("Azure:" from
+    `- **Azure:** — ...` matches a new "Azure")."""
+    return " ".join(name.split()).rstrip(" :*").lower()
+
+
 def _answer_items(raw: str) -> list[str]:
     """The bold names of the item-form lines in `raw` (group headings excluded)."""
     out: list[str] = []
@@ -527,20 +534,21 @@ def _clean(text: str) -> str:
     return " ".join(_MARKER_LIST_RE.sub(" ", text).split())
 
 
-def _completion_entries(parsed: list, uncited: set[int], existing: set[str]) -> list[str]:
+def _completion_entries(parsed: list, uncited: set[int], existing: list[str]) -> list[str]:
     """One `- **item** — description [m]...` line per usable entry: a non-empty string
-    item that is not already an answer item, a string description and up to 3 markers
-    from the uncited set; anything else is skipped."""
+    item that is not already an answer item (compared by `_item_key`), a string
+    description and up to 3 markers from the uncited set; anything else is skipped."""
     out: list[str] = []
-    seen = set(existing)
+    seen = {_item_key(n) for n in existing}
     for entry in parsed:
         if not isinstance(entry, dict):
             continue
         item, desc, markers = entry.get("item"), entry.get("description"), entry.get("markers")
         if not isinstance(item, str) or not isinstance(desc, str) or not isinstance(markers, list):
             continue
-        item = _clean(item).replace("*", "")
-        if not item or item.lower() in seen:
+        item = _clean(item.replace("*", " ")).rstrip(" :")
+        key = _item_key(item)
+        if not key or key in seen:
             continue
         kept: list[int] = []
         for m in markers:
@@ -549,8 +557,8 @@ def _completion_entries(parsed: list, uncited: set[int], existing: set[str]) -> 
                 kept.append(m)
         if not kept:
             continue
-        seen.add(item.lower())
-        desc = _clean(desc)
+        seen.add(key)
+        desc = _clean(desc.replace("*", " "))
         cites = "".join(f"[{m}]" for m in kept[:3])
         out.append(f"- **{item}** — {desc} {cites}" if desc else f"- **{item}** {cites}")
     return out
@@ -589,7 +597,7 @@ async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int,
         logger.warning("list completeness pass failed (%s); keeping the first answer", exc)
         _degrade(degraded, COMPLETENESS_DEGRADED)
         return raw
-    added = _completion_entries(parsed, set(uncited), {n.lower() for n in existing})
+    added = _completion_entries(parsed, set(uncited), existing)
     logger.info("list completeness pass: %d uncited facts, %d items added",
                 len(uncited), len(added))
     if not added:
@@ -631,8 +639,10 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
     if raw is None:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
                 "cited": 0, "applies_to": [], "item_grades": [], "items_ungraded": 0}
-    if settings.list_completeness_pass:
-        # Before grading: the added lines are graded like every other line.
+    if settings.list_completeness_pass and raw.strip() != _REFUSAL:
+        # Before grading: the added lines are graded like every other line. Never on a
+        # refusal: every supported fact would look uncited, and a refusal that gains
+        # citations would stop the router falling through to the normal route.
         raw = await _completeness_pass(map_client, map_model, raw, marker_map, n_sup, q=q,
                                        degraded=got.degraded)
         if got.degraded:

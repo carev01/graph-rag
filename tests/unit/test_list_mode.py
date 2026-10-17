@@ -7,9 +7,11 @@ import numpy as np
 import pytest
 
 import answer_api.list_mode as lm
+import answer_api.router as router_mod
 import answer_api.synthesize as synth_mod
 from answer_api.fact_dedup import EMBEDDINGS_QUERY
 from answer_api.scope import _EPISODES_AMONG, Scope
+from answer_api.shape import Facet, QuestionShape
 from graph_extract.config import ExtractSettings
 
 LISTS = [
@@ -1181,3 +1183,93 @@ def test_the_completeness_note_is_fixed_wording():
     assert lm.COMPLETENESS_DEGRADED == "completeness check unavailable"
     assert lm.degraded_note([lm.COMPLETENESS_DEGRADED]) == (
         "Some documented items may be missing; this list may be incomplete.")
+
+
+# --- Completeness pass, fix round 1 ------------------------------------------------
+
+async def test_a_refused_synthesis_skips_the_pass_and_the_router_falls_through(
+        patched, monkeypatch):
+    out, map_client = await _answer_with_completion(
+        patched, monkeypatch, '[{"item": "OLVM", "description": "x", "markers": [2]}]',
+        synth=synth_mod._REFUSAL)
+    assert len(map_client.calls) == 1                 # the expansion only
+    assert out["citations"] == [] and out["cited"] == 0
+    assert "Also documented" not in out["answer"]
+
+    # Through the router: the real answer_list's refusal falls to the normal route.
+    modes = []
+
+    async def _run_mode(mode, *a, **kw):
+        modes.append(mode)
+        return mode, None, {"answer": "normal", "citations": [
+            {"marker": 1, "fact_uuid": "x", "sources": []}]}
+
+    async def _classify(q, **kw):
+        return "drift", "llm"
+
+    monkeypatch.setattr(router_mod, "_run_mode", _run_mode)
+    monkeypatch.setattr(router_mod, "classify", _classify)
+    router_map = _Replies("[]", '[{"item": "OLVM", "description": "x", "markers": [2]}]')
+    env = await router_mod.answer_router(
+        None, None, None, _Client(synth_mod._REFUSAL), "s", router_map, "m", None, "c",
+        q=_COMPLETE_Q, mode_override=None, scope=Scope(),
+        settings=_settings(list_item_floor=0.1),
+        shape=QuestionShape("single", (Facet("", Scope()),)))
+    assert len(router_map.calls) == 1
+    assert modes == ["drift"] and env["answer"] == "normal"
+    assert env["routing"].get("path") != "list"
+
+
+async def test_the_duplicate_check_normalises_both_sides(patched, monkeypatch):
+    synth = ("**Hypervisors**\n- **Sangfor  aSV:** — restore as a VM [1]\n\n"
+             "**Not supported / limitations**\n- Xen is not supported [4]")
+    reply = ('[{"item": "sangfor aSV", "description": "again", "markers": [2]}, '
+             '{"item": "**Sangfor   aSV**:", "description": "again", "markers": [3]}, '
+             '{"item": "OLVM:", "description": "**restore** as a *VM*", "markers": [2]}]')
+    out, _ = await _answer_with_completion(patched, monkeypatch, reply, synth=synth)
+    lines = [ln.strip() for ln in out["answer"].splitlines()]
+    also = lines.index("### Also documented")
+    assert lines[also + 1].startswith("- **OLVM** — restore as a VM [2]")
+    assert lines[also + 2] == ""
+    assert "again" not in out["answer"]
+
+
+async def test_a_truncated_answer_still_gets_the_pass_and_both_notes(patched, monkeypatch):
+    install, _ = patched
+    install({_COMPLETE_Q: [_fact(u, text) for u, (text, _s) in _COMPLETE_FACTS.items()]})
+    monkeypatch.setattr(lm, "rerank", _complete_rerank)
+    partial = "**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]\n- **Ora"
+    synth = _SeqClient([(partial[:-4], "length"), (partial, "length")])
+    map_client = _Replies("[]", '[{"item": "Oracle Linux Virtualization Manager", '
+                          '"description": "restore agent backups as VMs", "markers": [2]}]')
+    out = await lm.answer_list(None, None, map_client, "m", synth, "s", q=_COMPLETE_Q,
+                               scope=Scope(), group_id="g",
+                               settings=_settings(list_item_floor=0.1))
+    assert synth.max_tokens == [10000, 16000] and len(map_client.calls) == 2
+    assert out["degraded"] == [lm.LIST_TRUNCATED]
+    lines = [ln.strip() for ln in out["answer"].splitlines() if ln.strip()]
+    assert lines[:3] == ["**Hypervisors**", "- **Sangfor aSV** — restore as a VM [1]",
+                         "- **Ora"]
+    assert lines[3:5] == ["### Also documented", "- **Oracle Linux Virtualization "
+                          "Manager** — restore agent backups as VMs [2]"]
+    assert [g["item"] for g in out["item_grades"]] == [
+        "Sangfor aSV", "Oracle Linux Virtualization Manager"]
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "olvm"]
+    assert out["answer"].endswith("The answer was cut short; this list may be incomplete.")
+    combined = lm.degraded_note([lm.LIST_TRUNCATED, lm.COMPLETENESS_DEGRADED])
+    assert combined == ("The answer was cut short and some documented items may be "
+                        "missing; this list may be incomplete.")
+
+
+async def test_a_truncated_answer_with_a_failed_pass_combines_both_notes(patched, monkeypatch):
+    install, _ = patched
+    install({_COMPLETE_Q: [_fact(u, text) for u, (text, _s) in _COMPLETE_FACTS.items()]})
+    monkeypatch.setattr(lm, "rerank", _complete_rerank)
+    partial = "**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]\n- **Ora"
+    synth = _SeqClient([(partial[:-4], "length"), (partial, "length")])
+    out = await lm.answer_list(None, None, _Replies("[]", "not json"), "m", synth, "s",
+                               q=_COMPLETE_Q, scope=Scope(), group_id="g",
+                               settings=_settings(list_item_floor=0.1))
+    assert out["degraded"] == [lm.LIST_TRUNCATED, lm.COMPLETENESS_DEGRADED]
+    assert out["answer"].endswith("The answer was cut short and some documented items may "
+                                  "be missing; this list may be incomplete.")
