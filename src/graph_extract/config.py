@@ -429,6 +429,10 @@ class ExtractSettings(BaseSettings):
     # Vendors gathered/checked at once: at 40 vendors the unbounded fan-out issued
     # up to 120 hybrid searches plus 40 scans at once against Neo4j.
     enum_concurrency: int = 8
+    # A vendor counts as documented only when its best supporting fact scores at
+    # least this against the question; measured 2026-10-17, the false positive's
+    # best was 0.448, genuine vendors' best 0.633-0.824.
+    enumeration_min_score: float = 0.55
     # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
     # older than this (plan ruling 4 -- no separate freshness module exists).
     scope_reload_seconds: int = 3600

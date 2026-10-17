@@ -14,7 +14,10 @@ from graph_extract.config import ExtractSettings
 pytestmark = pytest.mark.asyncio
 
 _S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
-                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                     # Hermetic: the relevance floor must stay OFF unless a test turns
+                     # it on explicitly (rerank_configured(settings) reads these two).
+                     rerank_base_url="", rerank_model="")
 _VENDORS = ["AWS", "Cohesity", "Microsoft", "Veeam"]
 _FACETS = [Facet(v, Scope(vendors=(v,), source="detected")) for v in _VENDORS]
 
@@ -412,3 +415,77 @@ async def test_gather_without_a_rewrite_searches_once(monkeypatch):
                      facet=Facet("AWS", Scope(vendors=("AWS",))), group_id="g",
                      settings=_S)
     assert asked == ["Which vendors lock backups?"]
+
+
+# -- Relevance floor (spec 2026-10-17: enumeration_min_score=0.55) ----------
+
+_DOCUMENTED = _checks(AWS='{"documented": true, "points": ["p"], "fact_ids": ["lf-AWS"]}',
+                      Veeam='{"documented": true, "points": ["p"], "fact_ids": ["cf-Veeam"]}')
+
+
+def _rerank_by_vendor(scores: dict[str, float]):
+    """A fake `rerank` that scores by which vendor's fact text the documents
+    hold -- the real texts fixture renders facts as "text <fact_uuid>", and
+    every fact_uuid in this file embeds its vendor's name."""
+    async def _rerank(q, documents, *, top_k, settings):
+        for v, score in scores.items():
+            if any(v in d for d in documents):
+                return [(0, score)]
+        raise AssertionError(f"no score configured for documents {documents!r}")
+    return _rerank
+
+
+async def test_a_vendor_below_the_relevance_floor_is_checked_not_documented(monkeypatch):
+    monkeypatch.setattr(en, "rerank", _rerank_by_vendor({"AWS": 0.448, "Veeam": 0.633}))
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["checked_vendors"] == _VENDORS
+    assert res["documented_vendors"] == ["Veeam"]
+    assert res["answer"].endswith(
+        "Checked: AWS, Cohesity, Microsoft, Veeam. Documented for: Veeam.")
+    assert res["vendor_scores"] == {"AWS": 0.448, "Veeam": 0.633}
+    assert res["relevance_unchecked"] == []
+
+
+async def test_a_vendor_above_the_floor_stays_documented(monkeypatch):
+    monkeypatch.setattr(en, "rerank", _rerank_by_vendor({"AWS": 0.633, "Veeam": 0.824}))
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert res["vendor_scores"] == {"AWS": 0.633, "Veeam": 0.824}
+    assert res["relevance_unchecked"] == []
+
+
+async def test_relevance_check_unavailable_keeps_both_and_records_degraded():
+    # Default _S has no reranker configured: both documented vendors are kept,
+    # not scored, and recorded as unchecked rather than silently trusted.
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert set(res["relevance_unchecked"]) == {"AWS", "Veeam"}
+    assert res["vendor_scores"] == {}
+
+
+async def test_a_rerank_exception_for_one_vendor_keeps_that_vendor(monkeypatch):
+    async def _rerank(q, documents, *, top_k, settings):
+        if any("AWS" in d for d in documents):
+            raise RuntimeError("rerank endpoint down")
+        return [(0, 0.824)]
+
+    monkeypatch.setattr(en, "rerank", _rerank)
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert res["relevance_unchecked"] == ["AWS"]
+    assert res["vendor_scores"] == {"Veeam": 0.824}
+
+
+async def test_enumeration_min_score_defaults_to_055():
+    assert ExtractSettings(_env_file=None, docext_base_url="http://x",
+                           docext_read_key="k", neo4j_uri="bolt://x", neo4j_user="u",
+                           neo4j_password="p").enumeration_min_score == 0.55
+
+
+async def test_check_prompt_rejects_adjacent_features():
+    assert ("Mark it documented only when the evidence states the capability the "
+            "question asks about itself -- a related or adjacent feature does not "
+            "count.") in en._CHECK_PROMPT
