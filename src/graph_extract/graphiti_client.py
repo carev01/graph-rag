@@ -400,17 +400,30 @@ async def init_indices(graphiti: Graphiti, *, embed_dim: int | None = None,
         await ensure_vector_indexes(graphiti.driver, embed_dim,
                                     wait_seconds=vector_index_wait_seconds)
 
+# Marks the start of the per-chunk DOCUMENT CONTEXT block `document_context`
+# returns, below. Exported so `cache_layout.StaticTailLearner` can split this
+# PER-ARTICLE tail off the otherwise-static instructions before learning or
+# matching the static block -- see its module docstring. Keep this constant
+# and `document_context`'s leading text in sync: cache_layout imports it
+# (deferred, to avoid the import cycle) rather than hardcoding it.
+DOCUMENT_CONTEXT_MARKER = "\n\nDOCUMENT CONTEXT:"
+
+
 def document_context(vendor: str, product: str, source: str) -> str:
     """The per-chunk DOCUMENT CONTEXT block the extraction instructions refer
     to: the article's real vendor/product/document set, from the structural
     graph chain. Appended to `instructions` so the model is told the subject
     instead of being invited to invent one (extraction-grounding, 2026-10-17).
-    Empty when there is no product (no structural chain for the article)."""
+    Empty when there is no product (no structural chain for the article).
+    Vendor and source are each optional (an empty string omits that part
+    cleanly -- no "from  documentation" / "(document set: )")."""
     if not product:
         return ""
+    vendor_part = f"{vendor} " if vendor else ""
+    source_clause = f" (document set: {source})" if source else ""
     return (
-        f"\n\nDOCUMENT CONTEXT: This chunk comes from {vendor} documentation for "
-        f"{product} (document set: {source}). The documented product is "
+        f"{DOCUMENT_CONTEXT_MARKER} This chunk comes from {vendor_part}documentation for "
+        f"{product}{source_clause}. The documented product is "
         f'"{product}".')
 
 

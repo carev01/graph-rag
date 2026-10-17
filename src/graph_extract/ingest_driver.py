@@ -310,12 +310,27 @@ class IngestDriver:
         the grounding fed to every `add_text_episode` call for this article
         (extraction-grounding, 2026-10-17). `("", "", "")` with a WARNING when
         the article has no structural chain, so extraction still runs, just
-        without a documented-product subject."""
+        without a documented-product subject.
+
+        An article can in principle sit under more than one Vendor/Product/
+        Source chain (a shared Source re-pointed, say); deterministically pick
+        the lowest Source id and log a WARNING naming how many chains existed,
+        rather than silently picking whichever Neo4j happens to return first.
+        """
         async with self._driver.session() as s:
             r = await s.run(
+                "CALL { "
                 "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->"
                 "(so:Source)-[:HAS_ARTICLE]->(:Article {id:$a}) "
-                "RETURN v.name AS vendor, p.name AS product, so.name AS source",
+                "RETURN v.name AS vendor, p.name AS product, so.name AS source, so.id AS sid "
+                "ORDER BY sid LIMIT 1 "
+                "} "
+                "CALL { "
+                "MATCH (:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->"
+                "(:Source)-[:HAS_ARTICLE]->(:Article {id:$a}) "
+                "RETURN count(*) AS chain_count "
+                "} "
+                "RETURN vendor, product, source, chain_count",
                 a=article_id)
             rec = await r.single()
         if rec is None:
@@ -323,6 +338,10 @@ class IngestDriver:
                 "article %s has no structural chain (Vendor->Product->Source); "
                 "extracting with no document context", article_id)
             return "", "", ""
+        if rec["chain_count"] > 1:
+            logger.warning(
+                "article %s has %d structural chains (Vendor->Product->Source); "
+                "using the one with the lowest source id", article_id, rec["chain_count"])
         return rec["vendor"] or "", rec["product"] or "", rec["source"] or ""
 
 

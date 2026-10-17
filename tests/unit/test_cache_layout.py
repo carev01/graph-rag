@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from graph_extract.cache_layout import StaticTailLearner, clean_block, wrap_client
+from graph_extract.graphiti_client import DOCUMENT_CONTEXT_MARKER
 
 STATIC = ("\n\n# TASK\nExtract every entity.\nUse only the text above.\n"
           "Return JSON matching the schema.\n")
@@ -23,8 +24,24 @@ def _user(i: int, *, tail: str = STATIC) -> str:
             f"<CURRENT MESSAGE>\ncontent number {i} {'x' * i}\n</CURRENT MESSAGE>{tail}")
 
 
+def _context(article: str) -> str:
+    # graphiti renders custom_extraction_instructions (STATIC + this) at the
+    # END of the user message -- document_context's real leading text, keyed
+    # by article so distinct articles are distinct contexts.
+    return f'{DOCUMENT_CONTEXT_MARKER} This chunk is from article {article}.'
+
+
+def _user_with_context(i: int, article: str, *, tail: str = STATIC) -> str:
+    return _user(i, tail=tail) + _context(article)
+
+
 def _msgs(i: int, system: str = "You extract entities.") -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": _user(i)}]
+
+
+def _msgs_with_context(i: int, article: str, system: str = "You extract entities.") -> list[dict]:
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": _user_with_context(i, article)}]
 
 
 def _learner(**kw) -> StaticTailLearner:
@@ -124,3 +141,61 @@ async def test_wrap_client_transforms_the_messages_sent_and_keys_by_schema_name(
         await client.chat.completions.create(model="m", messages=_msgs(i), response_format=fmt)
     assert sent[0] == _msgs(0)
     assert "# TASK" in sent[3][0]["content"] and "# TASK" not in sent[3][1]["content"]
+
+
+# -- extraction-grounding (2026-10-17): per-article DOCUMENT CONTEXT must not
+# poison the learned static block -- regression tests ------------------------
+
+def test_same_article_warmup_learns_without_baking_in_that_articles_context():
+    """Reviewer probe: warming up on ONE article's calls must not bake that
+    article's DOCUMENT CONTEXT into the learned block -- otherwise every
+    later, different-article call fails to match and nothing ever moves."""
+    ln = _learner()
+    for i in range(3):
+        ln.transform("ExtractedEntities", _msgs_with_context(i, "A1"))
+    out = ln.transform("ExtractedEntities", _msgs_with_context(7, "A2"))
+    assert "# TASK" in out[0]["content"]          # static block moved...
+    assert "article A1" not in out[0]["content"]  # ...with no article baked in
+    assert "article A2" not in out[0]["content"]
+    assert "# TASK" not in out[1]["content"]       # static rules gone from user
+    assert "article A2" in out[1]["content"]       # THIS call's context stays
+    assert ln.stats()["moved"] == 1
+
+
+def test_mixed_article_warmup_still_learns_and_moves():
+    """A different article's context on every warm-up call must not collapse
+    the learned common suffix to ~nothing -- only the context varied, not the
+    static rules, so the fix must strip the context before comparing."""
+    ln = _learner()
+    for i, article in enumerate(("A1", "A2", "A3")):
+        ln.transform("ExtractedEntities", _msgs_with_context(i, article))
+    assert ln.stats()["learned"] == 1
+    out = ln.transform("ExtractedEntities", _msgs_with_context(9, "A4"))
+    assert "# TASK" in out[0]["content"]
+    assert "article A4" in out[1]["content"]
+    assert ln.stats()["moved"] == 1
+
+
+def test_context_text_always_stays_in_the_user_message():
+    """Whether still warming up or already matching and moving, the per-call
+    context must never be dropped -- only excluded from what's COMPARED."""
+    ln = _learner()
+    for i, article in enumerate(("A1", "A2", "A3")):
+        out = ln.transform("ExtractedEntities", _msgs_with_context(i, article))
+        assert f"article {article}" in out[1]["content"]   # still learning: unchanged
+    for i, article in enumerate(("A4", "A5", "A6", "A7")):
+        out = ln.transform("ExtractedEntities", _msgs_with_context(10 + i, article))
+        assert f"article {article}" in out[1]["content"]   # moved: re-appended
+
+
+def test_no_marker_path_is_unchanged():
+    """Baseline behaviour (no DOCUMENT CONTEXT tail) must be untouched by the
+    split -- mirrors test_nothing_moves_while_learning_then_the_static_tail_moves_to_system."""
+    ln = _learner()
+    for i in range(3):
+        assert ln.transform("ExtractedEntities", _msgs(i)) == _msgs(i)
+    out = ln.transform("ExtractedEntities", _msgs(7))
+    assert out[0]["content"] == "You extract entities.\n\n" + STATIC.strip() + "\n"
+    assert out[1]["content"].endswith("</CURRENT MESSAGE>\n")
+    assert "# TASK" not in out[1]["content"]
+    assert ln.stats()["moved"] == 1

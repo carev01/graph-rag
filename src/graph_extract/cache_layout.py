@@ -20,6 +20,21 @@ message ends with it. A graphiti upgrade or an ontology change therefore re-lear
 in a new process instead of drifting from a stale copy. Library-owned prompts are
 not modified -- only the request's message list, at the transport, like
 `graphiti_client._bound_index_arrays` does for the schema.
+
+extraction-grounding (2026-10-17) appends a PER-ARTICLE "DOCUMENT CONTEXT: ..." tail
+to the extraction instructions (`graphiti_client.document_context`), which graphiti
+renders at the END of the user message -- i.e. after the otherwise-static
+instructions this module exists to cache. Left alone, that breaks the whole
+mechanism: a per-article suffix is never common across articles, so a same-article
+warm-up "learns" a block containing that one article's context (every later,
+different-article call then fails to match and nothing moves), and a mixed-article
+warm-up learns nothing at all (the common suffix collapses to ~0 chars at the first
+differing context). The fix: before learning AND before matching, split the user
+message at the LAST occurrence of `graphiti_client.DOCUMENT_CONTEXT_MARKER` and
+learn/match on the part before it only; once a block is moved to the system message,
+the context segment is re-appended to what remains of the user message, so it is
+never lost, just excluded from what the learner compares across calls. A user
+message with no marker is untouched by this split (today's behaviour exactly).
 """
 from __future__ import annotations
 
@@ -33,6 +48,24 @@ logger = logging.getLogger(__name__)
 
 def common_suffix(a: str, b: str) -> str:
     return os.path.commonprefix([a[::-1], b[::-1]])[::-1]
+
+
+def _split_document_context(user: str) -> tuple[str, str]:
+    """`(user_without_context, context_segment)`, split at the LAST occurrence
+    of the per-article DOCUMENT CONTEXT marker. `context_segment` is `""` (and
+    `user_without_context` is `user` unchanged) when the marker is absent --
+    the no-context path this module behaved on before extraction-grounding.
+
+    Deferred import: `graphiti_client` imports this module (`wrap_client`), so
+    importing it back at module scope here would be a circular import. The
+    import resolves fine by the time this runs, since it only runs per-call,
+    long after both modules have finished loading.
+    """
+    from graph_extract.graphiti_client import DOCUMENT_CONTEXT_MARKER
+    idx = user.rfind(DOCUMENT_CONTEXT_MARKER)
+    if idx < 0:
+        return user, ""
+    return user[:idx], user[idx:]
 
 
 def clean_block(suffix: str) -> str:
@@ -79,12 +112,16 @@ class StaticTailLearner:
         system, user = messages[si].get("content"), messages[ui].get("content")
         if not isinstance(system, str) or not isinstance(user, str):
             return messages
+        # The per-article DOCUMENT CONTEXT tail (if any) varies call to call, so it
+        # is never part of what's common across calls -- exclude it from both
+        # learning and matching, then restore it below.
+        user_main, context = _split_document_context(user)
         # A prompt type = the response schema name AND its system message; two
         # prompt functions sharing a schema still learn separately.
         key = f"{prompt_key}:{hashlib.sha1(system.encode()).hexdigest()[:12]}"
         t = self._types.setdefault(key, _Type())
         if t.block is None:
-            t.running = user if t.running is None else common_suffix(t.running, user)
+            t.running = user_main if t.running is None else common_suffix(t.running, user_main)
             t.samples += 1
             if t.samples >= self._min_samples:
                 block = clean_block(t.running)
@@ -97,13 +134,13 @@ class StaticTailLearner:
             return messages
         if not t.block:
             return messages
-        if not user.endswith(t.block):
+        if not user_main.endswith(t.block):
             self._skipped += 1
             return messages
-        head = user[: len(user) - len(t.block)]
+        head = user_main[: len(user_main) - len(t.block)]
         out = [dict(m) for m in messages]
         out[si]["content"] = f"{system.rstrip()}\n\n{t.block.rstrip()}\n"
-        out[ui]["content"] = head.rstrip() + "\n"
+        out[ui]["content"] = head.rstrip() + context if context else head.rstrip() + "\n"
         self._moved += 1
         return out
 

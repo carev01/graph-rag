@@ -121,7 +121,7 @@ def test_instructions_exclude_timezones_but_not_regions():
     # v5: regions are first-class (Region entity), no longer excluded as noise.
     lowered = EXTRACTION_INSTRUCTIONS.lower()
     assert "time zones" in lowered
-    assert "region" in lowered
+    assert "a specific region or jurisdiction is a region" in lowered
     assert "specific geographic regions" not in lowered
 
 def test_instructions_state_type_boundaries():
@@ -129,6 +129,7 @@ def test_instructions_state_type_boundaries():
     assert "storage-redundancy tiers" in lowered
     assert "configuration settings" in lowered
     assert "concepts, never platforms" in lowered
+    assert "general domain nouns are concepts, not requirements" in lowered
 
 def test_instructions_have_vendor_scoping_rule():
     # No example vendor/branded-feature names here: those leaked into

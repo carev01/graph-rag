@@ -140,6 +140,39 @@ async def test_missing_chain_warns_and_passes_empty_context(monkeypatch, caplog)
     assert len(recs) == 1
 
 
+async def test_single_chain_returns_it_without_a_warning(caplog):
+    # Exercises the REAL `_document_context` query directly -- chain_count=1,
+    # no multiplicity WARNING.
+    driver = IngestDriver(settings=_settings(), strong_tier=ExtractionTier("strong", object(), "I", 1000),
+                          cheap_tier=None, docext=object(), provenance=_Prov(),
+                          driver=_FakeNeo4jDriver(record={
+                              "vendor": "Veeam", "product": "Veeam Backup & Replication",
+                              "source": "VBR User Guide", "chain_count": 1}))
+    with caplog.at_level(logging.WARNING, logger="graph_extract.ingest_driver"):
+        chain = await driver._document_context("a1")
+    assert chain == ("Veeam", "Veeam Backup & Replication", "VBR User Guide")
+    assert [r for r in caplog.records if r.name == "graph_extract.ingest_driver"] == []
+
+
+async def test_multiple_chains_logs_a_warning_and_uses_the_chosen_one(caplog):
+    # chain_count=2 -> WARNING naming the article and the count; the query
+    # itself (ORDER BY source id LIMIT 1) already picked the lowest-id chain,
+    # so _document_context just has to report the multiplicity and use what
+    # the query returned.
+    driver = IngestDriver(settings=_settings(), strong_tier=ExtractionTier("strong", object(), "I", 1000),
+                          cheap_tier=None, docext=object(), provenance=_Prov(),
+                          driver=_FakeNeo4jDriver(record={
+                              "vendor": "Veeam", "product": "Veeam Backup & Replication",
+                              "source": "VBR User Guide (lowest id)", "chain_count": 2}))
+    with caplog.at_level(logging.WARNING, logger="graph_extract.ingest_driver"):
+        chain = await driver._document_context("a1")
+    assert chain == ("Veeam", "Veeam Backup & Replication", "VBR User Guide (lowest id)")
+    recs = [r for r in caplog.records
+            if r.name == "graph_extract.ingest_driver" and "a1" in r.getMessage()
+            and "2" in r.getMessage()]
+    assert len(recs) == 1
+
+
 async def test_document_context_is_computed_once_per_article(monkeypatch):
     chain = ("AWS", "AWS Backup", "AWS Backup Developer Guide")
     driver, calls = _driver(monkeypatch, chain=chain, episode_count=3)
