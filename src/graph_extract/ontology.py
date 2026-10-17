@@ -116,6 +116,7 @@ NAMING_ALIASES: dict[str, tuple[str, ...]] = {
     **{canonical.lower(): aliases for canonical, _, aliases in NAMING_RULES},
     "proxmox virtual environment": ("proxmox ve",),
     "proxmox ve": ("proxmox virtual environment",),
+    "changed block tracking": ("cbt",),
 }
 
 
@@ -127,7 +128,8 @@ def _naming_rule_sentences() -> str:
 
 
 _VERBATIM_NAME_RULE = textwrap.fill(
-    "Write each entity's name as this chunk's text writes it; do not add a vendor prefix, "
+    "Write each entity's name as this chunk's text writes it, apart from the renames above; "
+    "do not add a vendor prefix, "
     "product family or expansion the text does not use (if the text says vSphere, name it "
     "vSphere).", width=92, initial_indent="- ", subsequent_indent="  ")
 

@@ -205,10 +205,38 @@ def test_the_proxmox_pair_is_grounding_only():
     assert "proxmox" not in EXTRACTION_INSTRUCTIONS.lower()
 
 
+def test_cbt_grounds_changed_block_tracking_and_is_grounding_only():
+    assert NAMING_ALIASES["changed block tracking"] == ("cbt",)
+    assert is_grounded("Changed Block Tracking", "Enable CBT on the VM.", ())
+    assert not is_grounded("Changed Block Tracking", "the cbtx driver", ())
+    flat = EXTRACTION_INSTRUCTIONS.lower()
+    assert "changed block tracking" not in flat and "cbt" not in flat
+
+
+@pytest.mark.parametrize("singular, plural", [
+    ("storage policy", "storage policies"),
+    ("protection policy", "protection policies"),
+    ("backup proxy", "backup proxies"),
+    ("tape library", "tape libraries"),
+    ("repository", "repositories"),
+    ("backup frequency", "backup frequencies"),
+])
+def test_ies_plurals_match_in_both_directions(singular, plural):
+    assert is_grounded(singular, f"Configure the {plural} first.", ())
+    assert is_grounded(plural, f"Configure the {singular} first.", ())
+
+
+def test_ies_plurals_stay_whole_words():
+    assert is_grounded("policy", "the policy was applied", ())
+    assert is_grounded("copy", "files were copied", ())
+    assert not is_grounded("policy", "the policiesx table", ())
+    assert not is_grounded("proxy", "a proxiesque setup", ())
+
+
 def test_the_instructions_forbid_vendor_expanded_names():
     flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
-    assert ("Write each entity's name as this chunk's text writes it; do not add a vendor "
-            "prefix, product family or expansion the text does not use (if the text says "
+    assert ("Write each entity's name as this chunk's text writes it, apart from the renames "
+            "above; do not add a vendor prefix, product family or expansion the text does not use (if the text says "
             "vSphere, name it vSphere).") in flat
 
 

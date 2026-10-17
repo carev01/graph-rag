@@ -101,9 +101,23 @@ def _name_tokens(name: str) -> tuple[str, ...]:
 
 def _stems(token: str) -> list[str]:
     """The token with one trailing suffix removed, for every suffix that leaves at
-    least 3 characters ("objectives" -> "objectiv", "objective")."""
-    return [token[: -len(suf)] for suf in _SUFFIXES
-            if token.endswith(suf) and len(token) - len(suf) >= 3]
+    least 3 characters ("objectives" -> "objectiv", "objective"), plus the -y
+    singular of an -ies/-ied form ("policies" -> "policy")."""
+    stems = [token[: -len(suf)] for suf in _SUFFIXES
+             if token.endswith(suf) and len(token) - len(suf) >= 3]
+    for suf in ("ies", "ied"):
+        if token.endswith(suf) and len(token) - len(suf) + 1 >= 3:
+            stems.append(token[: -len(suf)] + "y")
+    return stems
+
+
+def _form_pattern(form: str) -> str:
+    """A 3+ character token or stem with its accepted inflections, as a whole word.
+    A form ending in "y" also matches its -ies/-ied form ("policy" ~ "policies")."""
+    alts = re.escape(form) + _INFLECTION
+    if form.endswith("y"):
+        alts = f"(?:{alts}|{re.escape(form[:-1])}(?:ies|ied))"
+    return _B + alts + _E
 
 
 def _whole_word(phrase: str, text: str) -> bool:
@@ -114,7 +128,7 @@ def _present(token: str, text: str) -> bool:
     if len(token) == 2:
         # whole word or its plural: "vm" matches "vm"/"vms", never "kvm" or "vmware"
         return re.search(_B + re.escape(token) + "s?" + _E, text) is not None
-    return any(re.search(_B + re.escape(form) + _INFLECTION + _E, text) is not None
+    return any(re.search(_form_pattern(form), text) is not None
                for form in [token, *_stems(token)])
 
 
