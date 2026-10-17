@@ -162,9 +162,10 @@ async def _relevance_floor(q: str, supported: dict[str, list[str]],
 
     Returns `(vendor_scores, relevance_unchecked)`: `vendor_scores` holds every
     vendor whose evidence was actually scored; `relevance_unchecked` lists
-    vendors the floor could not be applied to (no reranker configured, or that
-    vendor's rerank call failed) -- those vendors are kept, never dropped on
-    unchecked relevance.
+    vendors the floor could not be applied to -- no reranker configured, the
+    rerank call failed, or its reply had no usable score (empty, or every index
+    out of range for that vendor's own evidence) -- those vendors are kept,
+    never dropped on unchecked relevance.
     """
     vendor_scores: dict[str, float] = {}
     relevance_unchecked: list[str] = []
@@ -187,17 +188,26 @@ async def _relevance_floor(q: str, supported: dict[str, list[str]],
         if isinstance(res, BaseException) or res is None:
             if isinstance(res, BaseException):
                 logger.warning("enumeration relevance check for %s failed: %s", v, res)
+            else:
+                logger.warning("enumeration relevance check for %s returned no "
+                               "usable score", v)
             relevance_unchecked.append(v)
             continue
-        best = max((score for _, score in res), default=0.0)
+        # A reply with no usable score -- empty, or every index out of range for
+        # this vendor's own evidence -- is unavailable, never a 0.0 that drops it.
+        n = len(supported[v])
+        scores = [score for i, score in res if 0 <= i < n]
+        if not scores:
+            logger.warning("enumeration relevance check for %s returned no "
+                           "usable score", v)
+            relevance_unchecked.append(v)
+            continue
+        best = max(scores)
         vendor_scores[v] = best
         if best < settings.enumeration_min_score:
             logger.info("enumeration: %s evidence too weak (best %.3f < %.2f); "
                         "not documented", v, best, settings.enumeration_min_score)
             del supported[v]
-    if relevance_unchecked:
-        logger.warning("enumeration: relevance check unavailable for %s",
-                       ", ".join(relevance_unchecked))
     return vendor_scores, relevance_unchecked
 
 

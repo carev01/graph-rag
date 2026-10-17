@@ -479,10 +479,23 @@ async def test_a_rerank_exception_for_one_vendor_keeps_that_vendor(monkeypatch):
     assert res["vendor_scores"] == {"Veeam": 0.824}
 
 
-async def test_enumeration_min_score_defaults_to_055():
-    assert ExtractSettings(_env_file=None, docext_base_url="http://x",
-                           docext_read_key="k", neo4j_uri="bolt://x", neo4j_user="u",
-                           neo4j_password="p").enumeration_min_score == 0.55
+@pytest.mark.parametrize("aws_reply", [[], [(5, 0.9)]], ids=["empty", "out-of-range"])
+async def test_an_unusable_rerank_reply_keeps_the_vendor_not_a_zero_score(
+        monkeypatch, aws_reply):
+    # Not None, not an exception, but no usable score in it (empty, or every
+    # index out of range for AWS's single fact) -- must never become best=0.0
+    # and a silent drop.
+    async def _rerank(q, documents, *, top_k, settings):
+        if any("AWS" in d for d in documents):
+            return aws_reply
+        return [(0, 0.824)]
+
+    monkeypatch.setattr(en, "rerank", _rerank)
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert res["relevance_unchecked"] == ["AWS"]
+    assert res["vendor_scores"] == {"Veeam": 0.824}
 
 
 async def test_check_prompt_rejects_adjacent_features():
