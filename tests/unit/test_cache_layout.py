@@ -142,6 +142,34 @@ def test_no_marker_path_is_unchanged():
     assert ln.stats()["moved"] == 1
 
 
+def test_bare_document_context_marker_in_chunk_body_does_not_derail_learning():
+    """Carried over from the Task 1 review: a chunk's own text can contain the
+    literal "\\n\\nDOCUMENT CONTEXT:" marker without the full sentence format
+    (" This chunk comes from ...") that DOCUMENT_CONTEXT_PATTERN requires.
+    DOCUMENT_CONTEXT_PATTERN must not match a bare marker, so
+    `_cut_document_context` leaves the user message untouched -- learning must
+    proceed exactly as the no-marker baseline: the static block is still
+    learned and moved."""
+    def user_with_bare_marker(i: int) -> str:
+        chunk = (f"content number {i} mentions a \"\n\nDOCUMENT CONTEXT:\" "
+                 f"heading {'x' * i}")
+        return (f"<PREVIOUS MESSAGES>\nprevious {i}\n</PREVIOUS MESSAGES>\n"
+                f"<CURRENT MESSAGE>\n{chunk}\n</CURRENT MESSAGE>{STATIC}")
+
+    def msgs(i: int) -> list[dict]:
+        return [{"role": "system", "content": "You extract entities."},
+                {"role": "user", "content": user_with_bare_marker(i)}]
+
+    ln = _learner()
+    for i in range(3):
+        assert ln.transform("ExtractedEntities", msgs(i)) == msgs(i)
+    out = ln.transform("ExtractedEntities", msgs(7))
+    assert out[0]["content"] == "You extract entities.\n\n" + STATIC.strip() + "\n"
+    assert out[1]["content"].endswith("</CURRENT MESSAGE>\n")
+    assert "# TASK" not in out[1]["content"]
+    assert ln.stats()["moved"] == 1
+
+
 # -- extraction-grounding (2026-10-17), fix round 2: regression tests against
 # graphiti's REAL prompt functions. The first version of this fix wrongly
 # assumed `custom_extraction_instructions` sits at the END of the user message

@@ -91,8 +91,10 @@ def test_region_docstring_has_negative_examples():
     assert "policy/permission/role name" in doc
 
 def test_concept_and_platform_cover_storage_classes():
+    # extraction-grounding (2026-10-17): docstrings name no concrete storage
+    # class/tier (no "S3 Standard"), only the generic boundary.
     from graph_extract.ontology import Concept, Platform
-    assert "S3 Standard" in (Concept.__doc__ or "")
+    assert "storage classes" in (Concept.__doc__ or "")
     assert "storage classes" in (Platform.__doc__ or "")
 
 def test_edge_type_map_references_defined_types():
@@ -148,7 +150,9 @@ def test_docstrings_state_type_boundaries():
     assert "region" in (Platform.__doc__ or "").lower()
     assert "NOT" in (Capability.__doc__ or "")
     assert "regulation" in (Concept.__doc__ or "").lower()
-    assert "LRS" in (Concept.__doc__ or "")
+    # extraction-grounding (2026-10-17): no concrete tier name ("LRS"), just
+    # the generic boundary.
+    assert "storage-redundancy tier" in (Concept.__doc__ or "")
     assert "CLI" in (Product.__doc__ or "")
     assert "Tool" in (Product.__doc__ or "")
     assert "NOT" in (Requirement.__doc__ or "")
@@ -174,3 +178,64 @@ def test_cheap_tier_salience_present_and_not_global():
     assert "AvailableIn" in CHEAP_TIER_SALIENCE and "Limits" in CHEAP_TIER_SALIENCE
     # cheap-tier-only: the salience text must NOT be in the global instructions
     assert "BE SELECTIVE" not in EXTRACTION_INSTRUCTIONS
+
+
+# -- extraction-grounding (2026-10-17), task 2: RestoresTo relation and
+# example-free type descriptions. A traced AWS article produced "Azure Archive
+# tier", "SEC 17a-4", "LRS", "ZRS" -- exactly the old docstrings' own example
+# vocabulary -- so every type docstring must now name no concrete entity, and
+# restore/recovery/migration statements get a dedicated relation instead of
+# being squeezed into Supports edges pointing at the backup source.
+
+def test_restores_to_registered():
+    from graph_extract.ontology import EDGE_TYPES, RestoresTo
+    assert EDGE_TYPES["RestoresTo"] is RestoresTo
+
+
+def test_restores_to_wired_for_every_listed_pair():
+    from graph_extract.ontology import EDGE_TYPE_MAP
+    pairs = [
+        ("Product", "Platform"), ("Product", "Workload"),
+        ("Capability", "Platform"), ("Capability", "Workload"),
+        ("Workload", "Platform"), ("Workload", "Workload"),
+    ]
+    for pair in pairs:
+        assert "RestoresTo" in EDGE_TYPE_MAP[pair], pair
+
+
+def test_restores_to_is_additive_existing_types_kept():
+    from graph_extract.ontology import EDGE_TYPE_MAP
+    assert "Supports" in EDGE_TYPE_MAP[("Product", "Workload")]
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Workload")]
+    assert "IntegratesWith" in EDGE_TYPE_MAP[("Product", "Platform")]
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Platform")]
+    assert "AppliesTo" in EDGE_TYPE_MAP[("Capability", "Workload")]
+
+
+_LEAKY_EXAMPLE_NAMES = (
+    "AWS", "Azure", "Veeam", "NetBackup", "Amazon", "S3", "LRS", "ZRS",
+    "SEC 17a-4", "East US", "Germany", "Kubernetes", "SQL Server", "Oracle",
+    "Hyper-V", "VMware", "Windows", "Linux", "RPO", "GDPR",
+)
+
+
+def test_no_type_docstring_names_a_concrete_example_entity():
+    from graph_extract.ontology import ENTITY_TYPES, EDGE_TYPES
+    for name, model in {**ENTITY_TYPES, **EDGE_TYPES}.items():
+        doc = model.__doc__ or ""
+        for leaked in _LEAKY_EXAMPLE_NAMES:
+            assert leaked not in doc, f"{name} docstring leaks {leaked!r}"
+
+
+def test_cheap_tier_salience_names_no_concrete_example():
+    from graph_extract.ontology import CHEAP_TIER_SALIENCE
+    for leaked in ("Amazon S3", "cross-Region", "China"):
+        assert leaked not in CHEAP_TIER_SALIENCE
+
+
+def test_instructions_have_restores_to_rule():
+    from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
+    flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
+    assert ("the DESTINATION is the target entity and the relation is "
+            "RestoresTo") in flat
+    assert "use the product that performs the restore as the subject" in flat

@@ -3,33 +3,42 @@ from pydantic import BaseModel
 
 # Entity types. Attributes are minimal (a small model extracts them more
 # reliably). Descriptions guide extraction; keep them tight.
+#
+# extraction-grounding (2026-10-17): these docstrings are passed into the
+# extraction prompts (type_model.__doc__), the same way EXTRACTION_INSTRUCTIONS
+# is, so a concrete product/vendor/platform/region/standard/tier name written
+# here leaks into facts exactly like the old instructions' examples did (a
+# traced AWS article produced "Azure Archive tier", "SEC 17a-4", "LRS", "ZRS" --
+# the docstring vocabulary, not anything the chunk said). Every type below is
+# defined in words only: what it is, and what it is NOT, with no named example
+# entities. The boundary meaning (the NOT-clauses) is unchanged.
 class Vendor(BaseModel):
-    """A backup software/service vendor (e.g. AWS, Microsoft, Veeam, Commvault)."""
+    """A backup software/service vendor: the company or organization that makes, operates, or sells a backup product."""
 
 class Product(BaseModel):
-    """A backup product or service (e.g. AWS Backup, Azure Backup, Veeam Backup & Replication, NetBackup) — NOT CLIs, SDKs, or consoles (those are Tools)."""
+    """A backup product or service offered by a vendor — NOT a CLI, SDK, or console application (those are Tools)."""
     # No attributes: a `version` field was dropped (low value for backup products
     # — many are rolling-release with no version — and it made the cheap
     # extraction model balloon/truncate during graphiti's attribute-extraction
     # step). With NO entity type carrying attributes, graphiti skips that step.
 
 class Tool(BaseModel):
-    """A NAMED, installable-or-invocable tool application used to operate or administer a backup product: a command-line tool, SDK, API client, or a named management console/portal APPLICATION (e.g. AWS CLI, PowerShell Az module, Veeam Console, NetBackup Administration Console, Azure portal) — NOT the product itself, NOT a Platform, NOT a UI pane/tab/button/menu item/wizard/page name (e.g. "Restore pane", "Jobs", "Delete Protected Item", "Protected resources"), NOT an action or operation (e.g. "Recover", "Stop protection with retain data"), NOT a documentation section (e.g. "AWS Backup pricing")."""
+    """A NAMED, installable-or-invocable tool application used to operate or administer a backup product: a command-line tool, SDK, API client, or a named management console/portal APPLICATION — NOT the product itself, NOT a Platform, NOT a UI pane/tab/button/menu item/wizard/page name (e.g. "Restore pane", "Jobs", "Delete Protected Item", "Protected resources"), NOT an action or operation (e.g. "Recover", "Stop protection with retain data"), NOT a documentation section (e.g. a product's pricing page)."""
 
 class Workload(BaseModel):
-    """A data source or system that gets backed up (e.g. Amazon S3, Azure VM, SQL Server, Oracle Database, Kubernetes, NAS file shares)."""
+    """A data source or system that gets backed up: an application, database, virtual machine, storage service, container platform, or file share that a backup product protects."""
 
 class Capability(BaseModel):
-    """A backup feature or mechanism (e.g. immutability, cross-region copy, instant restore, synthetic full backup, changed block tracking) — NOT accounts, roles, or resources."""
+    """A backup feature or mechanism that a product provides, or that applies to a workload — NOT an account, role, or resource (those are Requirements, or not extracted)."""
 
 class Platform(BaseModel):
-    """An OS, hypervisor, or cloud/infrastructure platform that products run on or integrate with (e.g. Windows, Linux, VMware vSphere (the hypervisor platform, not the VMs it hosts), Hyper-V, AWS, Azure) — NOT tools/CLIs/consoles (those are Tools), NOT geographic regions, storage classes/tiers (S3 Standard, Azure Archive tier), storage-redundancy tiers (LRS/ZRS), or configuration settings (those are Concepts or not extracted)."""
+    """An operating system, hypervisor, or cloud/infrastructure platform that products run on or integrate with — NOT a tool, CLI, or console (those are Tools), NOT a geographic region (that is a Region), NOT storage classes or tiers, storage-redundancy tiers, or configuration settings (those are Concepts)."""
 
 class Concept(BaseModel):
-    """A domain concept (e.g. RPO, RTO, 3-2-1 rule, retention policy, recovery point, backup frequency, storage classes/tiers like S3 Standard, S3 Glacier, Azure Archive tier, storage-redundancy tiers like LRS/ZRS) or a regulation/standard (e.g. SEC 17a-4, GDPR)."""
+    """A domain concept: an abstract metric, rule, policy, or term (e.g. a recovery objective or a retention rule), storage classes or tiers, a storage-redundancy tier, or a regulation or compliance standard that a product or process follows."""
 
 class Region(BaseModel):
-    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data (e.g. Germany West Central, East US, us-east-1, Germany, EU) — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (LRS/ZRS are Concepts), NOT an API operation or field (DescribeKey, ...Arn), NOT a policy/permission/role name, NOT a scenario/section/page name, NOT a data-classification term (PII), NOT a bare "Availability Zone" — those are Tools/Requirements/Concepts/Workloads or noise, never Regions."""
+    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (those are Concepts), NOT an API operation or field (e.g. DescribeKey, ...Arn), NOT a policy/permission/role name, NOT a scenario/section/page name, NOT a data-classification term (e.g. PII), NOT a bare "Availability Zone" — those are Tools/Requirements/Concepts/Workloads or noise, never Regions."""
 
 class Requirement(BaseModel):
     """A concrete prerequisite or constraint to USE a product: a permission, minimum version, open port, license, or required role/account (e.g. Backup Operator role, TCP 443 open, minimum agent version) — NOT general domain nouns (a recovery point is a Concept)."""
@@ -57,23 +66,30 @@ class Operates(BaseModel):
     """A tool operates/administers a product."""
 class AvailableIn(BaseModel):
     """A product, capability, or workload is available in, operates in, or stores data in a region."""
+class RestoresTo(BaseModel):
+    """Backups of the subject (a product, capability or workload) can be
+    restored, recovered or migrated to the target platform or workload -- the
+    target is the DESTINATION."""
 
 EDGE_TYPES: dict[str, type[BaseModel]] = {
     "Supports": Supports, "Provides": Provides, "AppliesTo": AppliesTo,
     "IntegratesWith": IntegratesWith, "Limits": Limits, "Requires": Requires,
-    "Operates": Operates, "AvailableIn": AvailableIn,
+    "Operates": Operates, "AvailableIn": AvailableIn, "RestoresTo": RestoresTo,
 }
 
 EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
-    ("Product", "Workload"): ["Supports", "Limits"],
+    ("Product", "Workload"): ["Supports", "Limits", "RestoresTo"],
     ("Product", "Capability"): ["Provides", "Limits"],
-    ("Capability", "Workload"): ["AppliesTo"],
-    ("Product", "Platform"): ["IntegratesWith", "Limits"],
+    ("Capability", "Workload"): ["AppliesTo", "RestoresTo"],
+    ("Product", "Platform"): ["IntegratesWith", "Limits", "RestoresTo"],
     ("Product", "Requirement"): ["Requires"],
     ("Tool", "Product"): ["Operates"],
     ("Product", "Region"): ["AvailableIn"],
     ("Capability", "Region"): ["AvailableIn"],
     ("Workload", "Region"): ["AvailableIn"],
+    ("Capability", "Platform"): ["RestoresTo"],
+    ("Workload", "Platform"): ["RestoresTo"],
+    ("Workload", "Workload"): ["RestoresTo"],
 }
 
 EXCLUDED_ENTITY_TYPES: list[str] = []
@@ -112,6 +128,9 @@ Type boundaries:
   "not available in") as AvailableIn facts.
 - Requirement is a concrete prerequisite to use a product (permission, minimum version, port,
   license, required role); general domain nouns are Concepts, not Requirements.
+- For a restore, recovery or migration statement, the DESTINATION is the target entity and
+  the relation is RestoresTo; keep the backup's source (which backups, which machines) in
+  the fact text, and use the product that performs the restore as the subject.
 
 Naming rules -- apply ONLY to things the text mentions, so the same concept from different
 vendors resolves to one entity:
@@ -138,8 +157,7 @@ CHEAP_TIER_SALIENCE = (
     "residency statements as AvailableIn facts. Availability and limitation "
     "statements are the HIGHEST-VALUE facts: keep them, but state each ONCE at "
     "the most general level that is TRUE (e.g. '<feature> is not available in "
-    "China regions') — never over-generalize an exception into a global claim.\n"
-    "Use short canonical entity names ('Amazon S3', 'cross-Region copy'), never "
-    "descriptive phrases. A dense table chunk should yield roughly 10-25 facts "
-    "total, not dozens."
+    "<region>') — never over-generalize an exception into a global claim.\n"
+    "Use short canonical entity names, never descriptive phrases. A dense table "
+    "chunk should yield roughly 10-25 facts total, not dozens."
 )
