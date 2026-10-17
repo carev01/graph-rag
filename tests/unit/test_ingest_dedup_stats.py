@@ -66,6 +66,9 @@ def driver(monkeypatch):
     async def noop(self, *a, **k):
         return None
 
+    async def no_chain(self, *a, **k):
+        return "", "", ""
+
     monkeypatch.setattr(content_fetch, "fetch_article", fake_fetch_article)
     monkeypatch.setattr(ingest_driver.chonkie_client, "neural_chunk", fake_chunk)
     monkeypatch.setattr(ingest_driver.episode_builder, "build_episodes", fake_build_episodes)
@@ -73,6 +76,7 @@ def driver(monkeypatch):
     monkeypatch.setattr(IngestDriver, "_content_hash", noop)
     monkeypatch.setattr(IngestDriver, "_chapter_path", noop)
     monkeypatch.setattr(IngestDriver, "_supersede_trailing_episodes", noop)
+    monkeypatch.setattr(IngestDriver, "_document_context", no_chain)
 
     tier = ExtractionTier("strong", object(), "I", 1000)
     d = IngestDriver(settings=_settings(), strong_tier=tier, cheap_tier=None,

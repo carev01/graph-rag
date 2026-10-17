@@ -400,13 +400,28 @@ async def init_indices(graphiti: Graphiti, *, embed_dim: int | None = None,
         await ensure_vector_indexes(graphiti.driver, embed_dim,
                                     wait_seconds=vector_index_wait_seconds)
 
+def document_context(vendor: str, product: str, source: str) -> str:
+    """The per-chunk DOCUMENT CONTEXT block the extraction instructions refer
+    to: the article's real vendor/product/document set, from the structural
+    graph chain. Appended to `instructions` so the model is told the subject
+    instead of being invited to invent one (extraction-grounding, 2026-10-17).
+    Empty when there is no product (no structural chain for the article)."""
+    if not product:
+        return ""
+    return (
+        f"\n\nDOCUMENT CONTEXT: This chunk comes from {vendor} documentation for "
+        f"{product} (document set: {source}). The documented product is "
+        f'"{product}".')
+
+
 async def add_text_episode(graphiti: Graphiti, s: ExtractSettings, *, name: str,
                            body: str, source_description: str,
                            reference_time: datetime,
-                           instructions: str = EXTRACTION_INSTRUCTIONS) -> AddEpisodeResults:
+                           instructions: str = EXTRACTION_INSTRUCTIONS,
+                           context: str = "") -> AddEpisodeResults:
     return await graphiti.add_episode(
         name=name, episode_body=body, source_description=source_description,
         reference_time=reference_time, source=EpisodeType.text, group_id=s.group_id,
         entity_types=ENTITY_TYPES, excluded_entity_types=EXCLUDED_ENTITY_TYPES,
         edge_types=EDGE_TYPES, edge_type_map=EDGE_TYPE_MAP,
-        custom_extraction_instructions=instructions)
+        custom_extraction_instructions=instructions + context)

@@ -1,6 +1,6 @@
 import pytest
 from datetime import datetime, timezone
-from graph_extract.graphiti_client import add_text_episode
+from graph_extract.graphiti_client import add_text_episode, document_context
 from graph_extract.config import ExtractSettings
 from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
 
@@ -43,3 +43,36 @@ async def test_add_text_episode_defaults_to_global_instructions():
     await add_text_episode(FakeG(), s, name="n", body="b", source_description="u",
                            reference_time=datetime.now(timezone.utc))
     assert captured["custom_extraction_instructions"] == EXTRACTION_INSTRUCTIONS
+
+
+async def test_add_text_episode_appends_document_context():
+    captured = {}
+
+    class FakeG:
+        async def add_episode(self, **kw):
+            captured.update(kw)
+            return "ok"
+
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    ctx = document_context("Veeam", "Veeam Backup & Replication", "VBR User Guide")
+    await add_text_episode(FakeG(), s, name="n", body="b", source_description="u",
+                           reference_time=datetime.now(timezone.utc),
+                           instructions="CUSTOM-INSTR", context=ctx)
+    assert captured["custom_extraction_instructions"] == "CUSTOM-INSTR" + ctx
+
+
+async def test_add_text_episode_defaults_context_to_empty_string():
+    captured = {}
+
+    class FakeG:
+        async def add_episode(self, **kw):
+            captured.update(kw)
+            return "ok"
+
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    await add_text_episode(FakeG(), s, name="n", body="b", source_description="u",
+                           reference_time=datetime.now(timezone.utc),
+                           instructions="CUSTOM-INSTR")
+    assert captured["custom_extraction_instructions"] == "CUSTOM-INSTR"

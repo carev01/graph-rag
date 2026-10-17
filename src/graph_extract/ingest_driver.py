@@ -12,7 +12,7 @@ from graph_extract.config import ExtractSettings
 from graph_extract import content_fetch, chonkie_client, episode_builder
 from graph_extract.dedup_guard import CURRENT_DEDUP_STATS, DedupIndexStats
 from graph_extract.llm_timing import PromptTimings
-from graph_extract.graphiti_client import add_text_episode, ExtractionTier
+from graph_extract.graphiti_client import add_text_episode, document_context, ExtractionTier
 from graph_extract.provenance import Provenance
 from graph_extract.warmup import WarmupGate
 
@@ -188,6 +188,7 @@ class IngestDriver:
         # content_hash: reuse the article's stored hash from the graph, else hash markdown
         content_hash = await self._content_hash(article_id) or _sha(art.content_markdown)
         chapter_path = await self._chapter_path(article_id)
+        context = document_context(*await self._document_context(article_id))
         async with httpx.AsyncClient(base_url=self._s.chonkie_base_url, timeout=120) as ch:
             chunks = await chonkie_client.neural_chunk(ch, art.content_markdown, self._s.chonkie_model)
         episodes = episode_builder.build_episodes(
@@ -200,7 +201,7 @@ class IngestDriver:
                 continue
             r = await add_text_episode(tier.graphiti, self._s, name=e.name, body=e.body,
                                        source_description=art.source_url, reference_time=ref,
-                                       instructions=tier.instructions)
+                                       instructions=tier.instructions, context=context)
             await self._prov.link(art.id, r.episode.uuid, chunk_index=e.chunk_index,
                                   heading_path=e.heading_path, token_count=e.token_count,
                                   content_hash=e.content_hash,
@@ -303,6 +304,26 @@ class IngestDriver:
                             "RETURN c.title AS t", a=article_id)
             rec = await r.single()
             return rec["t"] if rec and rec["t"] else ""
+
+    async def _document_context(self, article_id: str) -> tuple[str, str, str]:
+        """The article's (vendor, product, source) from the structural chain --
+        the grounding fed to every `add_text_episode` call for this article
+        (extraction-grounding, 2026-10-17). `("", "", "")` with a WARNING when
+        the article has no structural chain, so extraction still runs, just
+        without a documented-product subject."""
+        async with self._driver.session() as s:
+            r = await s.run(
+                "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->"
+                "(so:Source)-[:HAS_ARTICLE]->(:Article {id:$a}) "
+                "RETURN v.name AS vendor, p.name AS product, so.name AS source",
+                a=article_id)
+            rec = await r.single()
+        if rec is None:
+            logger.warning(
+                "article %s has no structural chain (Vendor->Product->Source); "
+                "extracting with no document context", article_id)
+            return "", "", ""
+        return rec["vendor"] or "", rec["product"] or "", rec["source"] or ""
 
 
 def _sha(text: str) -> str:

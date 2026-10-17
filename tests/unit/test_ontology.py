@@ -38,17 +38,27 @@ def test_no_entity_type_has_attributes():
         assert model.model_fields == {}, f"{name} unexpectedly declares attributes"
 
 
-def test_instructions_require_extracting_the_product_subject():
-    # The product is the SUBJECT of most facts; if the model omits it as an
-    # entity, graphiti drops every edge whose endpoint is that missing node.
+def test_instructions_are_grounded_in_chunk_text():
+    # 2026-10-17 extraction-grounding: a mandatory-subject rule plus leaky
+    # examples caused extraction to invent "AWS Backup" as the subject of
+    # subjectless chunks. The instructions must now forbid inventing entities
+    # and defer the documented product's name to the per-chunk DOCUMENT CONTEXT
+    # (graphiti_client.document_context) rather than naming it here.
     instr = EXTRACTION_INSTRUCTIONS
-    # normalise whitespace so line wraps don't hide multi-word phrases
     flat = " ".join(instr.split())
+    assert "Extract ONLY entities and facts that THIS chunk's text states" in flat
+    assert "DOCUMENT CONTEXT" in flat
     lowered = flat.lower()
-    assert "always extract the backup product" in lowered
-    assert "every chunk" in lowered
-    assert "subject" in lowered
-    assert "Product entity" in flat
+    assert "never add an entity" in lowered
+    assert "never make any other product the subject of a fact" in lowered
+
+
+def test_instructions_leak_no_example_products():
+    # The instructions' own example vocabulary was being emitted as fabricated
+    # facts on thin chunks (BACKLOG extraction-grounding). None of the example
+    # products that used to appear here may appear again.
+    for leaked in ("AWS Backup", "Azure Backup", "Veeam Backup & Replication"):
+        assert leaked not in EXTRACTION_INSTRUCTIONS
 
 
 def test_instructions_capture_limitation_statements():
@@ -58,7 +68,7 @@ def test_instructions_capture_limitation_statements():
 
 def test_instructions_exclude_ui_elements():
     lowered = EXTRACTION_INSTRUCTIONS.lower()
-    assert "ui elements" in lowered
+    assert "ui noise" in lowered
     assert "panes" in lowered and "wizards" in lowered
     assert "action labels" in lowered
 
@@ -95,32 +105,38 @@ def test_instructions_mention_canonical_names():
     assert "kubernetes" in lowered and "immutability" in lowered
 
 def test_instructions_exclude_noise_entities():
+    # The concrete examples (ARNs, resource IDs, specific error codes, CLI
+    # invocations) were leaking into extraction as fabricated facts on thin
+    # chunks, so the rule is now stated generically, with no example to leak.
     lowered = EXTRACTION_INSTRUCTIONS.lower()
     assert "do not extract" in lowered
-    assert "arn:" in lowered
-    assert "snap-" in lowered and "vol-" in lowered
-    assert "install-module" in lowered
-    # Error/exception code markers — literal casing as named in the instructions.
-    assert "Failed" in EXTRACTION_INSTRUCTIONS
-    assert "RequestId" in EXTRACTION_INSTRUCTIONS
+    assert "arns" in lowered
+    assert "resource ids" in lowered
+    assert "error or exception codes" in lowered
+    assert "cli commands" in lowered
+    assert "example or placeholder values" in lowered
+    assert "extract the concept, not the example" in lowered
 
 def test_instructions_exclude_timezones_but_not_regions():
     # v5: regions are first-class (Region entity), no longer excluded as noise.
-    assert "UTC" in EXTRACTION_INSTRUCTIONS
-    assert "us-east-1" in EXTRACTION_INSTRUCTIONS
-    assert "specific geographic regions" not in EXTRACTION_INSTRUCTIONS.lower()
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "time zones" in lowered
+    assert "region" in lowered
+    assert "specific geographic regions" not in lowered
 
 def test_instructions_state_type_boundaries():
-    assert "LRS" in EXTRACTION_INSTRUCTIONS
-    assert "backup frequency" in EXTRACTION_INSTRUCTIONS.lower()
-    assert "recovery point" in EXTRACTION_INSTRUCTIONS
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "storage-redundancy tiers" in lowered
+    assert "configuration settings" in lowered
+    assert "concepts, never platforms" in lowered
 
 def test_instructions_have_vendor_scoping_rule():
-    assert "DISTINCT" in EXTRACTION_INSTRUCTIONS
-    assert "GENERIC" in EXTRACTION_INSTRUCTIONS
-    assert "AWS Backup Vault Lock" in EXTRACTION_INSTRUCTIONS
-    assert "Azure immutable vault" in EXTRACTION_INSTRUCTIONS
-    assert "do not merge" in EXTRACTION_INSTRUCTIONS.lower()
+    # No example vendor/branded-feature names here: those leaked into
+    # extraction as fabricated entities (test_instructions_leak_no_example_products).
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "vendor-branded features distinct" in lowered
+    assert "keep different vendors' products" in lowered
+    assert "do not fold it into immutability" in lowered
 
 def test_docstrings_state_type_boundaries():
     from graph_extract.ontology import (
