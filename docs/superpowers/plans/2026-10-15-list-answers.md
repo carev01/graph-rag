@@ -1718,3 +1718,38 @@ Tests:
 - A short answer keeps the single-call path.
 
 - [ ] Tests first; implement; unit suite, ruff, mypy; commit `feat(eval): judge long answers in chunks` (trailer lines).
+
+---
+
+## Amendment 4 tasks (spec §14, approved 2026-10-17)
+
+### Task 17: List prompt and completeness-pass precision
+
+**Files:** `src/answer_api/list_mode.py`; tests `tests/unit/test_list_mode.py`.
+
+1. Add two sentences to `_LIST_PROMPT`, placed after the item-form/naming sentences, verbatim:
+   - `"Describe each item only as its cited facts state it, and never change what a fact says it does: a fact about backing up is not a restore option, and supported-for is not recommended. "`
+   - `"List only items that answer the question for the subject it names: skip items about a different workload or product, but keep items a fact states for a broader category that contains the subject (for example, all agents when the question asks about a Windows agent). "`
+2. Change `_COMPLETE_PROMPT` so the description must restate only what the cited facts say (at most 15 words, no added claims) and so the pass applies the same subject rule. Reuse the two sentences above by building the prompt from shared constants (`_FAITHFUL_DESCRIPTION_RULE`, `_SUBJECT_RULE`) used by both prompts. Do not copy the sentences into the second prompt.
+3. The completeness call uses `max_tokens=8000` (was 4000). Use the finish-reason-aware completion (`_complete_with_finish_reason` or the equivalent already used by the pass). When its finish reason is `"length"`, treat the pass as failed (COMPLETENESS_DEGRADED) and log WARNING `"list completeness pass cut short at %d tokens (%d chars); keeping the first answer"`.
+
+Tests:
+- Both prompts contain both rules, from the shared constants.
+- The completeness call is made with 8000.
+- A `"length"` reply degrades with the WARNING and keeps the first answer.
+
+- [ ] Tests first; implement; unit suite, ruff src tests, mypy src; commit `fix(answer): list prompts keep facts' operations and the question's subject` (trailer lines).
+
+### Task 18: Faithfulness judge sees labels and honours disclosed gaps (eval)
+
+**Files:** `src/answer_api/eval_router.py`; tests in `tests/unit/test_eval_router_harness.py` (and `tests/unit/test_eval_attribution.py` if fixtures there build the judge inputs).
+
+1. `_score_one` passes the faithfulness judge LABELLED fact lines. Use the same `_labelled_facts(env["citations"], texts)` output the attribution judge gets, one line per cited fact: `(Vendor · Product[; ...]) fact text`. This applies to both the single-call and the chunked path; in the chunked path, each chunk receives the labelled lines of its own markers.
+2. Add this sentence to `_JUDGE_PROMPT`, before "Reply with ONLY the integer", verbatim: `"Each cited fact is labelled (Vendor · Product) with the documentation that states it. A line carrying a '(needs validation: ...)' note or a '†' mark discloses that its cited fact does not state the noted qualifier: judge such a line only on whether its cited facts support the item apart from that disclosed qualifier. "`
+
+Tests:
+- The judge prompt carries the labels and the new sentence.
+- The chunked path gives each chunk its own labelled lines.
+- Existing judge tests keep passing (update fixtures that assert the exact facts block).
+
+- [ ] Tests first; implement; unit suite, ruff, mypy; commit `fix(eval): faithfulness judge sees fact labels and disclosed gaps` (trailer lines).

@@ -236,3 +236,39 @@ Run 12 results:
 4. **Judge on long answers (eval).** An answer citing more than 60 facts or longer than 6000
    characters is judged in chunks of consecutive paragraphs/sections, each with only the facts
    it cites. Faithfulness is the minimum chunk score, so "5" still means every claim is supported.
+
+## 14. After paid eval run 13 (2026-10-17, option 1 approved in conversation)
+
+Run 13: item coverage 0.98 and no unscored answers. An itemised audit of the lowest answer
+(Azure, faithfulness 2) found three answer defects and three judge artifacts:
+
+- Answer defects:
+  - facts about *backing up* to a vault or MABS were written as "Restore from …" items;
+  - a completeness-pass description claimed more than its fact;
+  - the answer drifted to other workloads (Azure PostgreSQL, AKS, Hyper-V) under a
+    question about Azure VMs.
+- Judge artifacts:
+  - the faithfulness judge sees unlabelled fact text, so "Veeam Data Cloud states …"
+    lines citing Veeam-documentation facts read as unsupported;
+  - the judge counts lines carrying a "needs validation" note or † as unsupported,
+    although the note discloses the gap;
+  - the AWS "misattributions" are facts merged from AWS and Veeam documents, each with
+    an AWS Backup source (invariant #4), not a scope leak.
+
+1. **List prompt.** Two new rules:
+   - Describe each item only as its cited facts state it. Never change what a fact
+     says it does: a fact about backing up is not a restore option, and supported-for
+     is not recommended.
+   - List only items that answer the question for the subject it names. Skip items
+     about a different workload or product. Keep items a fact states for a broader
+     category that contains the subject, for example all agents when the question
+     asks about a Windows agent.
+2. **Completeness pass.** The description restates only what the cited facts say, in at
+   most 15 words, and the pass applies the same subject rule. `max_tokens` rises from
+   4000 to 8000. A reply cut short (`finish_reason == "length"`) is treated as a failed
+   pass, as today, but logged with its length.
+3. **Faithfulness judge (eval).** Fact lines go to the judge with their (Vendor ·
+   Product) labels, as the attribution judge already receives them. The judge prompt
+   says that a line carrying a "needs validation" note or † discloses that its fact
+   does not state the noted qualifier. Such a line is judged on whether its cited
+   facts support the item apart from that disclosed qualifier.
