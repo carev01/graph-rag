@@ -539,6 +539,46 @@ def test_strict_from_none_changes_nothing():
     assert "needs validation" in text
 
 
+# --- Fix round 1: exact-heading match only, never a substring --------------------
+
+def test_a_heading_that_only_contains_the_phrase_is_not_strict():
+    # A model-written "### Also documented elsewhere" must not be mistaken for the
+    # completeness pass's own "### Also documented" heading (reviewer-reproduced bug).
+    raw = ("### Also documented elsewhere\n"
+           "- **HPE Morpheus VM Essentials** — restore to Morpheus [1]")
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS)], strict_from="Also documented")
+    assert grades[0].grade == ig.NEEDS_VALIDATION
+    assert "needs validation: the cited source does not mention Windows" in text
+
+
+def test_a_bold_strict_heading_matches_exactly():
+    raw = "**Also documented**\n- **HPE Morpheus VM Essentials** — restore to Morpheus [1]"
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS)], strict_from="Also documented")
+    assert grades[0].grade == ig.DROPPED and grades[0].reason == "completion_unconfirmed"
+    assert text == ""
+
+
+def test_a_bold_heading_with_a_colon_matches_exactly():
+    raw = "**Also documented:**\n- **HPE Morpheus VM Essentials** — restore to Morpheus [1]"
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS)], strict_from="Also documented")
+    assert grades[0].grade == ig.DROPPED and grades[0].reason == "completion_unconfirmed"
+
+
+def test_only_the_last_exact_heading_is_strict():
+    # A heading the synthesis happens to have written with the exact same text is
+    # never the LAST one once the pass appends its own section after it -- only
+    # the pass's own section (after the second, later heading) is held strict.
+    raw = ("### Also documented\n"
+           "- **HPE Morpheus VM Essentials** — restore to Morpheus [1]\n\n"
+           "### Also documented\n"
+           "- **HPE Morpheus VM Essentials** — restore to Morpheus [2]")
+    text, grades, _ = _grade(raw, [_fact("hpe1", MORPHEUS), _fact("hpe2", MORPHEUS)],
+                             strict_from="Also documented")
+    assert [g.grade for g in grades] == [ig.NEEDS_VALIDATION, ig.DROPPED]
+    assert grades[1].reason == "completion_unconfirmed"
+    assert "needs validation: the cited source does not mention Windows" in text
+
+
 def test_find_limits_heading_returns_the_first_limitations_heading_line():
     lines = ["**Clouds**", "- **Azure** — x [1]", "Not supported / limitations apply here.",
              "", "### Not supported / limitations", "- Xen [2]", "**Not supported / limitations**"]

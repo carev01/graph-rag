@@ -1208,6 +1208,21 @@ async def test_added_items_without_a_limitations_section_are_appended(patched, m
     assert lines[-2:] == ["### Also documented", "- **OLVM** — restore as a VM [2]"]
 
 
+async def test_every_completion_item_unconfirmed_removes_the_heading_end_to_end(
+        patched, monkeypatch):
+    # Fix round 1: HPE Morpheus VM Essentials' fact does not name Windows, so under
+    # the pass's own "### Also documented" heading it grades DROPPED -- the only
+    # item there, so the whole heading disappears from the final answer.
+    reply = ('[{"item": "HPE Morpheus VM Essentials", "description": "restore physical '
+             'machines", "markers": [3]}]')
+    out, _ = await _answer_with_completion(patched, monkeypatch, reply)
+    assert "Also documented" not in out["answer"]
+    assert "HPE Morpheus" not in out["answer"]
+    assert [(g["item"], g["grade"], g["reason"]) for g in out["item_grades"]] == [
+        ("Sangfor aSV", "confirmed", "named"),
+        ("HPE Morpheus VM Essentials", "dropped", "completion_unconfirmed")]
+
+
 async def test_a_completion_naming_an_existing_item_is_ignored(patched, monkeypatch):
     reply = ('[{"item": " sangfor ASV ", "description": "again", "markers": [2]}, '
              '{"item": "Sangfor aSV", "description": "again", "markers": [3]}]')

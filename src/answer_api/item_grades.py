@@ -247,19 +247,45 @@ def _children(lines: list[str], i: int, end: int) -> list[int]:
     return out
 
 
+def _heading_text(line: str) -> str | None:
+    """The heading's bare text -- leading `#`s or bullet, surrounding `**`, a
+    trailing `:` and surrounding whitespace all stripped, lowercased -- or None
+    when `line` is not a heading. Used for an exact-text match (never a substring:
+    a model-written "### Also documented elsewhere" heading must not match
+    "Also documented")."""
+    if _is_bullet_heading(line):
+        m = _ITEM_RE.match(line)
+        assert m is not None
+        text = m.group("item")
+    elif _level(line) is not None:
+        text = line.strip().lstrip("#").strip()
+        bm = re.match(r"^\*\*([^*]+)\*\*\s*:?\s*$", text)
+        if bm:
+            text = bm.group(1)
+    else:
+        return None
+    return text.strip().rstrip(":").strip().lower()
+
+
 def _strict_region(lines: list[str], end: int, strict_from: str | None) -> set[int]:
-    """Line indices in `[0, end)` that fall after a heading whose text contains
-    `strict_from`, up to the next heading (any heading, matching or not): the
-    completeness pass's additions, held to CONFIRMED only (spec 2026-10-17 task 3)."""
+    """Line indices in `[0, end)` that fall after the LAST heading whose text
+    equals `strict_from` exactly (case-insensitively; see `_heading_text`), up to
+    the next heading of any kind or `end`: the completeness pass's own section,
+    held to CONFIRMED only (spec 2026-10-17 task 3). A heading the synthesis wrote
+    itself with that exact text, if any, is never the last one -- the pass always
+    appends its own section after it -- so its items are never caught here."""
     if strict_from is None:
         return set()
+    target = strict_from.strip().lower()
+    heading_idxs = [i for i in range(end) if _heading_text(lines[i]) == target]
+    if not heading_idxs:
+        return set()
+    last = heading_idxs[-1]
     region: set[int] = set()
-    active = False
-    for i in range(end):
-        if _level(lines[i]) is not None or _is_bullet_heading(lines[i]):
-            active = strict_from in lines[i]
-        elif active:
-            region.add(i)
+    for i in range(last + 1, end):
+        if _heading_text(lines[i]) is not None:
+            break
+        region.add(i)
     return region
 
 
@@ -279,10 +305,11 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
     and one fixed line naming the term is inserted, followed by a blank line,
     immediately before the first graded item line (spec §13.2).
 
-    `strict_from` (default None, which changes nothing): every item line after a
-    heading whose text contains it, and before the limitations heading, must grade
-    CONFIRMED -- a line that would be NEEDS_VALIDATION there becomes DROPPED instead,
-    reason "completion_unconfirmed" (spec 2026-10-17 task 3)."""
+    `strict_from` (default None, which changes nothing): every item line after the
+    LAST heading whose text equals it exactly (`_heading_text`), and before the
+    limitations heading, must grade CONFIRMED -- a line that would be
+    NEEDS_VALIDATION there becomes DROPPED instead, reason "completion_unconfirmed"
+    (spec 2026-10-17 task 3)."""
     lines = raw.split("\n")
     end = find_limits_heading(lines)
     if end is None:
