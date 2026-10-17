@@ -27,6 +27,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
+from graph_extract.ontology import NAMING_ALIASES
+
 logger = logging.getLogger(__name__)
 
 EXTRACT_TEXT_PROMPT_NAME = "extract_nodes.extract_text"
@@ -37,6 +39,17 @@ _STOPWORDS = frozenset(
     {"the", "a", "an", "of", "for", "and", "or", "to", "in", "on", "with", "by"})
 _TOKEN = re.compile(r"[a-z0-9]+")
 _SUFFIXES = ("es", "s", "ed", "ing")
+_B = r"(?<![a-z0-9])"     # word start
+_E = r"(?![a-z0-9])"      # word end
+# What may follow a 3+ character token or stem and still be "the same word":
+# a plural, a past or progressive form, or one doubled/added letter before
+# ed/ing (snapshot -> snapshotting, gap -> gapped). Nothing else: "hyper" does not
+# match "hypervisor", "nas" does not match "nasa".
+_INFLECTION = r"(?:s|es|d|ed|ing|[a-z](?:ed|ing))?"
+
+# Warned once per process: an extraction call reached a guarded graphiti with no
+# grounding context open, i.e. the gate was bypassed (the call is counted either way).
+_unscoped_warned = False
 
 
 @dataclass
@@ -76,37 +89,67 @@ CURRENT_GROUNDING: ContextVar[GroundingContext | None] = ContextVar(
 
 
 def _distinctive_tokens(name: str) -> list[str]:
-    toks = (t for t in _TOKEN.findall(name.lower()) if len(t) >= 2 and t not in _STOPWORDS)
-    return list(dict.fromkeys(toks))
+    return list(dict.fromkeys(_name_tokens(name)))
 
 
-def _stem(token: str) -> str | None:
-    for suf in _SUFFIXES:
-        if token.endswith(suf) and len(token) - len(suf) >= 3:
-            return token[: -len(suf)]
-    return None
+def _name_tokens(name: str) -> tuple[str, ...]:
+    """Every distinctive token in order (duplicates kept) -- the identity rule (b)
+    compares, so "Veeam Backup and Replication" equals "Veeam Backup & Replication"."""
+    return tuple(t for t in _TOKEN.findall(name.lower())
+                 if len(t) >= 2 and t not in _STOPWORDS)
 
 
-def _at_word_start(token: str, text: str) -> bool:
-    return re.search(r"(?<![a-z0-9])" + re.escape(token), text) is not None
+def _stems(token: str) -> list[str]:
+    """The token with one trailing suffix removed, for every suffix that leaves at
+    least 3 characters ("objectives" -> "objectiv", "objective")."""
+    return [token[: -len(suf)] for suf in _SUFFIXES
+            if token.endswith(suf) and len(token) - len(suf) >= 3]
+
+
+def _whole_word(phrase: str, text: str) -> bool:
+    return re.search(_B + re.escape(phrase) + _E, text) is not None
 
 
 def _present(token: str, text: str) -> bool:
-    if _at_word_start(token, text):
-        return True
-    stem = _stem(token)
-    return stem is not None and _at_word_start(stem, text)
+    if len(token) == 2:
+        # whole word or its plural: "vm" matches "vm"/"vms", never "kvm" or "vmware"
+        return re.search(_B + re.escape(token) + "s?" + _E, text) is not None
+    return any(re.search(_B + re.escape(form) + _INFLECTION + _E, text) is not None
+               for form in [token, *_stems(token)])
+
+
+def note_unscoped(stats: GroundingStats) -> None:
+    """Count an extract_text call made with no grounding context, and warn the
+    first time it happens in this process."""
+    global _unscoped_warned
+    stats.unscoped += 1
+    if not _unscoped_warned:
+        _unscoped_warned = True
+        logger.warning("grounding gate bypassed: extraction call without a grounding context")
 
 
 def is_grounded(name: str, text: str, allowed: tuple[str, ...]) -> bool:
-    """True when the text mentions `name` -- verbatim, or by at least ceil(2n/3) of
-    its n distinctive words at word starts (a simple inflection counts) -- or when
-    `name` is the document's product or vendor (the implied subject)."""
+    """True when any of these holds:
+
+    (a) the whole name occurs in the text as a whole word (case-insensitive);
+    (b) the name is the document's product or vendor (the implied subject),
+        compared by distinctive tokens so "and" and "&" spell the same name;
+    (c) at least ceil(2n/3) of its n distinctive words are present as whole words,
+        a simple inflection counting ("air gap" ~ "air-gapped", "VM" ~ "VMs");
+    (d) one of its naming aliases (ontology.NAMING_ALIASES) occurs as a whole word
+        -- the instructions tell the model to write "Kubernetes" for K8s, so a
+        chunk saying only K8s still grounds "Kubernetes".
+    """
     lname = name.strip().lower()
     ltext = text.lower()
-    if lname in ltext:
+    if lname and _whole_word(lname, ltext):
         return True
-    if any(a.strip() and a.strip().lower() == lname for a in allowed):
+    ntoks = _name_tokens(lname)
+    for a in allowed:
+        a = a.strip().lower()
+        if a and (a == lname or (ntoks and _name_tokens(a) == ntoks)):
+            return True
+    if any(_whole_word(alias, ltext) for alias in NAMING_ALIASES.get(lname, ())):
         return True
     toks = _distinctive_tokens(lname)
     if not toks:
@@ -132,8 +175,10 @@ def filter_entities(response: Any, ctx: GroundingContext) -> Any:
     dropped: list[str] = []
     for ent in entities:
         name = ent.get("name") if isinstance(ent, dict) else None
-        # An item without a string name is not ours to judge: keep it.
-        if not isinstance(name, str) or is_grounded(name, ctx.text, ctx.allowed):
+        # An item without a (non-blank) string name is not ours to judge: keep it;
+        # graphiti's validation and its own empty-name filter decide.
+        if (not isinstance(name, str) or not name.strip()
+                or is_grounded(name, ctx.text, ctx.allowed)):
             kept.append(ent)
         else:
             dropped.append(name)

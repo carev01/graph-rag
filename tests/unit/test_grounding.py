@@ -8,10 +8,13 @@ below are the real failure cases of 2026-10-17.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 import pytest
 
+from graph_extract import grounding
+from graph_extract.ontology import EXTRACTION_INSTRUCTIONS, NAMING_ALIASES, NAMING_RULES
 from graph_extract.grounding import (
     CURRENT_GROUNDING,
     EXTRACT_TEXT_PROMPT_NAME,
@@ -19,6 +22,7 @@ from graph_extract.grounding import (
     GroundingStats,
     filter_entities,
     is_grounded,
+    note_unscoped,
 )
 
 # "Access verification for self-hosted connectors" (Veeam / Securiti.ai): a bare
@@ -87,9 +91,9 @@ def test_securiti_connector_list(name, grounded):
     ("Hyper-V", False),
     ("Azure VM", False),
     ("VMware vSphere", False),
-    ("East US", False),       # "us" prefixes "use", "east" is only inside "latest"
+    ("East US", False),       # "use" is not "us", "latest" is not "east"
     ("LRS", False),
-    ("SEC 17a-4", False),     # "sec" prefixes "Security", "17a" is absent: 1 of 2
+    ("SEC 17a-4", False),     # neither "sec" nor "17a" is a whole word here
     ("recovery point", True),
     ("AWS Backup", True),     # named in the text, and the document's product
     ("backup plan", True),
@@ -111,10 +115,42 @@ def test_a_token_must_start_a_word():
     assert not is_grounded("Azure VM", "a kvm host on azure", ())
 
 
-def test_the_verbatim_rule_is_a_plain_substring():
-    """Rule (a) as specified: a whole name found anywhere counts, word boundary or
-    not -- so a very short name rides on a longer word."""
-    assert is_grounded("VM", "a kvm host", ())
+def test_the_verbatim_rule_needs_a_whole_word():
+    """Rule (a) matches whole words only: a short name never rides on a longer word."""
+    assert not is_grounded("VM", "a kvm host", ())
+    assert is_grounded("SQL Server", "Microsoft SQL Server 2019", ())
+
+
+@pytest.mark.parametrize("name, text", [
+    ("VM", "load the kvm module"),
+    ("AD", "load balancing"),
+    ("S3", "the S3x appliance"),
+    ("Hyper-V", "a type-1 hypervisor"),
+    ("US", "use the console"),
+    ("East US", "Use the eastern console"),
+    ("NAS", "NASA archives"),
+    ("Go", "Google Cloud"),
+])
+def test_imprecise_matches_are_dropped(name, text):
+    assert not is_grounded(name, text, ())
+
+
+@pytest.mark.parametrize("name, text", [
+    ("air gap", "keep an air-gapped copy"),
+    ("snapshot", "storage snapshotting is supported"),
+    ("Azure VM", "protect Azure VMs"),
+    ("Linux", "linux-based proxies"),
+    ("Azure Archive tier", "Azure Archive tiering"),
+    ("backup copy job", "create backup copy jobs"),
+    ("recovery point objective", "recovery point objectives"),
+    ("Veeam Agent for Microsoft Windows", "Veeam Agent for Windows"),
+    ("SQL Server", "Microsoft SQL Server 2019"),
+    ("HPE Morpheus VM Essentials", "restore to Morpheus VM Essentials"),
+    ("Sangfor aSV", "Sangfor HCI (aSV)"),
+    ("recovery point objectives", "the recovery point objective"),
+])
+def test_inflected_and_partial_names_are_kept(name, text):
+    assert is_grounded(name, text, ())
 
 
 def test_the_documented_product_or_vendor_is_always_grounded():
@@ -124,17 +160,67 @@ def test_the_documented_product_or_vendor_is_always_grounded():
     assert is_grounded("veeam backup & replication", text, allowed)
     assert is_grounded("VEEAM", text, allowed)
     assert not is_grounded("Veeam Agent for Linux", text, allowed)
+    # compared by distinctive tokens: "and" vs "&" is the same name
+    assert is_grounded("Veeam Backup and Replication", text, allowed)
 
 
 def test_empty_allowed_names_are_ignored():
     assert not is_grounded("Commvault", "Configure the job.", ("", ""))
 
 
-def test_aliases_are_not_resolved():
-    """The instructions say to name "K8s" as Kubernetes; the gate does not know
-    aliases, so such an entity is grounded only by its own words (accepted loss,
-    spec 2.3)."""
-    assert not is_grounded("Kubernetes", "Back up K8s clusters.", ())
+def test_naming_aliases_ground_the_canonical_name():
+    assert is_grounded("Kubernetes", "Back up K8s clusters.", ())
+    assert is_grounded("Proxmox VE", "Proxmox Virtual Environment hosts", ())
+    assert is_grounded("Proxmox Virtual Environment", "a Proxmox VE cluster", ())
+    # whole words only
+    assert not is_grounded("Kubernetes", "the k8sx tool", ())
+
+
+_RULE = re.compile(r"If (?:the text|it) says (.+?), name it (.+?)\.")
+
+
+def _instruction_naming_rules() -> list[tuple[str, str]]:
+    flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
+    return [(said, canonical) for said, canonical in _RULE.findall(flat) if said != canonical]
+
+
+def test_every_instruction_naming_rule_is_in_the_alias_table():
+    rules = _instruction_naming_rules()
+    assert [c for _, c in rules] == [c for c, _, _ in NAMING_RULES]
+    for said, canonical in rules:
+        assert canonical.lower() in NAMING_ALIASES, canonical
+
+
+def test_the_gate_keeps_every_instruction_canonical_name_for_its_alias():
+    """The instructions tell the model to rename; the gate must not then drop the
+    renamed entity because the chunk only has the alias. The two cannot drift."""
+    for said, canonical in _instruction_naming_rules():
+        assert is_grounded(canonical, f"Configure {said} for the job.", ()), (canonical, said)
+        for alias in NAMING_ALIASES[canonical.lower()]:
+            text = f"Configure {alias} for the job."
+            assert is_grounded(canonical, text, ()), (canonical, alias)
+
+
+def test_the_proxmox_pair_is_grounding_only():
+    assert "proxmox" not in EXTRACTION_INSTRUCTIONS.lower()
+
+
+def test_the_instructions_forbid_vendor_expanded_names():
+    flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
+    assert ("Write each entity's name as this chunk's text writes it; do not add a vendor "
+            "prefix, product family or expansion the text does not use (if the text says "
+            "vSphere, name it vSphere).") in flat
+
+
+def test_the_first_unscoped_call_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr(grounding, "_unscoped_warned", False)
+    stats = GroundingStats()
+    with caplog.at_level(logging.WARNING, logger="graph_extract.grounding"):
+        note_unscoped(stats)
+        note_unscoped(stats)
+    assert stats.unscoped == 2
+    msgs = [r.getMessage() for r in caplog.records]
+    assert msgs == ["grounding gate bypassed: extraction call without a grounding context"]
 
 
 def test_a_name_with_no_distinctive_tokens_needs_a_verbatim_match():
@@ -192,8 +278,8 @@ def test_a_malformed_reply_passes_through_unchanged_and_is_counted(reply, caplog
 def test_an_entity_without_a_string_name_is_kept():
     """A failure never reads as absence: graphiti's own validation decides."""
     ctx = _ctx("nothing")
-    reply = {"extracted_entities": [{"entity_type_id": 1}]}
-    assert filter_entities(reply, ctx)["extracted_entities"] == [{"entity_type_id": 1}]
+    reply = {"extracted_entities": [{"entity_type_id": 1}, {"name": " ", "entity_type_id": 1}]}
+    assert filter_entities(reply, ctx)["extracted_entities"] == reply["extracted_entities"]
     assert ctx.stats.dropped == 0
 
 

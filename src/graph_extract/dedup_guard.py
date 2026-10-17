@@ -60,6 +60,7 @@ from graph_extract.grounding import (
     EXTRACT_TEXT_PROMPT_NAME,
     GroundingStats,
     filter_entities,
+    note_unscoped,
 )
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.usage import CURRENT_PROMPT_NAME
@@ -265,7 +266,7 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                 response = await _timed(orig, name, messages, *args, **kwargs)
                 ctx = CURRENT_GROUNDING.get()
                 if ctx is None:
-                    guard.grounding_unscoped.unscoped += 1
+                    note_unscoped(guard.grounding_unscoped)
                     return response
                 return filter_entities(response, ctx)
             if name != DEDUP_PROMPT_NAME:

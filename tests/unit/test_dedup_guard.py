@@ -39,6 +39,7 @@ from graph_extract.dedup_guard import (
     install_dedup_guard,
     parse_candidate_counts,
 )
+from graph_extract import grounding
 from graph_extract.grounding import (
     CURRENT_GROUNDING,
     EXTRACT_TEXT_PROMPT_NAME,
@@ -575,14 +576,17 @@ async def test_grounding_filters_the_text_extraction_reply_inside_a_context():
     assert guard.timings.by_prompt[EXTRACT_TEXT_PROMPT_NAME].calls == 1
 
 
-async def test_grounding_without_a_context_is_a_counted_no_op():
+async def test_grounding_without_a_context_is_a_counted_no_op(monkeypatch, caplog):
+    monkeypatch.setattr(grounding, "_unscoped_warned", False)
     reply = _entities("AWS Backup")
     llm = _ScriptedLLM(reply)
     guard = install_dedup_guard(SimpleNamespace(llm_client=llm), fallback=None,
                                 unscoped=DedupIndexStats())
-    out = await _extract(llm)
+    with caplog.at_level(logging.WARNING, logger="graph_extract.grounding"):
+        out = await _extract(llm)
     assert out is reply
     assert guard.grounding_unscoped.unscoped == 1
+    assert "grounding gate bypassed" in caplog.text
 
 
 @pytest.mark.parametrize("prompt_name", [
