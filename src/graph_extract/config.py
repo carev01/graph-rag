@@ -410,6 +410,10 @@ class ExtractSettings(BaseSettings):
     # answer did not cite; they are appended under "Also documented" and graded like
     # every other line (spec §13.3).
     list_completeness_pass: bool = True
+    # Paid eval run 14: list answers of 15-20k characters with near-duplicate version
+    # lines (spec 2026-10-17 task 2). The list and completeness prompts cap item lines
+    # and merge versions/editions/variants of one thing onto a single line.
+    list_max_items: int = 120
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw

@@ -202,3 +202,4 @@ def test_list_mode_defaults():
     assert s.list_item_floor == 0.4 and s.list_item_unnamed_floor == 0.65
     assert s.list_flag_group_min == 5
     assert s.list_completeness_pass is True
+    assert s.list_max_items == 120
