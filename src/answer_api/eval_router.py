@@ -24,6 +24,7 @@ from answer_api.golden import precision_at_k
 from answer_api.global_search import _REFUSAL as _GLOBAL_REFUSAL
 from answer_api.global_search import _map_client_and_model
 from answer_api.item_coverage import match_items
+from answer_api.item_grades import _markers
 from answer_api.router import _cheap_classify_client
 from answer_api.router_eval import (
     BAG_MARKERS, _parse_attribution, _parse_judge_score, aggregate, bag_share,
@@ -197,6 +198,104 @@ async def _faithfulness_judge(client, model, q, answer, cited_facts) -> int | No
     return None
 
 
+# Spec §13.4 (after paid run 12): run 12's judge returned nothing for three
+# answers citing 110-254 facts -- long enough that the single-call prompt
+# (whole answer + every cited fact) overran the judge's context/reasoning
+# budget. Above either threshold the answer is judged in chunks instead.
+_CHUNK_FACT_THRESHOLD = 60
+_CHUNK_CHAR_THRESHOLD = 6000
+_CHUNK_SIZE = 2500
+_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+
+
+def _split_blocks(text: str) -> list[str]:
+    """Split `text` into atomic blocks at markdown headings (each its own
+    block) and blank-line paragraph boundaries. Every line ends up inside
+    exactly one block, so grouping blocks into chunks later can never split a
+    line in half."""
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if _HEADING_LINE_RE.match(line):
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            blocks.append(line)
+            continue
+        if not line.strip():
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def _chunk_answer(text: str, limit: int = _CHUNK_SIZE) -> list[str]:
+    """Group consecutive blocks (spec §13.4) up to about `limit` characters
+    each. A single block already bigger than `limit` becomes its own
+    oversized chunk rather than being split mid-line."""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for block in _split_blocks(text):
+        blen = len(block)
+        if current and size + blen > limit:
+            chunks.append("\n\n".join(current))
+            current = []
+            size = 0
+        current.append(block)
+        size += blen
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+async def _chunked_faithfulness_judge(
+        client, model, q, answer, citations, texts) -> tuple[int | None, int]:
+    """Faithfulness for a long answer (spec §13.4): split into chunks of
+    consecutive paragraphs/sections and judge each against only the facts its
+    OWN markers cite -- never the whole-answer fact bag, which is what made
+    run 12's 110-254-fact answers unmeasurable in one call. The result is the
+    minimum of the chunks that scored, so "5" still means every claim in the
+    WHOLE answer is supported, not just one chunk's. A chunk whose markers
+    cite no fact with text available is skipped outright: never sent to the
+    judge, never counted. If every chunk is unscoreable the answer is
+    unscored (None), never a fabricated 0 -- the same rule
+    `_faithfulness_judge` itself follows for a single-call answer.
+
+    Returns `(score, chunks_judged)` -- `chunks_judged` is the number of
+    chunks actually sent to the judge (skipped no-fact chunks do not count),
+    recorded as `faith_chunks` on the per-question record.
+    """
+    marker_map = {c["marker"]: c for c in citations}
+    scores: list[int] = []
+    judged = 0
+    for chunk in _chunk_answer(answer):
+        chunk_facts = [texts[marker_map[m]["fact_uuid"]] for m in _markers(chunk, marker_map)
+                       if marker_map[m]["fact_uuid"] in texts]
+        if not chunk_facts:
+            continue
+        judged += 1
+        score = await _faithfulness_judge(client, model, q, chunk, chunk_facts)
+        if score is not None:
+            scores.append(score)
+    return (min(scores) if scores else None), judged
+
+
+async def _judge_faithfulness(
+        client, model, q, answer, citations, facts, texts) -> tuple[int | None, int | None]:
+    """Dispatch to the chunked judge above `_CHUNK_FACT_THRESHOLD` cited facts
+    or `_CHUNK_CHAR_THRESHOLD` characters (spec §13.4); otherwise the original
+    single-call path, unchanged. `faith_chunks` is `None` on the single-call
+    path -- it was never chunked, not "chunked zero times"."""
+    if len(citations) > _CHUNK_FACT_THRESHOLD or len(answer) > _CHUNK_CHAR_THRESHOLD:
+        return await _chunked_faithfulness_judge(client, model, q, answer, citations, texts)
+    return await _faithfulness_judge(client, model, q, answer, facts), None
+
+
 async def judge_attribution(client, model, q, answer, labelled_facts: str) -> int | None:
     """Count claims the ANSWER attributes to a vendor/product not on its cited
     facts' (Vendor · Product) labels (spec §6). Uses the SAME independent
@@ -284,14 +383,15 @@ async def _score_one(clients, q, mode_override, settings, resolver):
         shape=shape)
     ghit = (precision_at_k(env["citations"], q["expected_article_ids"])
             if q["expected_article_ids"] else None)
-    facts = await _cited_fact_texts(driver, settings.group_id,
-                                    [c["fact_uuid"] for c in env["citations"]])
-    faith = await _faithfulness_judge(jc, jm, q["question"], env["answer"], facts)
-    texts = await _cited_fact_texts_by_uuid(driver, settings.group_id,
-                                            [c["fact_uuid"] for c in env["citations"]])
+    fact_uuids = [c["fact_uuid"] for c in env["citations"]]
+    facts = await _cited_fact_texts(driver, settings.group_id, fact_uuids)
+    texts = await _cited_fact_texts_by_uuid(driver, settings.group_id, fact_uuids)
+    faith, faith_chunks = await _judge_faithfulness(
+        jc, jm, q["question"], env["answer"], env["citations"], facts, texts)
     labelled = _labelled_facts(env["citations"], texts)
     misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
-    return env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape)
+    return (env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape),
+            faith_chunks)
 
 
 async def run_eval(clients, questions, settings, resolver) -> dict:
@@ -306,7 +406,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
     for i, q in enumerate(questions, 1):
         started = time.monotonic()
         try:
-            env, ghit, faith, facts, misattributed, facet_cov = await _score_one(
+            env, ghit, faith, facts, misattributed, facet_cov, faith_chunks = await _score_one(
                 clients, q, None, settings, resolver)
             chosen = env["routing"]["chosen"]
             # `cited` and `ranges` are what the faithfulness score is silently
@@ -356,6 +456,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
                          "scoped": bool(scope_d.get("vendors") or scope_d.get("products")
                                         or scope_d.get("sources")),
                          "grounding_hit": ghit, "faithfulness": faith,
+                         "faith_chunks": faith_chunks,
                          "cited": len(env["citations"]),
                          "ranges": len(_range_markers(env["answer"])),
                          "mps_mean": round(sum(mps) / len(mps), 1) if mps else None,
@@ -379,7 +480,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             if q["intent"] in ("global", "drift"):
                 comp: dict = {}
                 for m in ("local", "global", "drift"):
-                    _e, _g, _f, _facts, _mis, _fc = await _score_one(
+                    _e, _g, _f, _facts, _mis, _fc, _chunks = await _score_one(
                         clients, q, m, settings, resolver)
                     comp[m] = {"grounding_hit": _g, "faithfulness": _f}
                     raw.append({"question": q["question"], "intent": q["intent"],
@@ -390,6 +491,7 @@ async def run_eval(clients, questions, settings, resolver) -> dict:
             logger.warning("eval question failed: %s", q["question"], exc_info=True)
             rec = {"question": q["question"], "intent": q["intent"], "chosen": "error",
                    "routing_hit": False, "grounding_hit": None, "faithfulness": None,
+                   "faith_chunks": None,
                    "cited": None, "ranges": None, "mps_mean": None, "mps_max": None,
                    "bag_share": None, "misattributed": None,
                    "facet_coverage": None, "enumeration_complete": None,

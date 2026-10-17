@@ -131,8 +131,8 @@ async def test_score_one_builds_labelled_facts_from_citation_sources(monkeypatch
 
     q = {"question": "who does X?", "expected_article_ids": []}
     result = await er._score_one((None,) * 11, q, None, settings, resolver)
-    assert len(result) == 6
-    _env, _ghit, _faith, _facts, misattributed, _facet_coverage = result
+    assert len(result) == 7
+    _env, _ghit, _faith, _facts, misattributed, _facet_coverage, _faith_chunks = result
     assert misattributed == 1
     assert captured["labelled_facts"] == (
         "[1] (Veeam · B&R) Veeam fact\n[2] (Rubrik · RSC) Rubrik fact")

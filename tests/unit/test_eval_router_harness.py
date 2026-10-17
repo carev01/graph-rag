@@ -295,3 +295,152 @@ async def test_a_list_answer_with_no_item_lines_renders_no_grade_cell(monkeypatc
     assert (rec["items_graded"], rec["items_flagged"], rec["items_dropped"]) == (0, 0, 0)
     row = next(ln for ln in er.format_report(summary).splitlines() if ln.endswith("| loc |"))
     assert row.endswith("| - | loc |")
+
+
+# ---------------------------------------------------------------------------
+# Chunked faithfulness judge for long answers (spec §13.4, after run 12)
+# ---------------------------------------------------------------------------
+
+async def test_split_blocks_splits_at_headings_and_blank_line_paragraphs():
+    text = ("# Heading\nLine A.\n\nPara two line 1.\nPara two line 2.\n\n"
+            "## Sub\nPara three.")
+    assert er._split_blocks(text) == [
+        "# Heading",
+        "Line A.",
+        "Para two line 1.\nPara two line 2.",
+        "## Sub",
+        "Para three.",
+    ]
+
+
+async def test_chunk_answer_groups_consecutive_blocks_up_to_the_limit():
+    text = "AAAAAAAAAA\n\nBBBBBBBBBB\n\nCCCCCCCCCC"
+    # Each pair of 10-char blocks is 20 chars once joined -- over a 15-char
+    # limit each block is its own chunk, under a 25-char limit the first two
+    # group together.
+    assert er._chunk_answer(text, limit=15) == ["AAAAAAAAAA", "BBBBBBBBBB", "CCCCCCCCCC"]
+    assert er._chunk_answer(text, limit=25) == [
+        "AAAAAAAAAA\n\nBBBBBBBBBB", "CCCCCCCCCC"]
+
+
+async def test_chunked_faithfulness_judge_takes_the_minimum(monkeypatch):
+    citations = [{"marker": 1, "fact_uuid": "f1"}, {"marker": 2, "fact_uuid": "f2"}]
+    texts = {"f1": "fact one", "f2": "fact two"}
+    monkeypatch.setattr(er, "_chunk_answer",
+                         lambda text, limit=er._CHUNK_SIZE: ["First claim [1].", "Second claim [2]."])
+
+    async def fake_judge(client, model, q, answer, cited_facts):
+        return {"fact one": 5, "fact two": 2}[cited_facts[0]]
+    monkeypatch.setattr(er, "_faithfulness_judge", fake_judge)
+    score, judged = await er._chunked_faithfulness_judge(
+        None, None, "q", "whole answer", citations, texts)
+    assert score == 2                           # the minimum of 5 and 2, not their average
+    assert judged == 2
+
+
+async def test_chunked_faithfulness_judge_all_none_gives_none_not_zero(monkeypatch):
+    citations = [{"marker": 1, "fact_uuid": "f1"}, {"marker": 2, "fact_uuid": "f2"}]
+    texts = {"f1": "fact one", "f2": "fact two"}
+    monkeypatch.setattr(er, "_chunk_answer",
+                         lambda text, limit=er._CHUNK_SIZE: ["First claim [1].", "Second claim [2]."])
+
+    async def fake_judge_none(client, model, q, answer, cited_facts):
+        return None
+    monkeypatch.setattr(er, "_faithfulness_judge", fake_judge_none)
+    score, judged = await er._chunked_faithfulness_judge(
+        None, None, "q", "whole answer", citations, texts)
+    assert score is None
+    assert judged == 2                          # both chunks were sent to the judge
+
+
+async def test_chunked_faithfulness_judge_gives_each_chunk_only_its_own_facts(monkeypatch):
+    citations = [{"marker": 1, "fact_uuid": "f1"}, {"marker": 2, "fact_uuid": "f2"}]
+    texts = {"f1": "fact one", "f2": "fact two"}
+    monkeypatch.setattr(er, "_chunk_answer", lambda text, limit=er._CHUNK_SIZE: [
+        "No citation at all in this chunk.", "First claim [1].", "Second claim [2]."])
+    calls: list[tuple] = []
+
+    async def fake_judge(client, model, q, answer, cited_facts):
+        calls.append((answer, list(cited_facts)))
+        return 5
+    monkeypatch.setattr(er, "_faithfulness_judge", fake_judge)
+    score, judged = await er._chunked_faithfulness_judge(
+        None, None, "q", "whole answer", citations, texts)
+    assert judged == 2                          # the no-citation chunk is skipped, never judged
+    assert calls == [("First claim [1].", ["fact one"]), ("Second claim [2].", ["fact two"])]
+    assert score == 5
+
+
+async def test_judge_faithfulness_short_answer_uses_the_single_call_path(monkeypatch):
+    calls: list[list[str]] = []
+
+    async def fake_single(client, model, q, answer, cited_facts):
+        calls.append(cited_facts)
+        return 4
+    monkeypatch.setattr(er, "_faithfulness_judge", fake_single)
+    citations = [{"marker": 1, "fact_uuid": "f1"}]
+    faith, chunks = await er._judge_faithfulness(
+        None, None, "q", "short answer [1].", citations, ["fact one"], {"f1": "fact one"})
+    assert faith == 4
+    assert chunks is None                       # never chunked, not "chunked zero times"
+    assert calls == [["fact one"]]
+
+
+async def test_judge_faithfulness_dispatches_to_chunking_above_either_threshold(monkeypatch):
+    chunked_calls: list[tuple] = []
+
+    async def fake_chunked(client, model, q, answer, citations_arg, texts_arg):
+        chunked_calls.append((answer, citations_arg, texts_arg))
+        return 3, 5
+    monkeypatch.setattr(er, "_chunked_faithfulness_judge", fake_chunked)
+
+    # Over the fact-count threshold (61 citations), short text.
+    many_citations = [{"marker": i, "fact_uuid": f"f{i}"} for i in range(1, 62)]
+    faith, chunks = await er._judge_faithfulness(
+        None, None, "q", "short answer.", many_citations, [], {})
+    assert (faith, chunks) == (3, 5)
+
+    # Over the character threshold, few citations.
+    long_answer = "x" * 6001
+    one_citation = [{"marker": 1, "fact_uuid": "f1"}]
+    faith, chunks = await er._judge_faithfulness(
+        None, None, "q", long_answer, one_citation, ["fact"], {"f1": "fact"})
+    assert (faith, chunks) == (3, 5)
+    assert len(chunked_calls) == 2
+
+
+async def test_run_eval_records_faith_chunks_for_a_long_answer(monkeypatch):
+    """End to end through `_score_one`/`run_eval`: a long answer's per-question
+    record carries `faith_chunks` (the number of chunks judged) and the
+    minimum chunk score, not the single-call score."""
+    para1 = "Para one covers topic A at some length repeatedly. " * 60 + "[1]."
+    para2 = "Para two covers topic B at some length repeatedly. " * 60 + "[2]."
+    long_answer = para1 + "\n\n" + para2
+    # Two real citations plus padding ones (never mentioned in the text) to
+    # cross the fact-count threshold -- mirrors run 12's 110-254-fact answers.
+    citations = (
+        [{"marker": 1, "fact_uuid": "f1",
+          "sources": [{"article_id": "A1", "url": "u", "title": "t"}]},
+         {"marker": 2, "fact_uuid": "f2",
+          "sources": [{"article_id": "A1", "url": "u", "title": "t"}]}]
+        + [{"marker": n, "fact_uuid": f"f{n}",
+            "sources": [{"article_id": "A1", "url": "u", "title": "t"}]}
+           for n in range(3, 62)])
+
+    async def _router(*a, q, mode_override, scope, settings, **kw):
+        env = _env("local", "A1")
+        env["citations"] = citations
+        env["answer"] = long_answer
+        return env
+    monkeypatch.setattr(er.router_mod, "answer_router", _router)
+
+    async def fake_judge(client, model, q, answer, cited_facts):
+        return 2 if "[1]" in answer else 5
+    monkeypatch.setattr(er, "_faithfulness_judge", fake_judge)
+
+    questions = [{"question": "loc", "intent": "local", "expected_modes": ["local"],
+                  "expected_article_ids": ["A1"]}]
+    summary = await er.run_eval((None,) * 11, questions, _S, _RESOLVER)
+    rec = summary["per_question"][0]
+    assert rec["faith_chunks"] == 2
+    assert rec["faithfulness"] == 2             # the minimum of the two chunk scores (2, 5)
