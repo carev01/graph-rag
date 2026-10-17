@@ -31,14 +31,23 @@ spreading are not exercised; none of them touches extraction or the grounding ga
 
 Reported per article: facts written, grounding_calls / grounding_dropped and the
 dropped names (first 20), foreign-unnamed-subject facts (test vs production),
-RestoresTo facts (subject -> target), tokens; and the totals. A foreign-unnamed-subject
+RestoresTo facts (subject -> target), tokens and an estimated $ cost
+(`haiku_extract_ab.RATES` at the article's routed tier). Totals cover only the
+successfully ingested articles; failed, navigation-skipped, token-capped and unrun
+articles are listed in their own section with the reason. A foreign-unnamed-subject
 fact is one whose subject is a structural product name (production's Product nodes)
-that differs from the article's product and is not contained in the supporting
-episode's text (spec section 1).
+that differs from the article's product and is not contained in a supporting live
+episode's text (spec section 1); superseded and removed episodes are ignored.
 
-Exit status: 1 with "gate never fired" when no extraction reply was filtered, or the
-gate dropped nothing on every article production got wrong (or none was wrong); 2 when
-the gate fired but an article failed. The report is written either way.
+Spend guards: `--token-cap` (default 1.5M LLM tokens) is checked before every
+episode's extraction, so the overshoot is at most one episode; and the run stops at
+once, exit 1 "gate never fired", when an article extracted episodes while no
+extraction reply went through the grounding gate.
+
+Exit status: 1 with "gate never fired" on that early stop, when no extraction reply was
+filtered, or when the gate dropped nothing on every successfully ingested article
+production got wrong (or none was wrong); 2 when the gate fired but an article failed
+or the token cap stopped the sample. The report is written in every case.
 """
 from __future__ import annotations
 
@@ -51,6 +60,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +69,10 @@ from testcontainers.neo4j import Neo4jContainer
 
 from graph_extract.cli import _build_ingest_driver
 from graph_extract.config import get_extract_settings
-from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally
+from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally, get_tally
+
+sys.path.insert(0, str(Path(__file__).parent))
+from haiku_extract_ab import RATES, article_cost  # noqa: E402
 
 logger = logging.getLogger("extraction_proof")
 
@@ -78,7 +91,7 @@ PRODUCT_NAMES_QUERY = (
     "RETURN collect(DISTINCT toLower(p.name)) AS names")
 
 # Spec section 1: a fact whose subject is a structural product name, supported by a
-# live episode of an article of a DIFFERENT product whose text does not name it.
+# live (not superseded, not removed) episode of an article of a DIFFERENT product whose text does not name it.
 # $example splits the sample: subject among $example_subjects (true) or not (false).
 AFFECTED_ARTICLES_QUERY = (
     "MATCH (s:Entity)-[f:RELATES_TO]->(:Entity) "
@@ -88,6 +101,7 @@ AFFECTED_ARTICLES_QUERY = (
     "MATCH (e:Episodic {uuid: epu})<-[he:HAS_EPISODE]-(a:Article)"
     "<-[:HAS_ARTICLE]-(:Source)<-[:HAS_SOURCE]-(p:Product) "
     "WHERE p.id IS NOT NULL AND coalesce(he.superseded, false) = false "
+    "AND coalesce(e.removed, false) = false "
     "AND NOT a.id IN $exclude "
     "AND toLower(p.name) <> toLower(s.name) "
     "AND NOT toLower(coalesce(e.content, '')) CONTAINS toLower(s.name) "
@@ -98,7 +112,7 @@ AFFECTED_ARTICLES_QUERY = (
 # against production AND the container with the same $product_names (production's).
 ARTICLE_FACTS_QUERY = (
     "MATCH (a:Article {id: $a})-[he:HAS_EPISODE]->(e:Episodic) "
-    "WHERE coalesce(he.superseded, false) = false "
+    "WHERE coalesce(he.superseded, false) = false AND coalesce(e.removed, false) = false "
     "MATCH (e)-[:MENTIONS]->(s:Entity)-[f:RELATES_TO]->(t:Entity) "
     "WHERE e.uuid IN f.episodes "
     "OPTIONAL MATCH (p:Product)-[:HAS_SOURCE]->(:Source)-[:HAS_ARTICLE]->(a) "
@@ -300,6 +314,13 @@ def ingest_write_drivers(ingest, graphiti, ingest_neo4j) -> dict[str, Any]:
 
 # --- outcome, verdict, report ------------------------------------------------------------
 
+# Why an article is out of the totals (`ArticleOutcome.excluded`). Errors are their own
+# field (`error`) and exclude the article too.
+NAVIGATION_SKIP = "navigation page, skipped"
+TOKEN_CAP_SKIP = "token cap reached"
+GATE_ABORT_SKIP = "not run: ingest stopped because the gate never fired"
+
+
 @dataclass
 class ArticleOutcome:
     article_id: str
@@ -320,20 +341,50 @@ class ArticleOutcome:
     episodes_added: int = 0
     tier: str = ""
     prompt_tokens: int = 0
+    cached_tokens: int = 0
     completion_tokens: int = 0
+    cost: float = 0.0                # estimated $, haiku_extract_ab.RATES at `tier`
     note: str = ""
+    excluded: str = ""               # NAVIGATION_SKIP / TOKEN_CAP_SKIP... / GATE_ABORT_SKIP
     error: str | None = None
 
 
-def gate_verdict(outcomes: list[ArticleOutcome]) -> str | None:
+def exclusion(o: ArticleOutcome) -> str:
+    """Why `o` is out of the totals; "" when it was ingested successfully."""
+    return f"error: {o.error}" if o.error else o.excluded
+
+
+def included(outcomes: list[ArticleOutcome]) -> list[ArticleOutcome]:
+    return [o for o in outcomes if not exclusion(o)]
+
+
+def estimate_cost(tier: str, prompt: int, cached: int, completion: int) -> float:
+    """haiku_extract_ab's per-tier rates (cached input at the cached rate). An article
+    that failed before routing is priced at the strong tier, the dearer one."""
+    return article_cost(tier if tier in RATES else "strong", prompt, cached, completion)
+
+
+def engagement_abort(o: ArticleOutcome) -> str | None:
+    """Episodes were extracted but no extraction reply reached the gate: the variable
+    under test is not engaged, so spending on the rest of the sample proves nothing."""
+    if o.episodes_added > 0 and o.grounding_calls == 0:
+        return (f"gate never fired: article {o.article_id} added {o.episodes_added} "
+                "episode(s) with grounding_calls == 0; stopped before ingesting the rest")
+    return None
+
+
+def gate_verdict(outcomes: list[ArticleOutcome], abort: str | None = None) -> str | None:
     """None when the gate demonstrably fired; otherwise the refusal."""
+    if abort is not None:
+        return abort
     if sum(o.grounding_calls for o in outcomes) == 0:
         return ("gate never fired: grounding_calls == 0 on every article (no extraction "
                 "reply went through the grounding gate)")
-    wrong = [o for o in outcomes if o.prod_foreign > 0]
+    wrong = [o for o in included(outcomes) if o.prod_foreign > 0]
     if not wrong:
-        return ("gate never fired: no article in the sample has a foreign-unnamed-subject "
-                "fact in production, so nothing shows the gate dropping one")
+        return ("gate never fired: no successfully ingested article in the sample has a "
+                "foreign-unnamed-subject fact in production, so nothing shows the gate "
+                "dropping one")
     if all(o.grounding_calls == 0 or o.grounding_dropped == 0 for o in wrong):
         return ("gate never fired: grounding_dropped == 0 on every article production got "
                 "wrong (" + ", ".join(o.article_id for o in wrong) + ")")
@@ -348,13 +399,16 @@ def _pct(before: int, after: int) -> str:
     return f"{(after - before) / before * 100:+.1f}%" if before else "n/a"
 
 
-def render_report(outcomes: list[ArticleOutcome], *, meta: dict) -> str:
-    verdict = gate_verdict(outcomes)
-    wrong = [o for o in outcomes if o.prod_foreign > 0]
-    right = [o for o in outcomes if o.prod_foreign == 0 and o.error is None]
+def render_report(outcomes: list[ArticleOutcome], *, meta: dict,
+                  abort: str | None = None) -> str:
+    verdict = gate_verdict(outcomes, abort)
+    ok = included(outcomes)
+    out = [o for o in outcomes if exclusion(o)]
+    wrong = [o for o in ok if o.prod_foreign > 0]
+    right = [o for o in ok if o.prod_foreign == 0]
     fired = sum(1 for o in wrong if o.grounding_dropped > 0)
-    prod_foreign = sum(o.prod_foreign for o in outcomes)
-    test_foreign = sum(o.test_foreign for o in outcomes)
+    prod_foreign = sum(o.prod_foreign for o in ok)
+    test_foreign = sum(o.test_foreign for o in ok)
     reduction = (f"reduction {(1 - test_foreign / prod_foreign) * 100:.1f}%"
                  if prod_foreign else "reduction n/a")
     right_prod = sum(o.prod_facts for o in right)
@@ -368,38 +422,49 @@ def render_report(outcomes: list[ArticleOutcome], *, meta: dict) -> str:
         + ", ".join(f"{g} {n}" for g, n in sorted(groups.items())) + ")",
         "- Gate verdict: " + (verdict or f"fired (dropped entities on {fired} of "
                                           f"{len(wrong)} articles production got wrong)"),
-        f"- Failed articles: {sum(1 for o in outcomes if o.error)}", "",
-        "## Totals", "",
+        f"- Failed articles: {sum(1 for o in outcomes if o.error)}; excluded from totals: "
+        f"{len(out)}", "",
+        f"## Totals (over {len(ok)} of {len(outcomes)} articles: the successfully ingested "
+        "ones)", "",
         "| | production | test | |", "|---|---|---|---|",
-        f"| facts | {sum(o.prod_facts for o in outcomes)} | "
-        f"{sum(o.test_facts for o in outcomes)} | |",
+        f"| facts | {sum(o.prod_facts for o in ok)} | {sum(o.test_facts for o in ok)} | |",
         f"| foreign-unnamed-subject facts | {prod_foreign} | {test_foreign} | {reduction} |",
         f"| facts on articles production got right | {right_prod} | {right_test} | "
         f"change {_pct(right_prod, right_test)} |", "",
-        f"grounding_calls={sum(o.grounding_calls for o in outcomes)} "
-        f"grounding_dropped={sum(o.grounding_dropped for o in outcomes)} "
-        f"episodes_added={sum(o.episodes_added for o in outcomes)} "
+        f"included articles={len(ok)} "
+        f"grounding_calls={sum(o.grounding_calls for o in ok)} "
+        f"grounding_dropped={sum(o.grounding_dropped for o in ok)} "
+        f"episodes_added={sum(o.episodes_added for o in ok)}", "",
+        f"Spend (every article run, included or not): "
         f"prompt_tokens={sum(o.prompt_tokens for o in outcomes)} "
-        f"completion_tokens={sum(o.completion_tokens for o in outcomes)}", "",
-        "## Per article", "",
+        f"cached_tokens={sum(o.cached_tokens for o in outcomes)} "
+        f"completion_tokens={sum(o.completion_tokens for o in outcomes)} "
+        f"estimated cost ${sum(o.cost for o in outcomes):.3f} (haiku_extract_ab.RATES at "
+        "each article's routed tier; an estimate)", "",
+        "## Excluded from totals", "",
+    ]
+    lines += [f"- `{o.article_id}` {o.title}: {exclusion(o)}" for o in out] or ["- none"]
+    lines += [
+        "", "## Per article", "",
         "| article | title | group | product | facts prod -> test | foreign prod -> test "
-        "| grounding calls / dropped | RestoresTo | tier | status |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| grounding calls / dropped | RestoresTo | tier | est. $ | status |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for o in outcomes:
-        status = f"ERROR: {o.error}" if o.error else (o.note or "ok")
+        status = exclusion(o) or o.note or "ok"
         lines.append(
             f"| `{o.article_id}` | {_cell(o.title)} | {o.group} | {_cell(o.product)} | "
             f"{o.prod_facts} -> {o.test_facts} | {o.prod_foreign} -> {o.test_foreign} | "
             f"{o.grounding_calls} / {o.grounding_dropped} | {len(o.restores)} | "
-            f"{o.tier or '-'} | {_cell(status)} |")
+            f"{o.tier or '-'} | {o.cost:.4f} | {_cell(status)} |")
     lines += ["", "## Details", ""]
     for o in outcomes:
         lines += [f"### {o.title} (`{o.article_id}`)", "",
                   f"- {o.vendor} / {o.product}; {o.group}; episodes_added={o.episodes_added}; "
-                  f"tokens {o.prompt_tokens} in / {o.completion_tokens} out"]
-        if o.error:
-            lines.append(f"- error: {o.error}")
+                  f"tokens {o.prompt_tokens} in ({o.cached_tokens} cached) / "
+                  f"{o.completion_tokens} out; est. ${o.cost:.4f}"]
+        if exclusion(o):
+            lines.append(f"- excluded from totals: {exclusion(o)}")
         shown = o.dropped_names[:DROPPED_NAMES_SHOWN]
         lines.append(f"- dropped (first {DROPPED_NAMES_SHOWN} of {o.grounding_dropped}): "
                      + (", ".join(shown) if shown else "none"))
@@ -414,20 +479,107 @@ def render_report(outcomes: list[ArticleOutcome], *, meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def finish(outcomes: list[ArticleOutcome], out: Path, *, meta: dict) -> int:
-    """Write the report, then the exit status: 1 gate never fired, 2 failures, else 0."""
+def finish(outcomes: list[ArticleOutcome], out: Path, *, meta: dict,
+           abort: str | None = None) -> int:
+    """Write the report, then the exit status: 1 gate never fired, 2 failures or a
+    token-cap stop (the sample is incomplete), else 0."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_report(outcomes, meta=meta))
+    out.write_text(render_report(outcomes, meta=meta, abort=abort))
     print(f"report written to {out}")
-    verdict = gate_verdict(outcomes)
+    verdict = gate_verdict(outcomes, abort)
     if verdict is not None:
         print(verdict, file=sys.stderr)
         return 1
     failed = [o.article_id for o in outcomes if o.error]
+    capped = [o.article_id for o in outcomes if o.excluded.startswith(TOKEN_CAP_SKIP)]
     if failed:
         print(f"{len(failed)} article(s) failed: {', '.join(failed)}", file=sys.stderr)
-        return 2
-    return 0
+    if capped:
+        print(f"{len(capped)} article(s) not completed (token cap): {', '.join(capped)}",
+              file=sys.stderr)
+    return 2 if failed or capped else 0
+
+
+# --- the ingest loop ----------------------------------------------------------------------
+
+class TokenCapReached(RuntimeError):
+    """The run's LLM token budget is spent; raised before the next episode's extraction."""
+
+
+def install_episode_token_cap(ingest, cap: int, spent: Callable[[], int]) -> None:
+    """Stop before any episode's extraction once `cap` tokens are spent.
+
+    IngestDriver asks its provenance gate (`already_ingested`) once per episode, right
+    before that episode's `add_text_episode`. Wrapping that one method on THIS driver's
+    Provenance instance is the cheapest per-episode hook: nothing else in the ingest
+    path changes. The overshoot is at most the one episode in flight (~20-35k tokens)."""
+    prov = ingest._prov
+    orig = prov.already_ingested
+
+    async def already_ingested(*args, **kwargs):
+        used = spent()
+        if used >= cap:
+            raise TokenCapReached(f"{used} of {cap} tokens spent")
+        return await orig(*args, **kwargs)
+
+    prov.already_ingested = already_ingested
+
+
+def _tokens() -> int:
+    t = get_tally()
+    return t.prompt_tokens + t.completion_tokens
+
+
+async def ingest_sample(ingest, graph: ThrowawayGraph, outcomes: list[ArticleOutcome],
+                        product_names: list[str], *, token_cap: int,
+                        spent: Callable[[], int]) -> str | None:
+    """Ingest every not-yet-failed article in order and read back its facts. Returns
+    the engagement-abort message when the gate was not engaged (the rest of the sample
+    is then left unrun), else None."""
+    abort: str | None = None
+    for n, o in enumerate(outcomes, 1):
+        if o.error:
+            continue
+        if abort is not None:
+            o.excluded = GATE_ABORT_SKIP
+            continue
+        if spent() >= token_cap:
+            o.excluded = f"{TOKEN_CAP_SKIP} before this article ({spent()} of {token_cap})"
+            continue
+        tally = UsageTally()
+        tok = CURRENT_USAGE_TALLY.set(tally)
+        try:
+            res = await ingest.ingest_article(o.article_id)
+            o.episodes_added, o.tier = res.episodes_added, res.tier
+            o.grounding_calls = res.grounding.calls
+            o.grounding_dropped = res.grounding.dropped
+            o.dropped_names = list(res.grounding.dropped_names)
+            if res.skipped_navigation:
+                o.excluded = NAVIGATION_SKIP
+            elif res.grounding.parse_failures:
+                o.note = f"grounding parse failures={res.grounding.parse_failures}"
+            facts = summarise_facts(await graph.facts(o.article_id, product_names))
+            o.test_facts, o.test_foreign = facts.total, len(facts.foreign)
+            o.test_foreign_facts, o.restores = facts.foreign, facts.restores
+        except TokenCapReached as e:
+            o.excluded = f"{TOKEN_CAP_SKIP} mid-article ({e}); partially ingested"
+        except Exception as e:          # recorded and reported, never skipped
+            logger.exception("article %s failed", o.article_id)
+            o.error = f"{type(e).__name__}: {e}"
+        finally:
+            CURRENT_USAGE_TALLY.reset(tok)
+        o.prompt_tokens, o.cached_tokens = tally.prompt_tokens, tally.cached_tokens
+        o.completion_tokens = tally.completion_tokens
+        o.cost = estimate_cost(o.tier, o.prompt_tokens, o.cached_tokens, o.completion_tokens)
+        abort = engagement_abort(o)
+        print(f"[{n}/{len(outcomes)}] {o.article_id} facts {o.prod_facts}->{o.test_facts} "
+              f"foreign {o.prod_foreign}->{o.test_foreign} grounding calls="
+              f"{o.grounding_calls} dropped={o.grounding_dropped} restores={len(o.restores)} "
+              f"est ${o.cost:.4f} tokens={spent()}"
+              + (f" EXCLUDED {exclusion(o)}" if exclusion(o) else ""), flush=True)
+        if abort is not None:
+            print(abort, file=sys.stderr, flush=True)
+    return abort
 
 
 # --- the run ------------------------------------------------------------------------------
@@ -488,6 +640,7 @@ async def run(args) -> int:
         await prod_read_driver.close()
 
     # --- the throwaway graph: every write ---------------------------------------------
+    abort: str | None = None
     with Neo4jContainer(NEO4J_TEST_IMAGE) as neo:
         container_uri = neo.get_connection_url()
         test_settings = settings.model_copy(update={
@@ -511,41 +664,14 @@ async def run(args) -> int:
                 for o in outcomes:
                     for chain in chains[o.article_id]:
                         await graph.copy_chain(chain)
-                spent = 0
-                for n, o in enumerate(outcomes, 1):
-                    if o.error:
-                        continue
-                    if spent >= args.token_cap:
-                        o.error = f"skipped: token cap {args.token_cap} reached"
-                        continue
-                    tally = UsageTally()
-                    tok = CURRENT_USAGE_TALLY.set(tally)
-                    try:
-                        res = await ingest.ingest_article(o.article_id)
-                        o.episodes_added, o.tier = res.episodes_added, res.tier
-                        o.grounding_calls = res.grounding.calls
-                        o.grounding_dropped = res.grounding.dropped
-                        o.dropped_names = list(res.grounding.dropped_names)
-                        if res.skipped_navigation:
-                            o.note = "navigation page: skipped"
-                        elif res.grounding.parse_failures:
-                            o.note = f"grounding parse failures={res.grounding.parse_failures}"
-                    except Exception as e:      # recorded and reported, never skipped
-                        logger.exception("article %s failed", o.article_id)
-                        o.error = f"{type(e).__name__}: {e}"
-                    finally:
-                        CURRENT_USAGE_TALLY.reset(tok)
-                    o.prompt_tokens, o.completion_tokens = (tally.prompt_tokens,
-                                                            tally.completion_tokens)
-                    spent += tally.prompt_tokens + tally.completion_tokens
-                    facts = summarise_facts(await graph.facts(o.article_id, product_names))
-                    o.test_facts, o.test_foreign = facts.total, len(facts.foreign)
-                    o.test_foreign_facts, o.restores = facts.foreign, facts.restores
-                    print(f"[{n}/{len(outcomes)}] {o.article_id} facts {o.prod_facts}->"
-                          f"{o.test_facts} foreign {o.prod_foreign}->{o.test_foreign} "
-                          f"grounding calls={o.grounding_calls} dropped={o.grounding_dropped} "
-                          f"restores={len(o.restores)} tokens={spent}"
-                          + (f" ERROR {o.error}" if o.error else ""), flush=True)
+                start = _tokens()
+
+                def spent() -> int:
+                    return _tokens() - start
+
+                install_episode_token_cap(ingest, args.token_cap, spent)
+                abort = await ingest_sample(ingest, graph, outcomes, product_names,
+                                            token_cap=args.token_cap, spent=spent)
             finally:
                 await ingest_neo4j.close()
                 await docext.aclose()
@@ -554,20 +680,25 @@ async def run(args) -> int:
                     await ingest._cheap.graphiti.close()
         finally:
             await test_write_driver.close()
-    return finish(outcomes, Path(args.out),
+    return finish(outcomes, Path(args.out), abort=abort,
                   meta={"started": started, "commit": _commit(), "image": NEO4J_TEST_IMAGE})
 
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     p.add_argument("--articles", default="", help="comma-separated article ids")
     p.add_argument("--title", action="append", help="an exact article title (repeatable)")
     p.add_argument("--sample-affected", type=int, default=0,
                    help="add N affected articles (half example-product subjects)")
-    p.add_argument("--token-cap", type=int, default=4_000_000,
-                   help="stop ingesting once this many LLM tokens are spent")
+    p.add_argument("--token-cap", type=int, default=1_500_000,
+                   help="LLM token budget for the ingest, checked before every episode's "
+                        "extraction; the overshoot is at most one episode (~20-35k tokens)")
     p.add_argument("--out", required=True, help="markdown report path")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s "
                         "%(message)s")
     for noisy in ("neo4j", "httpx", "httpcore", "openai", "testcontainers"):

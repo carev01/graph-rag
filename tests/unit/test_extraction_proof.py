@@ -8,6 +8,9 @@ from types import SimpleNamespace
 import pytest
 from neo4j import RoutingControl
 
+from graph_extract import usage
+from graph_extract.grounding import GroundingStats
+
 _ROOT = Path(__file__).parents[2]
 _spec = importlib.util.spec_from_file_location(
     "extraction_proof", _ROOT / "scripts" / "extraction_proof.py")
@@ -257,3 +260,195 @@ def test_report_shows_errors_and_the_refusal():
     md = proof.render_report(rows, meta={})
     assert "RuntimeError: boom" in md
     assert "Gate verdict: gate never fired" in md
+
+
+# --- fix round 1: totals over ingested articles, early abort, cost, token cap -------
+
+def test_totals_cover_successfully_ingested_articles_only():
+    rows = [
+        _outcome("ok1", prod_facts=10, test_facts=9, prod_foreign=4, test_foreign=0,
+                 grounding_calls=2, grounding_dropped=3),
+        _outcome("err", prod_facts=50, prod_foreign=40, error="RuntimeError: boom"),
+        _outcome("nav", prod_facts=7, prod_foreign=7, excluded=proof.NAVIGATION_SKIP),
+        _outcome("cap", prod_facts=5, prod_foreign=5, test_facts=1,
+                 excluded=f"{proof.TOKEN_CAP_SKIP} before this article (9 of 1)"),
+    ]
+    md = proof.render_report(rows, meta={})
+    assert "## Totals (over 1 of 4 articles: the successfully ingested ones)" in md
+    assert "| facts | 10 | 9 | |" in md
+    assert "| foreign-unnamed-subject facts | 4 | 0 | reduction 100.0% |" in md
+    assert "included articles=1 " in md
+    excluded = md.split("## Excluded from totals")[1].split("## Per article")[0]
+    assert "`err` T err: error: RuntimeError: boom" in excluded
+    assert f"`nav` T nav: {proof.NAVIGATION_SKIP}" in excluded
+    assert "`cap` T cap: token cap reached" in excluded
+    assert "`ok1`" not in excluded
+
+
+def test_excluded_wrong_articles_do_not_satisfy_the_gate():
+    rows = [_outcome("nav", prod_foreign=5, grounding_calls=1, grounding_dropped=2,
+                     excluded=proof.NAVIGATION_SKIP)]
+    assert proof.gate_verdict(rows).startswith("gate never fired")
+
+
+def test_report_lists_no_exclusions_as_none():
+    md = proof.render_report([_outcome(prod_foreign=1, grounding_calls=1,
+                                       grounding_dropped=1)], meta={})
+    assert md.split("## Excluded from totals")[1].split("## Per article")[0].strip() == "- none"
+
+
+class FakeIngest:
+    """ingest_article answers from a script: (result, prompt, cached, completion) or an
+    exception; usage is recorded the way instrument() does, so tallies move."""
+
+    def __init__(self, script):
+        self.script = script
+        self.called = []
+        self._prov = SimpleNamespace()
+
+    async def ingest_article(self, article_id):
+        self.called.append(article_id)
+        entry = self.script[article_id]
+        if isinstance(entry, BaseException):
+            raise entry
+        res, prompt, cached, completion = entry
+        usage.record("llm", prompt=prompt, completion=completion, cached=cached)
+        return res
+
+
+class FakeGraph:
+    def __init__(self, facts=None, fail=()):
+        self._facts = facts or {}
+        self._fail = set(fail)
+
+    async def facts(self, article_id, product_names):
+        if article_id in self._fail:
+            raise RuntimeError("read failed")
+        return self._facts.get(article_id, [])
+
+
+def _res(episodes=1, calls=1, dropped=0, tier="cheap", navigation=False):
+    return SimpleNamespace(episodes_added=episodes, tier=tier, skipped_navigation=navigation,
+                           grounding=GroundingStats(calls=calls, dropped=dropped,
+                                                    dropped_names=["x"] * dropped))
+
+
+def _never_spent():
+    return 0
+
+
+async def test_ingest_sample_stops_when_episodes_were_extracted_without_the_gate(
+        tmp_path, capsys):
+    ingest = FakeIngest({"a1": (_res(episodes=2, calls=0), 100, 0, 10),
+                         "a2": (_res(), 100, 0, 10)})
+    rows = [_outcome("a1", prod_foreign=3), _outcome("a2", prod_foreign=3)]
+    abort = await proof.ingest_sample(ingest, FakeGraph(), rows, ["x"], token_cap=10**9,
+                                      spent=_never_spent)
+    assert abort.startswith("gate never fired") and "a1" in abort
+    assert ingest.called == ["a1"]                       # nothing spent on a2
+    assert rows[1].excluded == proof.GATE_ABORT_SKIP
+    out = tmp_path / "r.md"
+    assert proof.finish(rows, out, meta={}, abort=abort) == 1
+    assert "gate never fired" in capsys.readouterr().err
+    assert abort in out.read_text()
+
+
+async def test_ingest_sample_does_not_abort_on_an_article_with_no_episodes():
+    ingest = FakeIngest({"nav": (_res(episodes=0, calls=0, navigation=True), 0, 0, 0),
+                         "a2": (_res(calls=1, dropped=1), 100, 0, 10)})
+    rows = [_outcome("nav"), _outcome("a2", prod_foreign=2)]
+    abort = await proof.ingest_sample(ingest, FakeGraph(), rows, ["x"], token_cap=10**9,
+                                      spent=_never_spent)
+    assert abort is None and ingest.called == ["nav", "a2"]
+    assert rows[0].excluded == proof.NAVIGATION_SKIP
+    assert proof.included(rows) == [rows[1]]
+
+
+async def test_ingest_sample_records_a_failed_fact_read_and_carries_on(tmp_path):
+    ingest = FakeIngest({"a1": (_res(calls=1, dropped=2), 100, 0, 10),
+                         "a2": (_res(calls=1, dropped=1), 100, 0, 10)})
+    rows = [_outcome("a1", prod_foreign=2), _outcome("a2", prod_foreign=2)]
+    facts = {"a2": [{"uuid": "f", "subject": "S", "target": "T", "relation": "RestoresTo",
+                     "fact": "f", "foreign_unnamed": False}]}
+    await proof.ingest_sample(ingest, FakeGraph(facts, fail={"a1"}), rows, ["x"],
+                              token_cap=10**9, spent=_never_spent)
+    assert rows[0].error == "RuntimeError: read failed"
+    assert rows[1].error is None and rows[1].restores == [("S", "T")]
+    out = tmp_path / "r.md"
+    assert proof.finish(rows, out, meta={}) == 2
+    assert "read failed" in out.read_text()
+
+
+async def test_ingest_sample_estimates_cost_with_cached_tokens():
+    ingest = FakeIngest({"a1": (_res(tier="cheap"), 1_000_000, 500_000, 100_000),
+                         "a2": (_res(tier="strong"), 1_000_000, 0, 0)})
+    rows = [_outcome("a1"), _outcome("a2")]
+    await proof.ingest_sample(ingest, FakeGraph(), rows, ["x"], token_cap=10**9,
+                              spent=_never_spent)
+    a1, a2 = rows
+    assert (a1.prompt_tokens, a1.cached_tokens, a1.completion_tokens) == (
+        1_000_000, 500_000, 100_000)
+    assert a1.cost == pytest.approx(proof.article_cost("cheap", 1_000_000, 500_000, 100_000))
+    assert a1.cost < proof.article_cost("cheap", 1_000_000, 0, 100_000)   # cached is cheaper
+    assert a2.cost == pytest.approx(proof.RATES["strong"][0])
+    md = proof.render_report(rows, meta={})
+    assert f"estimated cost ${a1.cost + a2.cost:.3f}" in md
+    assert "cached_tokens=500000" in md
+
+
+def test_cost_of_an_unrouted_article_is_priced_at_the_strong_tier():
+    assert proof.estimate_cost("", 1_000_000, 0, 0) == pytest.approx(proof.RATES["strong"][0])
+
+
+async def test_episode_token_cap_raises_before_the_next_episode():
+    calls = []
+
+    async def already_ingested(*args, **kwargs):
+        calls.append(args)
+        return False
+
+    ingest = SimpleNamespace(_prov=SimpleNamespace(already_ingested=already_ingested))
+    spent = [0]
+    proof.install_episode_token_cap(ingest, 100, lambda: spent[0])
+    assert await ingest._prov.already_ingested("a", 0, "h") is False
+    spent[0] = 100
+    with pytest.raises(proof.TokenCapReached, match="100 of 100"):
+        await ingest._prov.already_ingested("a", 1, "h")
+    assert calls == [("a", 0, "h")]                      # the capped episode never ran
+
+
+async def test_ingest_sample_token_cap_mid_article_and_before_the_next(tmp_path, capsys):
+    ingest = FakeIngest({"a1": (_res(calls=1, dropped=1), 100, 0, 10),
+                         "a2": proof.TokenCapReached("200 of 150 tokens spent"),
+                         "a3": (_res(), 100, 0, 10)})
+    rows = [_outcome("a1", prod_foreign=1), _outcome("a2"), _outcome("a3")]
+    spent = [0]
+    orig = ingest.ingest_article
+
+    async def ingest_and_spend(article_id):
+        try:
+            return await orig(article_id)
+        finally:
+            spent[0] += 100
+
+    ingest.ingest_article = ingest_and_spend
+    await proof.ingest_sample(ingest, FakeGraph(), rows, ["x"], token_cap=150,
+                              spent=lambda: spent[0])
+    assert ingest.called == ["a1", "a2"]
+    assert rows[1].excluded.startswith(proof.TOKEN_CAP_SKIP + " mid-article")
+    assert rows[2].excluded.startswith(proof.TOKEN_CAP_SKIP + " before this article")
+    assert proof.finish(rows, tmp_path / "r.md", meta={}) == 2
+    assert "token cap" in capsys.readouterr().err
+
+
+def test_token_cap_default_and_help():
+    p = proof.build_parser()
+    args = p.parse_args(["--out", "x.md"])
+    assert args.token_cap == 1_500_000
+    assert "at most one episode" in " ".join(p.format_help().split())
+
+
+def test_removed_and_superseded_episodes_are_filtered_in_both_queries():
+    for q in (proof.AFFECTED_ARTICLES_QUERY, proof.ARTICLE_FACTS_QUERY):
+        assert "coalesce(e.removed, false) = false" in q
+        assert "coalesce(he.superseded, false) = false" in q

@@ -18,8 +18,8 @@ _spec.loader.exec_module(proof)
 
 # Three structural chains; one episode each. Securiti's chunk never names AWS Backup
 # (forced subject), Veeam Data Cloud's never names Cohesity DataProtect (other
-# subject), AWS Backup's own chunk names its subject. a4 is a superseded copy of a1's
-# failure and must not be sampled.
+# subject), AWS Backup's own chunk names its subject. a0 (superseded edge) and a00
+# (removed episode) repeat a1's failure and must be neither sampled nor counted.
 _SEED = """
 CREATE (v1:Vendor {id:'v1', name:'Veeam'}), (v2:Vendor {id:'v2', name:'AWS'}),
        (v3:Vendor {id:'v3', name:'Cohesity'}),
@@ -32,21 +32,24 @@ CREATE (v1:Vendor {id:'v1', name:'Veeam'}), (v2:Vendor {id:'v2', name:'AWS'}),
        (a2:Article {id:'a2', title:'Controls', content_hash:'h2'}),
        (a3:Article {id:'a3', title:'VDC page', content_hash:'h3'}),
        (a4:Article {id:'a0', title:'Old', content_hash:'h0'}),
+       (a5:Article {id:'a00', title:'Removed', content_hash:'h5'}),
        (c1:Chapter {id:'c1', title:'Connectors'}),
        (v1)-[:HAS_PRODUCT]->(p1)-[:HAS_SOURCE]->(s1)-[:HAS_ARTICLE]->(a1),
        (v2)-[:HAS_PRODUCT]->(p2)-[:HAS_SOURCE]->(s2)-[:HAS_ARTICLE]->(a2),
        (v3)-[:HAS_PRODUCT]->(p3),
        (v1)-[:HAS_PRODUCT]->(p4)-[:HAS_SOURCE]->(s4)-[:HAS_ARTICLE]->(a3),
-       (s1)-[:HAS_ARTICLE]->(a4),
+       (s1)-[:HAS_ARTICLE]->(a4), (s1)-[:HAS_ARTICLE]->(a5),
        (a1)-[:IN_CHAPTER]->(c1),
        (e1:Episodic {uuid:'e1', content:'Connectors: Azure Blob Storage, Oracle'}),
        (e2:Episodic {uuid:'e2', content:'AWS Backup: recovery points are encrypted'}),
        (e3:Episodic {uuid:'e3', content:'Restore to Proxmox VE is supported'}),
        (e0:Episodic {uuid:'e0', content:'Connectors'}),
+       (e5:Episodic {uuid:'e5', content:'Connectors', removed:true}),
        (a1)-[:HAS_EPISODE {chunk_index:0}]->(e1),
        (a2)-[:HAS_EPISODE {chunk_index:0}]->(e2),
        (a3)-[:HAS_EPISODE {chunk_index:0}]->(e3),
        (a4)-[:HAS_EPISODE {chunk_index:0, superseded:true}]->(e0),
+       (a5)-[:HAS_EPISODE {chunk_index:0}]->(e5),
        (aws:Entity:Product {uuid:'n1', name:'AWS Backup'}),
        (blob:Entity {uuid:'n2', name:'Azure Blob Storage'}),
        (rp:Entity {uuid:'n3', name:'recovery point'}),
@@ -60,11 +63,12 @@ CREATE (v1:Vendor {id:'v1', name:'Veeam'}), (v2:Vendor {id:'v2', name:'AWS'}),
        (coh)-[:RELATES_TO {uuid:'f3', name:'RestoresTo', fact:'Restore to Proxmox VE',
                            episodes:['e3']}]->(px),
        (aws)-[:RELATES_TO {uuid:'f4', name:'Supports', fact:'AWS Backup supports Oracle',
-                           episodes:['e0']}]->(old),
+                           episodes:['e0', 'e5']}]->(old),
        (e1)-[:MENTIONS]->(aws), (e1)-[:MENTIONS]->(blob),
        (e2)-[:MENTIONS]->(aws), (e2)-[:MENTIONS]->(rp),
        (e3)-[:MENTIONS]->(coh), (e3)-[:MENTIONS]->(px),
-       (e0)-[:MENTIONS]->(aws), (e0)-[:MENTIONS]->(old)
+       (e0)-[:MENTIONS]->(aws), (e0)-[:MENTIONS]->(old),
+       (e5)-[:MENTIONS]->(aws), (e5)-[:MENTIONS]->(old)
 """
 
 
@@ -83,7 +87,7 @@ async def test_product_names_are_structural_and_lower_case(seeded):
 async def test_affected_selection_splits_example_and_other_subjects(seeded):
     names = await proof.read_product_names(seeded)
     picked = await proof.select_affected(seeded, names, 4, exclude=[])
-    # a2 names its own product; a0 is superseded
+    # a2 names its own product; a0's episode is superseded, a00's removed
     assert picked == [("a1", "affected-example"), ("a3", "affected-other")]
     assert await proof.select_affected(seeded, names, 2, exclude=["a1"]) == [
         ("a3", "affected-other")]
@@ -98,6 +102,8 @@ async def test_article_facts_flag_the_foreign_unnamed_subject(seeded):
     a3 = proof.summarise_facts(await proof.read_article_facts(seeded, "a3", names))
     assert a3.restores == [("Cohesity DataProtect", "Proxmox VE")]
     assert len(a3.foreign) == 1
+    for dead in ("a0", "a00"):
+        assert await proof.read_article_facts(seeded, dead, names) == []
 
 
 async def test_chain_copy_round_trips(seeded, extract_neo4j):
