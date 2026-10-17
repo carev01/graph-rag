@@ -410,6 +410,9 @@ class ExtractSettings(BaseSettings):
     # answer did not cite; they are appended under "Also documented" and graded like
     # every other line (spec §13.3).
     list_completeness_pass: bool = True
+    # Paid run 15 (spec 2026-10-17 task 3): the completeness pass once added ~24k
+    # characters of generic, mis-renamed items; cap how many it can append.
+    list_completeness_max_items: int = 15
     # Paid eval run 14: list answers of 15-20k characters with near-duplicate version
     # lines (spec 2026-10-17 task 2). The list and completeness prompts cap item lines
     # and merge versions/editions/variants of one thing onto a single line.

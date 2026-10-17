@@ -22,13 +22,13 @@ def _fact(uuid, text, title=None):
 
 
 def _grade(raw, facts, *, q=Q_AGENT, terms=T_AGENT, scores=None, floor=0.1,
-          unnamed_floor=0.65, scope=None, flag_group_min=5):
+          unnamed_floor=0.65, scope=None, flag_group_min=5, strict_from=None):
     marker_map = {i: f for i, f in enumerate(facts, 1)}
     if scores is None:
         scores = {f["fact_uuid"]: 0.6 for f in facts}
     got = ig.grade_items(raw, marker_map, q=q, terms=terms, scores=scores, floor=floor,
                          unnamed_floor=unnamed_floor, scope=scope,
-                         flag_group_min=flag_group_min)
+                         flag_group_min=flag_group_min, strict_from=strict_from)
     return got.text, got.grades, marker_map
 
 
@@ -501,6 +501,42 @@ def test_an_item_made_only_of_excluded_words_still_needs_its_words_named():
     _, grades, _ = _grade("- **Veeam Backup** — x [1]", [named], scores={"vb": 0.5},
                           floor=0.4, scope=scope)
     assert grades[0].grade == ig.CONFIRMED
+
+
+# --- strict_from: the completeness pass's additions must grade CONFIRMED (task 3) --
+
+def test_a_needs_validation_line_under_the_strict_heading_is_dropped():
+    raw = "### Also documented\n- **HPE Morpheus VM Essentials** — restore to Morpheus [1]"
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS)], strict_from="Also documented")
+    assert grades[0].grade == ig.DROPPED and grades[0].reason == "completion_unconfirmed"
+    assert text == ""
+
+
+def test_a_confirmed_line_under_the_strict_heading_stays():
+    raw = "### Also documented\n- **Sangfor aSV** — restore as a VM [1]"
+    text, grades, _ = _grade(raw, [_fact("sf", SANGFOR)], strict_from="Also documented")
+    assert grades[0].grade == ig.CONFIRMED
+    assert text == raw
+
+
+def test_the_same_needs_validation_line_above_the_heading_stays_flagged():
+    raw = ("- **HPE Morpheus VM Essentials** — restore to Morpheus [1]\n\n"
+           "### Also documented\n- **Sangfor aSV** — restore as a VM [2]")
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS), _fact("sf", SANGFOR)],
+                             strict_from="Also documented")
+    assert [(g.item, g.grade) for g in grades] == [
+        ("HPE Morpheus VM Essentials", ig.NEEDS_VALIDATION),
+        ("Sangfor aSV", ig.CONFIRMED)]
+    assert "- **HPE Morpheus VM Essentials** — restore to Morpheus [1] " in text
+    assert "needs validation: the cited source does not mention Windows" in text
+    assert "- **Sangfor aSV** — restore as a VM [2]" in text
+
+
+def test_strict_from_none_changes_nothing():
+    raw = "### Also documented\n- **HPE Morpheus VM Essentials** — restore to Morpheus [1]"
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS)])
+    assert grades[0].grade == ig.NEEDS_VALIDATION
+    assert "needs validation" in text
 
 
 def test_find_limits_heading_returns_the_first_limitations_heading_line():

@@ -108,6 +108,18 @@ def test_the_list_prompt_formats_the_merge_rule_with_the_configured_cap():
         supported="s", limitations="l", q="q", max_items=37)
 
 
+# --- Completeness pass precision (spec 2026-10-17 task 3) --------------------------
+
+def test_the_completeness_prompt_has_the_naming_rule():
+    assert lm._COMPLETE_NAMING_RULE == (
+        "Name each item exactly as its fact names it; never add the question's subject "
+        "(or any product, platform or operating system the fact does not name) to an "
+        "item's name. Return only items that are themselves an answer to the question, "
+        "not details of how an already-listed item works. ")
+    assert lm._COMPLETE_NAMING_RULE in lm._COMPLETE_PROMPT
+    assert lm._COMPLETE_NAMING_RULE not in lm._LIST_PROMPT
+
+
 class _Client:
     def __init__(self, content=None, exc=None):
         self.content, self.exc, self.prompts = content, exc, []
@@ -1153,6 +1165,9 @@ async def test_a_configured_item_cap_reaches_the_list_prompt_only(patched, monke
 
 async def test_missing_items_are_added_before_the_limitations_and_graded(
         patched, monkeypatch, caplog):
+    # Oracle Linux Virtualization Manager's fact names Windows explicitly (confirmed);
+    # HPE Morpheus VM Essentials' fact does not (would be needs-validation elsewhere),
+    # but under "### Also documented" that grades DROPPED instead (task 3 strict_from).
     reply = ('Sure: [{"item": "Oracle Linux Virtualization Manager", "description": '
              '"restore agent backups as VMs", "markers": [2]}, '
              '{"item": "HPE Morpheus VM Essentials", "description": "restore physical '
@@ -1167,19 +1182,20 @@ async def test_missing_items_are_added_before_the_limitations_and_graded(
     assert "[1] " not in prompt and "[4] " not in prompt
     assert "JSON" in prompt and "URL" in prompt and "15 words" in prompt
     assert "Give at most" not in prompt and lm._MERGE_VARIANTS_RULE in prompt
+    assert lm._COMPLETE_NAMING_RULE in prompt
     lines = [ln.strip() for ln in out["answer"].splitlines()]
     also = lines.index("### Also documented")
     assert lines.index("- **Sangfor aSV** — restore as a VM [1]") < also
     assert lines[also + 1] == ("- **Oracle Linux Virtualization Manager** — restore agent "
                                "backups as VMs [2]")
-    assert lines[also + 2].startswith("- **HPE Morpheus VM Essentials** — restore physical "
-                                      "machines [3] *(needs validation")
+    assert "HPE Morpheus" not in out["answer"]
     assert also < lines.index("**Not supported / limitations**")
     assert [(g["item"], g["grade"]) for g in out["item_grades"]] == [
         ("Sangfor aSV", "confirmed"),
         ("Oracle Linux Virtualization Manager", "confirmed"),
-        ("HPE Morpheus VM Essentials", "needs_validation")]
-    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "olvm", "hpe", "lim"]
+        ("HPE Morpheus VM Essentials", "dropped")]
+    assert out["item_grades"][2]["reason"] == "completion_unconfirmed"
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "olvm", "lim"]
     assert "degraded" not in out
     assert "list completeness pass: 2 uncited facts, 2 items added" in caplog.text
 
@@ -1214,8 +1230,32 @@ async def test_completion_markers_outside_the_uncited_set_are_dropped(patched, m
     also = lines.index("### Also documented")
     assert lines[also + 1] == ("- **Oracle Linux Virtualization Manager** — restore as a "
                                "VM [2]")
-    assert lines[also + 2].startswith("- **Many** — x [3][2]")
+    # "Many" is named by neither cited fact (reason "unnamed" elsewhere), but under
+    # "### Also documented" that grades needs-validation-or-worse items DROPPED (task 3).
+    assert "Many" not in out["answer"]
     assert "Cited Already" not in out["answer"] and "No Description" not in out["answer"]
+
+
+def test_completion_entries_keeps_at_most_max_items_in_reply_order():
+    parsed = [{"item": f"Item {i}", "description": "x", "markers": [i]}
+             for i in range(1, 21)]
+    out = lm._completion_entries(parsed, set(range(1, 21)), [], 15)
+    assert len(out) == 15
+    assert out[0] == "- **Item 1** — x [1]"
+    assert out[-1] == "- **Item 15** — x [15]"
+    assert not any("Item 16" in ln or "Item 20" in ln for ln in out)
+
+
+async def test_the_completeness_cap_limits_items_added_end_to_end(patched, monkeypatch):
+    reply = ('[{"item": "Oracle Linux Virtualization Manager", "description": "x", '
+             '"markers": [2]}, '
+             '{"item": "HPE Morpheus VM Essentials", "description": "x", "markers": [2]}]')
+    out, _ = await _answer_with_completion(patched, monkeypatch, reply,
+                                           list_completeness_max_items=1)
+    lines = [ln.strip() for ln in out["answer"].splitlines() if ln.strip()]
+    also = lines.index("### Also documented")
+    assert lines[also + 1].startswith("- **Oracle Linux Virtualization Manager**")
+    assert "HPE Morpheus" not in out["answer"]
 
 
 @pytest.mark.parametrize("reply", ["not json", '{"item": "x"}', "[{]",

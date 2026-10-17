@@ -13,7 +13,10 @@ plus the source article titles -- with no model involved:
   apply;
 - dropped: neither of the above -- no cited fact at all (reason "no_marker"), or some
   exist but none clears its floor (reason "below_floor"; an unscored fact never
-  clears the unnamed floor).
+  clears the unnamed floor). Under `strict_from` (the completeness pass's own
+  heading, spec 2026-10-17 task 3), a line that would be needs validation there is
+  dropped instead (reason "completion_unconfirmed") -- an addition beyond the list
+  answer's own facts must grade CONFIRMED or go.
 
 A dropped line takes its deeper-indented children (sub-bullets, wrapped lines) with
 it, and each drop is logged with its reason. Words of the scope's vendor/product/
@@ -244,9 +247,26 @@ def _children(lines: list[str], i: int, end: int) -> list[int]:
     return out
 
 
+def _strict_region(lines: list[str], end: int, strict_from: str | None) -> set[int]:
+    """Line indices in `[0, end)` that fall after a heading whose text contains
+    `strict_from`, up to the next heading (any heading, matching or not): the
+    completeness pass's additions, held to CONFIRMED only (spec 2026-10-17 task 3)."""
+    if strict_from is None:
+        return set()
+    region: set[int] = set()
+    active = False
+    for i in range(end):
+        if _level(lines[i]) is not None or _is_bullet_heading(lines[i]):
+            active = strict_from in lines[i]
+        elif active:
+            region.add(i)
+    return region
+
+
 def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[str],
                 scores: dict[str, float | None], floor: float, unnamed_floor: float,
-                scope: Scope | None = None, flag_group_min: int = 5) -> GradedAnswer:
+                scope: Scope | None = None, flag_group_min: int = 5,
+                strict_from: str | None = None) -> GradedAnswer:
     """Grade every `- **<item>** ... [N]` line before the limitations section; return
     the text with dropped lines -- their deeper-indented children, and the headings
     they leave empty -- removed and flagged lines annotated, one grade per graded
@@ -257,13 +277,19 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
     needs-validation items and by at least half the kept (confirmed +
     needs_validation) items, those items' lines get " †" instead of their full note
     and one fixed line naming the term is inserted, followed by a blank line,
-    immediately before the first graded item line (spec §13.2)."""
+    immediately before the first graded item line (spec §13.2).
+
+    `strict_from` (default None, which changes nothing): every item line after a
+    heading whose text contains it, and before the limitations heading, must grade
+    CONFIRMED -- a line that would be NEEDS_VALIDATION there becomes DROPPED instead,
+    reason "completion_unconfirmed" (spec 2026-10-17 task 3)."""
     lines = raw.split("\n")
     end = find_limits_heading(lines)
     if end is None:
         end = len(lines)
     term_stems = {stem(t) for t in terms}
     excluded = scope_words(scope)
+    strict_region = _strict_region(lines, end, strict_from)
     grades: list[ItemGrade] = []
     item_lines: list[int] = []
     removed: set[int] = set()
@@ -281,6 +307,8 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
         g = _grade_line(m.group("item").strip(), _markers(lines[i], marker_map), marker_map,
                         terms=terms, term_stems=term_stems, excluded=excluded, scores=scores,
                         floor=floor, unnamed_floor=unnamed_floor)
+        if i in strict_region and g.grade == NEEDS_VALIDATION:
+            g = ItemGrade(g.item, DROPPED, [], g.markers, "completion_unconfirmed")
         grades.append(g)
         item_lines.append(i)
         if g.grade == DROPPED:
