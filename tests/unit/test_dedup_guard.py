@@ -589,6 +589,21 @@ async def test_grounding_without_a_context_is_a_counted_no_op(monkeypatch, caplo
     assert "grounding gate bypassed" in caplog.text
 
 
+async def test_both_tiers_can_share_one_unscoped_grounding_sink():
+    """The CLI passes one sink to every tier's guard so the worker can report the
+    gate's bypass count (grounding_unscoped) on its batch line."""
+    sink = GroundingStats()
+    strong, cheap = _ScriptedLLM(_entities("x")), _ScriptedLLM(_entities("y"))
+    g1 = install_dedup_guard(SimpleNamespace(llm_client=strong), fallback=None,
+                             unscoped=DedupIndexStats(), grounding_unscoped=sink)
+    g2 = install_dedup_guard(SimpleNamespace(llm_client=cheap), fallback=None,
+                             unscoped=DedupIndexStats(), grounding_unscoped=sink)
+    await _extract(strong)
+    await _extract(cheap)
+    assert g1.grounding_unscoped is sink and g2.grounding_unscoped is sink
+    assert sink.unscoped == 2
+
+
 @pytest.mark.parametrize("prompt_name", [
     "extract_nodes.extract_json", "extract_nodes.extract_message", "extract_edges.edge",
     "dedupe_nodes.nodes",

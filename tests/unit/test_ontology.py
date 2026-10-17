@@ -246,3 +246,21 @@ def test_instructions_extract_the_documented_product_as_an_entity():
     # facts because the implied subject was never extracted as an entity.
     text = " ".join(EXTRACTION_INSTRUCTIONS.split()).lower()
     assert "extract the documented product as an entity in every chunk that states facts about it" in text
+
+
+def test_requirement_docstring_keeps_only_generic_categories():
+    # final-review fix wave: the concrete examples leaked like every other example
+    from graph_extract.ontology import Requirement
+    doc = Requirement.__doc__ or ""
+    for leaked in ("Backup Operator", "TCP 443", "e.g."):
+        assert leaked not in doc
+    for category in ("permission", "minimum version", "open port", "license",
+                     "required role/account"):
+        assert category in doc
+
+
+def test_cheap_tier_salience_defers_to_the_naming_rules():
+    from graph_extract.ontology import CHEAP_TIER_SALIENCE
+    flat = " ".join(CHEAP_TIER_SALIENCE.split())
+    assert "Use the naming rules above and short names, never descriptive phrases" in flat
+    assert "canonical entity names" not in flat

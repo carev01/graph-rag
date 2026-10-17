@@ -140,6 +140,9 @@ class IngestDriver:
         # Set by the CLI to the PromptTimings shared across both tiers' guards, so
         # `ingest` can report where an episode's wall time went (BACKLOG 31).
         self.timings = PromptTimings()
+        # Set by the CLI to the guards' shared sink for extract_text calls made with
+        # no grounding context open (the gate bypassed); the worker reports it.
+        self.grounding_unscoped = GroundingStats()
         # The warm-up barrier `ingest_source` applies (see concurrent_ingest and
         # warmup for the measured rationale). None = no barrier, which is also
         # what `ingest_warmup_articles=0` builds: the fan-out then takes the

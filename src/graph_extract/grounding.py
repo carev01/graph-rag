@@ -15,16 +15,26 @@ The chunk text and the document's product/vendor names arrive through
 `CURRENT_GROUNDING`, which IngestDriver sets around each `add_text_episode`. With no
 context open (probe, compat, pilot scripts), the gate is a no-op counted as unscoped.
 
+Two more corrections ride on the same reply (final-review fix wave, 2026-10-17):
+an entity typed Product that is not the documented product needs its whole name (or
+a naming alias) in the text -- most of its words is not enough, because product names
+share generic words ("Backup", "Azure") that a chunk mentions anyway; and an entity
+named by a known abbreviation of the documented product ("VBR") is renamed to the
+documented product, so one product never becomes two nodes.
+
 Never reads a failure as absence: a reply the gate cannot parse is passed through
-unchanged (and counted), never emptied.
+unchanged (and counted), never emptied. A missing or malformed alias file fails the
+import rather than silently disabling the rename.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from graph_extract.ontology import ENTITY_TYPES, NAMING_ALIASES
@@ -54,6 +64,30 @@ _INFLECTION = r"(?:s|es|d|ed|ing|[a-z](?:ed|ing))?"
 # Computed, not hard-coded; a tripwire test builds graphiti's own context.
 PRODUCT_ENTITY_TYPE_ID = list(ENTITY_TYPES).index("Product") + 1
 
+# answer_api's scope alias table (alias -> one target name or a list of them), read
+# as DATA: graph_extract must not import answer_api code. Both packages ship in the
+# same wheel/image, so the file sits beside this package.
+SCOPE_ALIASES_PATH = Path(__file__).resolve().parent.parent / "answer_api" / "scope_aliases.json"
+
+
+def load_product_aliases(path: Path = SCOPE_ALIASES_PATH) -> dict[str, tuple[str, ...]]:
+    """Lower-cased alias -> the names it stands for. Raises on a missing or
+    malformed file: an empty table would silently turn the rename off."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a JSON object of alias -> target(s)")
+    table: dict[str, tuple[str, ...]] = {}
+    for alias, targets in raw.items():
+        names = [targets] if isinstance(targets, str) else targets
+        if (not isinstance(names, list) or not names
+                or not all(isinstance(n, str) and n.strip() for n in names)):
+            raise ValueError(f"{path}: alias {alias!r} must map to a name or a list of names")
+        table[alias.strip().lower()] = tuple(names)
+    return table
+
+
+PRODUCT_ALIASES: dict[str, tuple[str, ...]] = load_product_aliases()
+
 # Warned once per process: an extraction call reached a guarded graphiti with no
 # grounding context open, i.e. the gate was bypassed (the call is counted either way).
 _unscoped_warned = False
@@ -66,6 +100,7 @@ class GroundingStats:
     dropped: int = 0          # entities removed from those replies
     parse_failures: int = 0   # replies not shaped like ExtractedEntities -> passed through
     injected: int = 0         # documented-product entities supplied by the gate
+    renamed: int = 0          # entities named by an alias of the documented product, folded into it
     unscoped: int = 0         # extract_text calls with no grounding context open
     dropped_names: list[str] = field(default_factory=list)   # first DROPPED_NAMES_CAP
 
@@ -80,6 +115,7 @@ class GroundingStats:
         self.parse_failures += other.parse_failures
         self.unscoped += other.unscoped
         self.injected += other.injected
+        self.renamed += other.renamed
         self._add_names(other.dropped_names)
 
 
@@ -168,7 +204,19 @@ def note_unscoped(stats: GroundingStats) -> None:
         logger.warning("grounding gate bypassed: extraction call without a grounding context")
 
 
-def is_grounded(name: str, text: str, allowed: tuple[str, ...]) -> bool:
+def is_product_alias(name: str, product: str,
+                     aliases: dict[str, tuple[str, ...]] | None = None) -> bool:
+    """True when `name` is, case-insensitively and exactly, an alias the table maps
+    to `product` ("VBR" -> "Veeam Backup & Replication"). Initials count only when
+    the table lists them; nothing is derived. The product's own name is not an alias."""
+    if not product.strip() or same_name(name, product):
+        return False
+    targets = (PRODUCT_ALIASES if aliases is None else aliases).get(name.strip().lower(), ())
+    return any(same_name(t, product) for t in targets)
+
+
+def is_grounded(name: str, text: str, allowed: tuple[str, ...], *,
+                product_typed: bool = False) -> bool:
     """True when any of these holds:
 
     (a) the whole name occurs in the text as a whole word (case-insensitive);
@@ -179,6 +227,11 @@ def is_grounded(name: str, text: str, allowed: tuple[str, ...]) -> bool:
     (d) one of its naming aliases (ontology.NAMING_ALIASES) occurs as a whole word
         -- the instructions tell the model to write "Kubernetes" for K8s, so a
         chunk saying only K8s still grounds "Kubernetes".
+
+    `product_typed` (the entity was typed Product): rule (c) does not apply, so a
+    product other than the documented one needs (a) or (d). Product names are
+    built from generic words -- "AWS Backup" and "Google Cloud Backup" both ride on
+    a connector list naming AWS RDS, Google Cloud Storage and a stray "Backup".
     """
     lname = name.strip().lower()
     ltext = text.lower()
@@ -188,6 +241,8 @@ def is_grounded(name: str, text: str, allowed: tuple[str, ...]) -> bool:
         return True
     if any(_whole_word(alias, ltext) for alias in NAMING_ALIASES.get(lname, ())):
         return True
+    if product_typed:
+        return False
     toks = _distinctive_tokens(lname)
     if not toks:
         return False
@@ -196,9 +251,11 @@ def is_grounded(name: str, text: str, allowed: tuple[str, ...]) -> bool:
 
 
 def filter_entities(response: Any, ctx: GroundingContext) -> Any:
-    """`response` with `extracted_entities` reduced to the grounded ones. A reply
-    not shaped like ExtractedEntities is returned unchanged and counted; graphiti's
-    own `ExtractedEntities(**response)` then decides what it is worth."""
+    """`response` with `extracted_entities` reduced to the grounded ones, an alias
+    of the documented product renamed to it, and the documented product supplied
+    when absent. A reply not shaped like ExtractedEntities is returned unchanged
+    and counted; graphiti's own `ExtractedEntities(**response)` then decides what
+    it is worth."""
     stats = ctx.stats
     entities = response.get("extracted_entities") if isinstance(response, dict) else None
     if not isinstance(entities, list):
@@ -215,10 +272,31 @@ def filter_entities(response: Any, ctx: GroundingContext) -> Any:
         # An item without a (non-blank) string name is not ours to judge: keep it;
         # graphiti's validation and its own empty-name filter decide.
         if (not isinstance(name, str) or not name.strip()
-                or is_grounded(name, ctx.text, ctx.allowed)):
+                or is_grounded(name, ctx.text, ctx.allowed,
+                               product_typed=ent.get("entity_type_id") == PRODUCT_ENTITY_TYPE_ID)):
             kept.append(ent)
         else:
             dropped.append(name)
+    renamed = 0
+    if ctx.product.strip():
+        # "VBR" in a Veeam Backup & Replication chunk is the documented product, not
+        # a second product: rename it (only ever INTO ctx.product). When the product
+        # is already in the reply, the alias entity is folded away instead of
+        # becoming a same-named duplicate.
+        has_product = any(isinstance(ent, dict) and isinstance(ent.get("name"), str)
+                          and same_name(ent["name"], ctx.product) for ent in kept)
+        folded: list[Any] = []
+        for ent in kept:
+            if (isinstance(ent, dict) and isinstance(ent.get("name"), str)
+                    and is_product_alias(ent["name"], ctx.product)):
+                renamed += 1
+                if has_product:
+                    continue
+                ent = {**ent, "name": ctx.product, "entity_type_id": PRODUCT_ENTITY_TYPE_ID}
+                has_product = True
+            folded.append(ent)
+        kept = folded
+        stats.renamed += renamed
     injected = bool(ctx.product.strip()) and not any(
         isinstance(ent, dict) and isinstance(ent.get("name"), str)
         and same_name(ent["name"], ctx.product) for ent in kept)
@@ -228,7 +306,7 @@ def filter_entities(response: Any, ctx: GroundingContext) -> Any:
         # facts to "Source entity not found in nodes"). Supply it deterministically.
         kept.append({"name": ctx.product, "entity_type_id": PRODUCT_ENTITY_TYPE_ID})
         stats.injected += 1
-    if not dropped and not injected:
+    if not dropped and not injected and not renamed:
         return response
     if dropped:
         stats.dropped += len(dropped)

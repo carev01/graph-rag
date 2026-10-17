@@ -216,6 +216,10 @@ async def run_worker_once(
     batch_dedup = DedupIndexStats()
     # Entities the grounding gate removed (extraction-grounding, 2026-10-17).
     batch_grounding = GroundingStats()
+    # extract_text calls that bypassed the gate (no grounding context open) land in
+    # the guards' shared sink, not in any article's stats: report this batch's delta.
+    unscoped_sink = getattr(ingest, "grounding_unscoped", None)
+    unscoped_before = unscoped_sink.unscoped if isinstance(unscoped_sink, GroundingStats) else 0
     # Summed per-job spend: prompt / cached / completion tokens for the batch line.
     batch_tokens = UsageTally()
     basis_counts: Counter[str] = Counter()
@@ -454,12 +458,16 @@ async def run_worker_once(
     # dedup/basis summary and the timing report for the whole batch.
     processed = len(jobs) - len(deferred) - len(not_ours)
     if processed:
+        unscoped = batch_grounding.unscoped + (
+            unscoped_sink.unscoped - unscoped_before
+            if isinstance(unscoped_sink, GroundingStats) else 0)
         logger.info("semantic batch: jobs=%d deferred=%d reference_basis=%s dedup: %s "
-                    "grounding_calls=%d grounding_dropped=%d grounding_injected=%d "
-                    "grounding_parse_failures=%d",
+                    "grounding_calls=%d grounding_unscoped=%d grounding_dropped=%d "
+                    "grounding_injected=%d grounding_renamed=%d grounding_parse_failures=%d",
                     processed, len(deferred), dict(basis_counts), batch_dedup.summary(),
-                    batch_grounding.calls, batch_grounding.dropped,
-                    batch_grounding.injected, batch_grounding.parse_failures)
+                    batch_grounding.calls, unscoped, batch_grounding.dropped,
+                    batch_grounding.injected, batch_grounding.renamed,
+                    batch_grounding.parse_failures)
         # Phase B: per-batch proof the index path engaged; reset so each batch
         # reports its own counts.
         pt = batch_tokens.prompt_tokens

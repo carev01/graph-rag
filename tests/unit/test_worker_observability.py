@@ -13,6 +13,7 @@ import logging
 import pytest
 
 from graph_extract.dedup_guard import DedupIndexStats
+from graph_extract.grounding import GroundingStats
 from graph_extract.ingest_driver import CRAWL_FALLBACK, IngestArticleResult
 from graph_extract.llm_timing import PromptTimings
 from graph_sync.semantic_worker import run_worker_once
@@ -85,7 +86,40 @@ async def test_the_job_and_batch_lines_report_grounding_dropped(caplog):
     assert any("done: article=a1" in m and "grounding_calls=2 grounding_dropped=4 grounding_injected=1" in m
                for m in msgs)
     assert any(m.startswith("semantic batch: jobs=2")
-               and "grounding_calls=7 grounding_dropped=7 grounding_injected=2" in m for m in msgs)
+               and "grounding_calls=7 grounding_unscoped=0 grounding_dropped=7 "
+                   "grounding_injected=2 grounding_renamed=0" in m for m in msgs)
+
+
+class _BypassingIngest(_Ingest):
+    """An ingest whose guards' shared unscoped sink ticks during the batch -- an
+    extract_text call that ran with no grounding context open."""
+
+    def __init__(self, results, *, before: int, per_article: int):
+        super().__init__(results)
+        self.grounding_unscoped = GroundingStats(unscoped=before)
+        self._per_article = per_article
+
+    async def ingest_article(self, article_id):
+        self.grounding_unscoped.unscoped += self._per_article
+        return await super().ingest_article(article_id)
+
+
+async def test_the_batch_line_reports_grounding_unscoped_next_to_calls(caplog):
+    r1 = _result("a1", basis="exact")
+    r1.grounding.calls = 3
+    r1.grounding.unscoped = 1          # an article-scoped count, if one ever lands
+    r1.grounding.renamed = 2
+    r2 = _result("a2", basis="exact")
+    store = _Store([_job(1, "a1"), _job(2, "a2")])
+    # 5 bypasses happened in EARLIER batches: only this batch's delta (2 x 2) counts
+    ingest = _BypassingIngest({"a1": r1, "a2": r2}, before=5, per_article=2)
+    with caplog.at_level(logging.INFO, logger="graph_sync.semantic_worker"):
+        await run_worker_once(store, ingest, **_KW)
+    batch = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("semantic batch: jobs=2")]
+    assert len(batch) == 1
+    assert "grounding_calls=3 grounding_unscoped=5 grounding_dropped=0" in batch[0]
+    assert "grounding_renamed=2" in batch[0]
 
 
 async def test_crawl_fallback_articles_are_called_out_as_untrustworthy(caplog):

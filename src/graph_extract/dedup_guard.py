@@ -216,14 +216,20 @@ class DedupIndexGuard:
 def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                         unscoped: DedupIndexStats,
                         timings: PromptTimings | None = None,
-                        suppress_contradictions: bool = False) -> DedupIndexGuard:
+                        suppress_contradictions: bool = False,
+                        grounding_unscoped: GroundingStats | None = None) -> DedupIndexGuard:
     """Wrap `graphiti.llm_client.generate_response` in place (the same instance-
     attribute pattern as the chat.completions wrappers in graphiti_client.py).
-    `graphiti` only needs an `llm_client` attribute."""
+    `graphiti` only needs an `llm_client` attribute.
+
+    `grounding_unscoped` is the sink for extract_text calls made with no grounding
+    context open; pass one object to every tier's guard so a caller (the worker's
+    batch line) can report the bypass count."""
     client = graphiti.llm_client
     orig = client.generate_response
     guard = DedupIndexGuard(fallback=fallback, unscoped=unscoped, raw=_Raw(orig),
-                            timings=timings or PromptTimings())
+                            timings=timings or PromptTimings(),
+                            grounding_unscoped=grounding_unscoped or GroundingStats())
 
     def _suppressed(response: Any, stats: DedupIndexStats) -> Any:
         """Clear the WHOLE contradicted_facts list -- same-pair and cross-pair

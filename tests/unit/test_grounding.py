@@ -23,11 +23,14 @@ from graph_extract.ontology import (
 from graph_extract.grounding import (
     CURRENT_GROUNDING,
     EXTRACT_TEXT_PROMPT_NAME,
+    PRODUCT_ALIASES,
     PRODUCT_ENTITY_TYPE_ID,
     GroundingContext,
     GroundingStats,
     filter_entities,
     is_grounded,
+    is_product_alias,
+    load_product_aliases,
     note_unscoped,
 )
 
@@ -241,9 +244,12 @@ def test_ies_plurals_stay_whole_words():
 
 def test_the_instructions_forbid_vendor_expanded_names():
     flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
-    assert ("Write each entity's name as this chunk's text writes it, apart from the renames "
-            "above; do not add a vendor prefix, product family or expansion the text does not use (if the text says "
-            "vSphere, name it vSphere).") in flat
+    assert ("Write each entity's name as this chunk's text writes it, apart from the naming "
+            "rules above and the documented product's exact name; do not add a vendor prefix, "
+            "product family or expansion the text does not use.") in flat
+    # The old "(if the text says vSphere, name it vSphere)" example contradicts the
+    # vSphere naming rule and must not come back.
+    assert "name it vSphere." not in flat
 
 
 def test_the_first_unscoped_call_warns_once(monkeypatch, caplog):
@@ -435,3 +441,210 @@ def test_injected_counts_merge():
     a = GroundingStats(injected=2)
     a.merge(GroundingStats(injected=3))
     assert a.injected == 5
+
+
+# ------------------------- final-review fix wave: foreign products need a phrase
+
+# The Securiti connector list plus the connectors the 2026-10-17 proof saw riding on
+# rule (c): "AWS S3", "Azure SQL", and a stray "Backup" heading.
+SECURITI_PLUS_TEXT = SECURITI_TEXT + "  + AWS S3\n  + Azure SQL\n* **Backup**\n"
+
+VBR_TEXT = (
+    "Restoring to Microsoft Azure\n"
+    "You can restore backups of machines to Microsoft Azure. Before you restore, add a "
+    "Microsoft Azure compute account and configure the backup infrastructure.\n"
+)
+
+
+def _typed(name: str, type_id: int) -> dict:
+    return {"name": name, "entity_type_id": type_id}
+
+
+@pytest.mark.parametrize("name", [
+    "AWS Backup", "Azure Backup", "Google Cloud Backup", "Veeam Backup for AWS",
+])
+def test_a_foreign_product_riding_on_generic_words_is_dropped(name):
+    # rule (c) alone would keep every one of these: each token is somewhere in the list
+    assert is_grounded(name, SECURITI_PLUS_TEXT, ("Securiti.ai", "Veeam"))
+    assert not is_grounded(name, SECURITI_PLUS_TEXT, ("Securiti.ai", "Veeam"),
+                           product_typed=True)
+    ctx = _ctx(SECURITI_PLUS_TEXT, ("Securiti.ai", "Veeam"))
+    out = filter_entities({"extracted_entities": [_typed(name, PRODUCT_ENTITY_TYPE_ID)]}, ctx)
+    assert out["extracted_entities"] == []
+    assert ctx.stats.dropped_names == [name]
+
+
+def test_the_same_names_typed_otherwise_keep_rule_c():
+    ctx = _ctx(SECURITI_PLUS_TEXT, ("Securiti.ai", "Veeam"))
+    concept = list(ENTITY_TYPES).index("Concept") + 1
+    reply = {"extracted_entities": [_typed("AWS Backup", concept),
+                                    _typed("Google Cloud Backup", 1)]}
+    assert filter_entities(reply, ctx) is reply
+    assert ctx.stats.dropped == 0
+
+
+def test_a_product_named_as_a_phrase_or_alias_is_kept():
+    ctx = _ctx(SECURITI_PLUS_TEXT + "Oracle RAC\n", ("Securiti.ai", "Veeam"))
+    reply = {"extracted_entities": [
+        _typed("Oracle Object Storage", PRODUCT_ENTITY_TYPE_ID),     # rule (a)
+        _typed("aws s3", PRODUCT_ENTITY_TYPE_ID),                    # rule (a), any case
+        _typed("Oracle Real Application Clusters", PRODUCT_ENTITY_TYPE_ID),  # rule (d)
+    ]}
+    assert filter_entities(reply, ctx) is reply
+
+
+def test_on_a_vbr_chunk_a_foreign_veeam_product_needs_its_phrase():
+    allowed = ("Veeam Backup & Replication", "Veeam")
+    vba = "Veeam Backup for Microsoft Azure"
+    assert is_grounded(vba, VBR_TEXT, allowed), "rule (c) alone keeps it today"
+    ctx = GroundingContext(text=VBR_TEXT, allowed=allowed, stats=GroundingStats(),
+                           product="Veeam Backup & Replication")
+    out = filter_entities({"extracted_entities": [
+        _typed(vba, PRODUCT_ENTITY_TYPE_ID),
+        _typed("Veeam Backup & Replication", PRODUCT_ENTITY_TYPE_ID)]}, ctx)
+    assert [e["name"] for e in out["extracted_entities"]] == ["Veeam Backup & Replication"]
+    with_phrase = VBR_TEXT + "Veeam Backup for Microsoft Azure appliances can also be used.\n"
+    assert is_grounded(vba, with_phrase, allowed, product_typed=True)
+
+
+def test_the_documented_product_and_vendor_stay_grounded_when_product_typed():
+    allowed = ("Veeam Backup & Replication", "Veeam")
+    for name in ("Veeam Backup and Replication", "Veeam"):
+        assert is_grounded(name, "Configure the job.", allowed, product_typed=True)
+
+
+# --------------------- final-review fix wave: abbreviations fold into the product
+
+VBR = "Veeam Backup & Replication"
+
+
+def test_the_alias_table_is_read_from_answer_api_data():
+    assert PRODUCT_ALIASES["vbr"] == (VBR,)
+    # list targets are kept whole
+    assert "Veeam Agent for Linux" in PRODUCT_ALIASES["veeam agent"]
+
+
+def test_graph_extract_does_not_import_answer_api_code():
+    import ast
+    from pathlib import Path
+
+    src = Path(grounding.__file__).read_text()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("answer_api")
+        elif isinstance(node, ast.Import):
+            assert not any(a.name.startswith("answer_api") for a in node.names)
+
+
+@pytest.mark.parametrize("raw", ['[]', '{"VBR": 3}', '{"VBR": []}', '{"VBR": [""]}'])
+def test_a_malformed_alias_file_fails_loudly(tmp_path, raw):
+    path = tmp_path / "aliases.json"
+    path.write_text(raw)
+    with pytest.raises(ValueError):
+        load_product_aliases(path)
+
+
+def test_a_missing_alias_file_fails_loudly(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_product_aliases(tmp_path / "absent.json")
+
+
+def test_vbr_becomes_the_documented_product_and_nothing_is_injected():
+    ctx = GroundingContext(text="Open the VBR console and run the job.",
+                           allowed=(VBR, "Veeam"), stats=GroundingStats(), product=VBR)
+    out = filter_entities({"extracted_entities": [_typed("VBR", PRODUCT_ENTITY_TYPE_ID),
+                                                  _typed("job", 1)]}, ctx)
+    assert out["extracted_entities"] == [_typed(VBR, PRODUCT_ENTITY_TYPE_ID), _typed("job", 1)]
+    assert (ctx.stats.injected, ctx.stats.renamed, ctx.stats.dropped) == (0, 1, 0)
+
+
+def test_the_alias_match_is_case_insensitive_and_takes_the_product_type():
+    ctx = GroundingContext(text="vbr settings", allowed=(VBR, "Veeam"),
+                           stats=GroundingStats(), product=VBR)
+    out = filter_entities({"extracted_entities": [_typed("vbr", 1)]}, ctx)
+    assert out["extracted_entities"] == [_typed(VBR, PRODUCT_ENTITY_TYPE_ID)]
+    assert ctx.stats.injected == 0
+
+
+def test_an_alias_next_to_the_product_is_folded_not_duplicated():
+    ctx = GroundingContext(text="VBR is Veeam Backup & Replication.", allowed=(VBR, "Veeam"),
+                           stats=GroundingStats(), product=VBR)
+    out = filter_entities({"extracted_entities": [_typed(VBR, PRODUCT_ENTITY_TYPE_ID),
+                                                  _typed("VBR", PRODUCT_ENTITY_TYPE_ID)]}, ctx)
+    assert out["extracted_entities"] == [_typed(VBR, PRODUCT_ENTITY_TYPE_ID)]
+    assert (ctx.stats.injected, ctx.stats.renamed) == (0, 1)
+
+
+def test_an_alias_of_a_different_product_is_left_alone():
+    # VB365 is in the table, but it names Veeam Backup for Microsoft 365, not VBR
+    ctx = GroundingContext(text="VB365 and VBR both write to the repository.",
+                           allowed=(VBR, "Veeam"), stats=GroundingStats(), product=VBR)
+    reply = {"extracted_entities": [_typed("VB365", PRODUCT_ENTITY_TYPE_ID),
+                                    _typed(VBR, PRODUCT_ENTITY_TYPE_ID)]}
+    assert filter_entities(reply, ctx) is reply
+    assert ctx.stats.renamed == 0
+    assert not is_product_alias("VB365", VBR)
+
+
+def test_no_table_entry_means_no_rename():
+    # "B&R" is a plausible short form but the table does not list it; initials are
+    # never derived either
+    ctx = GroundingContext(text="B&R and VB&R settings", allowed=(VBR, "Veeam"),
+                           stats=GroundingStats(), product=VBR)
+    reply = {"extracted_entities": [_typed("B&R", 1), _typed("VB&R", 1)]}
+    out = filter_entities(reply, ctx)
+    assert [e["name"] for e in out["extracted_entities"]] == ["B&R", "VB&R", VBR]
+    assert (ctx.stats.renamed, ctx.stats.injected) == (0, 1)
+    assert not is_product_alias("VBR", VBR, aliases={})
+
+
+def test_the_product_itself_is_not_its_own_alias():
+    assert not is_product_alias(VBR, VBR, aliases={"veeam backup & replication": (VBR,)})
+    assert not is_product_alias("VBR", "", aliases={"vbr": (VBR,)})
+
+
+def test_an_ungrounded_alias_is_dropped_and_the_product_injected():
+    ctx = GroundingContext(text="Configure the job.", allowed=(VBR, "Veeam"),
+                           stats=GroundingStats(), product=VBR)
+    out = filter_entities({"extracted_entities": [_typed("VBR", PRODUCT_ENTITY_TYPE_ID)]}, ctx)
+    assert out["extracted_entities"] == [_typed(VBR, PRODUCT_ENTITY_TYPE_ID)]
+    assert (ctx.stats.dropped, ctx.stats.renamed, ctx.stats.injected) == (1, 0, 1)
+
+
+def test_renamed_counts_merge():
+    a = GroundingStats(renamed=2)
+    a.merge(GroundingStats(renamed=1))
+    assert a.renamed == 3
+
+
+def test_the_instructions_fold_abbreviations_into_the_documented_product():
+    flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
+    assert ("If the text names the documented product by an abbreviation or short form, "
+            "use the documented product's exact name.") in flat
+
+
+# -------------------- final-review fix wave: cross-vendor conditional naming rules
+
+@pytest.mark.parametrize("canonical, text", [
+    ("VMware vSphere", "Back up vSphere hosts."),
+    ("Azure VM", "Restore to an Azure virtual machine."),
+    ("Azure VM", "Restore to Azure virtual machines."),
+    ("Amazon EC2", "Restore to EC2 instances."),
+    ("SQL Server", "Protect MSSQL databases."),
+    ("Microsoft 365", "Back up M365 mailboxes."),
+    ("Microsoft 365", "Back up Office 365 mailboxes."),
+    ("Oracle Real Application Clusters", "Protect Oracle RAC databases."),
+])
+def test_cross_vendor_canonical_names_ground_on_their_alias(canonical, text):
+    assert is_grounded(canonical, text, ())
+    assert is_grounded(canonical, text, (), product_typed=True)
+
+
+@pytest.mark.parametrize("canonical", [
+    "VMware vSphere", "Azure VM", "Amazon EC2", "SQL Server", "Microsoft 365",
+    "Oracle Real Application Clusters",
+])
+def test_cross_vendor_naming_rules_are_conditional(canonical):
+    # the rule existing grounds nothing: a text without the alias drops the name
+    assert canonical in [c for c, _, _ in NAMING_RULES]
+    assert not is_grounded(canonical, "Configure the backup job schedule.", ())

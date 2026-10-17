@@ -42,7 +42,7 @@ class Region(BaseModel):
     """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (those are Concepts), NOT an API operation, field or identifier, NOT a policy/permission/role name, NOT a scenario/section/page name, NOT a data-classification term (e.g. PII), NOT a bare "Availability Zone" — those are Tools/Requirements/Concepts/Workloads or noise, never Regions."""
 
 class Requirement(BaseModel):
-    """A concrete prerequisite or constraint to USE a product: a permission, minimum version, open port, license, or required role/account (e.g. Backup Operator role, TCP 443 open, minimum agent version) — NOT general domain nouns (a recovery point is a Concept)."""
+    """A concrete prerequisite or constraint to USE a product: a permission, minimum version, open port, license, or required role/account — NOT general domain nouns (a recovery point is a Concept)."""
 
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Vendor": Vendor, "Product": Product, "Tool": Tool, "Workload": Workload,
@@ -107,6 +107,16 @@ NAMING_RULES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("immutability", "WORM, immutable backups or an immutability policy",
      ("worm", "immutable", "immutability")),
     ("retention policy", "retention, a retention rule or retention settings", ("retention",)),
+    # Cross-vendor canonical names (final-review fix wave, 2026-10-17). Conditional
+    # like every rule here: the gate grounds the canonical name only when one of its
+    # aliases is in the chunk text (rule (d)), never because the rule exists.
+    ("VMware vSphere", "vSphere", ("vsphere",)),
+    ("Azure VM", "Azure virtual machine(s) or Azure VMs",
+     ("azure virtual machine", "azure virtual machines", "azure vm", "azure vms")),
+    ("Amazon EC2", "EC2 or EC2 instance(s)", ("ec2",)),
+    ("SQL Server", "Microsoft SQL Server or MSSQL", ("microsoft sql server", "mssql")),
+    ("Microsoft 365", "M365 or Office 365", ("m365", "office 365")),
+    ("Oracle Real Application Clusters", "Oracle RAC", ("oracle rac",)),
 )
 
 # Lower-cased canonical name -> whole-word aliases. The instruction rules above plus
@@ -127,11 +137,14 @@ def _naming_rule_sentences() -> str:
                          subsequent_indent="  ")
 
 
+# The naming rules above and the documented-product rule are the only renames. (The
+# old "if the text says vSphere, name it vSphere" example now contradicts the
+# vSphere naming rule, so the rule carries no example.)
 _VERBATIM_NAME_RULE = textwrap.fill(
-    "Write each entity's name as this chunk's text writes it, apart from the renames above; "
-    "do not add a vendor prefix, "
-    "product family or expansion the text does not use (if the text says vSphere, name it "
-    "vSphere).", width=92, initial_indent="- ", subsequent_indent="  ")
+    "Write each entity's name as this chunk's text writes it, apart from the naming rules "
+    "above and the documented product's exact name; do not add a vendor prefix, product "
+    "family or expansion the text does not use.",
+    width=92, initial_indent="- ", subsequent_indent="  ")
 
 
 EXTRACTION_INSTRUCTIONS = """\
@@ -146,10 +159,11 @@ because it appears in these instructions.
 The document's product is given in the DOCUMENT CONTEXT below. It is the subject of most
 facts (it provides / supports / limits / integrates with / is available in things). When
 the text states a fact about the documented product without naming it, use the documented
-product's exact name as the subject, and extract the documented product as an entity in
-every chunk that states facts about it -- even when the text does not name it -- so those
-facts keep their subject. Never make any OTHER product the subject of a fact unless this
-chunk's text names that product.
+product's exact name as the subject. If the text names the documented product by an
+abbreviation or short form, use the documented product's exact name. Always extract the
+documented product as an entity in every chunk that states facts about it -- even when the
+text does not name it -- so those facts keep their subject. Never make any OTHER product
+the subject of a fact unless this chunk's text names that product.
 
 Do NOT extract documentation-navigation or UI noise as entities: phrases like "this
 guide", "the following table", "Note", "Important", "see also", button labels, menu items,
@@ -198,6 +212,6 @@ CHEAP_TIER_SALIENCE = (
     "statements are the HIGHEST-VALUE facts: keep them, but state each ONCE at "
     "the most general level that is TRUE (e.g. '<feature> is not available in "
     "<region>') — never over-generalize an exception into a global claim.\n"
-    "Use short canonical entity names, never descriptive phrases. A dense table "
+    "Use the naming rules above and short names, never descriptive phrases. A dense table "
     "chunk should yield roughly 10-25 facts total, not dozens."
 )
