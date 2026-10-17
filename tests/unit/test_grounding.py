@@ -202,12 +202,16 @@ def test_every_instruction_naming_rule_is_in_the_alias_table():
 
 def test_the_gate_keeps_every_instruction_canonical_name_for_its_alias():
     """The instructions tell the model to rename; the gate must not then drop the
-    renamed entity because the chunk only has the alias. The two cannot drift."""
+    renamed entity because the chunk only has the alias. The two cannot drift --
+    whatever type the model gives it, Product included (no rule (c) there)."""
     for said, canonical in _instruction_naming_rules():
-        assert is_grounded(canonical, f"Configure {said} for the job.", ()), (canonical, said)
-        for alias in NAMING_ALIASES[canonical.lower()]:
-            text = f"Configure {alias} for the job."
-            assert is_grounded(canonical, text, ()), (canonical, alias)
+        for product_typed in (False, True):
+            assert is_grounded(canonical, f"Configure {said} for the job.", (),
+                               product_typed=product_typed), (canonical, said, product_typed)
+            for alias in NAMING_ALIASES[canonical.lower()]:
+                text = f"Configure {alias} for the job."
+                assert is_grounded(canonical, text, (), product_typed=product_typed), (
+                    canonical, alias, product_typed)
 
 
 def test_the_proxmox_pair_is_grounding_only():
@@ -536,12 +540,32 @@ def test_graph_extract_does_not_import_answer_api_code():
             assert not any(a.name.startswith("answer_api") for a in node.names)
 
 
-@pytest.mark.parametrize("raw", ['[]', '{"VBR": 3}', '{"VBR": []}', '{"VBR": [""]}'])
+@pytest.mark.parametrize("raw", ['[]', '{"VBR": 3}', '{"VBR": null}', '{"VBR": [3]}',
+                                 '{"VBR": {"a": 1}}'])
 def test_a_malformed_alias_file_fails_loudly(tmp_path, raw):
     path = tmp_path / "aliases.json"
     path.write_text(raw)
     with pytest.raises(ValueError):
         load_product_aliases(path)
+
+
+def test_the_alias_file_is_read_as_scope_resolver_reads_it(tmp_path):
+    """Both consumers must agree: an empty target list is skipped, a blank name is
+    ignored -- neither is an error (ScopeResolver warns and moves on)."""
+    from answer_api.scope import ScopeResolver
+
+    raw = ('{"VBR": "Veeam Backup & Replication", "Empty": [], "Blank": [""], '
+           '"Mixed": ["", "Veeam Backup & Replication"]}')
+    path = tmp_path / "aliases.json"
+    path.write_text(raw)
+    table = load_product_aliases(path)
+    assert table == {"vbr": (VBR,), "mixed": (VBR,)}
+    import json
+    resolver = ScopeResolver(["Veeam"], [(VBR, "Veeam")], json.loads(raw))
+    assert resolver.detect("VBR jobs").products == (VBR,)
+    assert resolver.detect("Mixed jobs").products == (VBR,)
+    assert resolver.detect("Empty jobs").is_empty()
+    assert resolver.detect("Blank jobs").is_empty()
 
 
 def test_a_missing_alias_file_fails_loudly(tmp_path):
@@ -648,3 +672,89 @@ def test_cross_vendor_naming_rules_are_conditional(canonical):
     # the rule existing grounds nothing: a text without the alias drops the name
     assert canonical in [c for c, _, _ in NAMING_RULES]
     assert not is_grounded(canonical, "Configure the backup job schedule.", ())
+
+
+# ------------- follow-up: '&'-normalised phrases and single-target scope aliases
+
+@pytest.mark.parametrize("name, text", [
+    ("Veeam Backup & Replication", "Install Veeam Backup and Replication first."),
+    ("Veeam Backup and Replication", "Install Veeam Backup & Replication first."),
+    ("Hyper-V", "a Hyper V host"),
+    ("Backup and Archive (B&A)", "see Backup and Archive (B and A) docs"),
+    ("Veeam Backup & Replication", "**Veeam Backup&Replication** console"),
+])
+def test_rule_a_matches_on_normalised_phrases(name, text):
+    assert is_grounded(name, text, (), product_typed=True)
+
+
+@pytest.mark.parametrize("name, text", [
+    ("AWS Backup", "+ AWS\n+ Backup\n"),                  # two list items
+    ("AWS Backup", "| AWS | Backup |"),                     # two table cells
+    ("AWS Backup", "Supported: AWS, Backup Exec"),         # a comma list
+    ("Azure Backup", "Restore to Azure. Backup jobs run nightly."),   # sentence end
+])
+def test_a_normalised_phrase_never_crosses_a_boundary(name, text):
+    assert not is_grounded(name, text, (), product_typed=True)
+
+
+@pytest.mark.parametrize("name", [
+    "AWS Backup", "Azure Backup", "Google Cloud Backup", "Veeam Backup for AWS",
+])
+def test_the_securiti_names_stay_dropped_after_normalisation(name):
+    assert not is_grounded(name, SECURITI_PLUS_TEXT, ("Securiti.ai", "Veeam"),
+                           product_typed=True)
+    assert not is_grounded(name, SECURITI_TEXT, ("Securiti.ai", "Veeam"),
+                           product_typed=True)
+
+
+@pytest.mark.parametrize("name, text", [
+    ("Veeam Backup & Replication", "Back up VB365 data with VBR."),
+    ("Veeam Backup and Replication", "Add the VBR server."),
+    ("Veeam Backup for Microsoft 365", "Configure VB365 proxies."),
+    ("Veeam Service Provider Console", "Manage tenants in VSPC."),
+    ("Veeam Kasten for Kubernetes", "Kasten K10 policies export restore points."),
+    ("Veeam Agent for Microsoft Windows", "Deploy Veeam Agent for Windows on servers."),
+])
+def test_a_product_grounds_on_a_scope_alias_that_names_it_alone(name, text):
+    assert is_grounded(name, text, ("Veeam Data Cloud", "Veeam"), product_typed=True)
+
+
+def test_scope_aliases_ground_only_product_typed_names():
+    # a Concept named after a product is not grounded by the product's alias
+    assert not is_grounded("Veeam Service Provider Console", "Manage tenants in VSPC.", ())
+
+
+def test_a_multi_target_alias_grounds_none_of_its_targets():
+    text = "Install the Veeam Agent on each machine."
+    for target in PRODUCT_ALIASES["veeam agent"]:
+        assert not is_grounded(target, text, ("Veeam Backup & Replication", "Veeam"),
+                               product_typed=True), target
+    # an injected table: two targets -> neither is grounded by the alias
+    table = {"ab": ("Alpha Backup", "Beta Backup"), "ga": ("Gamma Archive",)}
+    assert not is_grounded("Alpha Backup", "AB jobs", (), product_typed=True,
+                           scope_aliases=table)
+    assert is_grounded("Gamma Archive", "GA jobs", (), product_typed=True,
+                       scope_aliases=table)
+
+
+def test_a_scope_alias_must_be_a_whole_word():
+    assert not is_grounded("Veeam Backup & Replication", "the VBRx module", (),
+                           product_typed=True)
+
+
+def test_a_vbr_chunk_keeps_its_cross_product_mentions_through_filter():
+    vb365 = "Veeam Backup for Microsoft 365"
+    ctx = GroundingContext(
+        text="VB365 can use Veeam Backup and Replication repositories. Kasten K10 too.",
+        allowed=(vb365, "Veeam"), stats=GroundingStats(), product=vb365)
+    reply = {"extracted_entities": [
+        _typed("Veeam Backup & Replication", PRODUCT_ENTITY_TYPE_ID),
+        _typed("Veeam Kasten for Kubernetes", PRODUCT_ENTITY_TYPE_ID),
+        _typed(vb365, PRODUCT_ENTITY_TYPE_ID)]}
+    assert filter_entities(reply, ctx) is reply
+    assert ctx.stats.dropped == 0
+
+
+def test_entra_id_grounds_microsoft_entra_id():
+    assert is_grounded("Microsoft Entra ID", "Sign in with Entra ID.", (), product_typed=True)
+    assert not is_grounded("Microsoft Entra ID", "Sign in with Entra.", (), product_typed=True)

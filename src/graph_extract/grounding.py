@@ -34,6 +34,7 @@ import math
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -71,18 +72,26 @@ SCOPE_ALIASES_PATH = Path(__file__).resolve().parent.parent / "answer_api" / "sc
 
 
 def load_product_aliases(path: Path = SCOPE_ALIASES_PATH) -> dict[str, tuple[str, ...]]:
-    """Lower-cased alias -> the names it stands for. Raises on a missing or
-    malformed file: an empty table would silently turn the rename off."""
+    """Lower-cased alias -> the names it stands for.
+
+    Accepts what answer_api's ScopeResolver accepts, so the two consumers of the
+    file agree: a target is a name or a list of names; a blank name is ignored and
+    an entry left with no names (an empty list) is skipped, not an error. Raises
+    on a missing file, a non-object file, or a target that is neither a string nor
+    a list of strings (ScopeResolver crashes on those too) -- at import, so a bad
+    committed file fails CI and startup instead of silently turning the rename off.
+    """
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: expected a JSON object of alias -> target(s)")
     table: dict[str, tuple[str, ...]] = {}
     for alias, targets in raw.items():
         names = [targets] if isinstance(targets, str) else targets
-        if (not isinstance(names, list) or not names
-                or not all(isinstance(n, str) and n.strip() for n in names)):
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
             raise ValueError(f"{path}: alias {alias!r} must map to a name or a list of names")
-        table[alias.strip().lower()] = tuple(names)
+        kept = tuple(n for n in names if n.strip())
+        if kept:
+            table[alias.strip().lower()] = kept
     return table
 
 
@@ -173,6 +182,40 @@ def _whole_word(phrase: str, text: str) -> bool:
     return re.search(_B + re.escape(phrase) + _E, text) is not None
 
 
+# Phrase matching on normalised text: "&" reads as "and", and any run of
+# punctuation/whitespace is one space, so "Veeam Backup & Replication" matches
+# "Veeam Backup and Replication" and "Hyper-V" matches "Hyper V". A phrase never
+# crosses a hard boundary, though: a line break, a table cell ("|"), a comma or
+# semicolon, or a sentence/label end (".", ":", "!", "?" before whitespace). Those
+# separate list items and cells -- "+ AWS\n+ Backup" is two connectors, not the
+# product "AWS Backup".
+_HARD_BOUNDARY = re.compile(r"[\r\n|,;]+|[.:!?]+(?=\s|$)")
+_SOFT_SEPARATORS = re.compile(r"[\W_]+")
+
+
+def _normalise(s: str) -> str:
+    return _SOFT_SEPARATORS.sub(" ", s.lower().replace("&", " and ")).strip()
+
+
+@lru_cache(maxsize=32)
+def _normalised_text(text: str) -> str:
+    """The text's segments (split at hard boundaries), each normalised, one per line."""
+    return "\n".join(_normalise(seg) for seg in _HARD_BOUNDARY.split(text))
+
+
+def _phrase_in(phrase: str, text: str) -> bool:
+    """`phrase` occurs in `text` as a whole-word phrase: raw (the original rule (a),
+    case-insensitive) or after normalising both sides."""
+    lphrase = phrase.strip().lower()
+    if not lphrase:
+        return False
+    if _whole_word(lphrase, text.lower()):
+        return True
+    nphrase = _normalise(phrase)
+    return bool(nphrase) and re.search(
+        r"(?<!\S)" + re.escape(nphrase) + r"(?!\S)", _normalised_text(text)) is not None
+
+
 def _present(token: str, text: str) -> bool:
     if len(token) == 2:
         # whole word or its plural: "vm" matches "vm"/"vms", never "kvm" or "vmware"
@@ -204,6 +247,20 @@ def note_unscoped(stats: GroundingStats) -> None:
         logger.warning("grounding gate bypassed: extraction call without a grounding context")
 
 
+def _single_target_aliases(
+        aliases: dict[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+    """Normalised target name -> the aliases that name it ALONE. A multi-target
+    alias ("Veeam Agent" -> several guides) names none of its targets."""
+    out: dict[str, list[str]] = {}
+    for alias, targets in aliases.items():
+        if len(targets) == 1:
+            out.setdefault(_normalise(targets[0]), []).append(alias)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+SINGLE_TARGET_ALIASES: dict[str, tuple[str, ...]] = _single_target_aliases(PRODUCT_ALIASES)
+
+
 def is_product_alias(name: str, product: str,
                      aliases: dict[str, tuple[str, ...]] | None = None) -> bool:
     """True when `name` is, case-insensitively and exactly, an alias the table maps
@@ -216,33 +273,42 @@ def is_product_alias(name: str, product: str,
 
 
 def is_grounded(name: str, text: str, allowed: tuple[str, ...], *,
-                product_typed: bool = False) -> bool:
+                product_typed: bool = False,
+                scope_aliases: dict[str, tuple[str, ...]] | None = None) -> bool:
     """True when any of these holds:
 
-    (a) the whole name occurs in the text as a whole word (case-insensitive);
+    (a) the whole name occurs in the text as a whole-word phrase, case-insensitive,
+        compared raw or normalised ("&" = "and", punctuation runs = one space, never
+        across a line, cell, comma or sentence end -- see `_phrase_in`);
     (b) the name is the document's product or vendor (the implied subject),
         compared by distinctive tokens so "and" and "&" spell the same name;
     (c) at least ceil(2n/3) of its n distinctive words are present as whole words,
         a simple inflection counting ("air gap" ~ "air-gapped", "VM" ~ "VMs");
-    (d) one of its naming aliases (ontology.NAMING_ALIASES) occurs as a whole word
-        -- the instructions tell the model to write "Kubernetes" for K8s, so a
-        chunk saying only K8s still grounds "Kubernetes".
+    (d) one of its naming aliases (ontology.NAMING_ALIASES) occurs as a whole-word
+        phrase (as in (a)) -- the instructions tell the model to write "Kubernetes"
+        for K8s, so a chunk saying only K8s still grounds "Kubernetes".
 
     `product_typed` (the entity was typed Product): rule (c) does not apply, so a
     product other than the documented one needs (a) or (d). Product names are
     built from generic words -- "AWS Backup" and "Google Cloud Backup" both ride on
     a connector list naming AWS RDS, Google Cloud Storage and a stray "Backup".
+    In exchange, a Product-typed name is also grounded by a scope alias that names
+    it ALONE (answer_api's scope_aliases.json, single-target entries only) found as
+    in (a): "VBR" grounds "Veeam Backup & Replication". `scope_aliases` overrides
+    the table (lower-cased alias -> targets, as `load_product_aliases` returns).
     """
     lname = name.strip().lower()
     ltext = text.lower()
-    if lname and _whole_word(lname, ltext):
+    if lname and _phrase_in(lname, text):
         return True
     if any(same_name(name, a) for a in allowed):
         return True
-    if any(_whole_word(alias, ltext) for alias in NAMING_ALIASES.get(lname, ())):
+    if any(_phrase_in(alias, text) for alias in NAMING_ALIASES.get(lname, ())):
         return True
     if product_typed:
-        return False
+        single = (SINGLE_TARGET_ALIASES if scope_aliases is None
+                  else _single_target_aliases(scope_aliases))
+        return any(_phrase_in(alias, text) for alias in single.get(_normalise(name), ()))
     toks = _distinctive_tokens(lname)
     if not toks:
         return False

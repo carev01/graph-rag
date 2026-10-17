@@ -247,3 +247,34 @@ async def test_load_keeps_content_products_per_vendor_and_derives_content_vendor
     assert r.products_of("Veeam") == ("Veeam ONE",)
     assert r.products_of("AWS") == ()
     assert len(d.queries) == 2
+
+
+# --- the committed alias file (2026-10-17: also read by graph_extract.grounding) ----
+
+def _real_aliases():
+    import json
+    from pathlib import Path
+
+    import answer_api.scope as scope_mod
+    return json.loads(Path(scope_mod.__file__).with_name("scope_aliases.json").read_text())
+
+
+def _rr():
+    return ScopeResolver(VENDORS, SRC_PRODUCTS + [("Veeam Kasten for Kubernetes", "Veeam")],
+                         _real_aliases(), SOURCES)
+
+
+def test_kasten_k10_scopes_to_the_kasten_product():
+    assert _rr().detect("How do Kasten K10 policies export?").products == (
+        "Veeam Kasten for Kubernetes",)
+    assert _rr().detect("Kasten restore points").products == ("Veeam Kasten for Kubernetes",)
+
+
+def test_veeam_agent_for_windows_scopes_to_the_windows_guide_alone():
+    # Before the alias, the multi-target "Veeam Agent" matched first and scoped
+    # every Agent guide; the longer single-target alias now wins.
+    s = _rr().detect("Does Veeam Agent for Windows support BitLocker volumes?")
+    assert s.sources == ("Veeam Agent for Microsoft Windows",)
+    assert s.vendors == () and s.products == ()
+    assert set(_rr().detect("Veeam Agent backups and immutability").sources) == {
+        "Veeam Agent for Linux", "Veeam Agent for Microsoft Windows"}

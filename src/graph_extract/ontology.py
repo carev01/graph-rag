@@ -127,6 +127,8 @@ NAMING_ALIASES: dict[str, tuple[str, ...]] = {
     "proxmox virtual environment": ("proxmox ve",),
     "proxmox ve": ("proxmox virtual environment",),
     "changed block tracking": ("cbt",),
+    # The Microsoft directory service is routinely written without the vendor prefix.
+    "microsoft entra id": ("entra id",),
 }
 
 
