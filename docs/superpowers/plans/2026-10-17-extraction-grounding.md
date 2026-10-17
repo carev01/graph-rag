@@ -100,9 +100,11 @@ Tests:
 2. Add this sentence to `EXTRACTION_INSTRUCTIONS`, right after the Requirement bullet, as a new bullet: `- For a restore, recovery or migration statement, the DESTINATION is the target entity and the relation is RestoresTo; keep the backup's source (which backups, which machines) in the fact text, and use the product that performs the restore as the subject.`
 3. Rewrite every entity and edge type docstring to define the type in words, with NO named example entities: no product, vendor, platform, region, standard or tier names. Keep each NOT-clause as a generic description; for example "NOT storage classes or tiers, storage-redundancy tiers, or configuration settings (those are Concepts)". Keep the Product/Tool and Region boundary clauses, all in generic terms.
 
+4. Reword `CHEAP_TIER_SALIENCE` so it names no concrete entity: replace "Use short canonical entity names ('Amazon S3', 'cross-Region copy'), never descriptive phrases." with "Use short canonical entity names, never descriptive phrases." and the example "'<feature> is not available in China regions'" with "'<feature> is not available in <region>'". Keep every other sentence unchanged.
+
 Tests:
 - `RestoresTo` is registered and in the map for every listed pair.
-- No type docstring contains any of these: "AWS", "Azure", "Veeam", "NetBackup", "Amazon", "S3", "LRS", "ZRS", "SEC 17a-4", "East US", "Germany", "Kubernetes", "SQL Server", "Oracle", "Hyper-V", "VMware", "Windows", "Linux", "RPO", "GDPR".
+- No type docstring contains any of these: "AWS", "Azure", "Veeam", "NetBackup", "Amazon", "S3", "LRS", "ZRS", "SEC 17a-4", "East US", "Germany", "Kubernetes", "SQL Server", "Oracle", "Hyper-V", "VMware", "Windows", "Linux", "RPO", "GDPR"; `CHEAP_TIER_SALIENCE` contains none of "Amazon S3", "cross-Region", "China".
 - The instructions contain the RestoresTo rule.
 
 - [ ] Tests first; implement; unit suite, ruff, mypy; commit `feat(extract): RestoresTo relation; type descriptions name no example entities` (trailer lines).
