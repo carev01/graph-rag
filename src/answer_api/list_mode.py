@@ -598,16 +598,19 @@ async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int,
     items = "\n".join(f"- {name}" for name in existing) or "(none)"
     prompt = _COMPLETE_PROMPT.format(q=q, items=items, facts=facts)
     try:
+        # `_complete_with_finish_reason` itself retries once at 3x `max_tokens` when a
+        # reply has no usable content at all -- that is the shared helper's own
+        # behaviour, not something this pass adds.
         completion = await _complete_with_finish_reason(client, model, prompt, max_tokens=8000)
     except Exception as exc:
         logger.warning("list completeness pass failed (%s); keeping the first answer", exc)
         _degrade(degraded, COMPLETENESS_DEGRADED)
         return raw
-    if completion.finish_reason == "length":
+    if completion.finish_reason == "length" and completion.content is not None:
         logger.warning(
             "list completeness pass cut short at %d tokens (%d chars); "
             "keeping the first answer",
-            completion.max_tokens, len(completion.content or ""))
+            completion.max_tokens, len(completion.content))
         _degrade(degraded, COMPLETENESS_DEGRADED)
         return raw
     try:

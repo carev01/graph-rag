@@ -1220,6 +1220,23 @@ async def test_a_completeness_pass_cut_short_degrades_and_keeps_the_first_answer
            "keeping the first answer") in caplog.text
 
 
+async def test_a_completeness_pass_cut_short_with_no_content_falls_through_to_failure(
+        patched, monkeypatch, caplog):
+    """finish_reason == "length" with content still None (both attempts unusable) must
+    not coerce to a "0 chars" truncation note; it falls through to the ordinary
+    no-usable-content failure path instead."""
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out, map_client = await _answer_with_completion(
+            patched, monkeypatch, [(None, "length"), (None, "length")])
+    assert len(map_client.calls) == 3
+    assert map_client.calls[1]["max_tokens"] == 8000
+    assert map_client.calls[2]["max_tokens"] == 24000
+    assert out["degraded"] == [lm.COMPLETENESS_DEGRADED]
+    assert "Also documented" not in out["answer"]
+    assert "list completeness pass failed" in caplog.text
+    assert "cut short" not in caplog.text
+
+
 async def test_the_completeness_pass_is_skipped_when_disabled(patched, monkeypatch):
     out, map_client = await _answer_with_completion(
         patched, monkeypatch, "unused", list_completeness_pass=False)
