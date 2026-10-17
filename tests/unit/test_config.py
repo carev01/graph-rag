@@ -194,3 +194,4 @@ def test_list_mode_defaults():
     assert s.local_single_dedup_cosine == 0.92
     assert (s.list_sweep_cap, s.list_sweep_scoped_overfetch) == (2000, 4)
     assert s.list_item_floor == 0.4 and s.list_item_unnamed_floor == 0.65
+    assert s.list_flag_group_min == 5

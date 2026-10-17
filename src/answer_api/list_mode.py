@@ -23,9 +23,9 @@ from answer_api.item_grades import CONFIRMED, NEEDS_VALIDATION, grade_items
 from answer_api.list_sweep import (
     _ITEM_NOUNS,
     _PLURAL,
+    grading_terms,
     is_limitation,
     keyword_sweep,
-    question_terms,
 )
 from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import scope_episode_uuids
@@ -510,9 +510,10 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
                 "cited": 0, "applies_to": [], "item_grades": [], "items_ungraded": 0}
     # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
     # dropped item's markers are never cited.
-    graded = grade_items(raw, marker_map, q=q, terms=question_terms(q, scope),
+    graded = grade_items(raw, marker_map, q=q, terms=grading_terms(q, scope),
                          scores=got.scores, floor=settings.list_item_floor,
-                         unnamed_floor=settings.list_item_unnamed_floor, scope=scope)
+                         unnamed_floor=settings.list_item_unnamed_floor, scope=scope,
+                         flag_group_min=settings.list_flag_group_min)
     item_grades = [g.as_dict(marker_map) for g in graded.grades]
     if graded.grades and not any(g.grade in (CONFIRMED, NEEDS_VALIDATION)
                                  for g in graded.grades):

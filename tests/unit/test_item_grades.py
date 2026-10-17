@@ -22,12 +22,13 @@ def _fact(uuid, text, title=None):
 
 
 def _grade(raw, facts, *, q=Q_AGENT, terms=T_AGENT, scores=None, floor=0.1,
-          unnamed_floor=0.65, scope=None):
+          unnamed_floor=0.65, scope=None, flag_group_min=5):
     marker_map = {i: f for i, f in enumerate(facts, 1)}
     if scores is None:
         scores = {f["fact_uuid"]: 0.6 for f in facts}
     got = ig.grade_items(raw, marker_map, q=q, terms=terms, scores=scores, floor=floor,
-                         unnamed_floor=unnamed_floor, scope=scope)
+                         unnamed_floor=unnamed_floor, scope=scope,
+                         flag_group_min=flag_group_min)
     return got.text, got.grades, marker_map
 
 
@@ -305,6 +306,115 @@ def test_scope_name_words_are_not_distinctive_item_words():
     assert excluded == {"veeam"}
     assert ig._item_words("Veeam Agent for Linux", set(), excluded) == ["agent", "linux"]
     assert ig._item_words("Veeam Agent for Linux", set(), set()) == ["veeam", "agent", "linux"]
+
+
+def test_item_kind_words_are_not_grading_qualifiers_so_the_aws_item_confirms():
+    q = "Which resource types can AWS Backup protect?"
+    scope = Scope(products=("AWS Backup",))
+    assert ls.grading_terms(q, scope) == ["protect"]       # "resource"/"types" dropped
+    fact = _fact("ec2", "AWS Backup can protect EC2 instances with a backup plan.")
+    raw = "- **EC2 instances** — can be protected [1]"
+    text, grades, _ = _grade(raw, [fact], q=q, terms=ls.grading_terms(q, scope), scope=scope)
+    assert grades[0].grade == ig.CONFIRMED and text == raw
+    # The un-fixed behaviour: grading on the raw question terms (including "resource")
+    # flags the same item, because the fact never says "resource".
+    _, grades, _ = _grade(raw, [fact], q=q, terms=ls.question_terms(q, scope), scope=scope)
+    assert grades[0].grade == ig.NEEDS_VALIDATION and grades[0].missing_terms == ["resource"]
+
+
+def test_group_term_none_below_the_minimum_count():
+    grades = ([ig.ItemGrade("i", ig.NEEDS_VALIDATION, ["vms"], [], "missing_terms")] * 4
+             + [ig.ItemGrade("i", ig.CONFIRMED, [], [], "named")] * 4)
+    assert ig._group_term(grades, 5) is None
+
+
+def test_group_term_none_under_half_the_kept_items():
+    grades = ([ig.ItemGrade("i", ig.NEEDS_VALIDATION, ["vms"], [], "missing_terms")] * 5
+             + [ig.ItemGrade("i", ig.CONFIRMED, [], [], "named")] * 6)   # 5 of 11
+    assert ig._group_term(grades, 5) is None
+
+
+def test_group_term_picks_the_most_frequent_qualifying_term():
+    grades = ([ig.ItemGrade("i", ig.NEEDS_VALIDATION, ["vms"], [], "missing_terms")] * 5
+             + [ig.ItemGrade("i", ig.NEEDS_VALIDATION, ["cost"], [], "missing_terms")] * 2
+             + [ig.ItemGrade("i", ig.CONFIRMED, [], [], "named")])
+    assert ig._group_term(grades, 5) == "vms"
+
+
+_Q_VMS = "What recovery options does Azure Backup offer for Azure VMs?"
+_T_VMS = ["vms"]
+_VMS_MISSING = [
+    ("Blob backup", "Azure Backup restores Blob storage accounts directly from snapshots."),
+    ("File share backup", "Azure Backup restores File share data from snapshots."),
+    ("SQL database backup", "Azure Backup restores SQL database data from backups."),
+    ("Table storage backup", "Azure Backup restores Table storage entities from backups."),
+    ("Queue backup", "Azure Backup restores Queue messages from backups."),
+]
+_VMS_CONFIRMED = [
+    ("Managed disk restore", "Azure Backup restores Managed disk data to VMs directly."),
+    ("Availability set restore", "Azure Backup restores Availability set VMs after failure."),
+    ("Scale set restore", "Azure Backup restores Scale set VMs from snapshots."),
+]
+
+
+def _vms_case():
+    items = _VMS_MISSING + _VMS_CONFIRMED
+    facts = [_fact(f"u{i}", text) for i, (_, text) in enumerate(items)]
+    raw = "## Recovery options\n" + "\n".join(
+        f"- **{item}** — x [{i + 1}]" for i, (item, _) in enumerate(items))
+    return raw, facts
+
+
+def test_grouping_triggers_at_5_of_8_kept_items_sharing_a_term():
+    raw, facts = _vms_case()
+    text, grades, _ = _grade(raw, facts, q=_Q_VMS, terms=_T_VMS)
+    assert sum(g.grade == ig.NEEDS_VALIDATION for g in grades) == 5
+    assert sum(g.grade == ig.CONFIRMED for g in grades) == 3
+    lines = text.splitlines()
+    assert lines[0] == "## Recovery options"
+    assert lines[1] == ig._NOTE_GROUP.format(term="VMs")
+    assert lines[2] == ""
+    for ln in lines[3:8]:
+        assert ln.endswith(" †") and "does not mention" not in ln
+    for ln in lines[8:]:
+        assert "†" not in ln and "needs validation" not in ln
+
+
+def test_no_grouping_at_4_items_keeps_the_full_notes():
+    items = _VMS_MISSING[:4] + _VMS_CONFIRMED
+    facts = [_fact(f"y{i}", text) for i, (_, text) in enumerate(items)]
+    raw = "\n".join(f"- **{item}** — x [{i + 1}]" for i, (item, _) in enumerate(items))
+    text, grades, _ = _grade(raw, facts, q=_Q_VMS, terms=_T_VMS)
+    assert sum(g.grade == ig.NEEDS_VALIDATION for g in grades) == 4
+    assert sum(g.grade == ig.CONFIRMED for g in grades) == 3        # 4 of 7 kept
+    assert "†" not in text
+    assert text.count("does not mention VMs") == 4
+
+
+def test_no_grouping_under_half_the_kept_items():
+    raw, facts = _vms_case()
+    extra_confirmed = [(f"Extra {n}", f"Azure Backup restores Extra{n} data to VMs.")
+                       for n in range(5)]
+    items = _VMS_MISSING + _VMS_CONFIRMED + extra_confirmed
+    facts = [_fact(f"x{i}", text) for i, (_, text) in enumerate(items)]
+    raw = "\n".join(f"- **{item}** — x [{i + 1}]" for i, (item, _) in enumerate(items))
+    text, grades, _ = _grade(raw, facts, q=_Q_VMS, terms=_T_VMS)
+    assert sum(g.grade == ig.NEEDS_VALIDATION for g in grades) == 5
+    assert sum(g.grade == ig.CONFIRMED for g in grades) == 8     # 5 of 13 kept: under half
+    assert "†" not in text
+    assert text.count("does not mention VMs") == 5
+
+
+def test_mixed_missing_terms_keep_their_own_full_notes():
+    raw = "- **HPE Morpheus VM Essentials** — x [1]\n- **Oracle Linux KVM** — y [2]"
+    kvm_fact = _fact("kvm", "VBR can restore Windows backups to Oracle Linux KVM directly.")
+    text, grades, _ = _grade(raw, [_fact("hpe", MORPHEUS), kvm_fact])
+    assert [g.grade for g in grades] == [ig.NEEDS_VALIDATION, ig.NEEDS_VALIDATION]
+    assert [g.missing_terms for g in grades] == [["windows"], ["agent"]]
+    assert "†" not in text
+    lines = text.splitlines()
+    assert lines[0].endswith("does not mention Windows)*")
+    assert lines[1].endswith("does not mention agent)*")
 
 
 def test_an_item_whose_only_overlap_is_the_vendor_word_is_not_named():

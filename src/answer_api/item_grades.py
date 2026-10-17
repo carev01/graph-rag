@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -66,6 +67,9 @@ _GENERIC = frozenset({"vm", "vms", "machine", "machines", "instance", "instances
                       "environment", "backup", "backups", "restore", "recovery"})
 _NOTE = " *(needs validation: the cited source does not mention {terms})*"
 _NOTE_UNNAMED = " *(needs validation: the cited source does not name this item)*"
+_FLAG = " †"
+_NOTE_GROUP = ("*Items marked † come from documentation that does not mention {term} "
+              "specifically; validate them for your case.*")
 
 
 @dataclass
@@ -176,6 +180,22 @@ def _grade_line(item: str, markers: list[int], marker_map: dict[int, dict], *,
     return ItemGrade(item, DROPPED, [], markers, "below_floor")
 
 
+def _group_term(grades: list[ItemGrade], flag_group_min: int) -> str | None:
+    """The single missing term that qualifies for the grouped flag note (spec
+    2026-10-15 §13.2): shared by `missing_terms == [t]`/`reason == "missing_terms"`
+    needs-validation items, at least `flag_group_min` of them and at least half the
+    kept (confirmed + needs_validation) items. The most frequent qualifying term
+    wins (ties keep first-seen order); None when nothing qualifies."""
+    kept = sum(1 for g in grades if g.grade in (CONFIRMED, NEEDS_VALIDATION))
+    counts = Counter(g.missing_terms[0] for g in grades
+                     if g.grade == NEEDS_VALIDATION and g.reason == "missing_terms"
+                     and len(g.missing_terms) == 1)
+    for term, count in counts.most_common():
+        if count >= flag_group_min and count * 2 >= kept:
+            return term
+    return None
+
+
 class GradedAnswer(NamedTuple):
     text: str                  # dropped lines removed, flagged lines annotated
     grades: list[ItemGrade]    # one per item line, in text order
@@ -226,17 +246,24 @@ def _children(lines: list[str], i: int, end: int) -> list[int]:
 
 def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[str],
                 scores: dict[str, float | None], floor: float, unnamed_floor: float,
-                scope: Scope | None = None) -> GradedAnswer:
+                scope: Scope | None = None, flag_group_min: int = 5) -> GradedAnswer:
     """Grade every `- **<item>** ... [N]` line before the limitations section; return
     the text with dropped lines -- their deeper-indented children, and the headings
     they leave empty -- removed and flagged lines annotated, one grade per graded
     item line in text order, and the count of bullet lines not in item form. Words
-    of the `scope`'s names never count towards naming an item."""
+    of the `scope`'s names never count towards naming an item.
+
+    When one missing term (`_group_term`) is shared by at least `flag_group_min`
+    needs-validation items and by at least half the kept (confirmed +
+    needs_validation) items, those items' lines get " †" instead of their full note
+    and one fixed line naming the term is inserted, followed by a blank line,
+    immediately before the first graded item line (spec §13.2)."""
     lines = raw.split("\n")
     end = next((i for i, ln in enumerate(lines) if _is_limits_heading(ln)), len(lines))
     term_stems = {stem(t) for t in terms}
     excluded = scope_words(scope)
     grades: list[ItemGrade] = []
+    item_lines: list[int] = []
     removed: set[int] = set()
     ungraded = 0
     for i in range(end):
@@ -253,18 +280,30 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
                         terms=terms, term_stems=term_stems, excluded=excluded, scores=scores,
                         floor=floor, unnamed_floor=unnamed_floor)
         grades.append(g)
+        item_lines.append(i)
         if g.grade == DROPPED:
             children = _children(lines, i, end)
             removed.add(i)
             removed.update(children)
             logger.info("list item dropped (%s): %s%s", g.reason, g.item[:80],
                         f" (+{len(children)} indented line(s))" if children else "")
-        elif g.grade == NEEDS_VALIDATION:
-            if g.reason == "unnamed":
-                lines[i] = lines[i].rstrip() + _NOTE_UNNAMED
-            else:
-                shown = ", ".join(_as_in_question(t, q) for t in g.missing_terms)
-                lines[i] = lines[i].rstrip() + _NOTE.format(terms=shown)
+    group_term = _group_term(grades, flag_group_min)
+    for g, i in zip(grades, item_lines):
+        if g.grade != NEEDS_VALIDATION:
+            continue
+        if g.reason == "unnamed":
+            lines[i] = lines[i].rstrip() + _NOTE_UNNAMED
+        elif group_term is not None and g.missing_terms == [group_term]:
+            lines[i] = lines[i].rstrip() + _FLAG
+        else:
+            shown = ", ".join(_as_in_question(t, q) for t in g.missing_terms)
+            lines[i] = lines[i].rstrip() + _NOTE.format(terms=shown)
+    if group_term is not None and item_lines:
+        header = [_NOTE_GROUP.format(term=_as_in_question(group_term, q)), ""]
+        idx = item_lines[0]
+        lines[idx:idx] = header
+        removed = {r + len(header) if r >= idx else r for r in removed}
+        end += len(header)
     if ungraded:
         logger.warning("list answer: %d bullet line(s) not in item form; left ungraded",
                        ungraded)

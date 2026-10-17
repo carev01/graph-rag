@@ -30,6 +30,31 @@ def test_question_terms_keep_only_distinctive_words(q, scope, terms):
     assert ls.question_terms(q, scope) == terms
 
 
+@pytest.mark.parametrize("q,words", [
+    ("Which resource types can AWS Backup protect?", {"resource", "types"}),
+    ("What recovery options does Azure Backup offer for Azure VMs?",
+     {"recovery", "options"}),
+    ("Which workloads does Veeam support immutability for?", {"workloads"}),
+    ("Where can I restore a Windows agent backup?", set()),
+])
+def test_item_kind_words(q, words):
+    assert ls.item_kind_words(q) == words
+
+
+@pytest.mark.parametrize("q,scope,terms", [
+    ("Which resource types can AWS Backup protect?", Scope(products=("AWS Backup",)),
+     ["protect"]),
+    ("What recovery options does Azure Backup offer for Azure VMs?",
+     Scope(vendors=("Microsoft",), products=("Azure Backup",)), ["vms"]),
+    ("Which workloads does Veeam support immutability for?", Scope(vendors=("Veeam",)),
+     ["immutability"]),
+    ("Where can I restore a Windows agent backup?", Scope(),
+     ["restore", "windows", "agent", "backup"]),
+])
+def test_grading_terms_drop_item_kind_words(q, scope, terms):
+    assert ls.grading_terms(q, scope) == terms
+
+
 @pytest.mark.parametrize("word,stemmed", [
     ("immutability", "immutab"), ("restore", "restor"), ("recovery", "recover"),
     ("databases", "databas"), ("restores", "restor"), ("agent", "agent"), ("vms", "vms"),

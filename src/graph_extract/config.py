@@ -401,6 +401,11 @@ class ExtractSettings(BaseSettings):
     # A relevant cited fact that does not name the item still flags it (needs
     # validation) above this score, rather than dropping it (spec §12.4).
     list_item_unnamed_floor: float = 0.65
+    # A needs-validation item's missing term is grouped into one flag line (item lines
+    # get " †" instead of the full note) once it is the reason for at least this many
+    # items, and for at least half the kept (confirmed + needs_validation) ones (spec
+    # §13.2).
+    list_flag_group_min: int = 5
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw

@@ -125,6 +125,27 @@ def question_terms(q: str, scope: Scope | None) -> list[str]:
     return out
 
 
+def item_kind_words(q: str) -> set[str]:
+    """The lower-cased words between the leading "which/what" and the matched item
+    noun of `_ITEM_NOUN_RE` (its prefix), plus the noun itself: "Which resource types
+    can AWS Backup protect?" -> {"resource", "types"}; "Which workloads does Veeam
+    support immutability for?" -> {"workloads"}; no "which/what ... <noun>" match ->
+    set(). These name the *kind* of thing being listed, not evidence an item's facts
+    must contain -- `question_terms` keeps them, since the sweep still wants them for
+    recall (spec 2026-10-15 §13.1)."""
+    m = _ITEM_NOUN_RE.search(q)
+    if not m:
+        return set()
+    return set(_WORD_RE.findall(m.group(0).lower())[1:])
+
+
+def grading_terms(q: str, scope: Scope | None) -> list[str]:
+    """`question_terms`, minus `item_kind_words`: the words naming what kind of item
+    the question lists are never grading qualifiers (spec §13.1)."""
+    kind = item_kind_words(q)
+    return [t for t in question_terms(q, scope) if t not in kind]
+
+
 def lucene_query(terms: list[str]) -> str:
     """OR of every term's inflected exact forms (`word_forms`), plus its stem as a
     prefix wildcard when the stem is a plain word of at least 4 characters; '-' is

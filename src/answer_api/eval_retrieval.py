@@ -155,7 +155,7 @@ async def check_list_items(graphiti, driver, map_client, map_model, settings,
     text = " || ".join(r["fact"] for r in facts)
     found, missing = match_items(text, items)
     qtext = q["question"]
-    terms = list_sweep.question_terms(qtext, scope)
+    terms = list_sweep.grading_terms(qtext, scope)
     item_scores: dict[str, float | None] = {}
     item_grades: dict[str, str] = {}
     for item in items:
@@ -173,7 +173,7 @@ async def check_list_items(graphiti, driver, map_client, map_model, settings,
         grades = grade_items(raw, marker_map, q=qtext, terms=terms,
                              scores=got.scores, floor=settings.list_item_floor,
                              unnamed_floor=settings.list_item_unnamed_floor,
-                             scope=scope).grades
+                             scope=scope, flag_group_min=settings.list_flag_group_min).grades
         item_grades[item["item"]] = grades[0].grade if grades else "unretrieved"
     return {"pass": not missing, "found": len(found), "total": len(items),
             "missing": missing, "item_scores": item_scores, "item_grades": item_grades}
