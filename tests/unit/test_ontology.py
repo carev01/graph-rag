@@ -239,3 +239,10 @@ def test_instructions_have_restores_to_rule():
     assert ("the DESTINATION is the target entity and the relation is "
             "RestoresTo") in flat
     assert "use the product that performs the restore as the subject" in flat
+
+
+def test_instructions_extract_the_documented_product_as_an_entity():
+    # 2026-10-17 proof smoke: a connector list with no product named lost 28 of its
+    # facts because the implied subject was never extracted as an entity.
+    text = " ".join(EXTRACTION_INSTRUCTIONS.split()).lower()
+    assert "extract the documented product as an entity in every chunk that states facts about it" in text

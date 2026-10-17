@@ -146,8 +146,10 @@ because it appears in these instructions.
 The document's product is given in the DOCUMENT CONTEXT below. It is the subject of most
 facts (it provides / supports / limits / integrates with / is available in things). When
 the text states a fact about the documented product without naming it, use the documented
-product's exact name as the subject. Never make any OTHER product the subject of a fact
-unless this chunk's text names that product.
+product's exact name as the subject, and extract the documented product as an entity in
+every chunk that states facts about it -- even when the text does not name it -- so those
+facts keep their subject. Never make any OTHER product the subject of a fact unless this
+chunk's text names that product.
 
 Do NOT extract documentation-navigation or UI noise as entities: phrases like "this
 guide", "the following table", "Note", "Important", "see also", button labels, menu items,

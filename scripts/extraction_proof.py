@@ -385,8 +385,12 @@ def gate_verdict(outcomes: list[ArticleOutcome], abort: str | None = None) -> st
         return ("gate never fired: no successfully ingested article in the sample has a "
                 "foreign-unnamed-subject fact in production, so nothing shows the gate "
                 "dropping one")
-    if all(o.grounding_calls == 0 or o.grounding_dropped == 0 for o in wrong):
-        return ("gate never fired: grounding_dropped == 0 on every article production got "
+    # Engagement is the gate SEEING the extraction replies (grounding_calls > 0 on
+    # the articles production got wrong). It need not drop anything: the 2026-10-17
+    # smoke showed the rewritten instructions alone stopped the inventions, leaving
+    # the gate nothing to remove -- a zero there is a result, not a dead mechanism.
+    if all(o.grounding_calls == 0 for o in wrong):
+        return ("gate never fired: grounding_calls == 0 on every article production got "
                 "wrong (" + ", ".join(o.article_id for o in wrong) + ")")
     return None
 

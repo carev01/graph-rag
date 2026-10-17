@@ -186,11 +186,17 @@ def test_gate_never_fired_when_no_extraction_call_was_filtered():
     assert proof.gate_verdict(rows).startswith("gate never fired")
 
 
-def test_gate_never_fired_when_nothing_dropped_on_articles_production_got_wrong():
-    rows = [_outcome("a1", prod_foreign=5, grounding_calls=3, grounding_dropped=0),
+def test_gate_never_fired_when_no_call_reached_it_on_articles_production_got_wrong():
+    rows = [_outcome("a1", prod_foreign=5, grounding_calls=0, grounding_dropped=0),
             _outcome("a2", prod_foreign=0, grounding_calls=3, grounding_dropped=4)]
     verdict = proof.gate_verdict(rows)
     assert verdict.startswith("gate never fired") and "a1" in verdict
+
+
+def test_engaged_gate_that_dropped_nothing_is_a_result_not_a_refusal():
+    # 2026-10-17 smoke: the rewritten instructions alone stopped the inventions.
+    rows = [_outcome("a1", prod_foreign=37, grounding_calls=4, grounding_dropped=0)]
+    assert proof.gate_verdict(rows) is None
 
 
 def test_gate_never_fired_when_no_article_was_wrong_in_production():
