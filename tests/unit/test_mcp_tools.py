@@ -85,7 +85,8 @@ async def test_answer_structured_output_carries_routing_and_list_fields(patch):
            "list_mode": True, "expansion_queries": ["q1", "q2"],
            "item_grades": [{"item": "Azure", "grade": "confirmed", "missing_terms": [],
                             "markers": [1], "fact_uuids": ["f1"]}],
-           "items_ungraded": 2}
+           "items_ungraded": 2,
+           "vendor_scores": {"AWS": 0.633, "Veeam": 0.824}, "relevance_unchecked": ["Cohesity"]}
     patch(answer=env)
     async with Client(ms.build_mcp_server(_app())) as c:
         r = await c.call_tool("answer_question", {"question": "q"})
@@ -94,6 +95,8 @@ async def test_answer_structured_output_carries_routing_and_list_fields(patch):
     assert r.structured_content["expansion_queries"] == ["q1", "q2"]
     assert r.structured_content["item_grades"] == env["item_grades"]
     assert r.structured_content["items_ungraded"] == 2
+    assert r.structured_content["vendor_scores"] == {"AWS": 0.633, "Veeam": 0.824}
+    assert r.structured_content["relevance_unchecked"] == ["Cohesity"]
 
 
 async def test_answer_structured_output_omits_absent_list_fields(patch):
@@ -105,6 +108,8 @@ async def test_answer_structured_output_omits_absent_list_fields(patch):
     assert "expansion_queries" not in r.structured_content
     assert "item_grades" not in r.structured_content
     assert "items_ungraded" not in r.structured_content
+    assert "vendor_scores" not in r.structured_content
+    assert "relevance_unchecked" not in r.structured_content
 
 
 def test_format_answer_text_never_invents_a_url():

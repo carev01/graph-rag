@@ -21,6 +21,7 @@ from answer_api.attribution import (
 )
 from answer_api.global_search import (_extract_json, _fact_texts, _in_scope_ci,
                                       shortlist_communities)
+from answer_api.rerank import rerank, rerank_configured
 from answer_api.search import search_local
 from answer_api.shape import Facet, could_not_check_note, raise_if_cancelled
 from answer_api.synthesize import (_REFUSAL, _build_citations, _complete_or_none,
@@ -39,7 +40,9 @@ NONE_DOCUMENTED = ("None of the checked vendors ({vendors}) document this in the
 # deterministic per-vendor form, never the bare cross-vendor question.
 _CHECK_PROMPT = (
     "Decide whether the EVIDENCE below, all from {vendor}'s documentation, answers the "
-    "QUESTION about {vendor}. Use ONLY the evidence. Absence of evidence "
+    "QUESTION about {vendor}. Use ONLY the evidence. Mark it documented only when the "
+    "evidence states the capability the question asks about itself -- a related or "
+    "adjacent feature does not count. Absence of evidence "
     "is not a finding. Respond with ONLY JSON: {{\"documented\": true or false, "
     "\"points\": [short strings stating what the evidence shows], \"fact_ids\": [ids "
     "from the evidence that support those points]}}. If documented is false, points and "
@@ -150,6 +153,68 @@ async def _check(client, model, *, q, vendor, evidence, valid) -> list[str] | No
     return None
 
 
+async def _relevance_floor(q: str, supported: dict[str, list[str]],
+                           texts: dict[str, str], *, settings,
+                           sem: asyncio.Semaphore
+                           ) -> tuple[dict[str, float], list[str]]:
+    """Reranks each documented vendor's best evidence against `q` and drops
+    (from `supported`, in place) any vendor whose best score misses
+    `settings.enumeration_min_score` -- it reads as checked, not documented.
+    The reranks share `sem`, the same per-vendor concurrency bound as the gather
+    and check phases, rather than firing unbounded.
+
+    Returns `(vendor_scores, relevance_unchecked)`: `vendor_scores` holds every
+    vendor whose evidence was actually scored; `relevance_unchecked` lists
+    vendors the floor could not be applied to -- no reranker configured, the
+    rerank call failed, or its reply had no usable score (empty, or every index
+    out of range for that vendor's own evidence) -- those vendors are kept,
+    never dropped on unchecked relevance.
+    """
+    vendor_scores: dict[str, float] = {}
+    relevance_unchecked: list[str] = []
+    vendors = list(supported)
+    if not vendors:
+        return vendor_scores, relevance_unchecked
+    if not rerank_configured(settings):
+        logger.warning("enumeration: relevance check unavailable (no reranker "
+                       "configured); %s kept unchecked", ", ".join(vendors))
+        return vendor_scores, vendors
+
+    async def _one(v: str):
+        ids = supported[v]
+        async with sem:
+            return await rerank(q, [texts[i] for i in ids], top_k=len(ids),
+                                settings=settings)
+
+    results = await asyncio.gather(*[_one(v) for v in vendors], return_exceptions=True)
+    raise_if_cancelled(results)
+    for v, res in zip(vendors, results):
+        if isinstance(res, BaseException) or res is None:
+            if isinstance(res, BaseException):
+                logger.warning("enumeration relevance check for %s failed: %s", v, res)
+            else:
+                logger.warning("enumeration relevance check for %s returned no "
+                               "usable score", v)
+            relevance_unchecked.append(v)
+            continue
+        # A reply with no usable score -- empty, or every index out of range for
+        # this vendor's own evidence -- is unavailable, never a 0.0 that drops it.
+        n = len(supported[v])
+        scores = [score for i, score in res if 0 <= i < n]
+        if not scores:
+            logger.warning("enumeration relevance check for %s returned no "
+                           "usable score", v)
+            relevance_unchecked.append(v)
+            continue
+        best = max(scores)
+        vendor_scores[v] = best
+        if best < settings.enumeration_min_score:
+            logger.info("enumeration: %s evidence too weak (best %.3f < %.2f); "
+                        "not documented", v, best, settings.enumeration_min_score)
+            del supported[v]
+    return vendor_scores, relevance_unchecked
+
+
 async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
                             synth_client, synth_model, *, q: str,
                             facets: Sequence[Facet], group_id: str, settings) -> dict:
@@ -235,6 +300,9 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
             del supported[v]
             degraded.add(v)
 
+    vendor_scores, relevance_unchecked = await _relevance_floor(q, supported, texts,
+                                                                 settings=settings, sem=sem)
+
     degraded_list = [v for v in attempted if v in degraded]
     checked = [v for v in attempted if v not in degraded]
     documented = [v for v in checked if v in supported]
@@ -242,7 +310,8 @@ async def enumerate_vendors(graphiti, driver, embedder, map_client, map_model,
     # checked_vendors agrees with the closing "Checked:" line; the vendors that
     # could not be checked are in degraded_facets.
     base = {"query": q, "checked_vendors": checked, "documented_vendors": documented,
-            "degraded_facets": degraded_list, "communities_used": communities_used}
+            "degraded_facets": degraded_list, "communities_used": communities_used,
+            "vendor_scores": vendor_scores, "relevance_unchecked": relevance_unchecked}
     if not checked:
         return {**base, "answer": f"{_REFUSAL} {note}", "citations": [],
                 "applies_to": []}

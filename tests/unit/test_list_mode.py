@@ -76,12 +76,48 @@ def test_the_shared_rules_have_their_verbatim_wording():
         "about a different workload or product, but keep items a fact states for a "
         "broader category that contains the subject (for example, all agents when the "
         "question asks about a Windows agent). ")
+    assert lm._MERGE_RULE == (
+        "Give at most {max_items} item lines in total. When several items are versions, "
+        "editions or minor variants of one thing (for example several versions of one "
+        "hypervisor), give them ONE line naming them together, with up to three markers. ")
+    assert lm._MERGE_VARIANTS_RULE == (
+        "When several items are versions, editions or minor variants of one thing, give "
+        "them ONE entry naming them together. ")
 
 
 def test_both_prompts_contain_both_shared_rules():
     for prompt in (lm._LIST_PROMPT, lm._COMPLETE_PROMPT):
         assert lm._FAITHFUL_DESCRIPTION_RULE in prompt
         assert lm._SUBJECT_RULE in prompt
+    # Only the list prompt caps item lines; the completeness pass adds items beyond
+    # that cap and gets the merge guidance without a limit (final review).
+    assert lm._MERGE_RULE in lm._LIST_PROMPT and lm._MERGE_RULE not in lm._COMPLETE_PROMPT
+    assert (lm._MERGE_VARIANTS_RULE in lm._COMPLETE_PROMPT
+            and lm._MERGE_VARIANTS_RULE not in lm._LIST_PROMPT)
+
+
+def test_the_list_prompt_has_no_item_limit_wording():
+    # The merge rule gives a numeric cap; the prompt must not also claim no limit.
+    assert "no item limit" not in lm._LIST_PROMPT
+
+
+def test_the_list_prompt_formats_the_merge_rule_with_the_configured_cap():
+    assert "Give at most 120 item lines in total" in lm._LIST_PROMPT.format(
+        supported="s", limitations="l", q="q", max_items=120)
+    assert "Give at most 37 item lines in total" in lm._LIST_PROMPT.format(
+        supported="s", limitations="l", q="q", max_items=37)
+
+
+# --- Completeness pass precision (spec 2026-10-17 task 3) --------------------------
+
+def test_the_completeness_prompt_has_the_naming_rule():
+    assert lm._COMPLETE_NAMING_RULE == (
+        "Name each item exactly as its fact names it; never add the question's subject "
+        "(or any product, platform or operating system the fact does not name) to an "
+        "item's name. Return only items that are themselves an answer to the question, "
+        "not details of how an already-listed item works. ")
+    assert lm._COMPLETE_NAMING_RULE in lm._COMPLETE_PROMPT
+    assert lm._COMPLETE_NAMING_RULE not in lm._LIST_PROMPT
 
 
 class _Client:
@@ -233,6 +269,7 @@ async def test_answer_list_groups_supported_then_limitations_and_cites_by_marker
     assert "every item" in prompt.lower() and "Not supported / limitations" in prompt
     assert ("Name each item the way the facts name it (the product, platform or feature "
             "the fact names), not by a broader category.") in prompt
+    assert "Give at most 120 item lines in total" in prompt
     assert out["list_mode"] is True and out["expansion_queries"] == []
     assert [c["fact_uuid"] for c in out["citations"]] == ["az", "lim"]
     assert out["citations"][0]["sources"][0]["url"] == "https://d/az"
@@ -1107,8 +1144,30 @@ async def _answer_with_completion(patched, monkeypatch, reply, *, synth=_COMPLET
     return out, map_client
 
 
+async def test_a_configured_item_cap_reaches_the_list_prompt_only(patched, monkeypatch):
+    install, _ = patched
+    install({_COMPLETE_Q: [_fact(u, text) for u, (text, _s) in _COMPLETE_FACTS.items()]})
+    monkeypatch.setattr(lm, "rerank", _complete_rerank)
+    reply = '[{"item": "OLVM", "description": "restore as a VM", "markers": [2]}]'
+    map_client = _Replies("[]", reply)
+    synth = _Client(_COMPLETE_SYNTH)
+    out = await lm.answer_list(None, None, map_client, "m", synth, "s", q=_COMPLETE_Q,
+                               scope=Scope(), group_id="g",
+                               settings=_settings(list_item_floor=0.1, list_max_items=37))
+    assert "Give at most 37 item lines in total" in synth.prompts[0]
+    # The completeness pass adds items beyond the list prompt's own cap: it gets the
+    # cap-free merge guidance, never a numeric limit of its own.
+    completeness_prompt = map_client.calls[1]["messages"][0]["content"]
+    assert "Give at most" not in completeness_prompt
+    assert lm._MERGE_VARIANTS_RULE in completeness_prompt
+    assert out["list_mode"] is True
+
+
 async def test_missing_items_are_added_before_the_limitations_and_graded(
         patched, monkeypatch, caplog):
+    # Oracle Linux Virtualization Manager's fact names Windows explicitly (confirmed);
+    # HPE Morpheus VM Essentials' fact does not (would be needs-validation elsewhere),
+    # but under "### Also documented" that grades DROPPED instead (task 3 strict_from).
     reply = ('Sure: [{"item": "Oracle Linux Virtualization Manager", "description": '
              '"restore agent backups as VMs", "markers": [2]}, '
              '{"item": "HPE Morpheus VM Essentials", "description": "restore physical '
@@ -1122,19 +1181,21 @@ async def test_missing_items_are_added_before_the_limitations_and_graded(
     assert "[2] " in prompt and "[3] " in prompt
     assert "[1] " not in prompt and "[4] " not in prompt
     assert "JSON" in prompt and "URL" in prompt and "15 words" in prompt
+    assert "Give at most" not in prompt and lm._MERGE_VARIANTS_RULE in prompt
+    assert lm._COMPLETE_NAMING_RULE in prompt
     lines = [ln.strip() for ln in out["answer"].splitlines()]
     also = lines.index("### Also documented")
     assert lines.index("- **Sangfor aSV** — restore as a VM [1]") < also
     assert lines[also + 1] == ("- **Oracle Linux Virtualization Manager** — restore agent "
                                "backups as VMs [2]")
-    assert lines[also + 2].startswith("- **HPE Morpheus VM Essentials** — restore physical "
-                                      "machines [3] *(needs validation")
+    assert "HPE Morpheus" not in out["answer"]
     assert also < lines.index("**Not supported / limitations**")
     assert [(g["item"], g["grade"]) for g in out["item_grades"]] == [
         ("Sangfor aSV", "confirmed"),
         ("Oracle Linux Virtualization Manager", "confirmed"),
-        ("HPE Morpheus VM Essentials", "needs_validation")]
-    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "olvm", "hpe", "lim"]
+        ("HPE Morpheus VM Essentials", "dropped")]
+    assert out["item_grades"][2]["reason"] == "completion_unconfirmed"
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "olvm", "lim"]
     assert "degraded" not in out
     assert "list completeness pass: 2 uncited facts, 2 items added" in caplog.text
 
@@ -1145,6 +1206,21 @@ async def test_added_items_without_a_limitations_section_are_appended(patched, m
         patched, monkeypatch, reply, synth="- **Sangfor aSV** — restore as a VM [1]")
     lines = [ln.strip() for ln in out["answer"].splitlines() if ln.strip()]
     assert lines[-2:] == ["### Also documented", "- **OLVM** — restore as a VM [2]"]
+
+
+async def test_every_completion_item_unconfirmed_removes_the_heading_end_to_end(
+        patched, monkeypatch):
+    # Fix round 1: HPE Morpheus VM Essentials' fact does not name Windows, so under
+    # the pass's own "### Also documented" heading it grades DROPPED -- the only
+    # item there, so the whole heading disappears from the final answer.
+    reply = ('[{"item": "HPE Morpheus VM Essentials", "description": "restore physical '
+             'machines", "markers": [3]}]')
+    out, _ = await _answer_with_completion(patched, monkeypatch, reply)
+    assert "Also documented" not in out["answer"]
+    assert "HPE Morpheus" not in out["answer"]
+    assert [(g["item"], g["grade"], g["reason"]) for g in out["item_grades"]] == [
+        ("Sangfor aSV", "confirmed", "named"),
+        ("HPE Morpheus VM Essentials", "dropped", "completion_unconfirmed")]
 
 
 async def test_a_completion_naming_an_existing_item_is_ignored(patched, monkeypatch):
@@ -1169,8 +1245,32 @@ async def test_completion_markers_outside_the_uncited_set_are_dropped(patched, m
     also = lines.index("### Also documented")
     assert lines[also + 1] == ("- **Oracle Linux Virtualization Manager** — restore as a "
                                "VM [2]")
-    assert lines[also + 2].startswith("- **Many** — x [3][2]")
+    # "Many" is named by neither cited fact (reason "unnamed" elsewhere), but under
+    # "### Also documented" that grades needs-validation-or-worse items DROPPED (task 3).
+    assert "Many" not in out["answer"]
     assert "Cited Already" not in out["answer"] and "No Description" not in out["answer"]
+
+
+def test_completion_entries_keeps_at_most_max_items_in_reply_order():
+    parsed = [{"item": f"Item {i}", "description": "x", "markers": [i]}
+             for i in range(1, 21)]
+    out = lm._completion_entries(parsed, set(range(1, 21)), [], 15)
+    assert len(out) == 15
+    assert out[0] == "- **Item 1** — x [1]"
+    assert out[-1] == "- **Item 15** — x [15]"
+    assert not any("Item 16" in ln or "Item 20" in ln for ln in out)
+
+
+async def test_the_completeness_cap_limits_items_added_end_to_end(patched, monkeypatch):
+    reply = ('[{"item": "Oracle Linux Virtualization Manager", "description": "x", '
+             '"markers": [2]}, '
+             '{"item": "HPE Morpheus VM Essentials", "description": "x", "markers": [2]}]')
+    out, _ = await _answer_with_completion(patched, monkeypatch, reply,
+                                           list_completeness_max_items=1)
+    lines = [ln.strip() for ln in out["answer"].splitlines() if ln.strip()]
+    also = lines.index("### Also documented")
+    assert lines[also + 1].startswith("- **Oracle Linux Virtualization Manager**")
+    assert "HPE Morpheus" not in out["answer"]
 
 
 @pytest.mark.parametrize("reply", ["not json", '{"item": "x"}', "[{]",

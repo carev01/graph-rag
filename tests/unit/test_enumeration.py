@@ -14,7 +14,10 @@ from graph_extract.config import ExtractSettings
 pytestmark = pytest.mark.asyncio
 
 _S = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
-                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+                     neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p",
+                     # Hermetic: the relevance floor must stay OFF unless a test turns
+                     # it on explicitly (rerank_configured(settings) reads these two).
+                     rerank_base_url="", rerank_model="")
 _VENDORS = ["AWS", "Cohesity", "Microsoft", "Veeam"]
 _FACETS = [Facet(v, Scope(vendors=(v,), source="detected")) for v in _VENDORS]
 
@@ -363,6 +366,60 @@ async def test_enum_concurrency_bounds_the_vendor_fan_out(monkeypatch):
     assert res["checked_vendors"] == vendors   # results stay in facet order
 
 
+async def test_the_relevance_floor_reranks_are_bounded_by_enum_concurrency(monkeypatch):
+    # Final review (spec 2026-10-17): the floor used to fire one rerank per
+    # documented vendor at once; it now shares enum_concurrency with gather/check.
+    live, peak = {"rerank": 0}, {"rerank": 0}
+
+    async def _hold():
+        live["rerank"] += 1
+        peak["rerank"] = max(peak["rerank"], live["rerank"])
+        for _ in range(5):
+            await asyncio.sleep(0)
+        live["rerank"] -= 1
+
+    async def _search(graphiti, driver, *, q, k, scope=None, group_id, **kw):
+        v = scope.vendors[0]
+        return {"results": [{"fact": f"{v} fact", "fact_uuid": f"lf-{v}",
+                             "valid_at": None, "invalid_at": None, "sources": _src(v)}]}
+
+    class _AllDocumented:
+        def __init__(self):
+            self.prompts = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            p = kw["messages"][0]["content"]
+            self.prompts.append(p)
+            if p.startswith("Decide whether"):
+                v = next(v for v in vendors if f"from {v}'s documentation" in p)
+                text = ('{"documented": true, "points": ["p"], '
+                       f'"fact_ids": ["lf-{v}"]}}')
+            else:
+                text = "stub [1]."
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=text), finish_reason="stop")])
+
+    async def _rerank(q, documents, *, top_k, settings):
+        await _hold()
+        return [(0, 0.9)]
+
+    monkeypatch.setattr(en, "search_local", _search)
+    monkeypatch.setattr(en, "rerank", _rerank)
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    monkeypatch.setattr(en, "Provenance", _AnyProv)
+    vendors = [f"V{i}" for i in range(7)]
+    facets = [Facet(v, Scope(vendors=(v,))) for v in vendors]
+    c = _AllDocumented()
+    settings = _S.model_copy(update={"enum_concurrency": 2})
+    res = await en.enumerate_vendors(None, None, None, c, "map", c, "syn",
+                                     q="Which vendors lock backups?", facets=facets,
+                                     group_id="g", settings=settings)
+    assert peak == {"rerank": 2}
+    assert res["documented_vendors"] == vendors
+    assert res["vendor_scores"] == {v: 0.9 for v in vendors}
+
+
 class _AnyProv:
     def __init__(self, driver):
         pass
@@ -412,3 +469,90 @@ async def test_gather_without_a_rewrite_searches_once(monkeypatch):
                      facet=Facet("AWS", Scope(vendors=("AWS",))), group_id="g",
                      settings=_S)
     assert asked == ["Which vendors lock backups?"]
+
+
+# -- Relevance floor (spec 2026-10-17: enumeration_min_score=0.55) ----------
+
+_DOCUMENTED = _checks(AWS='{"documented": true, "points": ["p"], "fact_ids": ["lf-AWS"]}',
+                      Veeam='{"documented": true, "points": ["p"], "fact_ids": ["cf-Veeam"]}')
+
+
+def _rerank_by_vendor(scores: dict[str, float]):
+    """A fake `rerank` that scores by which vendor's fact text the documents
+    hold -- the real texts fixture renders facts as "text <fact_uuid>", and
+    every fact_uuid in this file embeds its vendor's name."""
+    async def _rerank(q, documents, *, top_k, settings):
+        for v, score in scores.items():
+            if any(v in d for d in documents):
+                return [(0, score)]
+        raise AssertionError(f"no score configured for documents {documents!r}")
+    return _rerank
+
+
+async def test_a_vendor_below_the_relevance_floor_is_checked_not_documented(monkeypatch):
+    monkeypatch.setattr(en, "rerank", _rerank_by_vendor({"AWS": 0.448, "Veeam": 0.633}))
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["checked_vendors"] == _VENDORS
+    assert res["documented_vendors"] == ["Veeam"]
+    assert res["answer"].endswith(
+        "Checked: AWS, Cohesity, Microsoft, Veeam. Documented for: Veeam.")
+    assert res["vendor_scores"] == {"AWS": 0.448, "Veeam": 0.633}
+    assert res["relevance_unchecked"] == []
+
+
+async def test_a_vendor_above_the_floor_stays_documented(monkeypatch):
+    monkeypatch.setattr(en, "rerank", _rerank_by_vendor({"AWS": 0.633, "Veeam": 0.824}))
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert res["vendor_scores"] == {"AWS": 0.633, "Veeam": 0.824}
+    assert res["relevance_unchecked"] == []
+
+
+async def test_relevance_check_unavailable_keeps_both_and_records_degraded():
+    # Default _S has no reranker configured: both documented vendors are kept,
+    # not scored, and recorded as unchecked rather than silently trusted.
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert set(res["relevance_unchecked"]) == {"AWS", "Veeam"}
+    assert res["vendor_scores"] == {}
+
+
+async def test_a_rerank_exception_for_one_vendor_keeps_that_vendor(monkeypatch):
+    async def _rerank(q, documents, *, top_k, settings):
+        if any("AWS" in d for d in documents):
+            raise RuntimeError("rerank endpoint down")
+        return [(0, 0.824)]
+
+    monkeypatch.setattr(en, "rerank", _rerank)
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert res["relevance_unchecked"] == ["AWS"]
+    assert res["vendor_scores"] == {"Veeam": 0.824}
+
+
+@pytest.mark.parametrize("aws_reply", [[], [(5, 0.9)]], ids=["empty", "out-of-range"])
+async def test_an_unusable_rerank_reply_keeps_the_vendor_not_a_zero_score(
+        monkeypatch, aws_reply):
+    # Not None, not an exception, but no usable score in it (empty, or every
+    # index out of range for AWS's single fact) -- must never become best=0.0
+    # and a silent drop.
+    async def _rerank(q, documents, *, top_k, settings):
+        if any("AWS" in d for d in documents):
+            return aws_reply
+        return [(0, 0.824)]
+
+    monkeypatch.setattr(en, "rerank", _rerank)
+    monkeypatch.setattr(en, "rerank_configured", lambda s: True)
+    res = await _run(_Client(_DOCUMENTED))
+    assert res["documented_vendors"] == ["AWS", "Veeam"]
+    assert res["relevance_unchecked"] == ["AWS"]
+    assert res["vendor_scores"] == {"Veeam": 0.824}
+
+
+async def test_check_prompt_rejects_adjacent_features():
+    assert ("Mark it documented only when the evidence states the capability the "
+            "question asks about itself -- a related or adjacent feature does not "
+            "count.") in en._CHECK_PROMPT

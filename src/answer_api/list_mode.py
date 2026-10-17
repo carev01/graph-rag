@@ -93,15 +93,28 @@ _SUBJECT_RULE = (
     "about a different workload or product, but keep items a fact states for a "
     "broader category that contains the subject (for example, all agents when the "
     "question asks about a Windows agent). ")
+# Paid eval run 14 (spec 2026-10-17 task 2): list answers of 15-20k characters with
+# near-duplicate version lines. {max_items} is filled from settings.list_max_items
+# wherever the prompts are formatted.
+_MERGE_RULE = (
+    "Give at most {max_items} item lines in total. When several items are versions, "
+    "editions or minor variants of one thing (for example several versions of one "
+    "hypervisor), give them ONE line naming them together, with up to three markers. ")
+# The completeness pass adds items beyond the list prompt's own cap, so it gets the
+# merge guidance without a line limit.
+_MERGE_VARIANTS_RULE = (
+    "When several items are versions, editions or minor variants of one thing, give "
+    "them ONE entry naming them together. ")
 
 _LIST_PROMPT = (
     "You are answering a question that asks for a LIST, about backup products, using "
     "ONLY the numbered facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
-    "List EVERY item the SUPPORTED FACTS state as an answer -- no item limit -- grouped "
+    "List EVERY item the SUPPORTED FACTS state as an answer -- within the line limit "
+    "below, merging variants rather than dropping items -- grouped "
     "under a few short headings that the facts suggest. Write each item as one line in "
     "exactly this form: - **<item name>** — <short description> [N]. Name each item the "
     "way the facts name it (the product, platform or feature the fact names), not by a "
-    "broader category. " + _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE +
+    "broader category. " + _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE + _MERGE_RULE +
     "Include an item even "
     "when its fact states it more generally than the question asks (for example for every "
     "agent rather than one); such items are checked and flagged automatically. When "
@@ -115,6 +128,15 @@ _LIST_PROMPT = (
     "SUPPORTED FACTS:\n{supported}\n\nLIMITATION FACTS:\n{limitations}\n\n"
     "QUESTION: {q}\n\nAnswer:")
 
+# Paid run 15 (spec 2026-10-17 task 3): the completeness pass renamed generic Linux/AIX
+# agent facts as a Windows-agent item by prepending the question's subject, and listed
+# details of an already-listed item as if they were items of their own.
+_COMPLETE_NAMING_RULE = (
+    "Name each item exactly as its fact names it; never add the question's subject "
+    "(or any product, platform or operating system the fact does not name) to an "
+    "item's name. Return only items that are themselves an answer to the question, "
+    "not details of how an already-listed item works. ")
+
 # The completeness pass (spec §13.3): items stated by supported facts the answer did
 # not cite, named by the map tier and graded like every other line.
 _COMPLETE_PROMPT = (
@@ -124,7 +146,8 @@ _COMPLETE_PROMPT = (
     "question and that is not already among the answer items. Name each item the way "
     "the facts name it, give a description of at most 15 words, and give at most 3 "
     "markers, only from the FACTS below, of the facts that state it. " +
-    _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE +
+    _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE + _MERGE_VARIANTS_RULE +
+    _COMPLETE_NAMING_RULE +
     "Do NOT use outside "
     "knowledge. Do NOT write any URL or link. Reply with ONLY a JSON list of objects "
     "{{\"item\": \"<item name>\", \"description\": \"<at most 15 words>\", "
@@ -167,8 +190,14 @@ DIVERSITY_DEGRADED = "diversity selection unavailable"
 SWEEP_DEGRADED = "keyword search unavailable"
 LIST_TRUNCATED = "list answer cut short"
 COMPLETENESS_DEGRADED = "completeness check unavailable"
+# The completeness pass's own heading; also `grade_items`' strict_from (spec
+# 2026-10-17 task 3): an item added there must grade CONFIRMED or it is dropped.
+_COMPLETION_HEADING = "Also documented"
 # The list synthesis budget (spec §11), and the one wider retry when the reply is cut
-# short at it (finish_reason "length").
+# short at it (finish_reason "length"). max_tokens is a ceiling, not a cost: lowering
+# it below what a full list needs only adds a truncation + regeneration round trip
+# (final review, spec 2026-10-17 task 2), so the item cap and merge rule shorten the
+# answer without touching this budget.
 _LIST_MAX_TOKENS = 10000
 _LIST_RETRY_MAX_TOKENS = 16000
 _warned_unconfigured = False
@@ -551,13 +580,17 @@ def _clean(text: str) -> str:
     return " ".join(_MARKER_LIST_RE.sub(" ", text).split())
 
 
-def _completion_entries(parsed: list, uncited: set[int], existing: list[str]) -> list[str]:
+def _completion_entries(parsed: list, uncited: set[int], existing: list[str],
+                        max_items: int) -> list[str]:
     """One `- **item** — description [m]...` line per usable entry: a non-empty string
     item that is not already an answer item (compared by `_item_key`), a string
-    description and up to 3 markers from the uncited set; anything else is skipped."""
+    description and up to 3 markers from the uncited set; anything else is skipped. At
+    most `max_items` entries, in reply order (spec 2026-10-17 task 3)."""
     out: list[str] = []
     seen = {_item_key(n) for n in existing}
     for entry in parsed:
+        if len(out) >= max_items:
+            break
         if not isinstance(entry, dict):
             continue
         item, desc, markers = entry.get("item"), entry.get("description"), entry.get("markers")
@@ -582,10 +615,12 @@ def _completion_entries(parsed: list, uncited: set[int], existing: list[str]) ->
 
 
 async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int, dict],
-                             n_sup: int, *, q: str, degraded: list[str]) -> str:
+                             n_sup: int, *, q: str, degraded: list[str],
+                             max_items: int) -> str:
     """`raw` with an "Also documented" section, before the limitations heading (at the
     end without one), of the items the map tier finds stated by supported facts that
-    `raw` does not cite (spec §13.3). Nothing uncited: `raw`, with no call. A failed or
+    `raw` does not cite (spec §13.3), capped at `max_items` entries in reply order
+    (spec 2026-10-17 task 3). Nothing uncited: `raw`, with no call. A failed or
     unreadable reply records COMPLETENESS_DEGRADED and keeps `raw` -- a failed check is
     never read as "nothing missing"."""
     cited = set(_markers(raw, marker_map))
@@ -627,12 +662,12 @@ async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int,
         logger.warning("list completeness pass failed (%s); keeping the first answer", exc)
         _degrade(degraded, COMPLETENESS_DEGRADED)
         return raw
-    added = _completion_entries(parsed, set(uncited), existing)
+    added = _completion_entries(parsed, set(uncited), existing, max_items)
     logger.info("list completeness pass: %d uncited facts, %d items added",
                 len(uncited), len(added))
     if not added:
         return raw
-    section = "### Also documented\n" + "\n".join(added)
+    section = f"### {_COMPLETION_HEADING}\n" + "\n".join(added)
     lines = raw.split("\n")
     at = find_limits_heading(lines)
     if at is None:
@@ -662,7 +697,8 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
     # Up to 250 supported facts: room for a long grouped list plus the synthesis
     # tier's reasoning tokens.
     raw = await _list_synthesis(synth_client, synth_model,
-                                _LIST_PROMPT.format(supported=sup, limitations=lim, q=q),
+                                _LIST_PROMPT.format(supported=sup, limitations=lim, q=q,
+                                                    max_items=settings.list_max_items),
                                 degraded=got.degraded)
     if got.degraded:
         base["degraded"] = got.degraded
@@ -674,15 +710,18 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
         # refusal: every supported fact would look uncited, and a refusal that gains
         # citations would stop the router falling through to the normal route.
         raw = await _completeness_pass(map_client, map_model, raw, marker_map, n_sup, q=q,
-                                       degraded=got.degraded)
+                                       degraded=got.degraded,
+                                       max_items=settings.list_completeness_max_items)
         if got.degraded:
             base["degraded"] = got.degraded
     # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
-    # dropped item's markers are never cited.
+    # dropped item's markers are never cited. strict_from holds the completeness
+    # pass's additions to CONFIRMED only (spec 2026-10-17 task 3).
     graded = grade_items(raw, marker_map, q=q, terms=grading_terms(q, scope),
                          scores=got.scores, floor=settings.list_item_floor,
                          unnamed_floor=settings.list_item_unnamed_floor, scope=scope,
-                         flag_group_min=settings.list_flag_group_min)
+                         flag_group_min=settings.list_flag_group_min,
+                         strict_from=_COMPLETION_HEADING)
     item_grades = [g.as_dict(marker_map) for g in graded.grades]
     if graded.grades and not any(g.grade in (CONFIRMED, NEEDS_VALIDATION)
                                  for g in graded.grades):

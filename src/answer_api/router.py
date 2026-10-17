@@ -203,7 +203,8 @@ def _shape_fields(env: dict, shape: QuestionShape | None, raw: dict,
     env["facets"] = [{"label": f.label, "scope": f.scope.as_dict(),
                       **({"query": f.query} if f.query else {})}
                      for f in (shape.facets if shape is not None else ())]
-    for key in ("degraded_facets", "checked_vendors", "documented_vendors"):
+    for key in ("degraded_facets", "checked_vendors", "documented_vendors",
+                "vendor_scores", "relevance_unchecked"):
         if key in raw:
             env[key] = raw[key]
 

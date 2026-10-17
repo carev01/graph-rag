@@ -90,6 +90,12 @@ def test_global_scope_defaults():
     assert s.scope_reload_seconds == 3600
 
 
+def test_enumeration_min_score_defaults_to_055():
+    s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
+                        neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+    assert s.enumeration_min_score == 0.55
+
+
 def test_router_default_mode():
     from graph_extract.config import ExtractSettings
     s = ExtractSettings(_env_file=None, docext_base_url="http://x", docext_read_key="k",
@@ -196,3 +202,5 @@ def test_list_mode_defaults():
     assert s.list_item_floor == 0.4 and s.list_item_unnamed_floor == 0.65
     assert s.list_flag_group_min == 5
     assert s.list_completeness_pass is True
+    assert s.list_completeness_max_items == 15
+    assert s.list_max_items == 120

@@ -41,7 +41,8 @@ def seen(monkeypatch):
         calls.append(("enumerate", kw["facets"]))
         return {"answer": "E", "citations": _CITE, "applies_to": [],
                 "checked_vendors": ["AWS"], "documented_vendors": ["AWS"],
-                "degraded_facets": []}
+                "degraded_facets": [], "vendor_scores": {"AWS": 0.824},
+                "relevance_unchecked": ["Cohesity"]}
 
     async def _fresh(*a, **kw):
         return {}
@@ -76,6 +77,8 @@ async def test_an_enumeration_runs_the_enumeration_path(seen):
     assert env["mode"] == "global"
     assert env["shape_requested"] == "enumeration"
     assert env["checked_vendors"] == ["AWS"] and env["documented_vendors"] == ["AWS"]
+    assert env["vendor_scores"] == {"AWS": 0.824}
+    assert env["relevance_unchecked"] == ["Cohesity"]
 
 
 async def test_no_shape_is_single_and_passes_no_facets(seen):

@@ -410,6 +410,13 @@ class ExtractSettings(BaseSettings):
     # answer did not cite; they are appended under "Also documented" and graded like
     # every other line (spec §13.3).
     list_completeness_pass: bool = True
+    # Paid run 15 (spec 2026-10-17 task 3): the completeness pass once added ~24k
+    # characters of generic, mis-renamed items; cap how many it can append.
+    list_completeness_max_items: int = 15
+    # Paid eval run 14: list answers of 15-20k characters with near-duplicate version
+    # lines (spec 2026-10-17 task 2). The list and completeness prompts cap item lines
+    # and merge versions/editions/variants of one thing onto a single line.
+    list_max_items: int = 120
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw
@@ -429,6 +436,11 @@ class ExtractSettings(BaseSettings):
     # Vendors gathered/checked at once: at 40 vendors the unbounded fan-out issued
     # up to 120 hybrid searches plus 40 scans at once against Neo4j.
     enum_concurrency: int = 8
+    # A vendor counts as documented only when its best supporting fact scores at
+    # least this against the question; measured 2026-10-17, the false positive's
+    # best was 0.448, genuine vendors' best 0.633-0.824. Re-measure on the next
+    # enumeration eval from vendor_scores (margin to the lowest genuine vendor was 0.08).
+    enumeration_min_score: float = 0.55
     # ScopeResolver.load()'s structural catalog is reloaded lazily on use once
     # older than this (plan ruling 4 -- no separate freshness module exists).
     scope_reload_seconds: int = 3600
