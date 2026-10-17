@@ -80,6 +80,20 @@ _EXPAND_PROMPT = (
     "of strings.\n\n"
     "QUESTION: {q}\nJSON:")
 
+# After paid eval run 13 (spec §14): facts about backing up were written as restore
+# items, a completeness description overreached its fact, and an answer drifted to
+# other workloads. Both the list prompt and the completeness pass share these two
+# rules verbatim, built once so they can never drift apart.
+_FAITHFUL_DESCRIPTION_RULE = (
+    "Describe each item only as its cited facts state it, and never change what a "
+    "fact says it does: a fact about backing up is not a restore option, and "
+    "supported-for is not recommended. ")
+_SUBJECT_RULE = (
+    "List only items that answer the question for the subject it names: skip items "
+    "about a different workload or product, but keep items a fact states for a "
+    "broader category that contains the subject (for example, all agents when the "
+    "question asks about a Windows agent). ")
+
 _LIST_PROMPT = (
     "You are answering a question that asks for a LIST, about backup products, using "
     "ONLY the numbered facts below. " + ATTRIBUTION_RULES + CLAIM_RULES +
@@ -87,7 +101,8 @@ _LIST_PROMPT = (
     "under a few short headings that the facts suggest. Write each item as one line in "
     "exactly this form: - **<item name>** — <short description> [N]. Name each item the "
     "way the facts name it (the product, platform or feature the fact names), not by a "
-    "broader category. Include an item even "
+    "broader category. " + _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE +
+    "Include an item even "
     "when its fact states it more generally than the question asks (for example for every "
     "agent rather than one); such items are checked and flagged automatically. When "
     "several facts state the same item, put it on one line "
@@ -108,7 +123,9 @@ _COMPLETE_PROMPT = (
     "the numbered FACTS below, find every item that the facts state as an answer to the "
     "question and that is not already among the answer items. Name each item the way "
     "the facts name it, give a description of at most 15 words, and give at most 3 "
-    "markers, only from the FACTS below, of the facts that state it. Do NOT use outside "
+    "markers, only from the FACTS below, of the facts that state it. " +
+    _FAITHFUL_DESCRIPTION_RULE + _SUBJECT_RULE +
+    "Do NOT use outside "
     "knowledge. Do NOT write any URL or link. Reply with ONLY a JSON list of objects "
     "{{\"item\": \"<item name>\", \"description\": \"<at most 15 words>\", "
     "\"markers\": [N, ...]}}; reply [] when nothing is missing.\n\n"
@@ -581,10 +598,20 @@ async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int,
     items = "\n".join(f"- {name}" for name in existing) or "(none)"
     prompt = _COMPLETE_PROMPT.format(q=q, items=items, facts=facts)
     try:
-        resp = await client.chat.completions.create(
-            model=model, temperature=0, max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}])
-        content = usable_content(resp)
+        completion = await _complete_with_finish_reason(client, model, prompt, max_tokens=8000)
+    except Exception as exc:
+        logger.warning("list completeness pass failed (%s); keeping the first answer", exc)
+        _degrade(degraded, COMPLETENESS_DEGRADED)
+        return raw
+    if completion.finish_reason == "length":
+        logger.warning(
+            "list completeness pass cut short at %d tokens (%d chars); "
+            "keeping the first answer",
+            completion.max_tokens, len(completion.content or ""))
+        _degrade(degraded, COMPLETENESS_DEGRADED)
+        return raw
+    try:
+        content = completion.content
         if content is None:
             raise ValueError("no usable content")
         start, end = content.find("["), content.rfind("]")

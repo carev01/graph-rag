@@ -64,6 +64,26 @@ def test_limitation_classifier(fact, lim):
     assert lm.is_limitation(fact) is lim
 
 
+# --- List prompt and completeness pass share the faithfulness/subject rules (spec §14) --
+
+def test_the_shared_rules_have_their_verbatim_wording():
+    assert lm._FAITHFUL_DESCRIPTION_RULE == (
+        "Describe each item only as its cited facts state it, and never change what a "
+        "fact says it does: a fact about backing up is not a restore option, and "
+        "supported-for is not recommended. ")
+    assert lm._SUBJECT_RULE == (
+        "List only items that answer the question for the subject it names: skip items "
+        "about a different workload or product, but keep items a fact states for a "
+        "broader category that contains the subject (for example, all agents when the "
+        "question asks about a Windows agent). ")
+
+
+def test_both_prompts_contain_both_shared_rules():
+    for prompt in (lm._LIST_PROMPT, lm._COMPLETE_PROMPT):
+        assert lm._FAITHFUL_DESCRIPTION_RULE in prompt
+        assert lm._SUBJECT_RULE in prompt
+
+
 class _Client:
     def __init__(self, content=None, exc=None):
         self.content, self.exc, self.prompts = content, exc, []
@@ -1033,8 +1053,9 @@ async def test_a_bulleted_group_layout_is_answered_not_refused(patched, monkeypa
 # --- Completeness pass (spec §13.3) -----------------------------------------------
 
 class _Replies:
-    """Replies with each content in turn (an exception instance is raised); records
-    every call's keyword arguments."""
+    """Replies with each content in turn (an exception instance is raised); a
+    (content, finish_reason) tuple reply reports that finish reason instead of "stop".
+    Records every call's keyword arguments."""
 
     def __init__(self, *replies):
         self.replies, self.calls = list(replies), []
@@ -1045,8 +1066,9 @@ class _Replies:
         reply = self.replies.pop(0)
         if isinstance(reply, BaseException):
             raise reply
-        msg = SimpleNamespace(content=reply)
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")])
+        content, finish = reply if isinstance(reply, tuple) else (reply, "stop")
+        msg = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish)])
 
 
 _COMPLETE_FACTS = {
@@ -1071,11 +1093,14 @@ async def _complete_rerank(rq, documents, *, top_k, settings):
 async def _answer_with_completion(patched, monkeypatch, reply, *, synth=_COMPLETE_SYNTH,
                                   **settings):
     """Supported markers: [1] sf, [2] olvm, [3] hpe; limitation [4] lim. The map tier
-    answers the expansion with [] and the completeness pass with `reply`."""
+    answers the expansion with [] and the completeness pass with `reply` -- a list of
+    replies when the pass itself makes more than one call (e.g. the internal retry on
+    no usable content)."""
     install, _ = patched
     install({_COMPLETE_Q: [_fact(u, text) for u, (text, _s) in _COMPLETE_FACTS.items()]})
     monkeypatch.setattr(lm, "rerank", _complete_rerank)
-    map_client = _Replies("[]", reply)
+    replies = reply if isinstance(reply, list) else [reply]
+    map_client = _Replies("[]", *replies)
     out = await lm.answer_list(None, None, map_client, "m", _Client(synth), "s",
                                q=_COMPLETE_Q, scope=Scope(), group_id="g",
                                settings=_settings(list_item_floor=0.1, **settings))
@@ -1091,7 +1116,7 @@ async def test_missing_items_are_added_before_the_limitations_and_graded(
     with caplog.at_level(logging.INFO, logger="answer_api.list_mode"):
         out, map_client = await _answer_with_completion(patched, monkeypatch, reply)
     call = map_client.calls[1]
-    assert call["model"] == "m" and call["temperature"] == 0 and call["max_tokens"] == 4000
+    assert call["model"] == "m" and call["temperature"] == 0 and call["max_tokens"] == 8000
     prompt = call["messages"][0]["content"]
     assert _COMPLETE_Q in prompt and "Sangfor aSV" in prompt
     assert "[2] " in prompt and "[3] " in prompt
@@ -1148,19 +1173,51 @@ async def test_completion_markers_outside_the_uncited_set_are_dropped(patched, m
     assert "Cited Already" not in out["answer"] and "No Description" not in out["answer"]
 
 
-@pytest.mark.parametrize("reply", ["not json", None, '{"item": "x"}', "[{]",
+@pytest.mark.parametrize("reply", ["not json", '{"item": "x"}', "[{]",
                                    RuntimeError("map tier down")])
 async def test_a_failed_completeness_pass_degrades_and_keeps_the_first_answer(
         patched, monkeypatch, caplog, reply):
     with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
         out, map_client = await _answer_with_completion(patched, monkeypatch, reply)
     assert len(map_client.calls) == 2
+    assert map_client.calls[1]["max_tokens"] == 8000
     assert out["degraded"] == [lm.COMPLETENESS_DEGRADED]
     assert "Also documented" not in out["answer"]
     assert out["answer"].startswith("**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]")
     assert out["answer"].endswith(
         "Some documented items may be missing; this list may be incomplete.")
     assert "list completeness pass" in caplog.text
+
+
+async def test_a_completeness_pass_with_no_usable_content_retries_then_degrades(
+        patched, monkeypatch, caplog):
+    """`_complete_with_finish_reason`'s own retry on no usable content (None, None)
+    still ends in a degraded pass that keeps the first answer."""
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out, map_client = await _answer_with_completion(patched, monkeypatch, [None, None])
+    assert len(map_client.calls) == 3
+    assert map_client.calls[1]["max_tokens"] == 8000
+    assert map_client.calls[2]["max_tokens"] == 24000
+    assert out["degraded"] == [lm.COMPLETENESS_DEGRADED]
+    assert "Also documented" not in out["answer"]
+    assert "list completeness pass failed" in caplog.text
+
+
+async def test_a_completeness_pass_cut_short_degrades_and_keeps_the_first_answer(
+        patched, monkeypatch, caplog):
+    partial = '[{"item": "Oracle Linux Virtualization Manager", "description": "x"'
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out, map_client = await _answer_with_completion(
+            patched, monkeypatch, (partial, "length"))
+    assert len(map_client.calls) == 2
+    assert map_client.calls[1]["max_tokens"] == 8000
+    assert out["degraded"] == [lm.COMPLETENESS_DEGRADED]
+    assert "Also documented" not in out["answer"]
+    assert out["answer"].startswith("**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]")
+    assert out["answer"].endswith(
+        "Some documented items may be missing; this list may be incomplete.")
+    assert (f"list completeness pass cut short at 8000 tokens ({len(partial)} chars); "
+           "keeping the first answer") in caplog.text
 
 
 async def test_the_completeness_pass_is_skipped_when_disabled(patched, monkeypatch):
