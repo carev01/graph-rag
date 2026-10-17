@@ -238,3 +238,48 @@ async def test_labelled_facts_skips_a_citation_with_no_text():
     ]
     result = er._labelled_facts(citations, {"f1": "Veeam fact"})
     assert result == "[1] (Veeam · B&R) Veeam fact"
+
+
+# --- Task 18 (spec §14.3, after run 13): the faithfulness judge must see the
+# SAME labelled lines as the attribution judge, not the plain fact-text bag --
+# otherwise a correctly labelled "Veeam Data Cloud states ..." line reads as
+# unsupported because the judge cannot see which vendor/product states it.
+
+async def test_score_one_passes_labelled_facts_to_the_faithfulness_judge(monkeypatch):
+    settings, resolver = _settings_and_resolver()
+    env = {"mode": "local", "answer": "ans [1] [2].", "citations": _CITATIONS,
+           "routing": {"chosen": "local", "via": "llm", "fallback_from": None}}
+
+    async def _fake_router(*a, q, mode_override, scope, settings, **kw):
+        return env
+
+    async def _fake_facts(driver, g, uuids):
+        return ["Veeam fact", "Rubrik fact"]
+
+    async def _fake_texts_by_uuid(driver, g, uuids):
+        return {"f1": "Veeam fact", "f2": "Rubrik fact"}
+
+    captured: dict = {}
+
+    async def _fake_judge(client, model, q, answer, facts):
+        captured["facts"] = facts
+        return 3
+
+    async def _fake_attribution(client, model, q, answer, labelled_facts):
+        return 0
+
+    monkeypatch.setattr(er.router_mod, "answer_router", _fake_router)
+    monkeypatch.setattr(er, "_cited_fact_texts", _fake_facts)
+    monkeypatch.setattr(er, "_cited_fact_texts_by_uuid", _fake_texts_by_uuid)
+    monkeypatch.setattr(er, "_faithfulness_judge", _fake_judge)
+    monkeypatch.setattr(er, "judge_attribution", _fake_attribution)
+
+    q = {"question": "who does X?", "expected_article_ids": []}
+    result = await er._score_one((None,) * 11, q, None, settings, resolver)
+    _env, _ghit, faith, facts, _mis, _facet, _chunks = result
+    assert faith == 3
+    assert captured["facts"] == [
+        "[1] (Veeam · B&R) Veeam fact", "[2] (Rubrik · RSC) Rubrik fact"]
+    # `facts` (the plain bag persisted verbatim into raw["cited_facts"]) is
+    # unaffected -- only the judge's own input changes.
+    assert facts == ["Veeam fact", "Rubrik fact"]

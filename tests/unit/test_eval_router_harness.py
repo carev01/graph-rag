@@ -298,6 +298,27 @@ async def test_a_list_answer_with_no_item_lines_renders_no_grade_cell(monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Task 18 (spec §14.3, after paid run 13): the faithfulness judge must see
+# labelled fact lines and must be told that a disclosed gap ("needs
+# validation" / "†") is not unsupported.
+# ---------------------------------------------------------------------------
+
+_DISCLOSED_GAP_SENTENCE = (
+    "Each cited fact is labelled (Vendor · Product) with the documentation that "
+    "states it. A line carrying a '(needs validation: ...)' note or a '†' mark "
+    "discloses that its cited fact does not state the noted qualifier: judge such "
+    "a line only on whether its cited facts support the item apart from that "
+    "disclosed qualifier. "
+)
+
+
+async def test_judge_prompt_carries_the_disclosed_gap_sentence_verbatim_before_the_reply_rule():
+    assert _DISCLOSED_GAP_SENTENCE in er._JUDGE_PROMPT
+    assert (er._JUDGE_PROMPT.index(_DISCLOSED_GAP_SENTENCE)
+            < er._JUDGE_PROMPT.index("Reply with ONLY the integer"))
+
+
+# ---------------------------------------------------------------------------
 # Chunked faithfulness judge for long answers (spec §13.4, after run 12)
 # ---------------------------------------------------------------------------
 
@@ -330,7 +351,7 @@ async def test_chunked_faithfulness_judge_takes_the_minimum(monkeypatch):
                          lambda text, limit=er._CHUNK_SIZE: ["First claim [1].", "Second claim [2]."])
 
     async def fake_judge(client, model, q, answer, cited_facts):
-        return {"fact one": 5, "fact two": 2}[cited_facts[0]]
+        return {"[1] fact one": 5, "[2] fact two": 2}[cited_facts[0]]
     monkeypatch.setattr(er, "_faithfulness_judge", fake_judge)
     score, judged = await er._chunked_faithfulness_judge(
         None, None, "q", "whole answer", citations, texts)
@@ -353,8 +374,14 @@ async def test_chunked_faithfulness_judge_all_none_gives_none_not_zero(monkeypat
     assert judged == 2                          # both chunks were sent to the judge
 
 
-async def test_chunked_faithfulness_judge_gives_each_chunk_only_its_own_facts(monkeypatch):
-    citations = [{"marker": 1, "fact_uuid": "f1"}, {"marker": 2, "fact_uuid": "f2"}]
+async def test_chunked_faithfulness_judge_gives_each_chunk_only_its_own_labelled_facts(
+        monkeypatch):
+    """Task 18 (spec §14.3): each chunk gets the labelled line(s) of its OWN
+    markers, not the plain fact text and not another chunk's facts."""
+    citations = [
+        {"marker": 1, "fact_uuid": "f1", "sources": [{"vendor": "V1", "product": "P1"}]},
+        {"marker": 2, "fact_uuid": "f2", "sources": [{"vendor": "V2", "product": "P2"}]},
+    ]
     texts = {"f1": "fact one", "f2": "fact two"}
     monkeypatch.setattr(er, "_chunk_answer", lambda text, limit=er._CHUNK_SIZE: [
         "No citation at all in this chunk.", "First claim [1].", "Second claim [2]."])
@@ -367,7 +394,10 @@ async def test_chunked_faithfulness_judge_gives_each_chunk_only_its_own_facts(mo
     score, judged = await er._chunked_faithfulness_judge(
         None, None, "q", "whole answer", citations, texts)
     assert judged == 2                          # the no-citation chunk is skipped, never judged
-    assert calls == [("First claim [1].", ["fact one"]), ("Second claim [2].", ["fact two"])]
+    assert calls == [
+        ("First claim [1].", ["[1] (V1 · P1) fact one"]),
+        ("Second claim [2].", ["[2] (V2 · P2) fact two"]),
+    ]
     assert score == 5
 
 

@@ -43,10 +43,22 @@ from graph_extract.usage import bounded_llm_client
 logger = logging.getLogger(__name__)
 _QUESTIONS = Path(__file__).with_name("router_golden.json")
 
+# Run 13 (2026-10-17, spec §14.3): the judge saw unlabelled fact text, so a
+# correctly-sourced "Veeam Data Cloud states ..." line read as unsupported,
+# and it counted a disclosed "needs validation"/"†" line as unsupported
+# although the line discloses exactly which qualifier the fact does not
+# state. Both are fixed here: the judge gets the SAME (Vendor · Product)
+# labelled lines the attribution judge already gets (`_score_one`), and the
+# prompt tells it how to read a disclosed gap.
 _JUDGE_PROMPT = (
     "You are scoring a backup-products ANSWER for faithfulness to its CITED FACTS. "
     "Score 0-5 how fully the answer's claims are supported by ONLY these facts "
-    "(5 = every claim supported, 0 = unsupported/hallucinated). Reply with ONLY the "
+    "(5 = every claim supported, 0 = unsupported/hallucinated). "
+    "Each cited fact is labelled (Vendor · Product) with the documentation that "
+    "states it. A line carrying a '(needs validation: ...)' note or a '†' mark "
+    "discloses that its cited fact does not state the noted qualifier: judge such "
+    "a line only on whether its cited facts support the item apart from that "
+    "disclosed qualifier. Reply with ONLY the "
     "integer.\n\nQUESTION: {q}\n\nANSWER:\n{answer}\n\nCITED FACTS:\n{facts}"
 )
 
@@ -256,15 +268,17 @@ def _chunk_answer(text: str, limit: int = _CHUNK_SIZE) -> list[str]:
 async def _chunked_faithfulness_judge(
         client, model, q, answer, citations, texts) -> tuple[int | None, int]:
     """Faithfulness for a long answer (spec §13.4): split into chunks of
-    consecutive paragraphs/sections and judge each against only the facts its
-    OWN markers cite -- never the whole-answer fact bag, which is what made
-    run 12's 110-254-fact answers unmeasurable in one call. The result is the
-    minimum of the chunks that scored, so "5" still means every claim in the
-    WHOLE answer is supported, not just one chunk's. A chunk whose markers
-    cite no fact with text available is skipped outright: never sent to the
-    judge, never counted. If every chunk is unscoreable the answer is
-    unscored (None), never a fabricated 0 -- the same rule
-    `_faithfulness_judge` itself follows for a single-call answer.
+    consecutive paragraphs/sections and judge each against only the LABELLED
+    lines (spec §14.3 -- `_labelled_fact_lines`) of the facts its OWN markers
+    cite -- never the whole-answer fact bag, which is what made run 12's
+    110-254-fact answers unmeasurable in one call, and never the plain
+    (unlabelled) fact text, which made run 13's correctly-sourced lines read
+    as unsupported. The result is the minimum of the chunks that scored, so
+    "5" still means every claim in the WHOLE answer is supported, not just
+    one chunk's. A chunk whose markers cite no fact with text available is
+    skipped outright: never sent to the judge, never counted. If every chunk
+    is unscoreable the answer is unscored (None), never a fabricated 0 -- the
+    same rule `_faithfulness_judge` itself follows for a single-call answer.
 
     Returns `(score, chunks_judged)` -- `chunks_judged` is the number of
     chunks actually sent to the judge (skipped no-fact chunks do not count),
@@ -274,10 +288,11 @@ async def _chunked_faithfulness_judge(
     scores: list[int] = []
     judged = 0
     for chunk in _chunk_answer(answer):
-        chunk_facts = [texts[marker_map[m]["fact_uuid"]] for m in _markers(chunk, marker_map)
-                       if marker_map[m]["fact_uuid"] in texts]
-        if not chunk_facts:
+        chunk_citations = [marker_map[m] for m in _markers(chunk, marker_map)
+                            if marker_map[m]["fact_uuid"] in texts]
+        if not chunk_citations:
             continue
+        chunk_facts = _labelled_fact_lines(chunk_citations, texts)
         judged += 1
         score = await _faithfulness_judge(client, model, q, chunk, chunk_facts)
         if score is not None:
@@ -330,16 +345,25 @@ async def judge_attribution(client, model, q, answer, labelled_facts: str) -> in
     return None
 
 
-def _labelled_facts(citations: list[dict], texts: dict[str, str]) -> str:
+def _labelled_fact_lines(citations: list[dict], texts: dict[str, str]) -> list[str]:
     """One `fact_line` per citation, in citation order, paired by `fact_uuid`
     (R7) -- never by position. `_cited_fact_texts`'s Cypher `IN`-scan row order
     is not guaranteed to match the requested uuid list, and a fact_uuid shared
     by two citations would shift a positional pairing for every citation after
     it. A citation whose uuid has no text (edge gone) is skipped, not
-    mislabeled against a neighbour's fact."""
-    lines = [attribution.fact_line(c["marker"], texts[c["fact_uuid"]], c.get("sources", []))
-             for c in citations if c["fact_uuid"] in texts]
-    return "\n".join(lines) or "(none)"
+    mislabeled against a neighbour's fact.
+
+    Shared by the attribution judge (`_labelled_facts`, joined into one block)
+    and the faithfulness judge (spec §14.3): both must see the SAME labelled
+    lines, as a list here so the chunked faithfulness path can hand each
+    chunk only its own markers' lines."""
+    return [attribution.fact_line(c["marker"], texts[c["fact_uuid"]], c.get("sources", []))
+            for c in citations if c["fact_uuid"] in texts]
+
+
+def _labelled_facts(citations: list[dict], texts: dict[str, str]) -> str:
+    """The attribution judge's fact block: `_labelled_fact_lines`, joined."""
+    return "\n".join(_labelled_fact_lines(citations, texts)) or "(none)"
 
 
 async def _cited_fact_texts(driver, group_id, fact_uuids) -> list[str]:
@@ -386,9 +410,13 @@ async def _score_one(clients, q, mode_override, settings, resolver):
     fact_uuids = [c["fact_uuid"] for c in env["citations"]]
     facts = await _cited_fact_texts(driver, settings.group_id, fact_uuids)
     texts = await _cited_fact_texts_by_uuid(driver, settings.group_id, fact_uuids)
+    # Task 18 (spec §14.3): the faithfulness judge gets the SAME labelled
+    # (Vendor · Product) lines as the attribution judge, not the plain `facts`
+    # bag -- `facts` itself is kept only for raw["cited_facts"] persistence.
+    labelled_lines = _labelled_fact_lines(env["citations"], texts)
     faith, faith_chunks = await _judge_faithfulness(
-        jc, jm, q["question"], env["answer"], env["citations"], facts, texts)
-    labelled = _labelled_facts(env["citations"], texts)
+        jc, jm, q["question"], env["answer"], env["citations"], labelled_lines, texts)
+    labelled = "\n".join(labelled_lines) or "(none)"
     misattributed = await judge_attribution(jc, jm, q["question"], env["answer"], labelled)
     return (env, ghit, faith, facts, misattributed, facet_coverage_hit(env, shape),
             faith_chunks)
