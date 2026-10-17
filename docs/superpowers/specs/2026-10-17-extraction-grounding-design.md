@@ -64,7 +64,22 @@ Scale, measured on the live graph:
    call as unscoped. Dropped entities are counted per article (`grounding_dropped`) and listed
    in a DEBUG log, and their names are logged at INFO with a cap. Graphiti then extracts edges
    only among the kept entities, so no fact can attach to an invented entity.
-4. **Report.** The per-article ingest result and the worker batch line carry
+4. **Restore destinations as relations (user request 2026-10-17).** Restore statements had no
+   relation type, so "VBR can restore physical machines from backups created by Veeam Agents to
+   HPE Morpheus" became "VBR Supports Veeam Agents", with Morpheus only in the text. Restore
+   facts also sat under invented subjects ("AWS Backup supports restore of EC2 instances … to
+   Nutanix AHV"), and Morpheus is split over 14 nodes. A new edge type, **RestoresTo**, covers
+   this: the backups of a product, capability or workload can be restored, recovered or
+   migrated to a destination platform or workload. The destination is the target entity, and
+   the backup source stays in the fact text. Allowed for (Product|Capability|Workload,
+   Platform|Workload). The instructions say: for a restore, recovery or migration statement,
+   the destination is the target and the relation is RestoresTo.
+5. **Type descriptions without examples.** The entity and edge type docstrings graphiti puts
+   into the prompt name concrete entities: "AWS Backup, Azure Backup, Veeam Backup &
+   Replication, NetBackup", "Amazon S3, Azure VM", "LRS/ZRS", "Azure Archive tier",
+   "SEC 17a-4", "East US". Several of the AWS article's invented facts are exactly these. The
+   descriptions are rewritten to define each type in words, with no named entities.
+6. **Report.** The per-article ingest result and the worker batch line carry
    `grounding_dropped` next to the dedup counters.
 
 ## 3. Proof (approved, ~$0.30)
@@ -73,6 +88,8 @@ A script re-extracts a fixed sample through the production ingest path into a th
 testcontainer, with the structural chain copied read-only from production. The sample is:
 
 - the two articles above;
+- the HPE Morpheus VM Essentials page and three agent-restore pages (Scale Computing HyperCore,
+  Proxmox VE, Sangfor aSV);
 - 20 affected articles: 10 with an example-product subject, 10 other.
 
 The script reports, per article, the facts written, `grounding_dropped`, and the count of facts
@@ -85,7 +102,9 @@ Pass criteria:
 - no fabricated foreign-product subject on the two known articles;
 - foreign-unnamed-subject facts in the sample cut by at least 90%;
 - facts per article not reduced by more than 30% on the articles production got right
-  (spot-checked).
+  (spot-checked);
+- each of the four restore pages yields at least one RestoresTo fact whose target is its
+  destination (Morpheus, HyperCore, Proxmox, Sangfor).
 
 ## 4. Out of scope (held)
 

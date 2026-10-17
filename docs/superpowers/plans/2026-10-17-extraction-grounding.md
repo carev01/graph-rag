@@ -86,7 +86,28 @@ Tests:
 
 - [ ] Tests first; implement; unit suite, ruff, mypy; commit `fix(extract): document context per chunk; extraction instructions cannot leak example entities` (trailer lines).
 
-### Task 2: Grounding gate
+### Task 2: RestoresTo relation and example-free type descriptions
+
+**Files:** `src/graph_extract/ontology.py`; tests `tests/unit/test_ontology.py`.
+
+1. Add the edge type:
+   ```python
+   class RestoresTo(BaseModel):
+       """Backups of the subject (a product, capability or workload) can be restored, recovered or migrated to the target platform or workload -- the target is the DESTINATION."""
+   ```
+   - Register it in `EDGE_TYPES`.
+   - Add `"RestoresTo"` to `EDGE_TYPE_MAP` for ("Product", "Platform"), ("Product", "Workload"), ("Capability", "Platform"), ("Capability", "Workload"), ("Workload", "Platform") and ("Workload", "Workload"), keeping the existing types in each list. New keys get `["RestoresTo"]`.
+2. Add this sentence to `EXTRACTION_INSTRUCTIONS`, right after the Requirement bullet, as a new bullet: `- For a restore, recovery or migration statement, the DESTINATION is the target entity and the relation is RestoresTo; keep the backup's source (which backups, which machines) in the fact text, and use the product that performs the restore as the subject.`
+3. Rewrite every entity and edge type docstring to define the type in words, with NO named example entities: no product, vendor, platform, region, standard or tier names. Keep each NOT-clause as a generic description; for example "NOT storage classes or tiers, storage-redundancy tiers, or configuration settings (those are Concepts)". Keep the Product/Tool and Region boundary clauses, all in generic terms.
+
+Tests:
+- `RestoresTo` is registered and in the map for every listed pair.
+- No type docstring contains any of these: "AWS", "Azure", "Veeam", "NetBackup", "Amazon", "S3", "LRS", "ZRS", "SEC 17a-4", "East US", "Germany", "Kubernetes", "SQL Server", "Oracle", "Hyper-V", "VMware", "Windows", "Linux", "RPO", "GDPR".
+- The instructions contain the RestoresTo rule.
+
+- [ ] Tests first; implement; unit suite, ruff, mypy; commit `feat(extract): RestoresTo relation; type descriptions name no example entities` (trailer lines).
+
+### Task 3: Grounding gate
 
 **Files:** create `src/graph_extract/grounding.py`; modify `src/graph_extract/dedup_guard.py` (wrapper dispatch, stats), `src/graph_extract/ingest_driver.py` (set the context around each `add_text_episode`), and whatever prints the per-article and batch lines (`grep -n "dedup.summary\|summary()" src/graph_extract src/graph_sync`); tests: create `tests/unit/test_grounding.py`, extend the dedup-guard tests.
 
@@ -115,7 +136,7 @@ Tests:
 
 - [ ] Tests first; implement; unit suite, ruff, mypy; commit `feat(extract): grounding gate drops extracted entities the chunk does not mention` (trailer lines).
 
-### Task 3: Proof script
+### Task 4: Proof script
 
 **Files:** create `scripts/extraction_proof.py`; a short report `docs/superpowers/extraction-grounding-proof-2026-10-17.md` written by the controller after the run.
 
@@ -125,7 +146,8 @@ Tests:
   3. Start a Neo4j testcontainer, with the same image the integration tests use (`grep -rn "Neo4jContainer" tests/integration | head -1`). Build graphiti on it with the production LLM tiers and guard, the same way the ingest CLI builds them (follow `graph_extract/cli.py ingest` and reuse its construction helpers; do not re-implement them). Run graphiti's index setup. Copy each article's structural chain (Vendor, Product, Source, Chapter if any, Article with `content_hash`) from production, as plain MERGE writes.
   4. Ingest each article with the production `IngestDriver.ingest_article` against the test DB, with the provenance repository pointed at the test DB too, so already-ingested gates read the empty test DB.
   5. Report per article: facts written, `grounding_dropped`, foreign-unnamed-subject facts (test vs production), and the totals. The script exits non-zero with "gate never fired" when `grounding_dropped == 0` on every article that production got wrong.
-- **Smoke first** (the controller runs it): the 2 known articles only. Confirm `grounding_dropped > 0`, then run the full sample (the 2 known plus `--sample-affected 20`).
+- The report also lists, per article, the RestoresTo facts written (subject -> target).
+- **Smoke first** (the controller runs it): the 2 known articles only. Confirm `grounding_dropped > 0`, then run the full sample: the 2 known articles, the 4 restore pages (a3a8692c-169f-4559-9dc2-5ccd637bd2df Morpheus, aac21e13-57c2-48ae-88cc-a4518a9958f1 HyperCore, ce76e11c-c4bd-4bb0-82a3-18996c88eedf Proxmox, 03e7863b-338b-46f0-a196-cf203b63b0ee Sangfor) and `--sample-affected 20`.
 
 Unit tests (hermetic): the affected-article selection query is parameterised and deterministic (fake driver); the "gate never fired" refusal; report formatting.
 
