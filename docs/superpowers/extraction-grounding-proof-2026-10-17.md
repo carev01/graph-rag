@@ -403,3 +403,32 @@ Spend (every article run, included or not): prompt_tokens=2570250 cached_tokens=
   - Veeam Data Cloud -> Outlook
   - Veeam Data Cloud -> Outlook
 
+
+---
+
+## Addendum: re-check after the final-review fixes (commit 43cf089, 6 named articles, ~$0.04)
+
+The final review tightened the gate in three ways:
+
+- a Product-typed name that is not the documented product must appear as a phrase (with
+  "&"/punctuation normalised and never crossing a list or cell boundary) or through a
+  single-target scope alias;
+- abbreviations of the documented product are renamed to it;
+- the cross-vendor naming rules (vSphere, Azure VM, EC2, SQL Server, Microsoft 365, Oracle RAC)
+  are restored as conditional renames.
+
+| article | production -> test facts | foreign | RestoresTo |
+|---|---|---|---|
+| Access verification for self-hosted connectors (Securiti) | 90 -> 93 | 37 -> 0 | 0 |
+| Controls and remediation (AWS Backup) | 92 -> 51 | 0 -> 0 | 2 |
+| HPE Morpheus VM Essentials | 35 -> 35 | 0 -> 0 | 28 |
+| Restoring Veeam Agent Backup to Scale Computing HyperCore | 3 -> 4 | 0 -> 0 | 3 |
+| Restoring Veeam Agent Backup to Proxmox VM | 5 -> 6 | 0 -> 0 | 2 |
+| Restore to Sangfor aSV | 17 -> 21 | 0 -> 0 | 7 |
+
+- **The headline "facts on articles production got right" change (-23%) is the AWS control
+  article.** Its production facts included ~40 invented vocabulary facts that the
+  foreign-subject measure does not count. Without it, the correct articles go 60 -> 66.
+- **An intermediate run (commit b5788ab) caught a real invention.** The gate dropped seven
+  "Veeam Plug-in for <hypervisor>" products on the Sangfor page, whose text never mentions a
+  plug-in.
