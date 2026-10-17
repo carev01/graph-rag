@@ -38,17 +38,27 @@ def test_no_entity_type_has_attributes():
         assert model.model_fields == {}, f"{name} unexpectedly declares attributes"
 
 
-def test_instructions_require_extracting_the_product_subject():
-    # The product is the SUBJECT of most facts; if the model omits it as an
-    # entity, graphiti drops every edge whose endpoint is that missing node.
+def test_instructions_are_grounded_in_chunk_text():
+    # 2026-10-17 extraction-grounding: a mandatory-subject rule plus leaky
+    # examples caused extraction to invent "AWS Backup" as the subject of
+    # subjectless chunks. The instructions must now forbid inventing entities
+    # and defer the documented product's name to the per-chunk DOCUMENT CONTEXT
+    # (graphiti_client.document_context) rather than naming it here.
     instr = EXTRACTION_INSTRUCTIONS
-    # normalise whitespace so line wraps don't hide multi-word phrases
     flat = " ".join(instr.split())
+    assert "Extract ONLY entities and facts that THIS chunk's text states" in flat
+    assert "DOCUMENT CONTEXT" in flat
     lowered = flat.lower()
-    assert "always extract the backup product" in lowered
-    assert "every chunk" in lowered
-    assert "subject" in lowered
-    assert "Product entity" in flat
+    assert "never add an entity" in lowered
+    assert "never make any other product the subject of a fact" in lowered
+
+
+def test_instructions_leak_no_example_products():
+    # The instructions' own example vocabulary was being emitted as fabricated
+    # facts on thin chunks (BACKLOG extraction-grounding). None of the example
+    # products that used to appear here may appear again.
+    for leaked in ("AWS Backup", "Azure Backup", "Veeam Backup & Replication"):
+        assert leaked not in EXTRACTION_INSTRUCTIONS
 
 
 def test_instructions_capture_limitation_statements():
@@ -58,7 +68,7 @@ def test_instructions_capture_limitation_statements():
 
 def test_instructions_exclude_ui_elements():
     lowered = EXTRACTION_INSTRUCTIONS.lower()
-    assert "ui elements" in lowered
+    assert "ui noise" in lowered
     assert "panes" in lowered and "wizards" in lowered
     assert "action labels" in lowered
 
@@ -81,8 +91,10 @@ def test_region_docstring_has_negative_examples():
     assert "policy/permission/role name" in doc
 
 def test_concept_and_platform_cover_storage_classes():
+    # extraction-grounding (2026-10-17): docstrings name no concrete storage
+    # class/tier (no "S3 Standard"), only the generic boundary.
     from graph_extract.ontology import Concept, Platform
-    assert "S3 Standard" in (Concept.__doc__ or "")
+    assert "storage classes" in (Concept.__doc__ or "")
     assert "storage classes" in (Platform.__doc__ or "")
 
 def test_edge_type_map_references_defined_types():
@@ -95,32 +107,39 @@ def test_instructions_mention_canonical_names():
     assert "kubernetes" in lowered and "immutability" in lowered
 
 def test_instructions_exclude_noise_entities():
+    # The concrete examples (ARNs, resource IDs, specific error codes, CLI
+    # invocations) were leaking into extraction as fabricated facts on thin
+    # chunks, so the rule is now stated generically, with no example to leak.
     lowered = EXTRACTION_INSTRUCTIONS.lower()
     assert "do not extract" in lowered
-    assert "arn:" in lowered
-    assert "snap-" in lowered and "vol-" in lowered
-    assert "install-module" in lowered
-    # Error/exception code markers — literal casing as named in the instructions.
-    assert "Failed" in EXTRACTION_INSTRUCTIONS
-    assert "RequestId" in EXTRACTION_INSTRUCTIONS
+    assert "arns" in lowered
+    assert "resource ids" in lowered
+    assert "error or exception codes" in lowered
+    assert "cli commands" in lowered
+    assert "example or placeholder values" in lowered
+    assert "extract the concept, not the example" in lowered
 
 def test_instructions_exclude_timezones_but_not_regions():
     # v5: regions are first-class (Region entity), no longer excluded as noise.
-    assert "UTC" in EXTRACTION_INSTRUCTIONS
-    assert "us-east-1" in EXTRACTION_INSTRUCTIONS
-    assert "specific geographic regions" not in EXTRACTION_INSTRUCTIONS.lower()
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "time zones" in lowered
+    assert "a specific region or jurisdiction is a region" in lowered
+    assert "specific geographic regions" not in lowered
 
 def test_instructions_state_type_boundaries():
-    assert "LRS" in EXTRACTION_INSTRUCTIONS
-    assert "backup frequency" in EXTRACTION_INSTRUCTIONS.lower()
-    assert "recovery point" in EXTRACTION_INSTRUCTIONS
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "storage-redundancy tiers" in lowered
+    assert "configuration settings" in lowered
+    assert "concepts, never platforms" in lowered
+    assert "general domain nouns are concepts, not requirements" in lowered
 
 def test_instructions_have_vendor_scoping_rule():
-    assert "DISTINCT" in EXTRACTION_INSTRUCTIONS
-    assert "GENERIC" in EXTRACTION_INSTRUCTIONS
-    assert "AWS Backup Vault Lock" in EXTRACTION_INSTRUCTIONS
-    assert "Azure immutable vault" in EXTRACTION_INSTRUCTIONS
-    assert "do not merge" in EXTRACTION_INSTRUCTIONS.lower()
+    # No example vendor/branded-feature names here: those leaked into
+    # extraction as fabricated entities (test_instructions_leak_no_example_products).
+    lowered = EXTRACTION_INSTRUCTIONS.lower()
+    assert "vendor-branded features distinct" in lowered
+    assert "keep different vendors' products" in lowered
+    assert "do not fold it into immutability" in lowered
 
 def test_docstrings_state_type_boundaries():
     from graph_extract.ontology import (
@@ -131,7 +150,9 @@ def test_docstrings_state_type_boundaries():
     assert "region" in (Platform.__doc__ or "").lower()
     assert "NOT" in (Capability.__doc__ or "")
     assert "regulation" in (Concept.__doc__ or "").lower()
-    assert "LRS" in (Concept.__doc__ or "")
+    # extraction-grounding (2026-10-17): no concrete tier name ("LRS"), just
+    # the generic boundary.
+    assert "storage-redundancy tier" in (Concept.__doc__ or "")
     assert "CLI" in (Product.__doc__ or "")
     assert "Tool" in (Product.__doc__ or "")
     assert "NOT" in (Requirement.__doc__ or "")
@@ -157,3 +178,89 @@ def test_cheap_tier_salience_present_and_not_global():
     assert "AvailableIn" in CHEAP_TIER_SALIENCE and "Limits" in CHEAP_TIER_SALIENCE
     # cheap-tier-only: the salience text must NOT be in the global instructions
     assert "BE SELECTIVE" not in EXTRACTION_INSTRUCTIONS
+
+
+# -- extraction-grounding (2026-10-17), task 2: RestoresTo relation and
+# example-free type descriptions. A traced AWS article produced "Azure Archive
+# tier", "SEC 17a-4", "LRS", "ZRS" -- exactly the old docstrings' own example
+# vocabulary -- so every type docstring must now name no concrete entity, and
+# restore/recovery/migration statements get a dedicated relation instead of
+# being squeezed into Supports edges pointing at the backup source.
+
+def test_restores_to_registered():
+    from graph_extract.ontology import EDGE_TYPES, RestoresTo
+    assert EDGE_TYPES["RestoresTo"] is RestoresTo
+
+
+def test_restores_to_wired_for_every_listed_pair():
+    from graph_extract.ontology import EDGE_TYPE_MAP
+    pairs = [
+        ("Product", "Platform"), ("Product", "Workload"),
+        ("Capability", "Platform"), ("Capability", "Workload"),
+        ("Workload", "Platform"), ("Workload", "Workload"),
+    ]
+    for pair in pairs:
+        assert "RestoresTo" in EDGE_TYPE_MAP[pair], pair
+
+
+def test_restores_to_is_additive_existing_types_kept():
+    from graph_extract.ontology import EDGE_TYPE_MAP
+    assert "Supports" in EDGE_TYPE_MAP[("Product", "Workload")]
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Workload")]
+    assert "IntegratesWith" in EDGE_TYPE_MAP[("Product", "Platform")]
+    assert "Limits" in EDGE_TYPE_MAP[("Product", "Platform")]
+    assert "AppliesTo" in EDGE_TYPE_MAP[("Capability", "Workload")]
+
+
+_LEAKY_EXAMPLE_NAMES = (
+    "AWS", "Azure", "Veeam", "NetBackup", "Amazon", "S3", "LRS", "ZRS",
+    "SEC 17a-4", "East US", "Germany", "Kubernetes", "SQL Server", "Oracle",
+    "Hyper-V", "VMware", "Windows", "Linux", "RPO", "GDPR",
+)
+
+
+def test_no_type_docstring_names_a_concrete_example_entity():
+    from graph_extract.ontology import ENTITY_TYPES, EDGE_TYPES
+    for name, model in {**ENTITY_TYPES, **EDGE_TYPES}.items():
+        doc = model.__doc__ or ""
+        for leaked in _LEAKY_EXAMPLE_NAMES:
+            assert leaked not in doc, f"{name} docstring leaks {leaked!r}"
+
+
+def test_cheap_tier_salience_names_no_concrete_example():
+    from graph_extract.ontology import CHEAP_TIER_SALIENCE
+    for leaked in ("Amazon S3", "cross-Region", "China"):
+        assert leaked not in CHEAP_TIER_SALIENCE
+
+
+def test_instructions_have_restores_to_rule():
+    from graph_extract.ontology import EXTRACTION_INSTRUCTIONS
+    flat = " ".join(EXTRACTION_INSTRUCTIONS.split())
+    assert ("the DESTINATION is the target entity and the relation is "
+            "RestoresTo") in flat
+    assert "use the product that performs the restore as the subject" in flat
+
+
+def test_instructions_extract_the_documented_product_as_an_entity():
+    # 2026-10-17 proof smoke: a connector list with no product named lost 28 of its
+    # facts because the implied subject was never extracted as an entity.
+    text = " ".join(EXTRACTION_INSTRUCTIONS.split()).lower()
+    assert "extract the documented product as an entity in every chunk that states facts about it" in text
+
+
+def test_requirement_docstring_keeps_only_generic_categories():
+    # final-review fix wave: the concrete examples leaked like every other example
+    from graph_extract.ontology import Requirement
+    doc = Requirement.__doc__ or ""
+    for leaked in ("Backup Operator", "TCP 443", "e.g."):
+        assert leaked not in doc
+    for category in ("permission", "minimum version", "open port", "license",
+                     "required role/account"):
+        assert category in doc
+
+
+def test_cheap_tier_salience_defers_to_the_naming_rules():
+    from graph_extract.ontology import CHEAP_TIER_SALIENCE
+    flat = " ".join(CHEAP_TIER_SALIENCE.split())
+    assert "Use the naming rules above and short names, never descriptive phrases" in flat
+    assert "canonical entity names" not in flat

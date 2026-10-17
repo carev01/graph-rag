@@ -30,6 +30,7 @@ from graph_extract.graphiti_client import (
     build_graphiti, build_cheap_graphiti, init_indices, ExtractionTier,
 )
 from graph_extract.dedup_guard import DedupIndexStats, install_dedup_guard
+from graph_extract.grounding import GroundingStats
 from graph_extract.llm_timing import PromptTimings
 from graph_extract.ingest_driver import IngestDriver
 from graph_extract.merge_duplicates import apply_merges, count_duplicates, plan_merges
@@ -120,9 +121,13 @@ async def _build_ingest_driver(
         # One timings object across BOTH tiers: the question is how the provider
         # behaves under our concurrency, and the tiers interleave on one host.
         timings = PromptTimings()
+        # One sink across both tiers for extraction calls that bypass the grounding
+        # gate (no context open); the worker reports it as grounding_unscoped.
+        grounding_unscoped = GroundingStats()
         strong_guard = install_dedup_guard(
             graphiti, fallback=None, unscoped=DedupIndexStats(), timings=timings,
-            suppress_contradictions=not settings.ingest_same_pair_contradictions)
+            suppress_contradictions=not settings.ingest_same_pair_contradictions,
+            grounding_unscoped=grounding_unscoped)
         cheap_tier: ExtractionTier | None = None
         if settings.extraction_routing and settings.cheap_llm_api_key:
             cheap_graphiti = build_cheap_graphiti(settings)
@@ -133,7 +138,8 @@ async def _build_ingest_driver(
                 # counted a second time by the strong tier's own guard.
                 fallback=strong_guard.raw if settings.dedup_retry_on_strong else None,
                 unscoped=DedupIndexStats(), timings=timings,
-                suppress_contradictions=not settings.ingest_same_pair_contradictions)
+                suppress_contradictions=not settings.ingest_same_pair_contradictions,
+                grounding_unscoped=grounding_unscoped)
             cheap_tier = ExtractionTier(
                 "cheap", cheap_graphiti,
                 EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,
@@ -147,6 +153,7 @@ async def _build_ingest_driver(
         ingest = IngestDriver(settings, strong_tier, cheap_tier, docext, provenance, driver,
                               warmup_gate=warmup_gate)
         ingest.timings = timings          # BACKLOG 31: reported by the ingest command
+        ingest.grounding_unscoped = grounding_unscoped
     except Exception:
         for closer in (
             cheap_graphiti.close if cheap_graphiti is not None else None,
@@ -290,6 +297,13 @@ def ingest(
             # hypothesis; `retry_clean` vs `retry_dirty` says whether the strong tier
             # reads the same prompt correctly.
             typer.echo(f"dedup indices: {res.dedup.summary()}")
+            # Extraction grounding (2026-10-17): entities the gate removed because
+            # the chunk text never mentions them.
+            typer.echo(f"grounding: grounding_calls={res.grounding.calls} "
+                       f"grounding_dropped={res.grounding.dropped} "
+                       f"grounding_injected={res.grounding.injected} "
+                       f"grounding_renamed={res.grounding.renamed} "
+                       f"grounding_parse_failures={res.grounding.parse_failures}")
             # BACKLOG 31: where an episode's wall time actually goes, and whether
             # the provider runs our 20-wide concurrent dedup calls in parallel.
             typer.echo(ingest_driver.timings.report())

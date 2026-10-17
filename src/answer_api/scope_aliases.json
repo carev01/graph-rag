@@ -3,6 +3,8 @@
  "VB365": "Veeam Backup for Microsoft 365",
  "VSPC": "Veeam Service Provider Console",
  "Kasten": "Veeam Kasten for Kubernetes",
+ "Kasten K10": "Veeam Kasten for Kubernetes",
+ "Veeam Agent for Windows": "Veeam Agent for Microsoft Windows",
  "Azure": "Microsoft",
  "Amazon": "AWS",
  "Veeam Agent": [

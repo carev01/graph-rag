@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -400,13 +401,52 @@ async def init_indices(graphiti: Graphiti, *, embed_dim: int | None = None,
         await ensure_vector_indexes(graphiti.driver, embed_dim,
                                     wait_seconds=vector_index_wait_seconds)
 
+# The DOCUMENT CONTEXT block `document_context` returns, below, is always a
+# single LINE (no embedded "\n") after its leading marker: ONE sentence
+# ("This chunk comes from ... documentation for ..."), whatever is filled in
+# for vendor/product/source. `DOCUMENT_CONTEXT_PATTERN` matches exactly that
+# line and is exported (compiled, not just the marker text) so
+# `cache_layout.StaticTailLearner` can find and cut OUT the per-article
+# sentence -- wherever graphiti placed it in the rendered user message --
+# before learning or matching the surrounding STATIC text (graphiti follows
+# `custom_extraction_instructions` with its own static <EXAMPLE>/EXTRACTION
+# RULES blocks; it does not sit at the end of the user message). Both halves
+# (the marker and the fixed sentence opener) are shared between the producer
+# and the pattern below, not duplicated as separate literals, so they cannot
+# drift apart. See cache_layout's module docstring for how the pattern is used.
+DOCUMENT_CONTEXT_MARKER = "\n\nDOCUMENT CONTEXT:"
+_DOCUMENT_CONTEXT_SENTENCE_OPENER = " This chunk comes from "
+DOCUMENT_CONTEXT_PATTERN: re.Pattern[str] = re.compile(
+    re.escape(DOCUMENT_CONTEXT_MARKER + _DOCUMENT_CONTEXT_SENTENCE_OPENER) + r"[^\n]*")
+
+
+def document_context(vendor: str, product: str, source: str) -> str:
+    """The per-chunk DOCUMENT CONTEXT block the extraction instructions refer
+    to: the article's real vendor/product/document set, from the structural
+    graph chain. Appended to `instructions` so the model is told the subject
+    instead of being invited to invent one (extraction-grounding, 2026-10-17).
+    Empty when there is no product (no structural chain for the article).
+    Vendor and source are each optional (an empty string omits that part
+    cleanly -- no "from  documentation" / "(document set: )"). Always a single
+    line -- see `DOCUMENT_CONTEXT_PATTERN`, above."""
+    if not product:
+        return ""
+    vendor_part = f"{vendor} " if vendor else ""
+    source_clause = f" (document set: {source})" if source else ""
+    return (
+        f"{DOCUMENT_CONTEXT_MARKER}{_DOCUMENT_CONTEXT_SENTENCE_OPENER}{vendor_part}"
+        f"documentation for {product}{source_clause}. The documented product is "
+        f'"{product}".')
+
+
 async def add_text_episode(graphiti: Graphiti, s: ExtractSettings, *, name: str,
                            body: str, source_description: str,
                            reference_time: datetime,
-                           instructions: str = EXTRACTION_INSTRUCTIONS) -> AddEpisodeResults:
+                           instructions: str = EXTRACTION_INSTRUCTIONS,
+                           context: str = "") -> AddEpisodeResults:
     return await graphiti.add_episode(
         name=name, episode_body=body, source_description=source_description,
         reference_time=reference_time, source=EpisodeType.text, group_id=s.group_id,
         entity_types=ENTITY_TYPES, excluded_entity_types=EXCLUDED_ENTITY_TYPES,
         edge_types=EDGE_TYPES, edge_type_map=EDGE_TYPE_MAP,
-        custom_extraction_instructions=instructions)
+        custom_extraction_instructions=instructions + context)

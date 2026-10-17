@@ -14,6 +14,7 @@ import openai
 from graph_extract import vector_search
 from graph_extract.concurrent_ingest import run_concurrently
 from graph_extract.dedup_guard import DedupIndexStats
+from graph_extract.grounding import GroundingStats
 from graph_extract.ingest_driver import CRAWL_FALLBACK
 from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally
 from graph_sync import metrics
@@ -213,6 +214,12 @@ async def run_worker_once(
     # measurements built to ride on a real ingest were invisible exactly where it
     # matters. Accumulated and logged per batch below.
     batch_dedup = DedupIndexStats()
+    # Entities the grounding gate removed (extraction-grounding, 2026-10-17).
+    batch_grounding = GroundingStats()
+    # extract_text calls that bypassed the gate (no grounding context open) land in
+    # the guards' shared sink, not in any article's stats: report this batch's delta.
+    unscoped_sink = getattr(ingest, "grounding_unscoped", None)
+    unscoped_before = unscoped_sink.unscoped if isinstance(unscoped_sink, GroundingStats) else 0
     # Summed per-job spend: prompt / cached / completion tokens for the batch line.
     batch_tokens = UsageTally()
     basis_counts: Counter[str] = Counter()
@@ -244,6 +251,7 @@ async def run_worker_once(
                 # sake of a counter. Explicit check, not a blanket try/except.
                 if res is not None:
                     batch_dedup.merge(res.dedup)
+                    batch_grounding.merge(res.grounding)
                     basis_counts[res.reference_basis] += 1
             elif job["op"] == "remove":
                 await ingest.tombstone_article_episodes(job["article_id"])
@@ -253,8 +261,12 @@ async def run_worker_once(
             elapsed = time.monotonic() - started
             route = res.tier if res is not None and getattr(res, "routed", False) else "-"
             metrics.job_outcome("done", elapsed, route)
-            logger.info("semantic job %s done: article=%s tier=%s worker_tier=%s %.0fs",
-                        job["id"], job["article_id"], route, metrics.TIER, elapsed)
+            logger.info("semantic job %s done: article=%s tier=%s worker_tier=%s %.0fs "
+                        "grounding_calls=%d grounding_dropped=%d grounding_injected=%d",
+                        job["id"], job["article_id"], route, metrics.TIER, elapsed,
+                        res.grounding.calls if res is not None else 0,
+                        res.grounding.dropped if res is not None else 0,
+                        res.grounding.injected if res is not None else 0)
         except Exception as e:  # a poison job must not block the queue
             halt = "credits" if _is_out_of_credits(e) else None
             if halt is None:
@@ -446,8 +458,16 @@ async def run_worker_once(
     # dedup/basis summary and the timing report for the whole batch.
     processed = len(jobs) - len(deferred) - len(not_ours)
     if processed:
-        logger.info("semantic batch: jobs=%d deferred=%d reference_basis=%s dedup: %s",
-                    processed, len(deferred), dict(basis_counts), batch_dedup.summary())
+        unscoped = batch_grounding.unscoped + (
+            unscoped_sink.unscoped - unscoped_before
+            if isinstance(unscoped_sink, GroundingStats) else 0)
+        logger.info("semantic batch: jobs=%d deferred=%d reference_basis=%s dedup: %s "
+                    "grounding_calls=%d grounding_unscoped=%d grounding_dropped=%d "
+                    "grounding_injected=%d grounding_renamed=%d grounding_parse_failures=%d",
+                    processed, len(deferred), dict(basis_counts), batch_dedup.summary(),
+                    batch_grounding.calls, unscoped, batch_grounding.dropped,
+                    batch_grounding.injected, batch_grounding.renamed,
+                    batch_grounding.parse_failures)
         # Phase B: per-batch proof the index path engaged; reset so each batch
         # reports its own counts.
         pt = batch_tokens.prompt_tokens

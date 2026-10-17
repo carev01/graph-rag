@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from graph_extract import cli
 from graph_extract.config import ExtractSettings
+from graph_extract.grounding import GroundingStats
 from graph_extract.ingest_driver import IngestResult
 
 
@@ -38,7 +39,8 @@ class _FakeIngest:
 
     async def ingest_source(self, source_id, limit):
         self.calls.append("ingest_source")
-        return IngestResult(articles=3, episodes_added=2, episodes_skipped=1)
+        return IngestResult(articles=3, episodes_added=2, episodes_skipped=1,
+                            grounding=GroundingStats(calls=4, dropped=2, injected=1))
 
 
 def test_ingest_prints_the_duplicate_count_last_and_after_the_run(monkeypatch):
@@ -74,3 +76,4 @@ def test_ingest_prints_the_duplicate_count_last_and_after_the_run(monkeypatch):
     assert last.startswith("7 exact-name duplicate entities"), last
     assert "merge-duplicates" in last, "the line carries the remedy"
     assert result.stdout.index("ingest complete") < result.stdout.index("7 exact-name")
+    assert "grounding: grounding_calls=4 grounding_dropped=2 grounding_injected=1" in result.stdout

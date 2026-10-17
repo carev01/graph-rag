@@ -20,6 +20,35 @@ message ends with it. A graphiti upgrade or an ontology change therefore re-lear
 in a new process instead of drifting from a stale copy. Library-owned prompts are
 not modified -- only the request's message list, at the transport, like
 `graphiti_client._bound_index_arrays` does for the schema.
+
+extraction-grounding (2026-10-17) appends a PER-ARTICLE "DOCUMENT CONTEXT: ..."
+sentence to the extraction instructions (`graphiti_client.document_context`),
+INSIDE `custom_extraction_instructions`. graphiti does NOT put that at the end of
+the user message: `extract_nodes.extract_text` follows it with ~700 chars of
+static <EXAMPLE> blocks, and `extract_edges.edge` follows it with ~4,000 chars of
+static "# EXTRACTION RULES" text -- both otherwise-static tails this module exists
+to cache. Left alone, the per-article sentence sits in the MIDDLE of what this
+module compares, which breaks the mechanism in two ways: a same-article warm-up
+bakes that one article's sentence into the "static" block, so every later,
+different-article call then fails to match (nothing moves); a mixed-article
+warm-up never accumulates a full common suffix either, because the differing
+sentence's position still has to be walked past character-by-character before the
+comparison reaches the static text behind it, and depending on sentence length
+that erodes or (if a later sentence is longer) corrupts the learned block.
+(An earlier version of this fix wrongly assumed the sentence was the very end of
+the user message and just split there -- that silently discarded graphiti's real
+trailing static blocks into the "varying" half instead of the learned one.)
+
+The fix: before learning AND before matching, CUT the DOCUMENT CONTEXT sentence
+out of the user message using `graphiti_client.DOCUMENT_CONTEXT_PATTERN` (the LAST
+match, in case a chunk's own text happens to contain the bare marker -- the pattern
+requires the full sentence opener, so a body line with just the marker text and no
+"This chunk comes from ..." never matches), closing the gap it leaves so the text
+before and after it become contiguous; learn/match on that. Once a block is moved
+to the system message, the cut sentence is re-appended to what remains of the user
+message (position doesn't matter to the model, only presence) -- it is never lost,
+just excluded from what the learner compares across calls. A user message with no
+match is untouched by this (today's behaviour exactly).
 """
 from __future__ import annotations
 
@@ -33,6 +62,30 @@ logger = logging.getLogger(__name__)
 
 def common_suffix(a: str, b: str) -> str:
     return os.path.commonprefix([a[::-1], b[::-1]])[::-1]
+
+
+def _cut_document_context(user: str) -> tuple[str, str]:
+    """`(user_with_context_cut_out, context_sentence)`: the LAST match of
+    `graphiti_client.DOCUMENT_CONTEXT_PATTERN` is removed from `user`, closing
+    the gap (NOT split at a position -- the sentence can sit in the middle of
+    the user message, between `custom_extraction_instructions` and graphiti's
+    own trailing static text). `context_sentence` is `""` (and `user` is
+    returned unchanged) when there is no match -- the no-context path this
+    module behaved on before extraction-grounding. The pattern requires the
+    full sentence opener, so a chunk body line that merely contains the bare
+    "DOCUMENT CONTEXT:" marker text never matches.
+
+    Deferred import: `graphiti_client` imports this module (`wrap_client`), so
+    importing it back at module scope here would be a circular import. The
+    import resolves fine by the time this runs, since it only runs per-call,
+    long after both modules have finished loading.
+    """
+    from graph_extract.graphiti_client import DOCUMENT_CONTEXT_PATTERN
+    matches = list(DOCUMENT_CONTEXT_PATTERN.finditer(user))
+    if not matches:
+        return user, ""
+    m = matches[-1]
+    return user[:m.start()] + user[m.end():], m.group(0)
 
 
 def clean_block(suffix: str) -> str:
@@ -79,12 +132,18 @@ class StaticTailLearner:
         system, user = messages[si].get("content"), messages[ui].get("content")
         if not isinstance(system, str) or not isinstance(user, str):
             return messages
+        # The per-article DOCUMENT CONTEXT sentence (if any) varies call to call
+        # and can sit in the MIDDLE of graphiti's rendered user message (between
+        # custom_extraction_instructions and graphiti's own trailing static
+        # <EXAMPLE>/EXTRACTION RULES text) -- cut it out so what's left is
+        # contiguous, then restore it below.
+        user_main, context = _cut_document_context(user)
         # A prompt type = the response schema name AND its system message; two
         # prompt functions sharing a schema still learn separately.
         key = f"{prompt_key}:{hashlib.sha1(system.encode()).hexdigest()[:12]}"
         t = self._types.setdefault(key, _Type())
         if t.block is None:
-            t.running = user if t.running is None else common_suffix(t.running, user)
+            t.running = user_main if t.running is None else common_suffix(t.running, user_main)
             t.samples += 1
             if t.samples >= self._min_samples:
                 block = clean_block(t.running)
@@ -97,13 +156,13 @@ class StaticTailLearner:
             return messages
         if not t.block:
             return messages
-        if not user.endswith(t.block):
+        if not user_main.endswith(t.block):
             self._skipped += 1
             return messages
-        head = user[: len(user) - len(t.block)]
+        head = user_main[: len(user_main) - len(t.block)]
         out = [dict(m) for m in messages]
         out[si]["content"] = f"{system.rstrip()}\n\n{t.block.rstrip()}\n"
-        out[ui]["content"] = head.rstrip() + "\n"
+        out[ui]["content"] = head.rstrip() + context if context else head.rstrip() + "\n"
         self._moved += 1
         return out
 
