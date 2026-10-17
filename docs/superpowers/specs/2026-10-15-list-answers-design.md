@@ -207,3 +207,32 @@ facts for all of them within the top 2000.
      the fixed note *(needs validation: the cited source does not name this item)*.
      Named support needs >= `list_item_floor` (0.4). Anything else is dropped.
    - The list prompt names each item as the facts name it.
+
+## 13. After paid eval run 12 (2026-10-16, approved in conversation)
+
+Run 12 results:
+- **Scored lines:** list item coverage in the answer text was 0.94, with 67 items flagged and 5 dropped. Routing, facet coverage and misattribution were unchanged.
+- **Synthesis omissions:** the model left out retrieved items (Sangfor, publish disks, OLVM, RHV).
+- **Kind words flagged:** words naming the item kind ("resource" in "resource types", "recovery" in "recovery options") were treated as qualifiers, which flagged all 11 AWS items.
+- **Noisy flags:** 41 of the Azure answer's items carried the same "does not mention VMs" note.
+- **Unscored answers:** the judge returned nothing on the three answers citing 110–254 facts.
+- **Not changed:** the SureBackup grounding miss was traced. The answer cites on-topic SureBackup pages other than the golden set's five, and an expected article is still in the top 15. The verify-enumeration miss is Cohesity documented through anomaly-detection facts, an enumeration-precision question outside this slice. Neither changes here.
+
+1. **Item-kind words are not qualifiers.** The words between "which/what" and the item noun
+   ("resource" in "Which resource types", "recovery" in "What recovery options") are excluded from
+   the grading terms. The sweep keeps them, since they help recall.
+2. **Grouped flag note.** When one missing term is shared by at least `list_flag_group_min` (5)
+   items and by at least half of the kept items, one fixed line goes above the list:
+   *"Items marked † come from documentation that does not mention <Term> specifically;
+   validate them for your case."* Those items' lines get " †" instead of the full note. Other
+   notes are unchanged.
+3. **Completeness pass.** After grading, supported facts the answer did not cite go to the map
+   tier with the answer's item names. The tier returns `{item, description, markers}` only for
+   items those facts state and the answer lacks, naming each item as the facts do, with at most
+   3 markers each. These are appended as an "Also documented" section before the limitations
+   section and graded like every other line. A failed pass records "completeness check
+   unavailable" and the note reads "some documented items may be missing". Controlled by
+   `list_completeness_pass` (default true).
+4. **Judge on long answers (eval).** An answer citing more than 60 facts or longer than 6000
+   characters is judged in chunks of consecutive paragraphs/sections, each with only the facts
+   it cites. Faithfulness is the minimum chunk score, so "5" still means every claim is supported.

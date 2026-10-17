@@ -1655,3 +1655,66 @@ async def test_a_question_with_no_distinctive_words_runs_no_query():
    - Unit: no per-question behaviour changes apart from the type (the existing tests stay green).
    - Integration: whichever Neo4j image the fixture runs, `fetch_vectors` returns usable vectors for inserted edges. Assert the cosine of two inserted vectors is within 0.01 of the float cosine.
 - [ ] Tests first; implement; unit suite + `tests/integration/test_list_siblings.py`, ruff src tests, mypy src green; commit `perf(answer): fetch fact embeddings as int8 vectors` (trailer lines).
+
+---
+
+## Amendment 3 tasks (spec §13, approved 2026-10-16)
+
+### Task 14: Item-kind words and grouped flag note
+
+**Files:** `src/answer_api/list_sweep.py`, `src/answer_api/item_grades.py`, `src/graph_extract/config.py`; tests `tests/unit/test_list_sweep.py`, `tests/unit/test_item_grades.py`, `tests/unit/test_config.py`.
+
+1. Add `list_sweep.item_kind_words(q: str) -> set[str]` — the lower-cased words between the leading "which/what" and the matched item noun of `_ITEM_NOUN_RE` (its `(?:[\w\-]+\s+){0,3}?` prefix), plus the item noun itself. Examples: "Which resource types can AWS Backup protect?" -> {"resource", "types"}; "What recovery options does Azure Backup offer for Azure VMs?" -> {"recovery", "options"}; "Which workloads does Veeam support immutability for?" -> {"workloads"}; "Where can I restore a Windows agent backup?" -> set(). `question_terms` is unchanged (the sweep keeps these words).
+2. `answer_list` and `eval_retrieval.check_list_items` pass grading terms `[t for t in question_terms(q, scope) if t not in item_kind_words(q)]`. Put the expression in one helper, `list_sweep.grading_terms(q, scope)`, and call that from both.
+3. Grouped note in `grade_items`: setting `list_flag_group_min: int = 5`. After grading, count the NEEDS_VALIDATION items whose `missing_terms` is exactly one term t (reason "missing_terms"). If some t has count >= `list_flag_group_min` and count >= half of the kept items (confirmed + needs validation), then:
+   - each such item's line ends with " †" instead of the full note;
+   - one fixed line `*Items marked † come from documentation that does not mention {T} specifically; validate them for your case.*` is inserted, followed by a blank line, immediately before the first graded line. {T} is spelled as in the question, as today.
+   Only the most frequent qualifying term is grouped. Every other note is unchanged. `ItemGrade`/`as_dict` are unchanged (the grade is still needs_validation with its missing term).
+
+Tests:
+- `item_kind_words` and `grading_terms` cover the four examples.
+- The AWS case: items whose facts lack "resource" are confirmed.
+- Grouping triggers at 5 of 8 kept items sharing "VMs": † marks, one header line, the other notes intact.
+- No grouping at 4 items or under half.
+- Mixed missing sets keep their full notes.
+
+- [ ] Tests first; implement; unit suite, ruff src tests, mypy src; commit `fix(answer): item-kind words are not qualifiers; grouped flag note` (trailer lines).
+
+### Task 15: Completeness pass
+
+**Files:** `src/answer_api/list_mode.py`, `src/graph_extract/config.py`; tests `tests/unit/test_list_mode.py`, `tests/unit/test_config.py`.
+
+- Setting `list_completeness_pass: bool = True`. Constant `COMPLETENESS_DEGRADED = "completeness check unavailable"`; `degraded_note` renders it as "some documented items may be missing".
+- In `answer_list`, after the first synthesis (and its truncation handling), BEFORE grading:
+  1. Compute the supported-fact markers not cited in the raw text (parse markers the same way grading does).
+  2. If there are none, or the setting is off, skip.
+  3. Otherwise, one map-tier call (`map_client`, `map_model`, `temperature=0`, `max_tokens=4000`) with `_COMPLETE_PROMPT`. It gives the QUESTION, the answer's item names (the bold names already in the raw text), and the uncited facts as `fact_line(i, fact, sources)`. It asks for ONLY a JSON list of `{"item": str, "description": str, "markers": [int, ...]}` for items that the listed facts state as an answer to the question and that are not already among the answer's items. Each item is named as the facts name it, with a description of at most 15 words, at most 3 markers from the listed facts, and no URLs. Return `[]` when nothing is missing.
+  4. Parse defensively: slice the first `[` to the last `]`; on any failure, or if the result is not a list, record COMPLETENESS_DEGRADED, log WARNING and continue with the first answer. Keep only entries with a non-empty string item, a string description, and markers that are ints within the uncited set; truncate markers to 3 and drop entries left with none. Drop items whose lower-cased name equals an existing item name.
+  5. If any entries remain, insert `\n\n### Also documented\n` followed by one line per entry, `- **{item}** — {description} [m1][m2]`, before the limitations heading. Use the same heading detection as item_grades: export a `find_limits_heading(lines) -> int | None` from item_grades and use it here. With no limitations heading, append at the end.
+  6. Grading then runs over the whole text, so these lines are graded like every other line.
+- Log INFO `"list completeness pass: %d uncited facts, %d items added"`.
+
+Tests:
+- Missing items are added before the limitations section and graded.
+- A reply naming an existing item is ignored.
+- Out-of-set markers are dropped.
+- An unparseable reply degrades and keeps the first answer.
+- Setting off: no call.
+- No uncited facts: no call.
+
+- [ ] Tests first; implement; unit suite, ruff, mypy; commit `feat(answer): list completeness pass over uncited facts` (trailer lines).
+
+### Task 16: Chunked faithfulness judge for long answers (eval)
+
+**Files:** `src/answer_api/eval_router.py`; tests in its existing unit test file (find it with `grep -l _faithfulness_judge tests/unit`).
+
+- In the per-question scoring, when the answer cites more than 60 facts or is longer than 6000 characters, split the answer into chunks. Split at markdown headings and blank-line paragraph boundaries, grouping consecutive blocks up to about 2500 characters each and never splitting a line. Judge each chunk with the existing `_faithfulness_judge`, giving it only the facts its markers cite (map markers to fact text through the envelope's citations). Faithfulness is the minimum of the chunk scores that are not None. If every chunk is None, the answer is unscored (None), never 0. A chunk citing no facts is skipped. Record `faith_chunks` (the number judged) in the per-question record.
+
+Tests:
+- Chunking at headings and paragraphs.
+- The minimum is taken.
+- All-None gives None.
+- Each chunk gets only its own facts.
+- A short answer keeps the single-call path.
+
+- [ ] Tests first; implement; unit suite, ruff, mypy; commit `feat(eval): judge long answers in chunks` (trailer lines).
