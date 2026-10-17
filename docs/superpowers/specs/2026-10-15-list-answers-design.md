@@ -226,7 +226,7 @@ Run 12 results:
    *"Items marked † come from documentation that does not mention <Term> specifically;
    validate them for your case."* Those items' lines get " †" instead of the full note. Other
    notes are unchanged.
-3. **Completeness pass.** After grading, supported facts the answer did not cite go to the map
+3. **Completeness pass.** After synthesis and before grading, supported facts the answer did not cite go to the map
    tier with the answer's item names. The tier returns `{item, description, markers}` only for
    items those facts state and the answer lacks, naming each item as the facts do, with at most
    3 markers each. These are appended as an "Also documented" section before the limitations
