@@ -38,7 +38,7 @@ class Concept(BaseModel):
     """A domain concept: an abstract metric, rule, policy, or term (e.g. a recovery objective or a retention rule), storage classes or tiers, a storage-redundancy tier, or a regulation or compliance standard that a product or process follows."""
 
 class Region(BaseModel):
-    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (those are Concepts), NOT an API operation or field (e.g. DescribeKey, ...Arn), NOT a policy/permission/role name, NOT a scenario/section/page name, NOT a data-classification term (e.g. PII), NOT a bare "Availability Zone" — those are Tools/Requirements/Concepts/Workloads or noise, never Regions."""
+    """A specific geographic or cloud region, or a jurisdiction, where a product operates or stores backup data — NOT a Platform (a region runs on a platform), NOT a generic relative term (primary/secondary region are Concepts), NOT a redundancy tier (those are Concepts), NOT an API operation, field or identifier, NOT a policy/permission/role name, NOT a scenario/section/page name, NOT a data-classification term (e.g. PII), NOT a bare "Availability Zone" — those are Tools/Requirements/Concepts/Workloads or noise, never Regions."""
 
 class Requirement(BaseModel):
     """A concrete prerequisite or constraint to USE a product: a permission, minimum version, open port, license, or required role/account (e.g. Backup Operator role, TCP 443 open, minimum agent version) — NOT general domain nouns (a recovery point is a Concept)."""
