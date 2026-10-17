@@ -319,13 +319,13 @@ class IngestDriver:
         """
         async with self._driver.session() as s:
             r = await s.run(
-                "CALL { "
+                "CALL () { "
                 "MATCH (v:Vendor)-[:HAS_PRODUCT]->(p:Product)-[:HAS_SOURCE]->"
                 "(so:Source)-[:HAS_ARTICLE]->(:Article {id:$a}) "
                 "RETURN v.name AS vendor, p.name AS product, so.name AS source, so.id AS sid "
                 "ORDER BY sid LIMIT 1 "
                 "} "
-                "CALL { "
+                "CALL () { "
                 "MATCH (:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->"
                 "(:Source)-[:HAS_ARTICLE]->(:Article {id:$a}) "
                 "RETURN count(*) AS chain_count "

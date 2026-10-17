@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -400,13 +401,23 @@ async def init_indices(graphiti: Graphiti, *, embed_dim: int | None = None,
         await ensure_vector_indexes(graphiti.driver, embed_dim,
                                     wait_seconds=vector_index_wait_seconds)
 
-# Marks the start of the per-chunk DOCUMENT CONTEXT block `document_context`
-# returns, below. Exported so `cache_layout.StaticTailLearner` can split this
-# PER-ARTICLE tail off the otherwise-static instructions before learning or
-# matching the static block -- see its module docstring. Keep this constant
-# and `document_context`'s leading text in sync: cache_layout imports it
-# (deferred, to avoid the import cycle) rather than hardcoding it.
+# The DOCUMENT CONTEXT block `document_context` returns, below, is always a
+# single LINE (no embedded "\n") after its leading marker: ONE sentence
+# ("This chunk comes from ... documentation for ..."), whatever is filled in
+# for vendor/product/source. `DOCUMENT_CONTEXT_PATTERN` matches exactly that
+# line and is exported (compiled, not just the marker text) so
+# `cache_layout.StaticTailLearner` can find and cut OUT the per-article
+# sentence -- wherever graphiti placed it in the rendered user message --
+# before learning or matching the surrounding STATIC text (graphiti follows
+# `custom_extraction_instructions` with its own static <EXAMPLE>/EXTRACTION
+# RULES blocks; it does not sit at the end of the user message). Both halves
+# (the marker and the fixed sentence opener) are shared between the producer
+# and the pattern below, not duplicated as separate literals, so they cannot
+# drift apart. See cache_layout's module docstring for how the pattern is used.
 DOCUMENT_CONTEXT_MARKER = "\n\nDOCUMENT CONTEXT:"
+_DOCUMENT_CONTEXT_SENTENCE_OPENER = " This chunk comes from "
+DOCUMENT_CONTEXT_PATTERN: re.Pattern[str] = re.compile(
+    re.escape(DOCUMENT_CONTEXT_MARKER + _DOCUMENT_CONTEXT_SENTENCE_OPENER) + r"[^\n]*")
 
 
 def document_context(vendor: str, product: str, source: str) -> str:
@@ -416,14 +427,15 @@ def document_context(vendor: str, product: str, source: str) -> str:
     instead of being invited to invent one (extraction-grounding, 2026-10-17).
     Empty when there is no product (no structural chain for the article).
     Vendor and source are each optional (an empty string omits that part
-    cleanly -- no "from  documentation" / "(document set: )")."""
+    cleanly -- no "from  documentation" / "(document set: )"). Always a single
+    line -- see `DOCUMENT_CONTEXT_PATTERN`, above."""
     if not product:
         return ""
     vendor_part = f"{vendor} " if vendor else ""
     source_clause = f" (document set: {source})" if source else ""
     return (
-        f"{DOCUMENT_CONTEXT_MARKER} This chunk comes from {vendor_part}documentation for "
-        f"{product}{source_clause}. The documented product is "
+        f"{DOCUMENT_CONTEXT_MARKER}{_DOCUMENT_CONTEXT_SENTENCE_OPENER}{vendor_part}"
+        f"documentation for {product}{source_clause}. The documented product is "
         f'"{product}".')
 
 
