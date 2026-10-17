@@ -259,7 +259,9 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
     and one fixed line naming the term is inserted, followed by a blank line,
     immediately before the first graded item line (spec §13.2)."""
     lines = raw.split("\n")
-    end = next((i for i, ln in enumerate(lines) if _is_limits_heading(ln)), len(lines))
+    end = find_limits_heading(lines)
+    if end is None:
+        end = len(lines)
     term_stems = {stem(t) for t in terms}
     excluded = scope_words(scope)
     grades: list[ItemGrade] = []
@@ -325,6 +327,12 @@ def grade_items(raw: str, marker_map: dict[int, dict], *, q: str, terms: list[st
                 sum(g.grade == NEEDS_VALIDATION for g in grades),
                 sum(g.grade == DROPPED for g in grades))
     return GradedAnswer(raw, grades, ungraded)
+
+
+def find_limits_heading(lines: list[str]) -> int | None:
+    """The index of the first "Not supported / limitations" heading line (the end of
+    the graded region), or None when the answer has none."""
+    return next((i for i, ln in enumerate(lines) if _is_limits_heading(ln)), None)
 
 
 def _is_limits_heading(line: str) -> bool:

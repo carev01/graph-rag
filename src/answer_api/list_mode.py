@@ -19,7 +19,15 @@ import numpy as np
 
 from answer_api.attribution import ATTRIBUTION_RULES, CLAIM_RULES, applies_to, fact_line
 from answer_api.fact_dedup import collapse_near_duplicates, fetch_vectors
-from answer_api.item_grades import CONFIRMED, NEEDS_VALIDATION, grade_items
+from answer_api.item_grades import (
+    _ITEM_RE,
+    CONFIRMED,
+    NEEDS_VALIDATION,
+    _is_bullet_heading,
+    _markers,
+    find_limits_heading,
+    grade_items,
+)
 from answer_api.list_sweep import (
     _ITEM_NOUNS,
     _PLURAL,
@@ -31,7 +39,12 @@ from answer_api.rerank import rerank, rerank_configured
 from answer_api.scope import scope_episode_uuids
 from answer_api.search import search_local
 from answer_api.shape import raise_if_cancelled
-from answer_api.synthesize import _REFUSAL, _complete_with_finish_reason, _finalize_answer
+from answer_api.synthesize import (
+    _MARKER_LIST_RE,
+    _REFUSAL,
+    _complete_with_finish_reason,
+    _finalize_answer,
+)
 from graph_extract.provenance import Provenance
 from graph_extract.usage import usable_content
 
@@ -87,6 +100,20 @@ _LIST_PROMPT = (
     "SUPPORTED FACTS:\n{supported}\n\nLIMITATION FACTS:\n{limitations}\n\n"
     "QUESTION: {q}\n\nAnswer:")
 
+# The completeness pass (spec §13.3): items stated by supported facts the answer did
+# not cite, named by the map tier and graded like every other line.
+_COMPLETE_PROMPT = (
+    "You check a list answer about backup products for missing items. The QUESTION "
+    "asks for a list; ANSWER ITEMS are the items the answer already names. Using ONLY "
+    "the numbered FACTS below, find every item that the facts state as an answer to the "
+    "question and that is not already among the answer items. Name each item the way "
+    "the facts name it, give a description of at most 15 words, and give at most 3 "
+    "markers, only from the FACTS below, of the facts that state it. Do NOT use outside "
+    "knowledge. Do NOT write any URL or link. Reply with ONLY a JSON list of objects "
+    "{{\"item\": \"<item name>\", \"description\": \"<at most 15 words>\", "
+    "\"markers\": [N, ...]}}; reply [] when nothing is missing.\n\n"
+    "QUESTION: {q}\n\nANSWER ITEMS:\n{items}\n\nFACTS:\n{facts}\n\nJSON:")
+
 
 def is_list_question(q: str) -> bool:
     return bool(_LIST_RE.search(q)) and not _NOT_LIST_RE.search(q)
@@ -122,6 +149,7 @@ RELATION_EXPANSION_DEGRADED = "relation expansion unavailable"
 DIVERSITY_DEGRADED = "diversity selection unavailable"
 SWEEP_DEGRADED = "keyword search unavailable"
 LIST_TRUNCATED = "list answer cut short"
+COMPLETENESS_DEGRADED = "completeness check unavailable"
 # The list synthesis budget (spec §11), and the one wider retry when the reply is cut
 # short at it (finish_reason "length").
 _LIST_MAX_TOKENS = 10000
@@ -344,6 +372,8 @@ def degraded_note(degraded: list[str]) -> str:
         parts.append("the keyword search could not be completed")
     if LIST_TRUNCATED in degraded:
         parts.append("the answer was cut short")
+    if COMPLETENESS_DEGRADED in degraded:
+        parts.append("some documented items may be missing")
     return " and ".join(parts).capitalize() + "; this list may be incomplete." if parts else ""
 
 
@@ -481,6 +511,99 @@ async def _list_synthesis(client, model: str, prompt: str, *,
     return max((first.content, retry.content or ""), key=len)
 
 
+def _answer_items(raw: str) -> list[str]:
+    """The bold names of the item-form lines in `raw` (group headings excluded)."""
+    out: list[str] = []
+    for ln in raw.split("\n"):
+        m = _ITEM_RE.match(ln)
+        if m is not None and not _is_bullet_heading(ln):
+            out.append(m.group("item").strip())
+    return out
+
+
+def _clean(text: str) -> str:
+    """Model-written text for one answer line: no marker (a citation comes only from
+    the checked markers list) and no line break."""
+    return " ".join(_MARKER_LIST_RE.sub(" ", text).split())
+
+
+def _completion_entries(parsed: list, uncited: set[int], existing: set[str]) -> list[str]:
+    """One `- **item** — description [m]...` line per usable entry: a non-empty string
+    item that is not already an answer item, a string description and up to 3 markers
+    from the uncited set; anything else is skipped."""
+    out: list[str] = []
+    seen = set(existing)
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        item, desc, markers = entry.get("item"), entry.get("description"), entry.get("markers")
+        if not isinstance(item, str) or not isinstance(desc, str) or not isinstance(markers, list):
+            continue
+        item = _clean(item).replace("*", "")
+        if not item or item.lower() in seen:
+            continue
+        kept: list[int] = []
+        for m in markers:
+            # bool is an int subclass: `true` is not a marker.
+            if type(m) is int and m in uncited and m not in kept:
+                kept.append(m)
+        if not kept:
+            continue
+        seen.add(item.lower())
+        desc = _clean(desc)
+        cites = "".join(f"[{m}]" for m in kept[:3])
+        out.append(f"- **{item}** — {desc} {cites}" if desc else f"- **{item}** {cites}")
+    return out
+
+
+async def _completeness_pass(client, model: str, raw: str, marker_map: dict[int, dict],
+                             n_sup: int, *, q: str, degraded: list[str]) -> str:
+    """`raw` with an "Also documented" section, before the limitations heading (at the
+    end without one), of the items the map tier finds stated by supported facts that
+    `raw` does not cite (spec §13.3). Nothing uncited: `raw`, with no call. A failed or
+    unreadable reply records COMPLETENESS_DEGRADED and keeps `raw` -- a failed check is
+    never read as "nothing missing"."""
+    cited = set(_markers(raw, marker_map))
+    uncited = [m for m in range(1, n_sup + 1) if m not in cited]
+    if not uncited:
+        return raw
+    existing = _answer_items(raw)
+    facts = "\n".join(fact_line(m, marker_map[m]["fact"], marker_map[m]["sources"])
+                      for m in uncited)
+    items = "\n".join(f"- {name}" for name in existing) or "(none)"
+    prompt = _COMPLETE_PROMPT.format(q=q, items=items, facts=facts)
+    try:
+        resp = await client.chat.completions.create(
+            model=model, temperature=0, max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}])
+        content = usable_content(resp)
+        if content is None:
+            raise ValueError("no usable content")
+        start, end = content.find("["), content.rfind("]")
+        if start < 0 or end <= start:
+            raise ValueError("no JSON list in the reply")
+        parsed = json.loads(content[start:end + 1])
+        if not isinstance(parsed, list):
+            raise ValueError("the reply was not a JSON list")
+    except Exception as exc:
+        logger.warning("list completeness pass failed (%s); keeping the first answer", exc)
+        _degrade(degraded, COMPLETENESS_DEGRADED)
+        return raw
+    added = _completion_entries(parsed, set(uncited), {n.lower() for n in existing})
+    logger.info("list completeness pass: %d uncited facts, %d items added",
+                len(uncited), len(added))
+    if not added:
+        return raw
+    section = "### Also documented\n" + "\n".join(added)
+    lines = raw.split("\n")
+    at = find_limits_heading(lines)
+    if at is None:
+        return f"{raw.rstrip()}\n\n{section}"
+    before = "\n".join(lines[:at]).rstrip()
+    after = "\n".join(lines[at:])
+    return f"{before}\n\n{section}\n\n{after}".lstrip("\n")
+
+
 async def answer_list(graphiti, driver, map_client, map_model, synth_client, synth_model,
                       *, q, scope, group_id, settings) -> dict:
     got = await retrieve_list(graphiti, driver, map_client, map_model, q=q, scope=scope,
@@ -508,6 +631,12 @@ async def answer_list(graphiti, driver, map_client, map_model, synth_client, syn
     if raw is None:
         return {**base, "answer": _REFUSAL, "citations": [], "retrieved": len(facts),
                 "cited": 0, "applies_to": [], "item_grades": [], "items_ungraded": 0}
+    if settings.list_completeness_pass:
+        # Before grading: the added lines are graded like every other line.
+        raw = await _completeness_pass(map_client, map_model, raw, marker_map, n_sup, q=q,
+                                       degraded=got.degraded)
+        if got.degraded:
+            base["degraded"] = got.degraded
     # Deterministic per-item grades (spec §12.2) BEFORE marker resolution, so a
     # dropped item's markers are never cited.
     graded = grade_items(raw, marker_map, q=q, terms=grading_terms(q, scope),

@@ -1026,3 +1026,158 @@ async def test_a_bulleted_group_layout_is_answered_not_refused(patched, monkeypa
     assert [ln.strip() for ln in out["answer"].splitlines()] == [
         "- **Hypervisors**", "- **Sangfor aSV** — restore as a VM [1]"]
     assert [c["fact_uuid"] for c in out["citations"]] == ["sf"]
+
+
+# --- Completeness pass (spec §13.3) -----------------------------------------------
+
+class _Replies:
+    """Replies with each content in turn (an exception instance is raised); records
+    every call's keyword arguments."""
+
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kw):
+        self.calls.append(kw)
+        reply = self.replies.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        msg = SimpleNamespace(content=reply)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")])
+
+
+_COMPLETE_FACTS = {
+    "sf": ("VBR supports backups created by Veeam Agent for Microsoft Windows for restore "
+           "to Sangfor aSV.", 0.9),
+    "olvm": ("VBR can restore backups created by Veeam Agent for Microsoft Windows to "
+             "Oracle Linux Virtualization Manager.", 0.8),
+    "hpe": ("VBR can restore physical machines from backups created by Veeam Agents to the "
+            "HPE Morpheus VM Essentials environment.", 0.7),
+    "lim": ("Restore of Windows agent backups to Xen is not supported.", 0.3),
+}
+_COMPLETE_Q = "Where can I restore a Windows agent backup?"
+_COMPLETE_SYNTH = ("**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]\n\n"
+                   "**Not supported / limitations**\n- Xen is not supported [4]")
+
+
+async def _complete_rerank(rq, documents, *, top_k, settings):
+    score = {text: s for text, s in _COMPLETE_FACTS.values()}
+    return [(i, score[d]) for i, d in enumerate(documents)][:top_k]
+
+
+async def _answer_with_completion(patched, monkeypatch, reply, *, synth=_COMPLETE_SYNTH,
+                                  **settings):
+    """Supported markers: [1] sf, [2] olvm, [3] hpe; limitation [4] lim. The map tier
+    answers the expansion with [] and the completeness pass with `reply`."""
+    install, _ = patched
+    install({_COMPLETE_Q: [_fact(u, text) for u, (text, _s) in _COMPLETE_FACTS.items()]})
+    monkeypatch.setattr(lm, "rerank", _complete_rerank)
+    map_client = _Replies("[]", reply)
+    out = await lm.answer_list(None, None, map_client, "m", _Client(synth), "s",
+                               q=_COMPLETE_Q, scope=Scope(), group_id="g",
+                               settings=_settings(list_item_floor=0.1, **settings))
+    return out, map_client
+
+
+async def test_missing_items_are_added_before_the_limitations_and_graded(
+        patched, monkeypatch, caplog):
+    reply = ('Sure: [{"item": "Oracle Linux Virtualization Manager", "description": '
+             '"restore agent backups as VMs", "markers": [2]}, '
+             '{"item": "HPE Morpheus VM Essentials", "description": "restore physical '
+             'machines", "markers": [3]}]')
+    with caplog.at_level(logging.INFO, logger="answer_api.list_mode"):
+        out, map_client = await _answer_with_completion(patched, monkeypatch, reply)
+    call = map_client.calls[1]
+    assert call["model"] == "m" and call["temperature"] == 0 and call["max_tokens"] == 4000
+    prompt = call["messages"][0]["content"]
+    assert _COMPLETE_Q in prompt and "Sangfor aSV" in prompt
+    assert "[2] " in prompt and "[3] " in prompt
+    assert "[1] " not in prompt and "[4] " not in prompt
+    assert "JSON" in prompt and "URL" in prompt and "15 words" in prompt
+    lines = [ln.strip() for ln in out["answer"].splitlines()]
+    also = lines.index("### Also documented")
+    assert lines.index("- **Sangfor aSV** — restore as a VM [1]") < also
+    assert lines[also + 1] == ("- **Oracle Linux Virtualization Manager** — restore agent "
+                               "backups as VMs [2]")
+    assert lines[also + 2].startswith("- **HPE Morpheus VM Essentials** — restore physical "
+                                      "machines [3] *(needs validation")
+    assert also < lines.index("**Not supported / limitations**")
+    assert [(g["item"], g["grade"]) for g in out["item_grades"]] == [
+        ("Sangfor aSV", "confirmed"),
+        ("Oracle Linux Virtualization Manager", "confirmed"),
+        ("HPE Morpheus VM Essentials", "needs_validation")]
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "olvm", "hpe", "lim"]
+    assert "degraded" not in out
+    assert "list completeness pass: 2 uncited facts, 2 items added" in caplog.text
+
+
+async def test_added_items_without_a_limitations_section_are_appended(patched, monkeypatch):
+    reply = '[{"item": "OLVM", "description": "restore as a VM", "markers": [2]}]'
+    out, _ = await _answer_with_completion(
+        patched, monkeypatch, reply, synth="- **Sangfor aSV** — restore as a VM [1]")
+    lines = [ln.strip() for ln in out["answer"].splitlines() if ln.strip()]
+    assert lines[-2:] == ["### Also documented", "- **OLVM** — restore as a VM [2]"]
+
+
+async def test_a_completion_naming_an_existing_item_is_ignored(patched, monkeypatch):
+    reply = ('[{"item": " sangfor ASV ", "description": "again", "markers": [2]}, '
+             '{"item": "Sangfor aSV", "description": "again", "markers": [3]}]')
+    out, map_client = await _answer_with_completion(patched, monkeypatch, reply)
+    assert len(map_client.calls) == 2
+    assert "Also documented" not in out["answer"]
+    assert [c["fact_uuid"] for c in out["citations"]] == ["sf", "lim"]
+    assert "degraded" not in out
+
+
+async def test_completion_markers_outside_the_uncited_set_are_dropped(patched, monkeypatch):
+    reply = ('[{"item": "Oracle Linux Virtualization Manager", "description": "restore '
+             'as a VM [1]", "markers": [1, 4, 99, true, "3", 2]}, '
+             '{"item": "Cited Already", "description": "x", "markers": [1, 4]}, '
+             '{"item": "", "description": "x", "markers": [3]}, '
+             '{"item": "No Description", "markers": [3]}, "plain string", '
+             '{"item": "Many", "description": "x", "markers": [3, 2, 3, 2]}]')
+    out, _ = await _answer_with_completion(patched, monkeypatch, reply)
+    lines = [ln.strip() for ln in out["answer"].splitlines()]
+    also = lines.index("### Also documented")
+    assert lines[also + 1] == ("- **Oracle Linux Virtualization Manager** — restore as a "
+                               "VM [2]")
+    assert lines[also + 2].startswith("- **Many** — x [3][2]")
+    assert "Cited Already" not in out["answer"] and "No Description" not in out["answer"]
+
+
+@pytest.mark.parametrize("reply", ["not json", None, '{"item": "x"}', "[{]",
+                                   RuntimeError("map tier down")])
+async def test_a_failed_completeness_pass_degrades_and_keeps_the_first_answer(
+        patched, monkeypatch, caplog, reply):
+    with caplog.at_level(logging.WARNING, logger="answer_api.list_mode"):
+        out, map_client = await _answer_with_completion(patched, monkeypatch, reply)
+    assert len(map_client.calls) == 2
+    assert out["degraded"] == [lm.COMPLETENESS_DEGRADED]
+    assert "Also documented" not in out["answer"]
+    assert out["answer"].startswith("**Hypervisors**\n- **Sangfor aSV** — restore as a VM [1]")
+    assert out["answer"].endswith(
+        "Some documented items may be missing; this list may be incomplete.")
+    assert "list completeness pass" in caplog.text
+
+
+async def test_the_completeness_pass_is_skipped_when_disabled(patched, monkeypatch):
+    out, map_client = await _answer_with_completion(
+        patched, monkeypatch, "unused", list_completeness_pass=False)
+    assert len(map_client.calls) == 1
+    assert "Also documented" not in out["answer"] and "degraded" not in out
+
+
+async def test_the_completeness_pass_is_skipped_without_uncited_facts(patched, monkeypatch):
+    synth = ("- **Sangfor aSV** — restore as a VM [1]\n- **OLVM** — restore [2]\n"
+             "- **HPE Morpheus VM Essentials** — restore [3]")
+    out, map_client = await _answer_with_completion(patched, monkeypatch, "unused",
+                                                    synth=synth)
+    assert len(map_client.calls) == 1
+    assert "degraded" not in out
+
+
+def test_the_completeness_note_is_fixed_wording():
+    assert lm.COMPLETENESS_DEGRADED == "completeness check unavailable"
+    assert lm.degraded_note([lm.COMPLETENESS_DEGRADED]) == (
+        "Some documented items may be missing; this list may be incomplete.")

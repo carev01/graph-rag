@@ -501,3 +501,11 @@ def test_an_item_made_only_of_excluded_words_still_needs_its_words_named():
     _, grades, _ = _grade("- **Veeam Backup** — x [1]", [named], scores={"vb": 0.5},
                           floor=0.4, scope=scope)
     assert grades[0].grade == ig.CONFIRMED
+
+
+def test_find_limits_heading_returns_the_first_limitations_heading_line():
+    lines = ["**Clouds**", "- **Azure** — x [1]", "Not supported / limitations apply here.",
+             "", "### Not supported / limitations", "- Xen [2]", "**Not supported / limitations**"]
+    assert ig.find_limits_heading(lines) == 4
+    assert ig.find_limits_heading(lines[:4]) is None
+    assert ig.find_limits_heading([]) is None

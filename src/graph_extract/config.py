@@ -406,6 +406,10 @@ class ExtractSettings(BaseSettings):
     # items, and for at least half the kept (confirmed + needs_validation) ones (spec
     # §13.2).
     list_flag_group_min: int = 5
+    # After the list synthesis, the map tier names items stated by supported facts the
+    # answer did not cite; they are appended under "Also documented" and graded like
+    # every other line (spec §13.3).
+    list_completeness_pass: bool = True
     # Single answers keep the threshold they were reviewed at; lists use list_dedup_cosine.
     local_single_dedup_cosine: float = 0.92
     # Every other single question reranks this many candidates down to k (was raw
