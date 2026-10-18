@@ -1,5 +1,5 @@
 """The Opus-distillation harness: `select`, `round`, `status`, `batches`, `intake`,
-`review-sample`, `export`.
+`review-sample`, `report`, `export`.
 
     uv run --extra dev python -m scripts.distill.harness select --out DIR/sample.json
     uv run --extra dev python -m scripts.distill.harness round \
@@ -12,6 +12,8 @@
         --store DIR/store --answers DIR/batches/round-N/ --sample DIR/sample.json
     uv run --extra dev python -m scripts.distill.harness review-sample \
         --store DIR/store --fraction 0.05 --seed 20261017 --out DIR/reviews/
+    uv run --extra dev python -m scripts.distill.harness report \
+        --store DIR/store --batches DIR/batches/ [--out DIR/pilot-report.md]
     uv run --extra dev python -m scripts.distill.harness export \
         --store DIR/store --out DIR/capture.jsonl
 
@@ -87,8 +89,10 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
 import random
 import sys
@@ -457,11 +461,29 @@ def observe_transport(transport: TeacherTransport, log: RoundLog) -> TeacherTran
 
 # --- the stack -----------------------------------------------------------------------
 
+# What the harness passes as the cheap tier's (and so the cross-encoder's) API key: a
+# non-secret placeholder, the same one production uses for keyless local endpoints.
+NO_API_KEY = "not-needed"
+
+
 def harness_settings(base: ExtractSettings, store_root: Path) -> ExtractSettings:
-    """Production settings with the harness's overrides: capture into the store, the
-    teacher's model label on the cheap tier, the cheap tier only (no dense-matrix
-    router: only the cheap graphiti is built), contradictions as production runs them
-    (detection off, suppression on), no strong-tier dedup retry."""
+    """Production settings with the harness's overrides:
+
+    - capture into the store (`llm_capture_path`);
+    - the teacher's model label on the cheap tier (`cheap_llm_model`);
+    - `extraction_routing=True`, production's value. The harness never consults it:
+      it only ever builds the cheap graphiti (`build_teacher_graphiti`), so no
+      dense-matrix router exists here, whatever the flag says;
+    - contradictions as production runs them (detection off, suppression on) and no
+      strong-tier dedup retry -- a differing environment value is overridden, with
+      a WARNING;
+    - NO real API key on the cheap tier or the reranker: `cheap_llm_api_key` is the
+      placeholder `NO_API_KEY` and `rerank_api_key=""`. The LLM transport is the fake
+      `TeacherTransport`, and graphiti's cross-encoder -- built by `build_graphiti`
+      from the cheap view, i.e. from `cheap_llm_api_key` -- is never called during
+      `add_episode`. Defence in depth: nothing the harness builds can authenticate to
+      a paid endpoint. (A placeholder, not "": the openai SDK refuses to construct a
+      client whose api_key is empty, and the cross-encoder constructs one.)"""
     for name, want in (("ingest_detect_contradictions", False),
                        ("ingest_same_pair_contradictions", False),
                        ("dedup_retry_on_strong", False)):
@@ -474,7 +496,9 @@ def harness_settings(base: ExtractSettings, store_root: Path) -> ExtractSettings
         extraction_routing=True,
         ingest_detect_contradictions=False,
         ingest_same_pair_contradictions=False,
-        dedup_retry_on_strong=False))
+        dedup_retry_on_strong=False,
+        cheap_llm_api_key=NO_API_KEY,
+        rerank_api_key=""))
 
 
 def build_teacher_graphiti(settings: ExtractSettings, store: AnswerStore, log: RoundLog, *,
@@ -503,7 +527,9 @@ def build_teacher_graphiti(settings: ExtractSettings, store: AnswerStore, log: R
 
 @dataclass
 class Chunk:
-    chunk_index: int
+    # The raw `HAS_EPISODE.chunk_index` as read; `run_round` parses it to an int per
+    # chunk (`_parse_chunk_index`), so one bad row errors one chunk, not the round.
+    chunk_index: Any
     uuid: str
     name: str
     content: str
@@ -542,7 +568,7 @@ async def read_article_chunks(read: Any, article_id: str) -> ArticleChunks | Non
         source_url=first["source_url"] or "",
         fields={k: first[k] for k in ("content_changed_at", "content_changed_basis",
                                       "last_updated_at")},
-        chunks=[Chunk(chunk_index=int(r["chunk_index"]), uuid=r["uuid"], name=r["name"],
+        chunks=[Chunk(chunk_index=r["chunk_index"], uuid=r["uuid"], name=r["name"],
                       content=r["content"], valid_at=r["valid_at"],
                       created_at=r["created_at"]) for r in recs])
 
@@ -751,6 +777,48 @@ async def run_chunk(*, graphiti: Graphiti, settings: ExtractSettings, store: Ans
     return record
 
 
+def _parse_chunk_index(raw: Any) -> int:
+    """`HAS_EPISODE.chunk_index` as an int; raises TypeError/ValueError on a row that
+    has none (null) or a non-integer one."""
+    if isinstance(raw, bool):
+        raise TypeError(f"chunk_index is a bool: {raw!r}")
+    if isinstance(raw, float) and not raw.is_integer():
+        raise ValueError(f"chunk_index is not an integer: {raw!r}")
+    return int(raw)
+
+
+def _bad_chunk_record(round_no: int, art: ArticleChunks, chunk: Chunk,
+                      exc: BaseException) -> dict:
+    """The `error` record of a chunk whose row could not even be parsed."""
+    return {
+        "round": round_no, "chunk_id": f"{art.article_id}:{chunk.chunk_index}",
+        "article_id": art.article_id, "chunk_index": chunk.chunk_index,
+        "episode_uuid": chunk.uuid, "state": "error", "pending_keys": [],
+        "dropped_keys": [], "replayed": 0, "previous_episode_uuids": [],
+        "reference_time": None, "ref_matches_episode": None,
+        "error": f"bad chunk_index {chunk.chunk_index!r}: {type(exc).__name__}: {exc}",
+        "ts": _utcnow()}
+
+
+def _parse_article_chunks(art: ArticleChunks, round_no: int, log: RoundLog,
+                          summary: RoundSummary) -> None:
+    """Parse every chunk's index, per chunk: a bad row is recorded `error` and left
+    out of `art.chunks` (so it is neither replayed nor ordered as a sibling); the
+    other chunks of the article still run."""
+    good: list[Chunk] = []
+    for chunk in art.chunks:
+        try:
+            chunk.chunk_index = _parse_chunk_index(chunk.chunk_index)
+        except (TypeError, ValueError) as exc:
+            rec = _bad_chunk_record(round_no, art, chunk, exc)
+            logger.error("chunk %s: %s", rec["chunk_id"], rec["error"])
+            log.chunk_done(rec)
+            summary.states["error"] += 1
+            continue
+        good.append(chunk)
+    art.chunks = good
+
+
 async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
                     settings: ExtractSettings, store: AnswerStore, log: RoundLog,
                     read: Any) -> RoundSummary:
@@ -764,6 +832,7 @@ async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
             logger.warning("article %s: no live production episodes; skipped", sa.article_id)
             summary.articles_missing.append(sa.article_id)
             continue
+        _parse_article_chunks(art, round_no, log, summary)
         vendor, product, source = await read_document_context(read, sa.article_id)
         if (vendor, product) != (sa.vendor, sa.product):
             logger.warning("article %s: document context %s / %s differs from the sample's "
@@ -803,10 +872,34 @@ def status_text(store_root: Path) -> str:
         lines.append(f"  {name}: {n}")
     lines.append(f"answered: {len(store.answered_keys())}")
     lines.append(f"dropped: {len(store.dropped_keys())}")
-    sm = _read_jsonl(log.selfmatch_path)
+    lines.append(f"{NOT_REPLAYED_LABEL}: {len(answered_not_replayed(store_root))}")
     lines.append("dedup self-matches (candidate = this chunk's own production extraction):")
+    lines.extend(_selfmatch_lines(_read_jsonl(log.selfmatch_path)))
+    return "\n".join(lines)
+
+
+NOT_REPLAYED_LABEL = "answered but not replayed in the latest round"
+
+
+def answered_not_replayed(store_root: Path) -> list[str]:
+    """Accepted (not dropped) keys that no round has replayed since intake accepted
+    them -- every answer accepted after the latest round. `calls.jsonl` gets a
+    record the first time an answered call goes through the transport (a replay),
+    and a key can only be replayed once it is answered, so an accepted key with no
+    `calls.jsonl` record has never been replayed: it has no capture record yet, and
+    `export` would count it `missing`. Also catches a key whose every asker chunk
+    ended `dropped` on another key (it will never be replayed)."""
+    store = AnswerStore(store_root)
+    replayed = {r["key"] for r in _read_jsonl(store_root / "calls.jsonl")}
+    accepted = set(store.answered_keys()) - set(store.dropped_keys())
+    return sorted(accepted - replayed)
+
+
+def _selfmatch_lines(sm: list[dict]) -> list[str]:
+    """The self-match share per dedup prompt type (`status` and `report`)."""
     if not sm:
-        lines.append("  none recorded yet")
+        return ["  none recorded yet"]
+    lines = []
     for name in SELF_MATCH_PROMPTS:
         recs = [r for r in sm if r["prompt_name"] == name]
         if not recs:
@@ -818,20 +911,25 @@ def status_text(store_root: Path) -> str:
         share = f"{hits / cands:.1%}" if cands else "n/a"
         lines.append(f"  {name}: {hits} of {cands} candidates ({share}); "
                      f"{with_hit} of {len(recs)} prompts with >=1; unparsed {unparsed}")
-    return "\n".join(lines)
+    return lines
 
 
-# --- batches / intake / review-sample / export (task 4) ------------------------------
+# --- batches / intake / review-sample / report / export (task 4) ---------------------
 #
-# Four more stages on the same on-disk store, run between rounds:
+# Five more stages on the same on-disk store, run between rounds:
 #
 # - `batches` writes the teacher's work: every still-pending request, grouped so one
-#   file never mixes prompt types, carrying a re-ask's `previous_answer`/`rejection`.
-# - `intake` reads the teacher's `*.answers.jsonl` replies, validates each
-#   (`scripts.distill.validate.validate_answer`) and accepts, re-queues (first
-#   rejection) or drops (second) it.
-# - `review-sample` draws ~5% of accepted answers, stratified by prompt type, for a
-#   reviewer subagent.
+#   file never mixes prompt types, carrying a re-ask's `previous_answer`/`rejection`,
+#   and on every line its `ordinal` (1-based position in the file) and `check` (the
+#   first 12 hex characters of sha256 of the user message), which the teacher echoes.
+# - `intake` reads the teacher's `*.answers.jsonl` replies, checks the echoed
+#   `ordinal`/`check` against the key's batch line (an answer filed under the wrong
+#   key is rejected), validates each (`scripts.distill.validate.validate_answer`) and
+#   accepts, re-queues (first rejection) or drops (second) it.
+# - `review-sample` draws ~5% of accepted answers, stratified by prompt type (at
+#   least one per type that has any), for a reviewer subagent.
+# - `report` writes the pilot report: per prompt type, keys asked / accepted /
+#   re-asked / dropped, validity and re-ask rates, prompt and answer sizes.
 # - `export` copies the capture record of every accepted key into the production
 #   capture format, preferring the "moved" wire layout (`calls.jsonl` tells layouts
 #   apart; see the module docstring).
@@ -839,10 +937,16 @@ def status_text(store_root: Path) -> str:
 # A rejection's history lives in its own append-only log (`AnswerStore` has no notion
 # of "rejected once already" -- that is this task's own bookkeeping, not the
 # store's): `<store>/rejections.jsonl`, one record per rejection, `key` ->
-# `{"reason", "previous_answer"}`. The SECOND rejection of a key is what turns into
-# `store.drop`.
+# `{"reason", "previous_answer", "prompt_name"}`. A SECOND rejection of a key is what
+# turns into `store.drop` -- and only a genuine second answer counts as one: the
+# answer to a re-ask (its batch line carried `rejection`) or an answer that differs
+# from the one already rejected. Re-running `intake` over the same answers directory
+# sees the same rejected answer again and leaves the key pending (`already_rejected`).
 
 REJECTIONS_FILENAME = "rejections.jsonl"
+WRONG_PROMPT_REASON = "answer filed under the wrong prompt"
+CHECK_HEX_CHARS = 12
+INTAKE_OUTCOMES = ("accepted", "requeued", "dropped", "unanswered")
 
 
 def _rejections_by_key(store_root: Path) -> dict[str, list[dict]]:
@@ -852,15 +956,35 @@ def _rejections_by_key(store_root: Path) -> dict[str, list[dict]]:
     return out
 
 
-def _append_rejection(store_root: Path, key: str, *, reason: str, previous_answer: Any) -> None:
+def _append_rejection(store_root: Path, key: str, *, reason: str, previous_answer: Any,
+                      prompt_name: str | None = None) -> None:
     _append_jsonl(store_root / REJECTIONS_FILENAME, {
-        "key": key, "reason": reason, "previous_answer": previous_answer, "ts": _utcnow()})
+        "key": key, "reason": reason, "previous_answer": previous_answer,
+        "prompt_name": prompt_name, "ts": _utcnow()})
+
+
+def user_message_check(messages: Sequence[Any]) -> str:
+    """The first `CHECK_HEX_CHARS` hex characters of sha256 over the request's user
+    message (every user-role message's content, joined by a newline -- graphiti
+    sends one). A string content is hashed as is, anything else as canonical JSON."""
+    parts = []
+    for m in messages:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if role != "user":
+            continue
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        parts.append(content if isinstance(content, str)
+                     else json.dumps(content, sort_keys=True, ensure_ascii=False))
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return digest[:CHECK_HEX_CHARS]
 
 
 def write_batches(store_root: Path, out_dir: Path, *, size: int) -> list[Path]:
     """`<out_dir>/batch-NNN.jsonl`: every pending request, grouped by prompt type (one
-    file never mixes types) with at most `size` lines each. A key already rejected
-    once carries `previous_answer`/`rejection` so the teacher fixes exactly that."""
+    file never mixes types) with at most `size` lines each. Every line carries
+    `ordinal` (its 1-based position in its file) and `check` (`user_message_check`);
+    a key already rejected once carries `previous_answer`/`rejection` so the teacher
+    fixes exactly that."""
     store = AnswerStore(store_root)
     rejections = _rejections_by_key(store_root)
     by_prompt: dict[str, list[tuple[str, dict]]] = defaultdict(list)
@@ -873,9 +997,12 @@ def write_batches(store_root: Path, out_dir: Path, *, size: int) -> list[Path]:
         items = sorted(by_prompt[prompt_name], key=lambda kv: kv[0])
         for i in range(0, len(items), size):
             lines = []
-            for key, request in items[i:i + size]:
-                line = {"key": key, "prompt_name": prompt_name,
-                        "messages": request.get("messages"),
+            for ordinal, (key, request) in enumerate(items[i:i + size], start=1):
+                messages = request.get("messages") or []
+                line = {"key": key, "ordinal": ordinal,
+                        "check": user_message_check(messages),
+                        "prompt_name": prompt_name,
+                        "messages": messages,
                         "response_schema": request.get("response_format")}
                 history = rejections.get(key)
                 if history:
@@ -897,6 +1024,13 @@ class IntakeSummary:
     dropped: int = 0            # second rejection: given up on
     skipped: int = 0            # answer for a key no longer pending (already resolved)
     unanswered: int = 0         # a batch key with no parseable answer line at all
+    already_rejected: int = 0   # the same rejected answer seen again (intake re-run)
+    # prompt_name -> Counter over INTAKE_OUTCOMES
+    by_prompt: dict[str, Counter] = field(default_factory=lambda: defaultdict(Counter))
+
+    def count(self, outcome: str, prompt_name: str) -> None:
+        setattr(self, outcome, getattr(self, outcome) + 1)
+        self.by_prompt[prompt_name][outcome] += 1
 
 
 def _answer_files(answers_dir: Path) -> list[Path]:
@@ -910,10 +1044,24 @@ def _batch_files(answers_dir: Path) -> list[Path]:
     return sorted(p for p in answers_dir.glob("*.jsonl") if not p.name.endswith(".answers.jsonl"))
 
 
+def _batch_lines(answers_dir: Path) -> dict[str, dict]:
+    """key -> its batch line, for every key `batches` asked for in this round, read
+    from our OWN files (`_read_jsonl`'s strict parser is fine here -- we wrote them)."""
+    return {rec["key"]: rec for path in _batch_files(answers_dir) for rec in _read_jsonl(path)}
+
+
 def _requested_keys(answers_dir: Path) -> set[str]:
-    """Every key `batches` asked for in this round, read from our OWN files
-    (`_read_jsonl`'s strict parser is fine here -- we wrote them)."""
-    return {rec["key"] for path in _batch_files(answers_dir) for rec in _read_jsonl(path)}
+    return set(_batch_lines(answers_dir))
+
+
+def _filed_under_wrong_key(rec: dict, line: dict | None) -> bool:
+    """Does the answer's echoed `ordinal`/`check` disagree with its key's batch line?
+    A batch line written before `ordinal`/`check` existed (or no batch line in this
+    directory) cannot be checked and passes."""
+    if line is None or "ordinal" not in line or "check" not in line:
+        return False
+    return (str(rec.get("ordinal")).strip() != str(line["ordinal"])
+            or str(rec.get("check")).strip().lower() != str(line["check"]).lower())
 
 
 def _read_answer_lines(path: Path) -> list[dict]:
@@ -999,13 +1147,22 @@ def _validate_across_contexts(prompt_name: str, messages: list, answer: Any,
 def run_intake(store_root: Path, answers_dir: Path, sample_path: Path) -> IntakeSummary:
     """Validate every teacher-answered key in `answers_dir`'s `*.answers.jsonl` files
     against the request still pending under that key. A key `batches` asked for in
-    this round (`_requested_keys`) that never turns up as a parseable, correctly-shaped
+    this round (`_batch_lines`) that never turns up as a parseable, correctly-shaped
     answer line in any of them stays pending untouched -- it is simply re-batched next
-    round -- and is counted as `unanswered`."""
+    round -- and is counted as `unanswered`.
+
+    An answer whose echoed `ordinal`/`check` does not match its key's batch line is
+    rejected (`WRONG_PROMPT_REASON`) without being validated. A rejection of a key
+    already rejected once is the SECOND (a drop) only when this answer is a genuine
+    second one: its batch line carried `rejection` (a re-ask), or the answer differs
+    from the stored `previous_answer`. Otherwise it is the same rejected answer seen
+    again -- `intake` re-run over the same directory -- and the key stays pending
+    with no new rejection record (`already_rejected`)."""
     store = AnswerStore(store_root)
     pending = dict(store.pending())
     rejections = _rejections_by_key(store_root)
     articles_by_id = {a.article_id: a for a in load_sample(sample_path)}
+    batch_lines = _batch_lines(answers_dir)
     summary = IntakeSummary()
     found_keys: set[str] = set()
     for path in _answer_files(answers_dir):
@@ -1020,29 +1177,48 @@ def run_intake(store_root: Path, answers_dir: Path, sample_path: Path) -> Intake
                 continue
             prompt_name = str(request.get("prompt_name"))
             messages = request.get("messages") or []
-            articles = _articles_for_key(store, articles_by_id, key)
-            if len(articles) > 1:
+            line = batch_lines.get(key)
+            if _filed_under_wrong_key(rec, line):
+                assert line is not None
                 logger.warning(
-                    "intake: %s has askers across %d distinct (vendor, product) "
-                    "contexts: %s", key, len(articles),
-                    [(a.vendor, a.product) for a in articles])
-            reasons = _validate_across_contexts(prompt_name, messages, answer, articles)
+                    "intake: %s: echoed ordinal/check %r/%r != its batch line's %r/%r",
+                    key, rec.get("ordinal"), rec.get("check"), line["ordinal"],
+                    line["check"])
+                reasons = [WRONG_PROMPT_REASON]
+            else:
+                articles = _articles_for_key(store, articles_by_id, key)
+                if len(articles) > 1:
+                    logger.warning(
+                        "intake: %s has askers across %d distinct (vendor, product) "
+                        "contexts: %s", key, len(articles),
+                        [(a.vendor, a.product) for a in articles])
+                reasons = _validate_across_contexts(prompt_name, messages, answer, articles)
             if not reasons:
                 store.put(key, json.dumps(answer, ensure_ascii=False),
                          {"prompt_name": prompt_name, "messages": messages})
-                summary.accepted += 1
+                summary.count("accepted", prompt_name)
+                pending.pop(key, None)
                 continue
             reason = "; ".join(reasons)
             history = rejections.get(key)
             if history:
+                reask = bool(line is not None and line.get("rejection"))
+                if not reask and answer == history[-1]["previous_answer"]:
+                    summary.already_rejected += 1
+                    logger.info("intake: %s: the same answer was already rejected once "
+                                "(intake re-run?); left pending, not dropped", key)
+                    continue
                 store.drop(key, f"re-ask rejected again: first={history[-1]['reason']!r}; "
-                                f"second={reason!r}")
-                summary.dropped += 1
+                                f"second={reason!r}", prompt_name=prompt_name)
+                summary.count("dropped", prompt_name)
+                pending.pop(key, None)
             else:
-                summary.requeued += 1
-            _append_rejection(store_root, key, reason=reason, previous_answer=answer)
+                summary.count("requeued", prompt_name)
+            _append_rejection(store_root, key, reason=reason, previous_answer=answer,
+                              prompt_name=prompt_name)
             rejections.setdefault(key, []).append({"reason": reason, "previous_answer": answer})
-    summary.unanswered = len(_requested_keys(answers_dir) - found_keys)
+    for key in sorted(set(batch_lines) - found_keys):
+        summary.count("unanswered", str(batch_lines[key].get("prompt_name")))
     return summary
 
 
@@ -1061,7 +1237,9 @@ def write_review_sample(store_root: Path, out_dir: Path, *, fraction: float,
                         seed: int) -> Path:
     """`<out_dir>/review-sample.jsonl`: about `fraction` of accepted answers, sampled
     independently within each prompt type with a seeded shuffle keyed on
-    `(seed, "review", prompt_name)` -- deterministic for a fixed store and seed."""
+    `(seed, "review", prompt_name)` -- deterministic for a fixed store and seed. Every
+    prompt type with at least one accepted answer contributes at least one sample
+    (a rare type would otherwise round to zero and never be reviewed)."""
     store = AnswerStore(store_root)
     accepted = set(store.answered_keys())
     meta_by_key = {rec["key"]: rec.get("meta") or {}
@@ -1075,7 +1253,7 @@ def write_review_sample(store_root: Path, out_dir: Path, *, fraction: float,
     for name in sorted(by_prompt):
         keys = sorted(by_prompt[name])
         random.Random(f"{seed}|review|{name}").shuffle(keys)
-        selected.extend(sorted(keys[:round(len(keys) * fraction)]))
+        selected.extend(sorted(keys[:max(1, round(len(keys) * fraction))]))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "review-sample.jsonl"
     lines = [{"key": key, "prompt_name": prompt_by_key.get(key),
@@ -1085,6 +1263,156 @@ def write_review_sample(store_root: Path, out_dir: Path, *, fraction: float,
     path.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines),
                     encoding="utf-8")
     return path
+
+
+# --- report ----------------------------------------------------------------------------
+
+CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _percentile(values: Sequence[int], pct: float) -> int:
+    """Nearest-rank percentile (0 for no values)."""
+    if not values:
+        return 0
+    ordered = sorted(values)
+    rank = max(1, math.ceil(pct / 100 * len(ordered)))
+    return ordered[rank - 1]
+
+
+def _size_cell(values: Sequence[int]) -> str:
+    """"p50 / p95 / max" chars, then the same in estimated tokens (chars / 4)."""
+    if not values:
+        return "n/a | n/a"
+    stats = [_percentile(values, 50), _percentile(values, 95), max(values)]
+    chars = " / ".join(str(v) for v in stats)
+    tokens = " / ".join(str(round(v / CHARS_PER_TOKEN_ESTIMATE)) for v in stats)
+    return f"{chars} | {tokens}"
+
+
+def _rate(num: int, den: int) -> str:
+    return f"{num / den:.1%}" if den else "n/a"
+
+
+def _prompt_chars(messages: Sequence[Any]) -> int:
+    return sum(len(t) for t in _message_texts(messages))
+
+
+def report_text(store_root: Path, batches_dir: Path) -> str:
+    """The pilot report (markdown). Every batch file under `batches_dir` (searched
+    recursively, so the whole `DIR/batches/` with its `round-N/` folders or a single
+    round folder both work) and the store's own logs.
+
+    Per prompt type, all counts are DISTINCT KEYS:
+
+    - asked: keys in any batch file;
+    - answered: keys `intake` resolved at least once (accepted, or rejected at least
+      once -- `rejections.jsonl`);
+    - accepted: keys in the store's answers (not dropped);
+    - re-asked: keys rejected at least once (each first rejection is sent back);
+    - dropped: keys in `dropped.jsonl`;
+    - validity = accepted / answered; re-ask rate = re-asked / answered.
+
+    Sizes: prompt = every message's text of a key's latest batch line; answer = the
+    JSON of every teacher answer line under `batches_dir` (rejected ones included).
+    Tokens are estimated as chars / 4."""
+    store = AnswerStore(store_root)
+    log = RoundLog(store)
+    batch_paths = sorted(p for p in batches_dir.rglob("*.jsonl")
+                         if not p.name.endswith(".answers.jsonl"))
+    answer_paths = sorted(batches_dir.rglob("*.answers.jsonl"))
+
+    line_by_key: dict[str, dict] = {}
+    for p in batch_paths:
+        for rec in _read_jsonl(p):
+            line_by_key[rec["key"]] = rec
+    accepted_names = _accepted_prompt_names(store_root)
+    dropped_recs = {r["key"]: r for r in _read_jsonl(store.dropped_path)}
+    rejections = _rejections_by_key(store_root)
+
+    def name_of(key: str, *hints: Any) -> str:
+        for hint in hints:
+            if hint:
+                return str(hint)
+        if key in line_by_key:
+            return str(line_by_key[key].get("prompt_name"))
+        return accepted_names.get(key) or "unknown"
+
+    asked: dict[str, set[str]] = defaultdict(set)
+    prompt_sizes: dict[str, list[int]] = defaultdict(list)
+    for key, rec in line_by_key.items():
+        name = name_of(key, rec.get("prompt_name"))
+        asked[name].add(key)
+        prompt_sizes[name].append(_prompt_chars(rec.get("messages") or []))
+    answer_sizes: dict[str, list[int]] = defaultdict(list)
+    for p in answer_paths:
+        for rec in _read_answer_lines(p):
+            answer_sizes[name_of(rec["key"])].append(
+                len(json.dumps(rec["answer"], ensure_ascii=False)))
+    dropped: dict[str, set[str]] = defaultdict(set)
+    for key, rec in dropped_recs.items():
+        last_rej = (rejections.get(key) or [{}])[-1]
+        dropped[name_of(key, rec.get("prompt_name"), last_rej.get("prompt_name"))].add(key)
+    accepted: dict[str, set[str]] = defaultdict(set)
+    for key in set(store.answered_keys()) - set(dropped_recs):
+        accepted[name_of(key, accepted_names.get(key))].add(key)
+    reasked: dict[str, set[str]] = defaultdict(set)
+    for key, recs in rejections.items():
+        reasked[name_of(key, recs[-1].get("prompt_name"))].add(key)
+
+    names = sorted(set(asked) | set(accepted) | set(reasked) | set(dropped)
+                   | set(answer_sizes))
+    out = ["# Distillation pilot report", "",
+           f"- store: `{store_root}`",
+           f"- batches: `{batches_dir}` ({len(batch_paths)} batch file(s), "
+           f"{len(answer_paths)} answers file(s))",
+           f"- rounds run: {log.next_round() - 1}",
+           f"- generated: {_utcnow()}", "",
+           "## Per prompt type (distinct keys)", "",
+           "| prompt type | asked | answered | accepted | re-asked | dropped "
+           "| validity (accepted / answered) | re-ask rate (re-asked / answered) |",
+           "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    totals: Counter = Counter()
+    for name in names:
+        answered = len(accepted[name] | reasked[name])
+        row = {"asked": len(asked[name]), "answered": answered,
+               "accepted": len(accepted[name]), "reasked": len(reasked[name]),
+               "dropped": len(dropped[name])}
+        totals.update(row)
+        out.append(f"| {name} | {row['asked']} | {answered} | {row['accepted']} "
+                   f"| {row['reasked']} | {row['dropped']} "
+                   f"| {_rate(row['accepted'], answered)} | {_rate(row['reasked'], answered)} |")
+    out.append(f"| **total** | {totals['asked']} | {totals['answered']} "
+               f"| {totals['accepted']} | {totals['reasked']} | {totals['dropped']} "
+               f"| {_rate(totals['accepted'], totals['answered'])} "
+               f"| {_rate(totals['reasked'], totals['answered'])} |")
+    out += ["", "## Prompt and answer sizes", "",
+            "p50 / p95 / max; tokens estimated as chars / "
+            f"{CHARS_PER_TOKEN_ESTIMATE}.", "",
+            "| prompt type | prompt chars | prompt tokens (est.) | answer chars "
+            "| answer tokens (est.) |",
+            "|---|---:|---:|---:|---:|"]
+    for name in names:
+        out.append(f"| {name} | {_size_cell(prompt_sizes[name])} "
+                   f"| {_size_cell(answer_sizes[name])} |")
+
+    latest = log.latest_states()
+    states = Counter(r["state"] for r in latest.values())
+    not_replayed = answered_not_replayed(store_root)
+    out += ["", "## Chunks", "",
+            f"{len(latest)} chunks: " + ", ".join(f"{s} {states.get(s, 0)}" for s in STATES),
+            "", f"{NOT_REPLAYED_LABEL}: {len(not_replayed)} (run one more `round` "
+            "before `export`)", "",
+            "## Dedup self-matches", "",
+            "Candidate = this chunk's own production extraction (the accepted caveat).", "",
+            "```", *_selfmatch_lines(_read_jsonl(log.selfmatch_path)), "```", "",
+            "## Controller notes (fill in by hand)", "",
+            "Wall time and Agent usage per teacher batch -- not recorded by the harness.",
+            "",
+            "| batch file | wall time | Agent usage (tokens / tool calls) | notes |",
+            "|---|---|---|---|"]
+    for p in batch_paths:
+        out.append(f"| {p.relative_to(batches_dir)} |  |  |  |")
+    return "\n".join(out) + "\n"
 
 
 @dataclass
@@ -1221,6 +1549,13 @@ def _parser() -> argparse.ArgumentParser:
     rs.add_argument("--fraction", type=float, default=0.05)
     rs.add_argument("--seed", type=int, default=20261017)
     rs.add_argument("--out", type=Path, required=True)
+    rp = sub.add_parser("report", help="write the pilot report (markdown)")
+    rp.add_argument("--store", type=Path, required=True)
+    rp.add_argument("--batches", type=Path, required=True,
+                    help="the batches directory (searched recursively: DIR/batches/ "
+                         "with its round-N/ folders, or one round's folder)")
+    rp.add_argument("--out", type=Path, default=None,
+                    help="write the report here (default: print it)")
     ex = sub.add_parser("export", help="copy accepted keys' capture records")
     ex.add_argument("--store", type=Path, required=True)
     ex.add_argument("--out", type=Path, required=True)
@@ -1240,7 +1575,21 @@ def _cmd_intake(args: argparse.Namespace) -> int:
     summary = run_intake(args.store, args.answers, args.sample)
     print(f"intake: accepted {summary.accepted}, requeued {summary.requeued}, "
          f"dropped {summary.dropped}, skipped {summary.skipped}, "
-         f"unanswered {summary.unanswered}")
+         f"unanswered {summary.unanswered}, already rejected {summary.already_rejected}")
+    for name in sorted(summary.by_prompt):
+        counts = summary.by_prompt[name]
+        print(f"  {name}: " + ", ".join(f"{o} {counts.get(o, 0)}" for o in INTAKE_OUTCOMES))
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    text = report_text(args.store, args.batches)
+    if args.out is None:
+        print(text, end="")
+        return 0
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(text, encoding="utf-8")
+    print(f"wrote {args.out}")
     return 0
 
 
@@ -1275,6 +1624,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_intake(args)
     if args.cmd == "review-sample":
         return _cmd_review_sample(args)
+    if args.cmd == "report":
+        return _cmd_report(args)
     if args.cmd == "export":
         return _cmd_export(args)
     return asyncio.run(_cmd_round(args))

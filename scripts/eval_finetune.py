@@ -27,9 +27,23 @@ from scripts.build_extraction_dataset import (  # noqa: E402
 )
 
 BASE = "http://srv-llm.home.lan:8080/v1/chat/completions"
+PICK_SEED = 20260922
 
 
-async def call(session, msgs, model, sem, timeout):
+def pick_records(by_prompt: dict[str, list[dict]], per_prompt: int,
+                 seed: int = PICK_SEED) -> list[dict]:
+    """A seeded subsample of `per_prompt` records per prompt type, or EVERY record
+    when `per_prompt` is 0 (the full held-out set)."""
+    rng = random.Random(seed)
+    picked: list[dict] = []
+    for _name, recs in sorted(by_prompt.items()):
+        recs = list(recs)
+        rng.shuffle(recs)
+        picked += recs if per_prompt <= 0 else recs[:per_prompt]
+    return picked
+
+
+async def call(session, base_url, msgs, model, sem, timeout):
     body = {"model": model, "messages": msgs,
             # Explicit: the server defaults are temperature 0.7 / top_k 20 /
             # top_p 0.8 / presence_penalty 1.5. A presence penalty punishes
@@ -41,7 +55,7 @@ async def call(session, msgs, model, sem, timeout):
     async with sem:
         t = time.time()
         try:
-            r = await session.post(BASE, json=body, timeout=timeout)
+            r = await session.post(base_url, json=body, timeout=timeout)
             out = r.json()
         except Exception as e:  # noqa: BLE001 - any failure is a result, not a crash
             return None, f"{type(e).__name__}: {str(e)[:120]}", time.time() - t
@@ -53,7 +67,11 @@ async def main() -> int:
     import httpx
     ap = argparse.ArgumentParser()
     ap.add_argument("--val", type=Path, default=Path("data/ft-12k/val.jsonl"))
-    ap.add_argument("--per-prompt", type=int, default=25)
+    ap.add_argument("--per-prompt", type=int, default=25,
+                    help="records per prompt type (a seeded subsample); 0 = every "
+                         "record, the full held-out set")
+    ap.add_argument("--base-url", default=BASE,
+                    help=f"chat-completions endpoint of the served model (default {BASE})")
     ap.add_argument("--model", default="qwen35-graphrag")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=600)
@@ -64,13 +82,9 @@ async def main() -> int:
     for line in args.val.open():
         d = json.loads(line)
         by_prompt[d["prompt_name"]].append(d)
-    rng = random.Random(20260922)
-    picked = []
-    for name, recs in sorted(by_prompt.items()):
-        rng.shuffle(recs)
-        picked += recs[:args.per_prompt]
-    print(f"evaluating {len(picked)} held-out records, concurrency {args.concurrency}",
-          flush=True)
+    picked = pick_records(by_prompt, args.per_prompt)
+    print(f"evaluating {len(picked)} held-out records against {args.base_url}, "
+          f"concurrency {args.concurrency}", flush=True)
 
     sem = asyncio.Semaphore(args.concurrency)
     done = 0
@@ -79,7 +93,8 @@ async def main() -> int:
         async def one(rec):
             nonlocal done
             msgs = [m for m in rec["messages"] if m["role"] != "assistant"]
-            txt, finish, dt = await call(session, msgs, args.model, sem, args.timeout)
+            txt, finish, dt = await call(session, args.base_url, msgs, args.model, sem,
+                                         args.timeout)
             done += 1
             if done % 10 == 0:
                 print(f"  [{done}/{len(picked)}]", flush=True)

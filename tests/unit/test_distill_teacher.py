@@ -275,3 +275,13 @@ def test_note_asker_records_every_chunk_that_asked(tmp_path):
 
     reloaded = AnswerStore(tmp_path)
     assert reloaded.askers("k1") == ["chunk-a", "chunk-b"]
+
+
+def test_drop_stores_an_optional_prompt_name(tmp_path):
+    store = AnswerStore(tmp_path)
+    store.drop("k1", "bad", prompt_name="extract_edges.edge")
+    store.drop("k2", "bad")
+    recs = [json.loads(line) for line in store.dropped_path.read_text().splitlines()]
+    assert recs[0]["prompt_name"] == "extract_edges.edge"
+    assert "prompt_name" not in recs[1]
+    assert AnswerStore(tmp_path).dropped_reason("k1") == "bad"

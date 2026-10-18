@@ -461,3 +461,78 @@ async def test_scoped_load_sets_graph_scoped_true_and_unscoped_sets_it_false(
     unscoped_graph, _ = await _run_load(monkeypatch, fixture, article_ids=None)
     assert scoped_graph.scoped is True
     assert unscoped_graph.scoped is False
+
+
+# --------------------------------------------------------------------------- #
+# --articles-from fixes the train/val split (final-review fix wave)
+# --------------------------------------------------------------------------- #
+
+def _sample_file(tmp_path: Path, splits: dict[str, str]) -> Path:
+    path = tmp_path / "sample.json"
+    path.write_text(json.dumps({"articles": [
+        {"article_id": a, "vendor": "V", "product": "P", "source": "S", "split": s,
+         "stratum": "V / P"} for a, s in splits.items()]}), encoding="utf-8")
+    return path
+
+
+def _recs(*article_ids: str | None) -> list[dict]:
+    return [{"prompt_name": "extract_edges.edge", "meta": {"article_id": a}}
+            for a in article_ids]
+
+
+def test_sample_split_held_out_articles_land_only_in_val(tmp_path: Path) -> None:
+    ids = [f"art-{i}" for i in range(40)]
+    splits = bed._load_article_splits(_sample_file(
+        tmp_path, {a: ("heldout" if i % 4 == 0 else "train") for i, a in enumerate(ids)}))
+    assert splits is not None
+    records = _recs(*ids, *ids)                       # two records per article
+    # --val-fraction is irrelevant in this mode: 1.0 would send everything to val.
+    train, val = bed.split_records(records, val_fraction=1.0, article_splits=splits)
+    held = {a for i, a in enumerate(ids) if i % 4 == 0}
+    assert {r["meta"]["article_id"] for r in val} == held
+    assert len(val) == 2 * len(held)
+
+
+def test_sample_split_train_articles_land_only_in_train(tmp_path: Path) -> None:
+    ids = [f"art-{i}" for i in range(40)]
+    splits = bed._load_article_splits(_sample_file(
+        tmp_path, {a: ("heldout" if i % 4 == 0 else "train") for i, a in enumerate(ids)}))
+    assert splits is not None
+    train, _val = bed.split_records(_recs(*ids), val_fraction=0.0, article_splits=splits)
+    assert {r["meta"]["article_id"] for r in train} == {
+        a for i, a in enumerate(ids) if i % 4 != 0}
+
+
+def test_sample_split_an_out_of_sample_record_fails_the_build(tmp_path: Path) -> None:
+    splits = bed._load_article_splits(_sample_file(tmp_path, {"art-1": "train",
+                                                              "art-2": "heldout"}))
+    assert splits is not None
+    with pytest.raises(bed.OutOfSampleRecords) as exc:
+        bed.split_records(_recs("art-1", "stranger", "art-2", None), val_fraction=0.2,
+                          article_splits=splits)
+    assert "2 record(s)" in str(exc.value) and "stranger" in str(exc.value)
+
+
+def test_unscoped_split_is_unchanged() -> None:
+    ids = [f"art-{i}" for i in range(50)]
+    train, val = bed.split_records(_recs(*ids), val_fraction=0.2)
+    assert {r["meta"]["article_id"] for r in val} == {
+        a for a in ids if bed.split_of(a, 0.2) == "val"}
+    assert len(train) + len(val) == 50
+
+
+def test_load_article_splits_bare_list_and_partial(tmp_path: Path) -> None:
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps(["art-1", "art-2"]), encoding="utf-8")
+    assert bed._load_article_splits(bare) is None
+    partial = tmp_path / "partial.json"
+    partial.write_text(json.dumps({"articles": [
+        {"article_id": "art-1", "split": "train"}, {"article_id": "art-2"}]}),
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="carry no split"):
+        bed._load_article_splits(partial)
+    odd = tmp_path / "odd.json"
+    odd.write_text(json.dumps({"articles": [{"article_id": "art-1", "split": "test"}]}),
+                   encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown split"):
+        bed._load_article_splits(odd)

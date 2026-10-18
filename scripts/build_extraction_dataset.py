@@ -1880,6 +1880,47 @@ def split_of(article_id: str, val_fraction: float) -> str:
     return "val" if h < val_fraction else "train"
 
 
+# sample.json's per-article `split` -> the dataset split it lands in.
+SAMPLE_SPLIT_TO_DATASET = {"train": "train", "heldout": "val"}
+OUT_OF_SAMPLE_EXAMPLES = 5
+
+
+class OutOfSampleRecords(ValueError):
+    """Records whose article is not in the `--articles-from` sample."""
+
+
+def split_records(records: list[dict], *, val_fraction: float,
+                  article_splits: dict[str, str] | None = None,
+                  ) -> tuple[list[dict], list[dict]]:
+    """(train, val). With `article_splits` (article_id -> "train"/"val", from the
+    `--articles-from` sample's own held-out assignment) every record goes where its
+    article's split says, and a record whose article is not in the sample -- or has
+    no article id -- fails the build (`OutOfSampleRecords`, with a count and
+    examples): a held-out article must never reach train, and nothing outside the
+    sample may land in either. Without it, `split_of(article_id, val_fraction)`."""
+    train: list[dict] = []
+    val: list[dict] = []
+    if article_splits is None:
+        for r in records:
+            (val if split_of(r["meta"]["article_id"] or "", val_fraction) == "val"
+             else train).append(r)
+        return train, val
+    outside: list[dict] = []
+    for r in records:
+        split = article_splits.get(r["meta"].get("article_id") or "")
+        if split is None:
+            outside.append(r)
+        else:
+            (val if split == "val" else train).append(r)
+    if outside:
+        examples = [(r["meta"].get("article_id"), r.get("prompt_name"))
+                    for r in outside[:OUT_OF_SAMPLE_EXAMPLES]]
+        raise OutOfSampleRecords(
+            f"{len(outside)} record(s) belong to no article of the --articles-from "
+            f"sample; e.g. (article_id, prompt_name): {examples}")
+    return train, val
+
+
 def _tokens_by_prompt(records: list[dict], basis: str) -> dict[str, int]:
     """Approximate token count per prompt name, chars/4, under `basis`."""
     tokens: dict[str, int] = defaultdict(int)
@@ -2026,6 +2067,35 @@ def _load_article_ids(path: Path) -> list[str]:
     return ids
 
 
+def _load_article_splits(path: Path) -> dict[str, str] | None:
+    """article_id -> "train" | "val", from the `--articles-from` file's per-article
+    `split` (sample.json: "heldout" -> val, "train" -> train). None when the file
+    carries no split at all (a bare id list, the pre-Task-3 fallback); a file where
+    only some entries carry one, or one carries an unknown value, is an error."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.get("articles") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise ValueError(f"{path}: expected an object with an 'articles' list or a "
+                         "bare list of article ids")
+    splits: dict[str, str] = {}
+    without = 0
+    for item in items:
+        if not isinstance(item, dict) or "split" not in item:
+            without += 1
+            continue
+        if item["split"] not in SAMPLE_SPLIT_TO_DATASET:
+            raise ValueError(f"{path}: article {item.get('article_id')!r} has unknown "
+                             f"split {item['split']!r} (expected one of "
+                             f"{sorted(SAMPLE_SPLIT_TO_DATASET)})")
+        splits[str(item["article_id"])] = SAMPLE_SPLIT_TO_DATASET[item["split"]]
+    if not splits:
+        return None
+    if without:
+        raise ValueError(f"{path}: {without} article entr(y/ies) carry no split while "
+                         f"{len(splits)} do -- cannot assign the held-out set")
+    return splits
+
+
 async def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2035,7 +2105,10 @@ async def main() -> int:
                    help="total examples to emit across both splits (before mixing)")
     p.add_argument("--prompts", default=",".join(TARGET_MIX),
                    help="comma-separated prompt names to build")
-    p.add_argument("--val-fraction", type=float, default=0.2)
+    p.add_argument("--val-fraction", type=float, default=0.2,
+                   help="hash-split share of articles that go to val. IGNORED with "
+                        "--articles-from: the split is then the sample's own per-article "
+                        "split (heldout -> val, train -> train)")
     p.add_argument("--seed", type=int, default=20260916)
     p.add_argument("--tier", choices=("cheap", "strong"), default="cheap",
                    help="which tier's extraction instructions to render")
@@ -2122,9 +2195,20 @@ async def main() -> int:
     rng = random.Random(args.seed)
 
     article_ids = _load_article_ids(args.articles_from) if args.articles_from else None
+    article_splits: dict[str, str] | None = None
     if article_ids is not None:
         logger.info("scoping load to %d articles from %s", len(article_ids),
                     args.articles_from)
+        article_splits = _load_article_splits(args.articles_from)
+        if article_splits is None:
+            logger.warning("%s carries no per-article split: falling back to the "
+                           "--val-fraction %.2f hash split", args.articles_from,
+                           args.val_fraction)
+        else:
+            held = sum(1 for v in article_splits.values() if v == "val")
+            logger.info("--val-fraction is ignored: the train/val split comes from %s's "
+                        "per-article split (%d held out -> val, %d train)",
+                        args.articles_from, held, len(article_splits) - held)
 
     logger.info("loading %s (read-only) ...", s.neo4j_uri.split("@")[-1])
     graph = await load_graph(s.neo4j_uri, s.neo4j_user, s.neo4j_password, s.group_id,
@@ -2217,10 +2301,12 @@ async def main() -> int:
         logger.info("wrote %d sample records -> %s (+ %s)", len(sample), path, digest)
         return 0
 
-    train, val = [], []
-    for r in selected:
-        (val if split_of(r["meta"]["article_id"] or "", args.val_fraction) == "val"
-         else train).append(r)
+    try:
+        train, val = split_records(selected, val_fraction=args.val_fraction,
+                                   article_splits=article_splits)
+    except OutOfSampleRecords as exc:
+        logger.error("build failed: %s", exc)
+        return 1
 
     if args.upsample:
         upsampled = upsample_train(train, args.max_repeat, args.loss_basis)

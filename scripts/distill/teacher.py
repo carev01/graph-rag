@@ -277,8 +277,12 @@ class AnswerStore:
                     "re-recorded on the next round's replay: %s", path, exc)
         return out
 
-    def drop(self, key: str, reason: str) -> None:
-        record = {"key": key, "reason": reason, "ts": _utcnow()}
+    def drop(self, key: str, reason: str, prompt_name: str | None = None) -> None:
+        """Give up on `key` for good. `prompt_name`, when known, is stored in the
+        `dropped.jsonl` record so a report can count drops per prompt type."""
+        record: dict[str, Any] = {"key": key, "reason": reason, "ts": _utcnow()}
+        if prompt_name is not None:
+            record["prompt_name"] = prompt_name
         with self._lock:
             self._append_jsonl(self.dropped_path, record)
             self._dropped[key] = reason

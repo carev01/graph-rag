@@ -17,8 +17,10 @@ connected (the read-only layer refuses the only write before any I/O).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1006,3 +1008,258 @@ def test_export_cli_fails_loudly_when_incomplete_unless_allow_missing(
     rc2 = h.main(["export", "--store", str(store.root), "--out", str(out_path),
                  "--allow-missing"])
     assert rc2 == 0
+
+
+# --- Final-review fix wave ---------------------------------------------------------------
+
+EDGE = "extract_edges.edge"
+TEXT = "extract_nodes.extract_text"
+
+
+def _req(prompt_name: str, user: str) -> dict:
+    return {"prompt_name": prompt_name,
+            "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": user}],
+            "response_format": {}, "model": "m"}
+
+
+def _ok_unless_bad(prompt_name: str, messages: list, answer: Any, *,
+                   grounding_ctx: Any = None) -> list[str]:
+    return [f"bad:{answer}"] if isinstance(answer, dict) and answer.get("bad") else []
+
+
+def _intake_fixture(tmp_path: Path, keys: dict[str, str],
+                    monkeypatch: pytest.MonkeyPatch) -> tuple[AnswerStore, Path]:
+    """A store with one pending request per key (key -> prompt_name), asked by art-1."""
+    store = AnswerStore(tmp_path / "store")
+    sample_path = tmp_path / "sample.json"
+    _write_sample_json(sample_path, [_article("art-1")])
+    for key, name in keys.items():
+        store.add_pending(key, _req(name, f"user text for {key}"))
+        store.note_asker(key, "art-1:0")
+    monkeypatch.setattr(h, "validate_answer", _ok_unless_bad)
+    return store, sample_path
+
+
+def _answer(line: dict, answer: Any, **override: Any) -> dict:
+    """An answer echoing `line`'s ordinal/check, unless overridden."""
+    return {"key": line["key"], "ordinal": line["ordinal"], "check": line["check"],
+            "answer": answer, **override}
+
+
+def _write_answers(round_dir: Path, answers: list[dict]) -> None:
+    (round_dir / "batch-000.answers.jsonl").write_text(
+        "".join(json.dumps(a) + "\n" for a in answers), encoding="utf-8")
+
+
+def test_batches_carry_ordinal_and_user_message_check(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    for i in range(3):
+        store.add_pending(f"e{i}", _req(EDGE, f"edge prompt {i}"))
+    paths = h.write_batches(store.root, tmp_path / "b", size=2)
+    assert [[line["ordinal"] for line in h._read_jsonl(p)] for p in paths] == [[1, 2], [1]]
+    for p in paths:
+        for line in h._read_jsonl(p):
+            user = line["messages"][1]["content"]
+            assert line["check"] == hashlib.sha256(user.encode()).hexdigest()[:12]
+
+
+def test_intake_rejects_an_answer_filed_under_the_wrong_key(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, sample_path = _intake_fixture(tmp_path, {"k1": EDGE, "k2": EDGE, "k3": EDGE},
+                                         monkeypatch)
+    rnd = tmp_path / "round-1"
+    lines = {line["key"]: line for line in h._read_jsonl(h.write_batches(store.root, rnd,
+                                                                          size=10)[0])}
+    _write_answers(rnd, [
+        # k2's answer, filed under k1: the echoed ordinal/check are k2's
+        _answer(lines["k1"], {"x": 1}, ordinal=lines["k2"]["ordinal"],
+                check=lines["k2"]["check"]),
+        _answer(lines["k2"], {"x": 2}, check="000000000000"),    # check alone wrong
+        _answer(lines["k3"], {"x": 3})])                          # correctly filed
+    summary = h.run_intake(store.root, rnd, sample_path)
+    assert (summary.accepted, summary.requeued) == (1, 2)
+    store = AnswerStore(store.root)
+    assert store.get("k3") is not None and store.get("k1") is None
+    rejections = h._rejections_by_key(store.root)
+    assert rejections["k1"][0]["reason"] == h.WRONG_PROMPT_REASON
+    assert rejections["k2"][0]["reason"] == h.WRONG_PROMPT_REASON
+
+
+def test_intake_rejects_an_answer_that_does_not_echo_ordinal_and_check(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, sample_path = _intake_fixture(tmp_path, {"k1": EDGE}, monkeypatch)
+    rnd = tmp_path / "round-1"
+    h.write_batches(store.root, rnd, size=10)
+    _write_answers(rnd, [{"key": "k1", "answer": {"x": 1}}])
+    summary = h.run_intake(store.root, rnd, sample_path)
+    assert summary.requeued == 1
+    assert h._rejections_by_key(store.root)["k1"][0]["reason"] == h.WRONG_PROMPT_REASON
+
+
+def test_rerunning_intake_on_the_same_answers_never_turns_a_first_rejection_into_a_drop(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, sample_path = _intake_fixture(tmp_path, {"k1": EDGE}, monkeypatch)
+    rnd = tmp_path / "round-1"
+    (line,) = h._read_jsonl(h.write_batches(store.root, rnd, size=10)[0])
+    _write_answers(rnd, [_answer(line, {"bad": 1})])
+    first = h.run_intake(store.root, rnd, sample_path)
+    assert first.requeued == 1
+    again = h.run_intake(store.root, rnd, sample_path)          # same directory, re-run
+    assert (again.requeued, again.dropped, again.already_rejected) == (0, 0, 1)
+    store = AnswerStore(store.root)
+    assert store.dropped_reason("k1") is None
+    assert [k for k, _ in store.pending()] == ["k1"]
+    assert len(h._rejections_by_key(store.root)["k1"]) == 1     # no duplicate record
+
+    # The re-ask (its batch line carries `rejection`) answered the SAME way is a drop.
+    rnd2 = tmp_path / "round-2"
+    (line2,) = h._read_jsonl(h.write_batches(store.root, rnd2, size=10)[0])
+    assert line2["rejection"] and line2["previous_answer"] == {"bad": 1}
+    _write_answers(rnd2, [_answer(line2, {"bad": 1})])
+    second = h.run_intake(store.root, rnd2, sample_path)
+    assert second.dropped == 1
+    assert AnswerStore(store.root).dropped_reason("k1") is not None
+
+
+def test_intake_counts_per_prompt_type_and_records_prompt_names(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    store, sample_path = _intake_fixture(
+        tmp_path, {"e1": EDGE, "e2": EDGE, "t1": TEXT, "t2": TEXT}, monkeypatch)
+    rnd = tmp_path / "round-1"
+    lines = {line["key"]: line for p in h.write_batches(store.root, rnd, size=10)
+             for line in h._read_jsonl(p)}
+    _write_answers(rnd, [_answer(lines["e1"], {"x": 1}), _answer(lines["e2"], {"bad": 1}),
+                         _answer(lines["t1"], {"x": 1})])            # t2 unanswered
+    rc = h.main(["intake", "--store", str(store.root), "--answers", str(rnd),
+                 "--sample", str(sample_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"  {EDGE}: accepted 1, requeued 1, dropped 0, unanswered 0" in out
+    assert f"  {TEXT}: accepted 1, requeued 0, dropped 0, unanswered 1" in out
+    assert h._rejections_by_key(store.root)["e2"][0]["prompt_name"] == EDGE
+
+    rnd2 = tmp_path / "round-2"
+    lines2 = {line["key"]: line for p in h.write_batches(store.root, rnd2, size=10)
+              for line in h._read_jsonl(p)}
+    _write_answers(rnd2, [_answer(lines2["e2"], {"bad": 2})])
+    summary = h.run_intake(store.root, rnd2, sample_path)
+    assert summary.by_prompt[EDGE]["dropped"] == 1
+    dropped = h._read_jsonl(store.root / "dropped.jsonl")
+    assert dropped[0]["key"] == "e2" and dropped[0]["prompt_name"] == EDGE
+
+
+def test_review_sample_takes_at_least_one_per_prompt_type(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    for i in range(40):
+        store.put(f"e{i}", json.dumps({"i": i}), {"prompt_name": EDGE, "messages": []})
+    store.put("rare", json.dumps({"i": -1}), {"prompt_name": TEXT, "messages": []})
+    lines = h._read_jsonl(h.write_review_sample(store.root, tmp_path / "r", fraction=0.05,
+                                                seed=20261017))
+    by_type = Counter(line["prompt_name"] for line in lines)
+    assert by_type == {EDGE: 2, TEXT: 1}
+
+
+def test_report_on_a_synthetic_store(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    batches = tmp_path / "batches"
+    r1 = batches / "round-1"
+    r1.mkdir(parents=True)
+    # round-1 batch: e1, e2, e3 (edge), t1 (text)
+    lines = [{"key": k, "ordinal": i + 1, "check": "c", "prompt_name": n,
+              "messages": [{"role": "system", "content": "s" * 10},
+                           {"role": "user", "content": "u" * (100 * (i + 1))}],
+              "response_schema": {}}
+             for i, (k, n) in enumerate([("e1", EDGE), ("e2", EDGE), ("e3", EDGE),
+                                         ("t1", TEXT)])]
+    (r1 / "batch-000.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+    (r1 / "batch-000.answers.jsonl").write_text("".join(
+        json.dumps({"key": k, "answer": {"v": "a" * n}}) + "\n"
+        for k, n in [("e1", 10), ("e2", 20), ("e3", 30), ("t1", 40)]))
+    # e1 accepted; e2 rejected once then accepted; e3 rejected twice -> dropped; t1 accepted
+    store.put("e1", "{}", {"prompt_name": EDGE})
+    h._append_rejection(store.root, "e2", reason="r", previous_answer={}, prompt_name=EDGE)
+    store.put("e2", "{}", {"prompt_name": EDGE})
+    h._append_rejection(store.root, "e3", reason="r", previous_answer={}, prompt_name=EDGE)
+    h._append_rejection(store.root, "e3", reason="r2", previous_answer={"z": 1},
+                        prompt_name=EDGE)
+    store.drop("e3", "twice", prompt_name=EDGE)
+    store.put("t1", "{}", {"prompt_name": TEXT})
+    h._append_jsonl(store.root / "calls.jsonl", {"key": "e1", "wire_key": "w1",
+                                                 "layout": "moved"})
+    h._append_jsonl(store.root / "chunks.jsonl", {"round": 1, "chunk_id": "a:0",
+                                                  "state": "complete"})
+    h._append_jsonl(store.root / "chunks.jsonl", {"round": 1, "chunk_id": "a:1",
+                                                  "state": "dropped"})
+
+    text = h.report_text(store.root, batches)
+    assert (f"| {EDGE} | 3 | 3 | 2 | 2 | 1 | 66.7% | 66.7% |") in text
+    assert (f"| {TEXT} | 1 | 1 | 1 | 0 | 0 | 100.0% | 0.0% |") in text
+    assert "| **total** | 4 | 4 | 3 | 2 | 1 | 75.0% | 50.0% |" in text
+    # edge prompt chars: 110, 210, 310 -> p50 210, p95 310, max 310; tokens /4
+    # edge answer chars: len('{"v": "' + 'a'*n + '"}') = n + 9 -> 19, 29, 39
+    assert f"| {EDGE} | 210 / 310 / 310 | 52 / 78 / 78 | 29 / 39 / 39 | 7 / 10 / 10 |" in text
+    assert "2 chunks: pending 0, complete 1, dropped 1, error 0" in text
+    # e2 and t1 accepted, never replayed (only e1 has a calls.jsonl record)
+    assert f"{h.NOT_REPLAYED_LABEL}: 2" in text
+    assert "## Dedup self-matches" in text and "none recorded yet" in text
+    assert "## Controller notes (fill in by hand)" in text
+    assert "| round-1/batch-000.jsonl |  |  |  |" in text
+
+    out = tmp_path / "pilot-report.md"
+    assert h.main(["report", "--store", str(store.root), "--batches", str(batches),
+                   "--out", str(out)]) == 0
+    assert out.read_text().startswith("# Distillation pilot report")
+
+
+async def test_status_shows_answered_but_not_replayed(tmp_path: Path) -> None:
+    store, log = _stores(tmp_path)
+    g = FakeGraphiti(store, log, driver=ReadOnlyNeo4jDriver(UNREACHABLE, "u", "p"))
+    read = FakeRead({"art-1": 1})
+    await _round(g, store, log, read, [_article()])
+    (key, _), = store.pending()
+    store.put(key, json.dumps({"extracted_entities": []}), {})
+    assert f"{h.NOT_REPLAYED_LABEL}: 1" in h.status_text(store.root)
+    await _round(g, store, log, read, [_article()])            # the replay
+    assert f"{h.NOT_REPLAYED_LABEL}: 0" in h.status_text(store.root)
+
+
+class _BadIndexRead(FakeRead):
+    """art-1's chunk 1 row carries no chunk_index (null)."""
+
+    async def execute_query(self, query: str, parameters_: dict | None = None,
+                            routing_: Any = None) -> Any:
+        result = await super().execute_query(query, parameters_, routing_)
+        if query == h.EPISODES_QUERY and (parameters_ or {}).get("a") == "art-1":
+            rows = [dict(r) for r in result.records]
+            rows[1]["chunk_index"] = None
+            return SimpleNamespace(records=rows)
+        return result
+
+
+async def test_one_bad_chunk_index_errors_one_chunk_not_the_round(tmp_path: Path) -> None:
+    store, log = _stores(tmp_path)
+    g = FakeGraphiti(store, log, driver=ReadOnlyNeo4jDriver(UNREACHABLE, "u", "p"))
+    read = _BadIndexRead({"art-1": 3, "art-2": 1})
+    summary = await _round(g, store, log, read, [_article("art-1"), _article("art-2")])
+    assert summary.states == {"error": 1, "pending": 3}
+    states = log.latest_states()
+    assert states["art-1:None"]["state"] == "error"
+    assert "bad chunk_index None" in states["art-1:None"]["error"]
+    assert {c for c, r in states.items() if r["state"] == "pending"} == {
+        "art-1:0", "art-1:2", "art-2:0"}
+
+
+def test_harness_settings_and_graphiti_carry_no_reranker_key(tmp_path: Path) -> None:
+    base = _base_settings().model_copy(update={"rerank_api_key": "voyage-secret",
+                                               "cheap_llm_api_key": "or-secret"})
+    s = h.harness_settings(base, tmp_path)
+    assert s.rerank_api_key == ""
+    assert s.cheap_llm_api_key == h.NO_API_KEY
+    store, log = _stores(tmp_path)
+    driver = FakeGraphDriver(FakeRead({"art-1": 1}).episodes)
+    graphiti, _ = h.build_teacher_graphiti(s, store, log, graph_driver=driver)
+    assert graphiti.cross_encoder.config.api_key == h.NO_API_KEY
+    assert graphiti.cross_encoder.client.api_key == h.NO_API_KEY
+    for secret in ("voyage-secret", "or-secret"):
+        assert secret not in s.model_dump_json()

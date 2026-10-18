@@ -15,7 +15,7 @@ One line per sampled answer, already accepted by the deterministic validator:
 ```json
 {"key": "<sha256>", "prompt_name": "extract_nodes.extract_text",
  "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
- "answer": {"extracted_entities": [{"name": "Veeam Backup", "entity_type_id": 1, "episode_indices": [0]}]}}
+ "answer": {"extracted_entities": [{"name": "<product>", "entity_type_id": 1, "episode_indices": [0]}]}}
 ```
 
 Read `messages` as the prompt graphiti sent (the chunk text is inside it, tagged
@@ -34,7 +34,7 @@ Write one line per answer you reviewed, to the path you were given, each exactly
 or, when something is wrong:
 
 ```json
-{"key": "<the same sha256>", "verdict": "issue", "issues": ["invented entity \"Hyper-V\": not in the chunk text"]}
+{"key": "<the same sha256>", "verdict": "issue", "issues": ["invented entity \"<platform>\": not in the chunk text"]}
 ```
 
 `verdict` is `"ok"` or `"issue"`; `issues` is a list of short, specific findings (one

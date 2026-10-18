@@ -7,10 +7,13 @@ repo root (`.env` supplies production's Neo4j/LLM settings). Everything through
 (spec section 1: "no API spend... Claude Opus answers the prompts as subagents"). Nothing
 in this repo rents a GPU — training happens on the user's own Colab (section 3).
 
-Commands marked **"as specified in Task 4"** are not built yet in this worktree at the
-time this runbook was written; their interfaces are fixed by
-`docs/superpowers/plans/2026-10-17-opus-distillation.md` (Task 4) and repeated here so
-the whole pipeline reads end to end. Do not run them until Task 4 lands.
+**Keep production's semantic workers idle while rounds run** (pause the
+`graph-sync semantic-worker` processes from the first `round` to the last). Every round
+reads the LIVE graph -- previous episodes, dedup candidates, the self-match footprint --
+and the answer keys hash those prompts' bytes. A worker writing new episodes or entities
+between rounds changes the prompts of chunks still in flight (live-graph drift): their
+keys no longer match the stored answers, so they come back as new pending prompts and the
+teacher answers them twice.
 
 ## 1. Pick the sample (Task 3, built)
 
@@ -47,7 +50,7 @@ round — check `harness status` before going further:
 uv run --extra dev python -m scripts.distill.harness status --store DIR/store
 ```
 
-Then, **as specified in Task 4**:
+Then:
 
 ```bash
 # Write the pending prompts as batch files, grouped by prompt type:
@@ -55,7 +58,8 @@ uv run --extra dev python -m scripts.distill.harness batches \
     --store DIR/store --size 10 --out DIR/batches/round-N/
 
 # Dispatch one Claude-Opus teacher subagent per batch file (Agent tool), briefed with
-# scripts/distill/TEACHER_BRIEF.md. Each teacher writes DIR/batches/round-N/batch-XXX.answers.jsonl.
+# scripts/distill/TEACHER_BRIEF.md. Each teacher writes DIR/batches/round-N/batch-XXX.answers.jsonl,
+# echoing every line's `ordinal` and `check` next to its key.
 
 # Validate and store the answers (accepted -> store.put; a first rejection is re-queued
 # with its reason; a second rejection is dropped). --sample is required: it is how
@@ -64,10 +68,34 @@ uv run --extra dev python -m scripts.distill.harness intake \
     --store DIR/store --answers DIR/batches/round-N/ --sample DIR/sample.json
 ```
 
+`intake` prints its totals and the same counts per prompt type (accepted / requeued /
+dropped / unanswered). An answer whose echoed `ordinal`/`check` does not match its key's
+batch line is rejected as "answer filed under the wrong prompt". Re-running `intake` on
+the same answers directory is safe: a rejection becomes a drop only for the answer to a
+re-ask, or for an answer that differs from the one already rejected -- the same rejected
+answer seen again leaves the key pending (`already rejected`).
+
 Repeat **round -> batches -> teacher -> intake** until `status` shows every chunk
 `complete` or `dropped` (no `pending`, no `error`). Re-asked prompts carry
 `"previous_answer"`/`"rejection"` in their next batch line, so a teacher fixing a
-rejected answer sees exactly what was wrong.
+rejected answer sees exactly what was wrong. `status` (and `report`) also show
+**"answered but not replayed in the latest round"**: accepted keys no round has replayed
+yet, i.e. with no capture record -- every answer accepted since the last `round`. It must
+be 0 before `export` (section 3).
+
+**Pilot report.** After the pilot's last round, write the report the approval gate reads:
+
+```bash
+uv run --extra dev python -m scripts.distill.harness report \
+    --store DIR/store --batches DIR/batches/ --out DIR/pilot-report.md
+```
+
+Per prompt type: distinct keys asked, accepted, re-asked and dropped; the validity rate
+(accepted / answered) and re-ask rate (re-asked / answered); prompt and answer sizes
+(p50 / p95 / max, in characters and in estimated tokens, chars / 4). Then chunk-state
+totals, "answered but not replayed in the latest round", the dedup self-match share, and
+a "Controller notes" table the controller fills in by hand: wall time and Agent usage per
+batch (the harness cannot see either).
 
 **Full run:** the same loop with `--articles` omitted (all of `sample.json`'s train
 articles), driven by a Workflow over rounds with stage-parallel batches, resumable from
@@ -89,11 +117,9 @@ uv run --extra dev python -m scripts.distill.harness round \
     --sample DIR/sample.json --store DIR/store
 ```
 
-**As specified in Task 4:**
-
 ```bash
-# ~5% of accepted answers, stratified by prompt type, for one reviewer subagent briefed
-# with scripts/distill/REVIEWER_BRIEF.md:
+# ~5% of accepted answers, stratified by prompt type (at least one per prompt type that
+# has any), for one reviewer subagent briefed with scripts/distill/REVIEWER_BRIEF.md:
 uv run --extra dev python -m scripts.distill.harness review-sample \
     --store DIR/store --fraction 0.05 --seed 20261017 --out DIR/reviews/
 
@@ -116,6 +142,7 @@ uv run --extra dev python scripts/build_extraction_dataset.py \
     --loss-basis completion \
     --upsample --max-repeat 12 \
     --max-prompt-tokens 20480 --chars-per-token 3.0 \
+    --no-repair \
     --out data/ft-opus
 ```
 
@@ -125,7 +152,17 @@ defaults):
 - **`--articles-from DIR/sample.json`** scopes the graph load to exactly the sampled
   articles instead of the whole `group_id` (required at production scale — see
   `load_graph`'s module-docstring note on the ~240k-edge `RELATES_TO` scan) and implies
-  `with_embeddings=False` for the capture path (it matches on text, not vectors).
+  `with_embeddings=False` for the capture path (it matches on text, not vectors). It
+  also fixes the **train/val split**: each record goes where `sample.json`'s per-article
+  `split` says (`heldout` -> `val.jsonl`, `train` -> `train.jsonl`), so the held-out
+  articles `eval_finetune.py` scores are exactly the ones `select` held out.
+  `--val-fraction` is ignored (an INFO line says so), and a record whose article is not
+  in the sample fails the build with a count and examples.
+- **`--no-repair`**: intake already validated every accepted answer with zero defects,
+  so the builder must not need to repair anything. With repair off, any defect the
+  builder finds shows up as a DROP in its capture report instead of being silently
+  corrected -- a non-zero drop count here means intake's guarantee did not hold and is
+  worth investigating before training.
 - **`--loss-basis completion`**, not the builder's default `full`: the Colab notebook
   trains with prompt tokens masked out of the loss (completion-only), and
   `assign_loss_weights`'s docstring is explicit that the weight values depend on which
@@ -176,7 +213,10 @@ Open `notebooks/distill_train.ipynb` in Colab (A100 recommended; an L4 works wit
 smaller batch size the notebook's config cell documents). Steps, matching the
 notebook's own section numbers:
 
-1. **Install** (section 1) — Unsloth + TRL + PEFT + `huggingface_hub`, self-contained.
+1. **Install** (section 1) — the current `pip install unsloth` (which brings its own
+   compatible TRL/PEFT/transformers/datasets), then `trl`, `datasets` and
+   `huggingface_hub` unpinned. Every pip command's output is shown and a failed install
+   raises; the installed versions are printed.
 2. **HF token** (section 2) — set a Colab secret named `HF_TOKEN`, or export it in the
    runtime's environment; the notebook never hardcodes one and never prints it.
 3. **Configure** (section 3) — pick `DATA_SOURCE` (`"hf_dataset"` or `"drive"`), and if
@@ -226,7 +266,11 @@ notebook's own section numbers:
 9. **Train** (section 9) — `train_on_responses_only` with a `response_part` marker
    derived from the tokenizer's own template (a live probe render), not hardcoded, so it
    is exactly the serving-prompt suffix section 8 just verified; `packing=False`, eval on
-   val during training.
+   val during training. The trainer gets the tokenizer as `processing_class=` or
+   `tokenizer=`, whichever the installed TRL takes (feature-detected). Before training,
+   the cell decodes one example's unmasked labels and asserts they equal the answer plus
+   `<|im_end|>` (a trailing newline allowed); on a mismatch it prints both strings and
+   raises.
 10. **Export** (section 10) — merged safetensors + Q8 GGUF, pushed to
     `carev01/qwen35-4b-graphrag` revision `opus-distill-2026-10` (a NEW revision — the
     current production revision is untouched and stays available for comparison).
@@ -240,15 +284,20 @@ teacher, on the 20 held-out articles:
 
 ```bash
 uv run --extra dev python scripts/eval_finetune.py \
-    --val data/ft-opus/val.jsonl --model <served-name>
+    --val data/ft-opus/val.jsonl --model <served-name> \
+    --base-url <server>/v1/chat/completions --per-prompt 0
 ```
 
-(`BASE` inside `eval_finetune.py` points at a chat-completions server; point it at
-wherever the exported revision is being served — the user's Colab runtime over a
-tunnel, or a GGUF server, with the user's approval for any paid GPU.)
+`--per-prompt 0` scores EVERY held-out record; the default (`--per-prompt 25`) scores a
+seeded subsample of 25 per prompt type, which is not the held-out set the pass criterion
+names. `--base-url` is the chat-completions endpoint serving the exported revision (the
+user's Colab runtime over a tunnel, or a GGUF server, with the user's approval for any
+paid GPU); it defaults to the in-house `srv-llm` endpoint the old fine-tune was scored on.
 
 **2. End to end** — `scripts/extraction_proof.py` with the student serving the cheap
-tier:
+tier. **This is a PAID run: get the user's explicit authorisation before running it**
+(it calls the production LLM tiers -- its own docstring puts the full sample at about
+$0.30 per run -- and the three runs below are on top of any GPU serving):
 
 ```bash
 CHEAP_LLM_BASE_URL=<student-server-url> CHEAP_LLM_MODEL=<served-name> \
