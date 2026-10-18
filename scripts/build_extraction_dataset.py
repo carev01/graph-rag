@@ -271,6 +271,7 @@ class Graph:
 
 
 _LOAD_EPISODES = """
+// episodes
 MATCH (e:Episodic {group_id: $g})
 OPTIONAL MATCH (a:Article)-[h:HAS_EPISODE]->(e)
 RETURN e.uuid AS uuid, e.name AS name, e.content AS content,
@@ -278,12 +279,14 @@ RETURN e.uuid AS uuid, e.name AS name, e.content AS content,
        e.source_description AS sd, a.id AS article_id, h.chunk_index AS chunk_index
 """
 _LOAD_ENTITIES = """
+// entities
 MATCH (n:Entity {group_id: $g})
 RETURN n.uuid AS uuid, n.name AS name, labels(n) AS labels,
        coalesce(n.summary, '') AS summary, toString(n.created_at) AS created_at,
        n.name_embedding AS emb
 """
 _LOAD_FACTS = """
+// facts
 MATCH (s:Entity)-[r:RELATES_TO {group_id: $g}]->(t:Entity)
 RETURN r.uuid AS uuid, r.name AS name, r.fact AS fact, s.uuid AS src, t.uuid AS tgt,
        r.episodes AS episodes, toString(r.created_at) AS created_at,
@@ -291,25 +294,75 @@ RETURN r.uuid AS uuid, r.name AS name, r.fact AS fact, s.uuid AS src, t.uuid AS 
        r.fact_embedding AS emb
 """
 _LOAD_MENTIONS = """
+// mentions
 MATCH (e:Episodic {group_id: $g})-[:MENTIONS]->(n:Entity)
+RETURN e.uuid AS ep, n.uuid AS ent
+"""
+
+# Scoped variants, used when `article_ids` is given. Each is bounded to exactly
+# the articles asked for (episodes query) or to the episode set that query
+# returned (entities/facts/mentions, via `$episode_uuids`) -- never to the whole
+# `group_id`, which is the thing that makes the unscoped queries infeasible at
+# production scale (~240k RELATES_TO edges, 768-d embeddings on every one).
+_LOAD_EPISODES_SCOPED = """
+// episodes_scoped
+MATCH (a:Article)-[h:HAS_EPISODE]->(e:Episodic {group_id: $g})
+WHERE a.id IN $article_ids
+RETURN e.uuid AS uuid, e.name AS name, e.content AS content,
+       toString(e.valid_at) AS valid_at, toString(e.created_at) AS created_at,
+       e.source_description AS sd, a.id AS article_id, h.chunk_index AS chunk_index
+"""
+_LOAD_ENTITIES_SCOPED = """
+// entities_scoped
+MATCH (e:Episodic)-[:MENTIONS]->(n:Entity {group_id: $g})
+WHERE e.uuid IN $episode_uuids
+RETURN DISTINCT n.uuid AS uuid, n.name AS name, labels(n) AS labels,
+       coalesce(n.summary, '') AS summary, toString(n.created_at) AS created_at,
+       n.name_embedding AS emb
+"""
+_LOAD_FACTS_SCOPED = """
+// facts_scoped
+MATCH (s:Entity)-[r:RELATES_TO {group_id: $g}]->(t:Entity)
+WHERE ANY(ep IN r.episodes WHERE ep IN $episode_uuids)
+RETURN r.uuid AS uuid, r.name AS name, r.fact AS fact, s.uuid AS src, t.uuid AS tgt,
+       r.episodes AS episodes, toString(r.created_at) AS created_at,
+       toString(r.valid_at) AS valid_at, toString(r.invalid_at) AS invalid_at,
+       r.fact_embedding AS emb
+"""
+_LOAD_MENTIONS_SCOPED = """
+// mentions_scoped
+MATCH (e:Episodic)-[:MENTIONS]->(n:Entity)
+WHERE e.uuid IN $episode_uuids
 RETURN e.uuid AS ep, n.uuid AS ent
 """
 
 
 async def load_graph(uri: str, user: str, password: str, group_id: str, *,
-                     with_embeddings: bool = True) -> Graph:
-    """Pull the whole pilot slice into memory. READ access mode, no writes.
+                     with_embeddings: bool = True,
+                     article_ids: list[str] | None = None) -> Graph:
+    """Pull a slice of the graph into memory. READ access mode, no writes.
 
     `with_embeddings=False` drops `name_embedding` / `fact_embedding` from the
     result set. Only the graph-derived build needs them (they reconstruct
     graphiti's dedup candidate ranking); the capture path matches on text alone,
     and the vectors are ~3.5M floats -- by far the largest thing on the wire.
+
+    `article_ids`, when given, scopes the load to exactly those articles:
+    their episodes, the entities those episodes MENTION, and the facts whose
+    `episodes` overlap that episode set -- never the whole `group_id`. This is
+    what makes loading possible at all against the production graph (~240k
+    RELATES_TO edges; fetching embeddings for all of them is bandwidth-bound,
+    ~20s/1,000 vectors). `article_ids=None` (the default) is the original
+    whole-group load, byte-for-byte unchanged -- the pilot workflow and
+    existing callers see no behaviour change.
     """
     g = Graph()
+    scoped = article_ids is not None
     driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
     try:
         async with driver.session(default_access_mode="READ") as s:
-            res = await s.run(_LOAD_EPISODES, g=group_id)
+            episodes_query = _LOAD_EPISODES_SCOPED if scoped else _LOAD_EPISODES
+            res = await s.run(episodes_query, g=group_id, article_ids=article_ids or [])
             async for r in res:
                 g.episodes[r["uuid"]] = Episode(
                     uuid=r["uuid"], name=r["name"], content=r["content"],
@@ -318,18 +371,28 @@ async def load_graph(uri: str, user: str, password: str, group_id: str, *,
                     article_id=r["article_id"] or "",
                     chunk_index=r["chunk_index"] if r["chunk_index"] is not None else -1,
                 )
-            entities_query = (_LOAD_ENTITIES if with_embeddings
-                              else _LOAD_ENTITIES.replace("n.name_embedding", "null"))
-            facts_query = (_LOAD_FACTS if with_embeddings
-                           else _LOAD_FACTS.replace("r.fact_embedding", "null"))
-            res = await s.run(entities_query, g=group_id)
+
+            if scoped and not g.episodes:
+                # Nothing in scope -- no point issuing three more queries whose
+                # `episode_uuids` would be empty.
+                return g
+
+            episode_uuids = list(g.episodes)
+            entities_query = _LOAD_ENTITIES_SCOPED if scoped else _LOAD_ENTITIES
+            facts_query = _LOAD_FACTS_SCOPED if scoped else _LOAD_FACTS
+            mentions_query = _LOAD_MENTIONS_SCOPED if scoped else _LOAD_MENTIONS
+            if not with_embeddings:
+                entities_query = entities_query.replace("n.name_embedding", "null")
+                facts_query = facts_query.replace("r.fact_embedding", "null")
+
+            res = await s.run(entities_query, g=group_id, episode_uuids=episode_uuids)
             async for r in res:
                 g.entities[r["uuid"]] = Entity(
                     uuid=r["uuid"], name=r["name"], labels=list(r["labels"]),
                     summary=r["summary"], created_at=r["created_at"],
                     embedding=list(r["emb"] or []),
                 )
-            res = await s.run(facts_query, g=group_id)
+            res = await s.run(facts_query, g=group_id, episode_uuids=episode_uuids)
             async for r in res:
                 g.facts[r["uuid"]] = Fact(
                     uuid=r["uuid"], name=r["name"], fact=r["fact"], source_uuid=r["src"],
@@ -337,7 +400,7 @@ async def load_graph(uri: str, user: str, password: str, group_id: str, *,
                     created_at=r["created_at"], valid_at=r["valid_at"],
                     invalid_at=r["invalid_at"], embedding=list(r["emb"] or []),
                 )
-            res = await s.run(_LOAD_MENTIONS, g=group_id)
+            res = await s.run(mentions_query, g=group_id, episode_uuids=episode_uuids)
             async for r in res:
                 g.mentions[r["ep"]].append(r["ent"])
     finally:
@@ -1879,6 +1942,37 @@ def apply_mix(records: list[dict], rng: random.Random,
     return out
 
 
+def _load_article_ids(path: Path) -> list[str]:
+    """Reads the `--articles-from` file into a flat list of article ids.
+
+    Accepts Task 3's `sample.json` schema -- a JSON object with an "articles"
+    list of objects each carrying `article_id` (plus vendor/product/source/
+    split/stratum, ignored here) -- or, as a fallback for running before Task 3
+    lands, a bare list of article ids (as plain strings, or as objects that
+    themselves carry `article_id`).
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        items = data.get("articles")
+        if not isinstance(items, list):
+            raise ValueError(
+                f"{path}: object has no 'articles' list (keys: {sorted(data)})")
+    elif isinstance(data, list):
+        items = data
+    else:
+        raise ValueError(f"{path}: expected an object with an 'articles' list or a "
+                         "bare list of article ids")
+    ids: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            ids.append(item)
+        elif isinstance(item, dict) and item.get("article_id"):
+            ids.append(str(item["article_id"]))
+        else:
+            raise ValueError(f"{path}: article entry {item!r} has no article_id")
+    return ids
+
+
 async def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1894,6 +1988,16 @@ async def main() -> int:
                    help="which tier's extraction instructions to render")
     p.add_argument("--no-synthetic-positives", action="store_true",
                    help="omit the synthetic_alias_positive resolve_edge records")
+    p.add_argument("--articles-from", type=Path, default=None,
+                   help="scope the graph load to exactly the articles listed in this "
+                        "JSON file -- Task 3's sample.json ({'articles': [{'article_id': "
+                        "...}, ...]}) or a bare list of article ids. Loads only those "
+                        "articles' episodes, the entities they MENTION, and the facts on "
+                        "those episodes, instead of the whole group_id -- required at "
+                        "production scale (~240k RELATES_TO edges). Implies "
+                        "with_embeddings=False for --from-capture (the capture path "
+                        "matches on text, not vectors); the graph-derived build still "
+                        "loads embeddings, since SimIndex needs them.")
     p.add_argument("--from-capture", type=Path, default=None,
                    help="build from a usage.capture_llm_call JSONL of REAL (prompt, "
                         "completion) pairs instead of reconstructing from the graph. "
@@ -1964,9 +2068,15 @@ async def main() -> int:
     s = get_extract_settings()
     rng = random.Random(args.seed)
 
+    article_ids = _load_article_ids(args.articles_from) if args.articles_from else None
+    if article_ids is not None:
+        logger.info("scoping load to %d articles from %s", len(article_ids),
+                    args.articles_from)
+
     logger.info("loading %s (read-only) ...", s.neo4j_uri.split("@")[-1])
     graph = await load_graph(s.neo4j_uri, s.neo4j_user, s.neo4j_password, s.group_id,
-                             with_embeddings=args.from_capture is None)
+                             with_embeddings=args.from_capture is None,
+                             article_ids=article_ids)
     logger.info("loaded: %d episodes, %d entities, %d facts",
                 len(graph.episodes), len(graph.entities), len(graph.facts))
     if not graph.episodes:
