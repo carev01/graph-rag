@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,7 +37,7 @@ from graph_extract.usage import CURRENT_PROMPT_NAME
 from scripts.distill import harness as h
 from scripts.distill.readonly_driver import ReadOnlyNeo4jDriver, ReadOnlyViolation
 from scripts.distill.sample import SampleArticle
-from scripts.distill.teacher import AnswerStore, TeacherNeeded, TeacherTransport
+from scripts.distill.teacher import AnswerStore, TeacherDropped, TeacherNeeded, TeacherTransport
 
 VENDOR, PRODUCT, SOURCE = "Veeam", "Veeam Backup", "Veeam Backup User Guide"
 REF = "2026-03-01T10:00:00+00:00"
@@ -56,11 +56,12 @@ def _base_settings() -> ExtractSettings:
                            embed_base_url="http://127.0.0.1:9")
 
 
-def _content(k: int) -> str:
-    return f"Veeam Backup protects workloads. Marker chunk-{k:02d} text."
+def _content(k: int, article_id: str = "art-1") -> str:
+    tag = "" if article_id == "art-1" else f" ({article_id})"
+    return f"Veeam Backup protects workloads. Marker chunk-{k:02d} text{tag}."
 
 
-def _article(article_id: str = "art-1", n_chunks: int = 3) -> SampleArticle:
+def _article(article_id: str = "art-1") -> SampleArticle:
     return SampleArticle(article_id=article_id, vendor=VENDOR, product=PRODUCT,
                          source=SOURCE, split="train", stratum=f"{VENDOR} / {PRODUCT}")
 
@@ -69,16 +70,56 @@ def _uuid(article_id: str, k: int) -> str:
     return f"{article_id}-ep-{k:02d}"
 
 
+REF_DT = datetime.fromisoformat(REF)
+INGEST_T0 = datetime(2026, 4, 1, 9, tzinfo=timezone.utc)   # when art-1 was ingested
+GROUP = "backup-docs"
+
+
+def _graph_episodes(n_chunks: dict[str, int]) -> list[dict]:
+    """Every :Episodic the fake graph holds. Each sampled article's chunks share the
+    reference time and were created one minute apart, in chunk order; other
+    articles' episodes surround them."""
+    eps = []
+    for a_i, (a, n) in enumerate(sorted(n_chunks.items())):
+        for k in range(n):
+            eps.append({"uuid": _uuid(a, k), "content": _content(k, a), "valid_at": REF_DT,
+                        "created_at": INGEST_T0 + timedelta(hours=a_i, minutes=k),
+                        "group_id": GROUP, "source": "text"})
+    for i in range(12):            # older documents, ingested earlier
+        eps.append({"uuid": f"other-old-{i:02d}", "content": f"Older document {i:02d}.",
+                    "valid_at": REF_DT - timedelta(days=12 - i),
+                    "created_at": INGEST_T0 - timedelta(days=1, minutes=i),
+                    "group_id": GROUP, "source": "text"})
+    eps += [
+        {"uuid": "other-future", "content": "Future document.",
+         "valid_at": REF_DT + timedelta(days=1), "created_at": INGEST_T0 - timedelta(days=2),
+         "group_id": GROUP, "source": "text"},
+        {"uuid": "other-later-created", "content": "Ingested after art-1.",
+         "valid_at": REF_DT - timedelta(hours=1), "created_at": INGEST_T0 + timedelta(days=9),
+         "group_id": GROUP, "source": "text"},
+        {"uuid": "other-message", "content": "A message episode.",
+         "valid_at": REF_DT - timedelta(hours=2), "created_at": INGEST_T0 - timedelta(days=3),
+         "group_id": GROUP, "source": "message"},
+        {"uuid": "other-group", "content": "Another group.",
+         "valid_at": REF_DT - timedelta(hours=3), "created_at": INGEST_T0 - timedelta(days=3),
+         "group_id": "elsewhere", "source": "text"},
+    ]
+    return eps
+
+
 class FakeRead:
-    """The separate read-only driver: episode rows, the footprint and production's
+    """The separate read-only driver: episode rows, production's previous-episode
+    query (evaluated over `_graph_episodes`), the footprint and production's
     document-context query (through a READ session, as IngestDriver runs it)."""
 
     def __init__(self, n_chunks: dict[str, int], *, names: frozenset[str] = frozenset(),
                  facts: frozenset[str] = frozenset()) -> None:
         self.n_chunks = n_chunks
+        self.episodes = _graph_episodes(n_chunks)
         self.names = names
         self.facts = facts
         self.session_modes: list[Any] = []
+        self.previous_params: list[dict] = []
 
     async def execute_query(self, query: str, parameters_: dict | None = None,
                             routing_: Any = None) -> Any:
@@ -86,13 +127,27 @@ class FakeRead:
         params = parameters_ or {}
         if query == h.EPISODES_QUERY:
             a = params["a"]
-            # shuffled order: chunk order must come from chunk_index, not row order
+            by_uuid = {e["uuid"]: e for e in self.episodes}
             rows = [{"title": "T", "source_url": f"https://docs/{a}",
                      "content_changed_at": REF, "content_changed_basis": "exact",
                      "last_updated_at": None, "chunk_index": k, "uuid": _uuid(a, k),
-                     "name": f"{a}:{k}:abcdef12", "content": _content(k), "valid_at": REF}
+                     "name": f"{a}:{k}:abcdef12", "content": _content(k, a),
+                     "valid_at": REF_DT, "created_at": by_uuid[_uuid(a, k)]["created_at"]}
                     for k in range(self.n_chunks.get(a, 0))]
             return SimpleNamespace(records=rows)
+        if query == h.PREVIOUS_EPISODES_QUERY:
+            self.previous_params.append(params)
+            hits = [e for e in self.episodes
+                    if e["valid_at"] <= params["reference_time"]
+                    and e["group_id"] in params["group_ids"]
+                    and e["source"] == params["source"]
+                    and e["created_at"] <= params["created_at"]
+                    and e["uuid"] != params["own"]
+                    and e["uuid"] not in params["later_siblings"]]
+            hits.sort(key=lambda e: e["uuid"])
+            hits.sort(key=lambda e: (e["valid_at"], e["created_at"]), reverse=True)
+            return SimpleNamespace(records=[{"uuid": e["uuid"]}
+                                            for e in hits[:params["num_episodes"]]])
         if query == h.FOOTPRINT_QUERY:
             return SimpleNamespace(records=[{"names": list(self.names),
                                              "facts": list(self.facts)}])
@@ -317,17 +372,75 @@ class _RaisingDriver:
         return _S()
 
 
-async def test_previous_episodes_are_the_earlier_siblings_only(tmp_path: Path) -> None:
+async def test_previous_episodes_mirror_production_retrieve_episodes(tmp_path: Path) -> None:
+    """graphiti's own lookup over the group as it stood at original ingest: the 10
+    most recent text episodes at or before the reference time, oldest first --
+    never the chunk itself, its later siblings, or anything created after it."""
     store, log = _stores(tmp_path)
     g = FakeGraphiti(store, log, raise_instead=TeacherNeeded("k", {"prompt_name": "x"}))
-    await _round(g, store, log, FakeRead({"art-1": 13}), [_article()])
+    read = FakeRead({"art-1": 13, "art-0": 2})
+    await _round(g, store, log, read, [_article()])
     assert len(g.calls) == 13
+    olds = [f"other-old-{i:02d}" for i in range(12)]
+    # art-0 was ingested an hour before art-1, at the same reference time
+    art0 = [_uuid("art-0", 0), _uuid("art-0", 1)]
     for k, call in enumerate(g.calls):
         prev = call["previous_episode_uuids"]
-        assert prev == [_uuid("art-1", j) for j in range(max(0, k - 10), k)]
+        expected = (olds + art0 + [_uuid("art-1", j) for j in range(k)])[-10:]
+        assert prev == expected, k
         assert _uuid("art-1", k) not in prev
-    # chunk 0 passes [] -- None would let graphiti look up the group's last episodes
-    assert g.calls[0]["previous_episode_uuids"] == []
+        assert not {_uuid("art-1", j) for j in range(k + 1, 13)} & set(prev)
+        assert not {"other-future", "other-later-created", "other-message",
+                    "other-group"} & set(prev)
+    # chunk 0 sees other articles' episodes
+    assert g.calls[0]["previous_episode_uuids"] == olds[4:] + art0
+    # the query was bounded by this chunk's own creation time and reference time
+    p0 = read.previous_params[0]
+    assert p0["own"] == _uuid("art-1", 0) and p0["num_episodes"] == 10
+    assert p0["group_ids"] == [GROUP] and p0["source"] == "text"
+    assert p0["later_siblings"] == [_uuid("art-1", j) for j in range(1, 13)]
+
+
+async def test_reference_time_is_the_episode_valid_at(tmp_path: Path) -> None:
+    store, log = _stores(tmp_path)
+    g = FakeGraphiti(store, log, raise_instead=TeacherNeeded("k", {"prompt_name": "x"}))
+    read = FakeRead({"art-1": 1})
+    later = REF_DT + timedelta(days=3)
+    for e in read.episodes:
+        if e["uuid"] == _uuid("art-1", 0):
+            e["valid_at"] = later
+
+    async def rows(query: str, parameters_: dict | None = None, routing_: Any = None) -> Any:
+        r = await FakeRead.execute_query(read, query, parameters_, routing_)
+        if query == h.EPISODES_QUERY:
+            r.records[0]["valid_at"] = later
+        return r
+
+    read.execute_query = rows  # type: ignore[method-assign]
+    await _round(g, store, log, read, [_article()])
+    assert g.calls[0]["reference_time"] == later
+    # the article's content_changed_at no longer agrees: recorded as a diagnostic
+    assert log.latest_states()["art-1:0"]["ref_matches_episode"] is False
+
+
+async def test_dropped_chunk_unqueues_its_own_pending_prompts(tmp_path: Path) -> None:
+    store, log = _stores(tmp_path)
+    store.add_pending("only-mine", {"prompt_name": "p"})
+    store.add_pending("shared", {"prompt_name": "p"})
+    store.note_asker("shared", "art-2:0")
+
+    class DropsAfterAsking(FakeGraphiti):
+        async def add_episode(self, **kwargs: Any) -> Any:
+            run = h.CURRENT_CHUNK.get()
+            assert run is not None
+            log.asked(run, "only-mine", "p", [], needed=True)
+            log.asked(run, "shared", "p", [], needed=True)
+            raise TeacherDropped("dead", "invalid twice")
+
+    g = DropsAfterAsking(store, log)
+    await _round(g, store, log, FakeRead({"art-1": 1}), [_article()])
+    assert log.latest_states()["art-1:0"]["state"] == "dropped"
+    assert [k for k, _ in store.pending()] == ["shared"]
 
 
 # --- self-matches ---------------------------------------------------------------------
@@ -395,21 +508,17 @@ async def test_self_matches_recorded_once_and_reported(tmp_path: Path) -> None:
 async def test_status_counts(tmp_path: Path) -> None:
     store, log = _stores(tmp_path)
     g = FakeGraphiti(store, log, driver=ReadOnlyNeo4jDriver(UNREACHABLE, "u", "p"))
-    # art-2's only chunk has the same text as art-1's first: one shared prompt
     read = FakeRead({"art-1": 3, "art-2": 1})
     arts = [_article("art-1"), _article("art-2")]
     await _round(g, store, log, read, arts)
     keys = [k for k, _ in store.pending()]
-    assert len(keys) == 3
-    shared = log.latest_states()["art-2:0"]["pending_keys"][0]
-    assert store.askers(shared) == ["art-1:0", "art-2:0"]
-    others = [k for k in keys if k != shared]
-    store.put(others[0], json.dumps({"extracted_entities": []}), {})
-    store.drop(others[1], "bad")
+    assert len(keys) == 4
+    store.put(keys[0], json.dumps({"extracted_entities": []}), {})
+    store.drop(keys[1], "bad")
     text = h.status_text(store.root)
     assert "rounds run: 1" in text
     assert "chunks: 4 -- pending 4, complete 0, dropped 0, error 0" in text
-    assert "pending prompts: 1" in text and "extract_nodes.extract_text: 1" in text
+    assert "pending prompts: 2" in text and "extract_nodes.extract_text: 2" in text
     assert "answered: 1" in text and "dropped: 1" in text
     assert h.main(["status", "--store", str(store.root)]) == 0
 
@@ -425,13 +534,14 @@ class FakeEmbedder:
 
 
 class FakeGraphDriver(h.HarnessGraphDriver):
-    """`HarnessGraphDriver` with its network layer faked: the episode lookup returns
-    the requested episodes in REVERSED order (the harness must restore it); every
-    other read (vector/fulltext candidate searches) finds nothing."""
+    """`HarnessGraphDriver` with its network layer faked over the same episode table
+    as `FakeRead`: the episode lookup returns the requested episodes in REVERSED
+    order (the harness must restore it); every other read (vector/fulltext candidate
+    searches) finds nothing."""
 
-    def __init__(self, contents: dict[str, str]) -> None:
+    def __init__(self, episodes: list[dict]) -> None:
         super().__init__(UNREACHABLE, "u", "p")
-        self.contents = contents
+        self.episodes = {e["uuid"]: e for e in episodes}
         self.queries: list[str] = []
         self.index_builds = 0
 
@@ -442,10 +552,11 @@ class FakeGraphDriver(h.HarnessGraphDriver):
     async def _execute(self, cypher_query_: Any, **kwargs: Any) -> Any:
         self.queries.append(str(cypher_query_))
         if h._is_episode_lookup(str(cypher_query_), kwargs):
-            when = datetime.fromisoformat(REF)
-            recs = [{"uuid": u, "name": u, "group_id": "backup-docs", "created_at": when,
-                     "source": "text", "source_description": "d", "content": self.contents[u],
-                     "valid_at": when, "entity_edges": []} for u in kwargs["uuids"]]
+            recs = [{"uuid": u, "name": u, "group_id": e["group_id"],
+                     "created_at": e["created_at"], "source": e["source"],
+                     "source_description": "d", "content": e["content"],
+                     "valid_at": e["valid_at"], "entity_edges": []}
+                    for u in kwargs["uuids"] for e in [self.episodes[u]]]
             return EagerResult(list(reversed(recs)), None, [])
         return EagerResult([], None, [])
 
@@ -458,16 +569,22 @@ ANSWERS = {
 }
 
 
-async def test_real_pipeline_rounds_converge_with_sibling_previous_episodes(
+def _teacher_graphiti(settings: ExtractSettings, store: AnswerStore, log: h.RoundLog,
+                      driver: FakeGraphDriver) -> Any:
+    graphiti, _ = h.build_teacher_graphiti(settings, store, log, graph_driver=driver)
+    graphiti.embedder = FakeEmbedder()
+    graphiti.clients.embedder = graphiti.embedder
+    return graphiti
+
+
+async def test_real_pipeline_rounds_converge_with_production_previous_episodes(
         tmp_path: Path) -> None:
     store, log = _stores(tmp_path)
     settings = h.harness_settings(_base_settings(), store.root)
     n = 3
-    driver = FakeGraphDriver({_uuid("art-1", k): _content(k) for k in range(n)})
-    graphiti, _ = h.build_teacher_graphiti(settings, store, log, graph_driver=driver)
-    graphiti.embedder = FakeEmbedder()          # type: ignore[assignment]
-    graphiti.clients.embedder = graphiti.embedder
     read = FakeRead({"art-1": n})
+    driver = FakeGraphDriver(read.episodes)
+    graphiti = _teacher_graphiti(settings, store, log, driver)
     seen: dict[str, list[dict]] = {}            # prompt_name -> requests
     for _ in range(6):
         await h.run_round([_article()], graphiti=graphiti, settings=settings, store=store,
@@ -484,22 +601,83 @@ async def test_real_pipeline_rounds_converge_with_sibling_previous_episodes(
     assert driver.index_builds == 0
     assert not any("CREATE" in q or "MERGE" in q for q in driver.queries)
 
-    # The edge prompt of chunk k shows chunks 0..k-1 as previous episodes, oldest
-    # first, and chunk k only once (as the current message).
+    # The edge prompt of chunk k shows production's previous episodes -- older
+    # documents, then chunks 0..k-1 -- oldest first, and chunk k only once (as the
+    # current message).
     for req in seen["extract_edges.edge"]:
         (chunk_id,) = store.askers(req["key"])
         k = int(chunk_id.split(":")[1])
         text = "\n".join(m["content"] for m in req["messages"])
         for j in range(n):
             assert text.count(f"chunk-{j:02d}") == (1 if j <= k else 0), (k, j)
-        positions = [text.find(f"chunk-{j:02d}") for j in range(k + 1)]
-        assert positions == sorted(positions)
+        markers = [f"Older document {i:02d}" for i in range(2 + k, 12)]
+        markers += [f"chunk-{j:02d}" for j in range(k + 1)]
+        positions = [text.find(m) for m in markers]
+        assert -1 not in positions and positions == sorted(positions), k
+        assert "Older document 01" not in text   # beyond the 10 most recent
 
     # Replayed answers were captured in the production capture format, with prompt type.
     capture = [json.loads(line) for line in
                (store.root / "capture.jsonl").read_text().splitlines()]
     assert capture and all(r["prompt_name"] in ANSWERS for r in capture)
     assert all(r["tier"] == "cheap" for r in capture)
+
+
+async def test_real_pipeline_keys_do_not_depend_on_the_cache_layout(tmp_path: Path) -> None:
+    """Production's cheap tier runs the cache layout, which learns per process: in a
+    fresh round a prompt type's first 5 calls go out unmoved, later ones moved. With
+    chunks progressing unevenly, the same prompt is sent moved in one round and
+    unmoved in another -- and must keep ONE key."""
+    store, log = _stores(tmp_path)
+    settings = h.harness_settings(
+        _base_settings().model_copy(update={"cheap_llm_cache_layout": True}), store.root)
+    n = 9
+    read = FakeRead({"art-1": n})
+    driver = FakeGraphDriver(read.episodes)
+    asked: dict[tuple[str, str], set[str]] = {}       # (chunk, prompt) -> keys
+    answered: list[str] = []
+    for round_i in range(30):
+        graphiti = _teacher_graphiti(settings, store, log, driver)   # a fresh learner
+        await h.run_round([_article()], graphiti=graphiti, settings=settings, store=store,
+                          log=log, read=read)
+        pending = store.pending()
+        if not pending:
+            break
+        for key, req in pending:
+            for chunk_id in store.askers(key):
+                asked.setdefault((chunk_id, req["prompt_name"]), set()).add(key)
+        # Round 1: answer everything (all 9 extract_text prompts; in round 2 chunks
+        # 5-8 replay theirs as calls 6-9, i.e. moved). Then uneven progress: answer
+        # only what the first 3 unfinished chunks asked, so finished chunks drop out
+        # and a later round replays chunk 5's extract_text as an early call: unmoved.
+        states = log.latest_states()
+        unfinished = sorted(c for c, r in states.items() if r["state"] == "pending")
+        if round_i:
+            unfinished = unfinished[:3]
+        for key, req in pending:
+            if set(store.askers(key)) & set(unfinished):
+                answered.append(key)
+                store.put(key, json.dumps(ANSWERS[req["prompt_name"]]), {})
+    states = {c: r["state"] for c, r in log.latest_states().items()}
+    assert set(states.values()) == {"complete"}, states
+    # one key per chunk and prompt type, never a re-ask
+    assert all(len(keys) == 1 for keys in asked.values()), asked
+    assert len(answered) == len(set(answered)) == n * len(ANSWERS)
+    calls = h._read_jsonl(log.calls_path)
+    layouts: dict[str, set[str]] = {}
+    for c in calls:
+        layouts.setdefault(c["key"], set()).add(c["layout"])
+    both = [k for k, ls in layouts.items() if ls == {"moved", "unmoved"}]
+    assert both, layouts                           # the layout really varied
+    # capture records carry both layouts' wire messages, mapped to the same key
+    wire_to_call = {c["wire_key"]: c for c in calls}
+    capture = [json.loads(line) for line in
+               (store.root / "capture.jsonl").read_text().splitlines()]
+    by_key: dict[str, set[str]] = {}
+    for r in capture:
+        c = wire_to_call[store.key_for(r["messages"], r.get("response_format"))]
+        by_key.setdefault(c["key"], set()).add(c["layout"])
+    assert any(by_key.get(k) == {"moved", "unmoved"} for k in both)
 
 
 def test_harness_settings_overrides(tmp_path: Path) -> None:

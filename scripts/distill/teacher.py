@@ -62,7 +62,9 @@ import logging
 import os
 import tempfile
 import threading
+import copy
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +73,36 @@ from typing import Any
 from graph_extract.usage import CURRENT_PROMPT_NAME
 
 logger = logging.getLogger(__name__)
+
+# The request as graphiti / OpenAIGenericClient produced it -- BEFORE any client
+# wrapper rewrote it (the cache layout's static-tail move above all, which
+# `StaticTailLearner` learns per process: the first calls of a prompt type go out
+# unmoved, later ones moved, so the WIRE messages of one prompt differ between a
+# fresh process and a warm one). Set by the outermost wrapper
+# `install_pre_layout_keys` installs; `TeacherTransport` keys answers on it so a
+# prompt has ONE key whatever its wire layout. Unset -> keyed on the wire request.
+PRE_LAYOUT_REQUEST: ContextVar[dict | None] = ContextVar(
+    "distill_pre_layout_request", default=None)
+
+
+def install_pre_layout_keys(client: Any) -> Any:
+    """Wrap `client.chat.completions.create` -- call this AFTER every production
+    wrapper is in place (i.e. on the object `build_cheap_graphiti` left as the LLM
+    client's raw client), so this wrapper is OUTERMOST and sees the request before
+    any of them rewrote it. Records a deep copy (wrappers may mutate in place)."""
+    orig = client.chat.completions.create
+
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        token = PRE_LAYOUT_REQUEST.set({
+            "messages": copy.deepcopy(kwargs.get("messages") or []),
+            "response_format": copy.deepcopy(kwargs.get("response_format"))})
+        try:
+            return await orig(*args, **kwargs)
+        finally:
+            PRE_LAYOUT_REQUEST.reset(token)
+
+    client.chat.completions.create = create
+    return client
 
 
 class TeacherNeeded(Exception):
@@ -184,6 +216,12 @@ class AnswerStore:
         """key -> the reason it was dropped."""
         return dict(self._dropped)
 
+    def unqueue(self, key: str) -> None:
+        """Remove a pending request without answering or dropping it (its only
+        asker gave up on it); it is re-queued if anything asks for it again."""
+        with self._lock:
+            self._pending_path(key).unlink(missing_ok=True)
+
     def _pending_path(self, key: str) -> Path:
         return self.pending_dir / f"{key}.json"
 
@@ -293,10 +331,18 @@ class TeacherTransport:
         self.prompt_name_getter = prompt_name_getter
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
+    def request_key(self, kwargs: dict) -> str:
+        """The answer key of one call: the PRE-layout request when the outermost
+        wrapper recorded it (`PRE_LAYOUT_REQUEST`), else the wire request."""
+        pre = PRE_LAYOUT_REQUEST.get()
+        if pre is not None:
+            return self.store.key_for(pre["messages"], pre["response_format"])
+        return self.store.key_for(kwargs.get("messages") or [], kwargs.get("response_format"))
+
     async def _create(self, **kwargs: Any) -> Any:
         messages = kwargs.get("messages") or []
         response_format = kwargs.get("response_format")
-        key = self.store.key_for(messages, response_format)
+        key = self.request_key(kwargs)
 
         reason = self.store.dropped_reason(key)
         if reason is not None:

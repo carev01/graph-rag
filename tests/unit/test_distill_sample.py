@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 from neo4j import RoutingControl
 
+from graph_extract.config import ExtractSettings
+
 from scripts.distill import sample as smp
 from scripts.extraction_proof import AFFECTED_ARTICLES_QUERY, PRODUCT_NAMES_QUERY
 
@@ -19,17 +21,47 @@ TABLE = [("Veeam", "Veeam Backup & Replication", 150), ("Veeam", "Veeam Agent", 
          ("Cohesity", "Cohesity DataProtect", 8)]
 
 
+PROSE = "\n".join(f"Prose line {i} about backups." for i in range(20))
+SMALL_TABLE = "| a | b |\n|---|---|\n| 1 | 2 |"          # cheap tier: 3 of 24 lines
+DENSE_TABLE = "\n".join(["| region | yes |", "|---|---|"]
+                        + [f"| r{i} | yes |" for i in range(40)])
+
+
+def _dense(n: int) -> bool:
+    return n % 19 == 0
+
+
+def _long(n: int) -> bool:
+    return n % 23 == 0
+
+
+def _texts(n: int) -> list[str]:
+    if _dense(n):
+        return ["Availability matrix.", DENSE_TABLE]
+    if n % 13 == 0:
+        return [PROSE, SMALL_TABLE]
+    return [PROSE]
+
+
 def _rows() -> list[dict]:
     rows = []
     n = 0
     for vendor, product, count in TABLE:
         for i in range(count):
             n += 1
+            texts = _texts(n)
             rows.append({"id": f"art-{n:04d}",
                          "title": "Restoring a VM" if n % 11 == 0 else f"Page {n}",
                          "vendor": vendor, "product": product, "source": f"{product} Guide",
-                         "has_table": n % 13 == 0, "unnamed_chunk": n % 17 == 0})
+                         "has_table": any("|---" in t for t in texts),
+                         "has_pipe": any("|" in t for t in texts),
+                         "max_tokens": 1500 if _long(n) else 600,
+                         "unnamed_chunk": n % 17 == 0, "_texts": texts})
     return rows
+
+
+def _strong(n: int) -> bool:
+    return _dense(n) or _long(n)
 
 
 class FakeRead:
@@ -51,6 +83,10 @@ class FakeRead:
         if query == AFFECTED_ARTICLES_QUERY:
             return SimpleNamespace(records=[{"id": i}
                                             for i in sorted(self.affected[params["example"]])])
+        if query == smp.CHUNK_TEXTS_QUERY:
+            by_id = {r["id"]: r for r in self.rows}
+            return SimpleNamespace(records=[{"id": i, "texts": by_id[i]["_texts"]}
+                                            for i in params["ids"]])
         if query == smp.ARTICLES_QUERY:
             wanted = set(params["vendors"])
             # deliberately NOT in id order: the selection must sort for itself
@@ -61,7 +97,7 @@ class FakeRead:
 
 def _fake() -> FakeRead:
     return FakeRead(_rows(), affected_example={"art-0003", "art-0390"},
-                    affected_other={"art-0200"})
+                    affected_other={"art-0201"})
 
 
 async def test_same_output_twice_and_floor_and_heldout() -> None:
@@ -108,9 +144,9 @@ async def test_hard_case_flags() -> None:
     fake = _fake()
     cands = {c.article_id: c for c in await smp.read_candidates(fake, smp.DEFAULT_VENDORS)}
     assert "affected" in cands["art-0003"].hard_cases     # example-subject half
-    assert "affected" in cands["art-0200"].hard_cases     # other-subject half
+    assert "affected" in cands["art-0201"].hard_cases     # other-subject half
     assert "restore_title" in cands["art-0011"].hard_cases
-    assert "table" in cands["art-0013"].hard_cases
+    assert "table" in cands["art-0013"].hard_cases and not cands["art-0013"].strong_tier
     assert "unnamed_chunk" in cands["art-0017"].hard_cases
     assert cands["art-0001"].hard_cases == ()
     # the affected query was run for both halves, unbounded, excluding nothing
@@ -154,3 +190,36 @@ async def test_write_and_load_roundtrip(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["strata"] == counts
     assert payload["train"] == 32 and payload["heldout"] == 8
+
+
+async def test_strong_tier_articles_are_excluded_and_counted() -> None:
+    fake = _fake()
+    cands = {c.article_id: c for c in await smp.read_candidates(fake, smp.DEFAULT_VENDORS)}
+    assert cands["art-0019"].strong_tier            # dense matrix (production's router)
+    assert cands["art-0023"].strong_tier            # a chunk above cheap_max_chunk_tokens
+    assert not cands["art-0013"].strong_tier        # a small table stays cheap
+    # chunk texts were fetched only for articles that contain a '|'
+    (params,) = [p for q, p in fake.queries if q == smp.CHUNK_TEXTS_QUERY]
+    rows = {r["id"]: r for r in _rows()}
+    assert params["ids"] == sorted(i for i, r in rows.items() if r["has_pipe"])
+
+    sample, counts = await smp.select_sample_with_counts(_fake(), n_total=60, n_heldout=10)
+    strong_ids = {r["id"] for r in _rows() if _strong(int(r["id"][4:]))}
+    assert not strong_ids & {a.article_id for a in sample}
+    per_stratum: Counter = Counter()
+    for r in _rows():
+        if r["id"] in strong_ids:
+            per_stratum[f"{r['vendor']} / {r['product']}"] += 1
+    assert {s: c["excluded_strong_tier"] for s, c in counts.items()} == {
+        s: per_stratum.get(s, 0) for s in counts}
+    assert sum(c["population"] + c["excluded_strong_tier"] for c in counts.values()) == len(rows)
+
+
+async def test_production_thresholds_are_used() -> None:
+    lenient = smp.RoutingThresholds(dense_table_line_ratio=0.99, dense_pipe_count=10_000,
+                                    cheap_max_chunk_tokens=10_000)
+    cands = await smp.read_candidates(_fake(), smp.DEFAULT_VENDORS, lenient)
+    assert not any(c.strong_tier for c in cands)
+    s = ExtractSettings(_env_file=None, neo4j_uri="bolt://x", neo4j_user="u",
+                        neo4j_password="p", docext_base_url="http://x", docext_read_key="k")
+    assert smp.RoutingThresholds.from_settings(s) == smp.RoutingThresholds()

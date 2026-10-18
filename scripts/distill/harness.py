@@ -35,22 +35,32 @@ Each chunk ends in one state, appended to `<store>/chunks.jsonl` (latest record 
 
 `complete` and `dropped` are final: later rounds skip those chunks.
 
-**Previous episodes.** The live graph already holds each chunk's own production
-episode, at the same reference time, so graphiti's own lookup would put the chunk
-into its own prompt twice. Each chunk is therefore given the article's production
-episodes with a LOWER chunk_index (the last `PREVIOUS_EPISODES_MAX`, oldest first)
--- what production saw at original ingest. graphiti fetches them with
-`EpisodicNode.get_by_uuids`, whose query has no ORDER BY; `HarnessGraphDriver`
-returns that query's rows in the order of the uuids passed, so the prompt is the
-same bytes every round (an unstable order would change the request's key and the
-chunk would never converge).
+**Previous episodes** are what production's graphiti saw. Production passes no
+`previous_episode_uuids`, so graphiti ran `retrieve_episodes` over the whole group:
+the `PREVIOUS_EPISODES_MAX` most recent text episodes with `valid_at <=
+reference_time`, `ORDER BY valid_at DESC`, then reversed (chronological). The live
+graph has moved on since, so `PREVIOUS_EPISODES_QUERY` mirrors that query (read
+only) EXCLUDING this chunk's own production episode, its later siblings, and every
+episode created after this chunk's production episode (the graph as it stood at
+original ingest), with a deterministic tie-break (`valid_at DESC, created_at DESC,
+uuid`). The result goes to graphiti as `previous_episode_uuids`, oldest first.
+graphiti fetches them with `EpisodicNode.get_by_uuids`, whose query has no ORDER BY;
+`HarnessGraphDriver` returns that query's rows in the order of the uuids passed, so
+the prompt is the same bytes every round.
 
-**Reference time** is `ingest_driver._reference_time` over the article's stored
-fields. Its last-resort fallback is the wall clock, which would change the edge
-prompt (it carries REFERENCE_TIME) every round; the harness passes the chunk's
-production `Episodic.valid_at` as the `extracted_at` it falls back to instead. Each
-chunk record carries `ref_matches_episode` (does the computed time equal production's
-`valid_at`?).
+**Reference time** is the chunk's production `Episodic.valid_at` -- the time
+production's graphiti actually used. `ingest_driver._reference_time` over the
+article's stored fields is computed as a diagnostic only (`ref_matches_episode`).
+
+**Answer keys ignore the wire layout.** Production runs the cheap tier with the cache
+layout on, whose `StaticTailLearner` learns per process: a fresh round sends a prompt
+type's first calls unmoved and later ones with the static tail moved into the system
+message. Keys are therefore computed on the PRE-layout request (`teacher.
+install_pre_layout_keys`, the outermost wrapper), so one prompt has one key in every
+round. Capture still records the wire messages; `<store>/calls.jsonl` maps each
+answered call's wire request (`wire_key` = `AnswerStore.key_for` over the captured
+messages and response_format) to its `key` and `layout` ("moved" when the system
+message differs from graphiti's, else "unmoved") for export.
 
 **Self-matches** (the accepted caveat). Dedup candidates come from the live graph,
 which already holds what production extracted from this very chunk. For every
@@ -99,12 +109,20 @@ from scripts.distill.readonly_driver import (
 )
 from scripts.distill.sample import (
     DEFAULT_VENDORS,
+    RoutingThresholds,
     SampleArticle,
     load_sample,
     select_sample_with_counts,
     write_sample,
 )
-from scripts.distill.teacher import AnswerStore, TeacherDropped, TeacherNeeded, TeacherTransport
+from scripts.distill.teacher import (
+    PRE_LAYOUT_REQUEST,
+    AnswerStore,
+    TeacherDropped,
+    TeacherNeeded,
+    TeacherTransport,
+    install_pre_layout_keys,
+)
 
 logger = logging.getLogger("distill.harness")
 
@@ -129,8 +147,25 @@ EPISODES_QUERY = (
     "       a.content_changed_basis AS content_changed_basis, "
     "       a.last_updated_at AS last_updated_at, "
     "       he.chunk_index AS chunk_index, e.uuid AS uuid, e.name AS name, "
-    "       e.content AS content, e.valid_at AS valid_at "
+    "       e.content AS content, e.valid_at AS valid_at, e.created_at AS created_at "
     "ORDER BY chunk_index, uuid")
+
+# graphiti's retrieve_episodes (graph_data_operations.py, the non-saga branch, as
+# add_episode calls it: last_n=RELEVANT_SCHEMA_LIMIT, group_ids=[group_id],
+# source=text), minus this chunk's own episode, its later siblings and anything
+# created after it, with a deterministic tie-break. Reversed by the caller, as
+# graphiti reverses it.
+PREVIOUS_EPISODES_QUERY = (
+    "MATCH (e:Episodic) "
+    "WHERE e.valid_at <= $reference_time "
+    "AND e.group_id IN $group_ids "
+    "AND e.source = $source "
+    "AND e.created_at <= $created_at "
+    "AND e.uuid <> $own "
+    "AND NOT e.uuid IN $later_siblings "
+    "RETURN e.uuid AS uuid "
+    "ORDER BY e.valid_at DESC, e.created_at DESC, e.uuid "
+    "LIMIT $num_episodes")
 
 # What production extracted from one episode: the entities it MENTIONS and the facts
 # that cite it (through MENTIONS, so the fact edges are not scanned one by one).
@@ -294,8 +329,23 @@ class RoundLog:
         self.store = store
         self.chunks_path = store.root / "chunks.jsonl"
         self.selfmatch_path = store.root / "selfmatch.jsonl"
+        self.calls_path = store.root / "calls.jsonl"
         self._selfmatch_seen = {(r["key"], r["chunk_id"])
                                 for r in _read_jsonl(self.selfmatch_path)}
+        self._calls_seen = {(r["key"], r["wire_key"]) for r in _read_jsonl(self.calls_path)}
+
+    def answered_call(self, key: str, wire_kwargs: dict, chunk_id: str | None) -> None:
+        """Map an answered call's WIRE request (what capture records) to its key and
+        layout, once per distinct (key, wire request)."""
+        wire_messages = wire_kwargs.get("messages") or []
+        wire_key = self.store.key_for(wire_messages, wire_kwargs.get("response_format"))
+        if (key, wire_key) in self._calls_seen:
+            return
+        self._calls_seen.add((key, wire_key))
+        _append_jsonl(self.calls_path, {
+            "key": key, "wire_key": wire_key, "layout": wire_layout(wire_messages),
+            "prompt_name": CURRENT_PROMPT_NAME.get(), "chunk_id": chunk_id,
+            "ts": _utcnow()})
 
     def asked(self, run: ChunkRun, key: str, prompt_name: str, messages: Sequence[Any], *,
               needed: bool) -> None:
@@ -335,6 +385,25 @@ class RoundLog:
                    default=0) + 1
 
 
+def _system_text(messages: Sequence[Any]) -> str | None:
+    for m in messages:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if role == "system":
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+            return content if isinstance(content, str) else None
+    return None
+
+
+def wire_layout(wire_messages: Sequence[Any]) -> str:
+    """"moved" when the cache layout rewrote the system message of this call (the
+    static tail went into it), "unmoved" when the wire system message is graphiti's,
+    "unknown" outside `install_pre_layout_keys`."""
+    pre = PRE_LAYOUT_REQUEST.get()
+    if pre is None:
+        return "unknown"
+    return "unmoved" if _system_text(wire_messages) == _system_text(pre["messages"]) else "moved"
+
+
 def observe_transport(transport: TeacherTransport, log: RoundLog) -> TeacherTransport:
     """Wrap the transport's `create` (innermost, before any production wrapper is
     applied on top) so every prompt a chunk asks -- answered or not -- is attributed
@@ -355,9 +424,10 @@ def observe_transport(transport: TeacherTransport, log: RoundLog) -> TeacherTran
             if run is not None:
                 run.dropped[exc.key] = exc.reason
             raise
+        key = transport.request_key(kwargs)
         if run is not None:
-            key = log.store.key_for(messages, kwargs.get("response_format"))
             log.asked(run, key, CURRENT_PROMPT_NAME.get(), messages, needed=False)
+        log.answered_call(key, kwargs, run.chunk_id if run is not None else None)
         return response
 
     transport.chat.completions.create = create
@@ -396,6 +466,12 @@ def build_teacher_graphiti(settings: ExtractSettings, store: AnswerStore, log: R
         graph_driver = HarnessGraphDriver(settings.neo4j_uri, settings.neo4j_user,
                                           settings.neo4j_password)
     graphiti = build_cheap_graphiti(settings, transport=transport, graph_driver=graph_driver)
+    # Every production wrapper re-assigns create ON the transport object; the LLM
+    # client's raw client must be that same object for the next wrapper to be the
+    # outermost one.
+    if graphiti.llm_client.client is not transport:  # type: ignore[attr-defined]
+        raise RuntimeError("the cheap LLM client does not wrap the injected transport")
+    install_pre_layout_keys(transport)
     install_dedup_guard(graphiti, fallback=None, unscoped=DedupIndexStats(),
                         timings=PromptTimings(), suppress_contradictions=True,
                         grounding_unscoped=GroundingStats())
@@ -411,6 +487,7 @@ class Chunk:
     name: str
     content: str
     valid_at: Any
+    created_at: Any = None
 
 
 @dataclass
@@ -445,7 +522,8 @@ async def read_article_chunks(read: Any, article_id: str) -> ArticleChunks | Non
         fields={k: first[k] for k in ("content_changed_at", "content_changed_basis",
                                       "last_updated_at")},
         chunks=[Chunk(chunk_index=int(r["chunk_index"]), uuid=r["uuid"], name=r["name"],
-                      content=r["content"], valid_at=r["valid_at"]) for r in recs])
+                      content=r["content"], valid_at=r["valid_at"],
+                      created_at=r["created_at"]) for r in recs])
 
 
 async def read_document_context(read: Any, article_id: str) -> tuple[str, str, str]:
@@ -465,29 +543,56 @@ async def read_footprint(read: Any, episode_uuid: str) -> tuple[frozenset[str], 
             frozenset(f for f in recs[0]["facts"] if f))
 
 
-def reference_time(art: ArticleChunks, chunk: Chunk) -> datetime:
-    """`ingest_driver._reference_time`, with the chunk's production `valid_at` in
-    place of its wall-clock last resort (see the module docstring)."""
+def _as_datetime(value: Any) -> datetime:
+    if hasattr(value, "to_native"):           # neo4j.time.DateTime
+        value = value.to_native()
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    raise ValueError(f"not a datetime: {value!r}")
+
+
+def reference_time(chunk: Chunk) -> datetime:
+    """The chunk's production `Episodic.valid_at`: the reference time production's
+    graphiti used for this episode."""
+    if chunk.valid_at is None:
+        raise ValueError(f"episode {chunk.uuid} has no valid_at")
+    return _as_datetime(chunk.valid_at)
+
+
+def article_reference_time(art: ArticleChunks) -> datetime | None:
+    """`ingest_driver._reference_time` over the article's stored fields -- a
+    diagnostic only (does production's valid_at still agree with the article?).
+    None when it would fall back to crawl time or the wall clock."""
+    if not art.fields.get("content_changed_at"):
+        return None
     ref, _basis = _reference_time(SimpleNamespace(
         id=art.article_id,
         content_changed_at=_iso(art.fields.get("content_changed_at")),
         content_changed_basis=art.fields.get("content_changed_basis"),
         last_updated_at=_iso(art.fields.get("last_updated_at")),
-        extracted_at=_iso(chunk.valid_at)))
+        extracted_at=None))
     return ref
 
 
-def _same_instant(a: datetime, b: Any) -> bool | None:
-    iso = _iso(b)
-    if iso is None:
+async def read_previous_episodes(read: Any, settings: ExtractSettings, art: ArticleChunks,
+                                 chunk: Chunk) -> list[str]:
+    """Production's previous episodes for `chunk`, oldest first (module docstring)."""
+    later = [c.uuid for c in art.chunks if c.chunk_index > chunk.chunk_index]
+    if chunk.created_at is None:
+        raise ValueError(f"episode {chunk.uuid} has no created_at")
+    result = await read.execute_query(PREVIOUS_EPISODES_QUERY, parameters_={
+        "reference_time": chunk.valid_at, "group_ids": [settings.group_id],
+        "source": "text", "created_at": chunk.created_at, "own": chunk.uuid,
+        "later_siblings": later, "num_episodes": PREVIOUS_EPISODES_MAX}, routing_=READ)
+    return list(reversed([r["uuid"] for r in result.records]))
+
+
+def _same_instant(a: datetime | None, b: datetime) -> bool | None:
+    if a is None or (a.tzinfo is None) != (b.tzinfo is None):
         return None
-    try:
-        other = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if (a.tzinfo is None) != (other.tzinfo is None):
-        return None
-    return a == other
+    return a == b
 
 
 # --- outcome classification ------------------------------------------------------------
@@ -559,18 +664,19 @@ class RoundSummary:
 
 async def run_chunk(*, graphiti: Graphiti, settings: ExtractSettings, store: AnswerStore,
                     log: RoundLog, read: Any, art: ArticleChunks, chunk: Chunk,
-                    previous: list[str], vendor: str, product: str, source: str,
-                    round_no: int) -> dict:
+                    vendor: str, product: str, source: str, round_no: int) -> dict:
     chunk_id = f"{art.article_id}:{chunk.chunk_index}"
     run = ChunkRun(chunk_id=chunk_id, episode_uuid=chunk.uuid)
     exc: BaseException | None = None
     ref: datetime | None = None
+    previous: list[str] = []
     before = asyncio.all_tasks()
     try:
         if not chunk.content:
             raise ValueError(f"episode {chunk.uuid} has no stored content")
         run.prod_names, run.prod_facts = await read_footprint(read, chunk.uuid)
-        ref = reference_time(art, chunk)
+        ref = reference_time(chunk)
+        previous = await read_previous_episodes(read, settings, art, chunk)
         stats = GroundingStats()
         ctoken = CURRENT_CHUNK.set(run)
         gtoken = CURRENT_GROUNDING.set(GroundingContext(
@@ -602,6 +708,12 @@ async def run_chunk(*, graphiti: Graphiti, settings: ExtractSettings, store: Ans
     if isinstance(exc, TeacherDropped):
         run.dropped.setdefault(exc.key, exc.reason)
     state, error = classify(exc, run)
+    if state == "dropped":
+        # A dropped chunk will never ask again: take its other pending prompts off
+        # the teacher's queue, unless another chunk asked them too.
+        for key in run.needed:
+            if set(store.askers(key)) <= {chunk_id}:
+                store.unqueue(key)
     if state == "error":
         logger.error("chunk %s: %s", chunk_id, error,
                      exc_info=(type(exc), exc, exc.__traceback__) if exc else None)
@@ -611,7 +723,8 @@ async def run_chunk(*, graphiti: Graphiti, settings: ExtractSettings, store: Ans
         "pending_keys": sorted(run.needed), "dropped_keys": sorted(run.dropped),
         "replayed": run.replayed, "previous_episode_uuids": list(previous),
         "reference_time": ref.isoformat() if ref else None,
-        "ref_matches_episode": _same_instant(ref, chunk.valid_at) if ref else None,
+        "ref_matches_episode": (_same_instant(article_reference_time(art), ref)
+                                if ref else None),
         "error": error, "ts": _utcnow()}
     log.chunk_done(record)
     return record
@@ -635,15 +748,13 @@ async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
             logger.warning("article %s: document context %s / %s differs from the sample's "
                            "%s / %s; using production's", sa.article_id, vendor, product,
                            sa.vendor, sa.product)
-        for i, chunk in enumerate(art.chunks):
+        for chunk in art.chunks:
             chunk_id = f"{sa.article_id}:{chunk.chunk_index}"
             if latest.get(chunk_id, {}).get("state") in FINAL_STATES:
                 summary.skipped_final += 1
                 continue
-            previous = [c.uuid for c in art.chunks[:i]
-                        if c.chunk_index < chunk.chunk_index][-PREVIOUS_EPISODES_MAX:]
             rec = await run_chunk(graphiti=graphiti, settings=settings, store=store, log=log,
-                                  read=read, art=art, chunk=chunk, previous=previous,
+                                  read=read, art=art, chunk=chunk,
                                   vendor=vendor, product=product, source=source,
                                   round_no=round_no)
             summary.states[rec["state"]] += 1
@@ -705,14 +816,16 @@ async def _cmd_select(args: argparse.Namespace) -> int:
     try:
         sample, counts = await select_sample_with_counts(
             read, n_total=args.n_total, n_heldout=args.n_heldout, seed=args.seed,
-            vendors=args.vendors)
+            vendors=args.vendors, thresholds=RoutingThresholds.from_settings(settings))
     finally:
         await read.close()
     write_sample(args.out, sample, counts, seed=args.seed, n_total=args.n_total,
                  n_heldout=args.n_heldout, vendors=args.vendors)
     train = sum(1 for a in sample if a.split == "train")
+    excluded = sum(c["excluded_strong_tier"] for c in counts.values())
     print(f"wrote {args.out}: {len(sample)} articles ({train} train, "
-          f"{len(sample) - train} held out) over {len(counts)} strata")
+          f"{len(sample) - train} held out) over {len(counts)} strata; "
+          f"{excluded} strong-tier articles excluded")
     return 0
 
 

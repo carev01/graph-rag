@@ -10,6 +10,13 @@ family: the graph carries no coarser grouping). Each article's chain is the one
 production's ingest driver uses for its DOCUMENT CONTEXT: the lowest source id
 (`IngestDriver._document_context`).
 
+**Cheap tier only.** The student replaces the cheap tier, so every article production
+routes to the STRONG tier is excluded before allocation (counted per stratum as
+`excluded_strong_tier`): a dense matrix by production's own `is_dense_matrix` (with
+`ExtractSettings`' thresholds, over the live chunks joined in chunk order), or an
+article with a chunk longer than `cheap_max_chunk_tokens` (only strong-tier chunking
+makes one). The `table` hard case is therefore always a cheap-tier table.
+
 **Allocation.** Each vendor first gets a floor of `VENDOR_FLOOR` articles (or all
 it has), the rest of `n_total` is apportioned to vendors in proportion to their
 article counts (largest remainder, ties by size then name), and each vendor's
@@ -50,6 +57,8 @@ from typing import Any
 
 from neo4j import RoutingControl
 
+from graph_extract.article_router import is_dense_matrix
+
 from scripts.extraction_proof import (
     AFFECTED_ARTICLES_QUERY,
     EXAMPLE_SUBJECTS,
@@ -86,12 +95,40 @@ ARTICLES_QUERY = (
     "WITH a, vendor, product, source WHERE toLower(vendor) IN $vendors "
     "MATCH (a)-[he:HAS_EPISODE]->(e:Episodic) "
     "WHERE coalesce(he.superseded, false) = false AND coalesce(e.removed, false) = false "
-    "WITH a, vendor, product, source, collect(toLower(coalesce(e.content, ''))) AS texts "
-    "RETURN a.id AS id, a.title AS title, vendor, product, source, "
+    "WITH a, vendor, product, source, collect(toLower(coalesce(e.content, ''))) AS texts, "
+    "     max(he.token_count) AS max_tokens "
+    "RETURN a.id AS id, a.title AS title, vendor, product, source, max_tokens, "
+    "       any(t IN texts WHERE t CONTAINS '|') AS has_pipe, "
     "       any(t IN texts WHERE t CONTAINS $table_rule) AS has_table, "
     "       any(t IN texts WHERE none(pn IN $product_names WHERE t CONTAINS pn)) "
     "         AS unnamed_chunk "
     "ORDER BY id")
+
+
+# The live chunks of the articles that could be dense matrices (they contain a
+# '|'), in chunk order, for production's own router (`is_dense_matrix`).
+CHUNK_TEXTS_QUERY = (
+    "UNWIND $ids AS id "
+    "MATCH (a:Article {id: id})-[he:HAS_EPISODE]->(e:Episodic) "
+    "WHERE coalesce(he.superseded, false) = false AND coalesce(e.removed, false) = false "
+    "WITH a, he, e ORDER BY he.chunk_index "
+    "RETURN a.id AS id, collect(coalesce(e.content, '')) AS texts")
+TEXTS_BATCH = 200
+
+
+@dataclass(frozen=True)
+class RoutingThresholds:
+    """Production's cheap/strong routing knobs (`ExtractSettings`): the dense-matrix
+    test `IngestDriver._tier_for` applies, and the cheap tier's chunk size."""
+    dense_table_line_ratio: float = 0.25
+    dense_pipe_count: int = 200
+    cheap_max_chunk_tokens: int = 900
+
+    @classmethod
+    def from_settings(cls, s: Any) -> RoutingThresholds:
+        return cls(dense_table_line_ratio=s.dense_table_line_ratio,
+                   dense_pipe_count=s.dense_pipe_count,
+                   cheap_max_chunk_tokens=s.cheap_max_chunk_tokens)
 
 
 @dataclass(frozen=True)
@@ -113,6 +150,7 @@ class _Candidate:
     product: str
     source: str
     hard_cases: tuple[str, ...]
+    strong_tier: bool = False
 
     @property
     def stratum(self) -> str:
@@ -203,15 +241,41 @@ def _hard_cases(rec: Any, affected: set[str]) -> tuple[str, ...]:
     return tuple(flags)
 
 
-async def read_candidates(driver: Any, vendors: Sequence[str]) -> list[_Candidate]:
+async def read_dense_ids(driver: Any, ids: list[str],
+                         thresholds: RoutingThresholds) -> set[str]:
+    """The articles production's router sends to the strong tier as dense matrices:
+    `is_dense_matrix` over the article's live chunks joined in chunk order (the graph
+    holds the chunks, not the original markdown -- the closest reconstruction)."""
+    dense: set[str] = set()
+    for i in range(0, len(ids), TEXTS_BATCH):
+        for rec in await _records(driver, CHUNK_TEXTS_QUERY, {"ids": ids[i:i + TEXTS_BATCH]}):
+            if is_dense_matrix("\n\n".join(rec["texts"]),
+                               ratio_threshold=thresholds.dense_table_line_ratio,
+                               pipe_threshold=thresholds.dense_pipe_count):
+                dense.add(rec["id"])
+    return dense
+
+
+async def read_candidates(driver: Any, vendors: Sequence[str],
+                          thresholds: RoutingThresholds = RoutingThresholds(),
+                          ) -> list[_Candidate]:
+    """Every candidate, with `strong_tier` set for the articles production routes to
+    the strong tier: a dense matrix (production's `is_dense_matrix`; only articles
+    containing a '|' can be one), or a chunk longer than the cheap tier's chunk size
+    (only strong-tier chunking produces one)."""
     product_names = await read_product_names(driver)
     affected = await read_affected_ids(driver, product_names)
     recs = await _records(driver, ARTICLES_QUERY, {
         "vendors": [v.lower() for v in vendors], "product_names": product_names,
         "table_rule": TABLE_RULE})
+    dense = await read_dense_ids(driver, sorted(r["id"] for r in recs if r["has_pipe"]),
+                                 thresholds)
     out = [_Candidate(article_id=rec["id"], title=rec["title"] or "",
                       vendor=rec["vendor"] or "", product=rec["product"] or "",
-                      source=rec["source"] or "", hard_cases=_hard_cases(rec, affected))
+                      source=rec["source"] or "", hard_cases=_hard_cases(rec, affected),
+                      strong_tier=(rec["id"] in dense
+                                   or (rec["max_tokens"] or 0)
+                                   > thresholds.cheap_max_chunk_tokens))
            for rec in recs]
     out.sort(key=lambda c: c.article_id)       # ORDER BY a.id, whatever the driver did
     return out
@@ -244,7 +308,13 @@ def choose(candidates: list[_Candidate], *, n_total: int, n_heldout: int, seed: 
     if n_heldout > n_total:
         raise ValueError(f"n_heldout {n_heldout} exceeds n_total {n_total}")
     by_stratum: dict[str, list[_Candidate]] = defaultdict(list)
+    excluded: dict[str, int] = defaultdict(int)
     for c in sorted(candidates, key=lambda c: c.article_id):
+        if c.strong_tier:
+            # The student serves the cheap tier only: production never sends these
+            # articles' prompts to it.
+            excluded[c.stratum] += 1
+            continue
         by_stratum[c.stratum].append(c)
     vendor_of = {s: cs[0].vendor for s, cs in by_stratum.items()}
     vendor_sizes: dict[str, int] = defaultdict(int)
@@ -264,7 +334,7 @@ def choose(candidates: list[_Candidate], *, n_total: int, n_heldout: int, seed: 
     held_alloc = apportion(min(n_heldout, sum(sizes.values())), sizes)
     sample: list[SampleArticle] = []
     counts: dict[str, dict] = {}
-    for s in sorted(by_stratum):
+    for s in sorted(set(by_stratum) | set(excluded)):
         picked = selected.get(s, [])
         perm = list(picked)
         random.Random(f"{seed}|heldout|{s}").shuffle(perm)
@@ -276,8 +346,9 @@ def choose(candidates: list[_Candidate], *, n_total: int, n_heldout: int, seed: 
                 source=c.source, split="heldout" if c.article_id in held else "train",
                 stratum=s, hard_cases=c.hard_cases))
         counts[s] = {
-            "population": len(by_stratum[s]),
-            "hard_population": sum(1 for c in by_stratum[s] if c.hard_cases),
+            "excluded_strong_tier": excluded.get(s, 0),
+            "population": len(by_stratum.get(s, [])),
+            "hard_population": sum(1 for c in by_stratum.get(s, []) if c.hard_cases),
             "selected": len(picked),
             "hard_selected": sum(1 for c in picked if c.hard_cases),
             "train": len(picked) - len(held),
@@ -290,22 +361,25 @@ def choose(candidates: list[_Candidate], *, n_total: int, n_heldout: int, seed: 
 
 async def select_sample(driver: Any, *, n_total: int = 100, n_heldout: int = 20,
                         seed: int = 20261017,
-                        vendors: Sequence[str] = DEFAULT_VENDORS) -> list[SampleArticle]:
+                        vendors: Sequence[str] = DEFAULT_VENDORS,
+                        thresholds: RoutingThresholds = RoutingThresholds(),
+                        ) -> list[SampleArticle]:
     """Read-only selection over `driver` (anything with neo4j's async
     `execute_query(query, parameters_=, routing_=)`). Raises when a requested
     vendor has no article with live episodes: a silent zero would quietly drop a
     stratum the spec requires."""
     sample, _ = await select_sample_with_counts(driver, n_total=n_total,
                                                 n_heldout=n_heldout, seed=seed,
-                                                vendors=vendors)
+                                                vendors=vendors, thresholds=thresholds)
     return sample
 
 
 async def select_sample_with_counts(
         driver: Any, *, n_total: int = 100, n_heldout: int = 20, seed: int = 20261017,
         vendors: Sequence[str] = DEFAULT_VENDORS,
+        thresholds: RoutingThresholds = RoutingThresholds(),
 ) -> tuple[list[SampleArticle], dict[str, dict]]:
-    candidates = await read_candidates(driver, vendors)
+    candidates = await read_candidates(driver, vendors, thresholds)
     found = {c.vendor.lower() for c in candidates}
     missing = [v for v in vendors if v.lower() not in found]
     if missing:
@@ -320,6 +394,7 @@ def write_sample(path: Path, sample: list[SampleArticle], counts: dict[str, dict
     payload = {
         "seed": seed, "n_total": n_total, "n_heldout": n_heldout, "vendors": list(vendors),
         "selected": len(sample),
+        "excluded_strong_tier": sum(c.get("excluded_strong_tier", 0) for c in counts.values()),
         "train": sum(1 for a in sample if a.split == "train"),
         "heldout": sum(1 for a in sample if a.split == "heldout"),
         "strata": counts,
