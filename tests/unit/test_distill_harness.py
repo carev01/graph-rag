@@ -1263,3 +1263,16 @@ def test_harness_settings_and_graphiti_carry_no_reranker_key(tmp_path: Path) -> 
     assert graphiti.cross_encoder.client.api_key == h.NO_API_KEY
     for secret in ("voyage-secret", "or-secret"):
         assert secret not in s.model_dump_json()
+
+
+def test_ensure_fixed_hash_seed_reexecs_without_pinned_seed():
+    calls = []
+    h.ensure_fixed_hash_seed({"PATH": "/bin"}, lambda exe, argv, env: calls.append(env))
+    assert calls == [{"PATH": "/bin", "PYTHONHASHSEED": h.HASH_SEED}]
+
+
+def test_ensure_fixed_hash_seed_noop_when_pinned():
+    calls = []
+    h.ensure_fixed_hash_seed({"PYTHONHASHSEED": h.HASH_SEED}, lambda *a: calls.append(a))
+    assert calls == []
+

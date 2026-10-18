@@ -1631,5 +1631,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     return asyncio.run(_cmd_round(args))
 
 
+# graphiti builds each entity's labels from a set ({"Entity", <type>}), so their order in
+# the dedupe_nodes and extract_edges prompts follows the per-process string-hash seed.
+# Answers are keyed on the prompt bytes: a round under another seed renders different
+# bytes and can never replay them. Pin the seed, re-executing the CLI once if needed.
+HASH_SEED = "0"
+
+
+def ensure_fixed_hash_seed(environ: Any = None, execve: Any = None) -> None:
+    environ = os.environ if environ is None else environ
+    if environ.get("PYTHONHASHSEED") == HASH_SEED:
+        return
+    (execve or os.execve)(sys.executable, sys.orig_argv, {**environ, "PYTHONHASHSEED": HASH_SEED})
+
+
 if __name__ == "__main__":
+    ensure_fixed_hash_seed()
     sys.exit(main())
