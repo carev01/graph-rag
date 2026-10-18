@@ -65,6 +65,17 @@ rather than papered over:
     (`validate_capture`) against its schema and against the semantic constraints
     a schema cannot express.
 
+PRODUCTION SCALE (`--articles-from`, `load_graph(article_ids=...)`)
+--------------------------------------------------------------------
+The 83-pilot-article whole-group load above does not reach: production has
+~240k RELATES_TO edges with 768-d embeddings on every one, and fetching
+embeddings is bandwidth-bound (~20s/1,000 vectors), so `--articles-from
+sample.json` scopes the load to exactly the sampled articles' episodes, the
+entities they MENTION, and the facts on those episodes. The scoped facts query
+still scans every `RELATES_TO` edge (no index on the `episodes` list property)
+-- fine at ~100 articles, worth re-checking before pointing this at a much
+larger `article_ids` set.
+
 REPAIR POLICY (`repair_capture`, `--no-repair` to disable)
 ---------------------------------------------------------
 This fine-tune REPLACES solar-pro4; it does not clone it. So where the correct
@@ -265,6 +276,15 @@ class Graph:
     entities: dict[str, Entity] = field(default_factory=dict)
     facts: dict[str, Fact] = field(default_factory=dict)
     mentions: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    # True when this Graph came from a `load_graph(article_ids=...)` scoped
+    # load. `CaptureAttributor` needs this: on a scoped graph, a Fact's full
+    # `episodes` list can legitimately reach outside `self.episodes` (another
+    # article the load never fetched), which must be treated as "this fact
+    # spans articles, don't attribute it" -- not confused with the unscoped
+    # graph's dangling-reference case, where an episode missing from
+    # `self.episodes` means no such episode exists at all and is rightly
+    # ignored. See `CaptureAttributor.attribute`'s `new_fact_via_graph` branch.
+    scoped: bool = False
 
     def episodes_in_order(self) -> list[Episode]:
         return sorted(self.episodes.values(), key=lambda e: e.created_at)
@@ -352,12 +372,14 @@ async def load_graph(uri: str, user: str, password: str, group_id: str, *,
     `episodes` overlap that episode set -- never the whole `group_id`. This is
     what makes loading possible at all against the production graph (~240k
     RELATES_TO edges; fetching embeddings for all of them is bandwidth-bound,
-    ~20s/1,000 vectors). `article_ids=None` (the default) is the original
-    whole-group load, byte-for-byte unchanged -- the pilot workflow and
-    existing callers see no behaviour change.
+    ~20s/1,000 vectors). `article_ids=None` (the default) runs the original
+    whole-group queries -- each now carries one `//`-tagged comment line
+    (Cypher ignores `//` comments; it exists only so tests can tell queries
+    apart), but the Cypher logic, parameters and results are unchanged, so the
+    pilot workflow and existing callers see no behaviour change.
     """
-    g = Graph()
     scoped = article_ids is not None
+    g = Graph(scoped=scoped)
     driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
     try:
         async with driver.session(default_access_mode="READ") as s:
@@ -1080,6 +1102,17 @@ class CaptureAttributor:
     1,500 article runs across 83 articles in timestamp order (~18 context
     switches per article), so "nearest in time" would be a guess, not a
     measurement.
+
+    `graph.scoped` (set by `load_graph(article_ids=...)`) changes what "spans
+    articles" can mean. On a scoped graph, `self._episodes` is a deliberate
+    SUBSET of the fact's possible supporting episodes -- a `RELATES_TO` edge's
+    full `episodes` list can legitimately name an episode from an article the
+    load never fetched. That is still a cross-article fact and must still be
+    dropped, but it looks different from the unscoped graph's dangling-
+    reference case (an episode uuid with no `:Episodic` node at all, which is
+    rightly ignored rather than treated as "another article"). `attribute`
+    tells the two apart using `graph.scoped`; see its `new_fact_via_graph`
+    branch.
     """
 
     def __init__(self, graph: Graph, renderer: PromptRenderer) -> None:
@@ -1093,6 +1126,7 @@ class CaptureAttributor:
             self._episode_by_content[key] = ep.uuid
         self.content_collisions = collisions
         self._episodes = graph.episodes
+        self._scoped = graph.scoped
         # Kept SEPARATE, and consulted capture-first, never unioned. A surviving
         # RELATES_TO edge lists every episode that supports it after merging --
         # which for a fact seen in several articles spans articles, and would
@@ -1104,8 +1138,15 @@ class CaptureAttributor:
         self._graph_facts: dict[str, set[str]] = defaultdict(set)
         for fact in graph.facts.values():
             if fact.fact:
-                self._graph_facts[renderer.clean(fact.fact).strip()].update(
-                    e for e in fact.episodes if e in graph.episodes)
+                # The FULL list, unfiltered -- NOT `e for e in fact.episodes if
+                # e in graph.episodes`. That filter was the bug: on a scoped
+                # graph it silently drops the out-of-scope episodes that are
+                # exactly the evidence a fact spans articles, collapsing a
+                # genuinely cross-article fact down to "one in-scope episode"
+                # and attributing it. `attribute` is what checks the full set
+                # against `self._episodes` now, so the set stored here has to
+                # still contain what was filtered out.
+                self._graph_facts[renderer.clean(fact.fact).strip()].update(fact.episodes)
 
     def learn_from_edge_completion(self, episode_uuid: str, completion: str) -> None:
         """Index every fact an attributed `extract_edges.edge` reply emitted."""
@@ -1155,6 +1196,18 @@ class CaptureAttributor:
             route = "new_fact_via_graph"
         if not episodes:
             return None, "new_fact_not_matched"
+        if (self._scoped and route == "new_fact_via_graph"
+                and any(e not in self._episodes for e in episodes)):
+            # Only reachable via the graph fallback: `_capture_facts` entries
+            # are seeded from `episode_for_content`, which only ever returns a
+            # uuid already in `self._episodes`, so they can't carry an
+            # out-of-scope episode. `_graph_facts` now carries each fact's
+            # FULL episode list (see __init__), so on a scoped graph an
+            # episode missing from `self._episodes` is one the load never
+            # fetched -- i.e. a different, out-of-scope article -- not a
+            # dangling reference. Dropped with its own reason so the report
+            # shows it separately from an in-scope "spans_articles".
+            return None, "new_fact_spans_out_of_scope"
         got = self._from_episodes(episodes, route)
         return (got, "") if got else (None, "new_fact_spans_articles")
 

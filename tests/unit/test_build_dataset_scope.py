@@ -5,13 +5,18 @@ loading the whole graph (let alone its vectors) is infeasible for the
 distillation capture's ~100-article sample. `load_graph` must therefore be
 able to load ONLY those articles' episodes, the entities those episodes
 MENTION, and the facts on those episodes, and to skip the embedding fields
-entirely when asked -- while the unscoped (`article_ids=None`) default stays
-byte-for-byte the old pilot-workflow query.
+entirely when asked -- while the unscoped (`article_ids=None`) default still
+runs the same query Cypher (plus a harmless `//` comment) and returns the same
+results as the old pilot-workflow load.
 
 No Neo4j: a fake driver/session records every query + its parameters and
 answers from an in-memory fixture, so the "returns only their episodes" claim
 is actually exercised (not just asserted) by filtering on the parameters the
 production queries pass, exactly as a real session would.
+
+Also covers the fix-round-1 regression: on a scoped graph, a fact genuinely
+shared across articles must be dropped (`new_fact_spans_out_of_scope`), never
+collapsed to whichever one of its episodes happens to be in scope.
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ from scripts import build_extraction_dataset as bed
 from scripts.build_extraction_dataset import (
     CaptureAttributor,
     Episode,
+    Fact,
     Graph,
     PromptRenderer,
     build_from_capture,
@@ -350,3 +356,108 @@ def test_capture_attributor_never_constructs_a_simindex(tmp_path: Path) -> None:
     assert attribution is not None
     assert attribution.article_id == "art-1"
     assert attribution.episode_uuid == "ep1"
+
+
+# --------------------------------------------------------------------------- #
+# fix round 1: a cross-article fact must not collapse on a scoped graph
+# --------------------------------------------------------------------------- #
+def _cross_article_fact(episodes: list[str]) -> Fact:
+    return Fact(uuid="f-shared", name="RELATES_TO", fact="shared fact text",
+               source_uuid="e1", target_uuid="e2", episodes=episodes,
+               created_at="2024-01-01T00:00:00+00:00", valid_at=None, invalid_at=None,
+               embedding=[])
+
+
+def test_scoped_graph_drops_a_fact_whose_full_episodes_reach_outside_the_scope() -> None:
+    """Reviewer's repro: a fact supported by one in-scope episode ('sample-art')
+    and one out-of-scope episode must be DROPPED, never attributed to
+    'sample-art' just because that is the only article the load fetched."""
+    graph = Graph(scoped=True)
+    graph.episodes["ep-sample"] = _episode("ep-sample", "irrelevant", "sample-art")
+    # NOTE: "ep-other" is deliberately absent from graph.episodes -- it is the
+    # out-of-scope article's episode, which a scoped load never fetched.
+    graph.facts["f-shared"] = _cross_article_fact(["ep-sample", "ep-other"])
+    renderer = PromptRenderer(group_id="backup-docs")
+    attributor = CaptureAttributor(graph, renderer)
+
+    attribution, reason = attributor.attribute(
+        "dedupe_edges.resolve_edge",
+        "<NEW FACT>\nshared fact text\n</NEW FACT>")
+
+    assert attribution is None, "must not collapse to the one in-scope episode"
+    assert reason == "new_fact_spans_out_of_scope"
+
+
+def test_unscoped_graph_keeps_the_old_spans_articles_behaviour_for_the_same_fact() -> None:
+    """Same fact, same two episodes, but BOTH loaded (unscoped): this is the
+    pre-existing, correctly-handled cross-article case and must still drop
+    with the original reason, unchanged by the fix."""
+    graph = Graph(scoped=False)
+    graph.episodes["ep-sample"] = _episode("ep-sample", "irrelevant", "sample-art")
+    graph.episodes["ep-other"] = _episode("ep-other", "irrelevant", "other-art")
+    graph.facts["f-shared"] = _cross_article_fact(["ep-sample", "ep-other"])
+    renderer = PromptRenderer(group_id="backup-docs")
+    attributor = CaptureAttributor(graph, renderer)
+
+    attribution, reason = attributor.attribute(
+        "dedupe_edges.resolve_edge",
+        "<NEW FACT>\nshared fact text\n</NEW FACT>")
+
+    assert attribution is None
+    assert reason == "new_fact_spans_articles"
+
+
+def test_scoped_graph_still_attributes_a_fact_whose_episodes_are_all_in_scope() -> None:
+    """The fix must not make every graph-fallback fact spurious: a fact
+    supported ONLY by in-scope episodes of the SAME article still attributes
+    normally."""
+    graph = Graph(scoped=True)
+    graph.episodes["ep-sample"] = _episode("ep-sample", "irrelevant", "sample-art")
+    graph.facts["f-solo"] = Fact(uuid="f-solo", name="RELATES_TO", fact="solo fact text",
+                                 source_uuid="e1", target_uuid="e2",
+                                 episodes=["ep-sample"],
+                                 created_at="2024-01-01T00:00:00+00:00",
+                                 valid_at=None, invalid_at=None, embedding=[])
+    renderer = PromptRenderer(group_id="backup-docs")
+    attributor = CaptureAttributor(graph, renderer)
+
+    attribution, reason = attributor.attribute(
+        "dedupe_edges.resolve_edge",
+        "<NEW FACT>\nsolo fact text\n</NEW FACT>")
+
+    assert reason == ""
+    assert attribution is not None
+    assert attribution.article_id == "sample-art"
+    assert attribution.episode_uuid == "ep-sample"
+    assert attribution.route == "new_fact_via_graph"
+
+
+def test_unscoped_graph_ignores_a_genuinely_dangling_episode_reference() -> None:
+    """The case the old filter existed for, preserved: on an UNSCOPED graph an
+    episode uuid with no `:Episodic` node at all (a data inconsistency, not an
+    out-of-scope article) is ignored, and the fact still attributes off its
+    one real episode -- `graph.scoped=False` must not start dropping these."""
+    graph = Graph(scoped=False)
+    graph.episodes["ep-sample"] = _episode("ep-sample", "irrelevant", "sample-art")
+    graph.facts["f-dangling"] = _cross_article_fact(["ep-sample", "ep-nonexistent"])
+    renderer = PromptRenderer(group_id="backup-docs")
+    attributor = CaptureAttributor(graph, renderer)
+
+    attribution, reason = attributor.attribute(
+        "dedupe_edges.resolve_edge",
+        "<NEW FACT>\nshared fact text\n</NEW FACT>")
+
+    assert reason == ""
+    assert attribution is not None
+    assert attribution.article_id == "sample-art"
+
+
+async def test_scoped_load_sets_graph_scoped_true_and_unscoped_sets_it_false(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`load_graph` is what `CaptureAttributor` relies on to tell the two
+    cases apart -- confirm it actually sets the flag both ways."""
+    fixture = _three_article_fixture()
+    scoped_graph, _ = await _run_load(monkeypatch, fixture, article_ids=["art-1"])
+    unscoped_graph, _ = await _run_load(monkeypatch, fixture, article_ids=None)
+    assert scoped_graph.scoped is True
+    assert unscoped_graph.scoped is False
