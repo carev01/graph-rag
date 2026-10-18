@@ -29,6 +29,9 @@ Judgement calls, settled once so every teacher answers them the same way:
 - Always include the documented product (DOCUMENT CONTEXT) in an `extract_text` answer,
   even when the chunk's facts are about another product it names: never leave it for the
   production grounding gate to add -- the validator rejects an answer the gate would fix.
+- Fact subjects: when the chunk names the product a fact is about, that named product is
+  the subject, even if DOCUMENT CONTEXT names another documented product. The documented
+  product is the subject only of facts the text states without naming any product.
 - Echo each line's `ordinal` and `check` unchanged next to its `key`: they prove the
   answer is filed under the prompt it answers. An answer whose `ordinal`/`check` do
   not match its key's line is rejected as "answer filed under the wrong prompt".
