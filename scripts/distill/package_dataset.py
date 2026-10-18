@@ -4,7 +4,7 @@ private Hugging Face dataset repo (spec 2026-10-17 section 7, Task 6).
 
     uv run --extra dev python -m scripts.distill.package_dataset \\
         --in data/ft-opus --out dist/ft-opus.zip \\
-        [--hf-repo carev01/<name> --private]
+        [--hf-repo carev01/<name> [--public]]
 
 READ-ONLY on the dataset directory except for writing `MANIFEST.json` into it.
 Makes no Neo4j, LLM or embedder call. The `--hf-repo` push is the only network
@@ -46,8 +46,10 @@ using `--hf-repo`.
 
 The token comes ONLY from the `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN`
 environment variable -- never a CLI flag, never logged, never written to
-MANIFEST.json. `--private` defaults to a loud warning rather than a silent
-public push: pass it explicitly (the runbook always does).
+MANIFEST.json. The pushed repo is PRIVATE by default (fail closed): `--public`
+is the explicit opt-out, and omitting both flags keeps it private. Passing
+`--public` logs a warning, since it is now a deliberate, consequential choice
+rather than an easy-to-miss default.
 """
 from __future__ import annotations
 
@@ -198,8 +200,7 @@ def push_to_hub(in_dir: Path, repo_id: str, private: bool, *, hf_api: Any = None
         from huggingface_hub import HfApi  # lazy: not a base dependency
         hf_api = HfApi(token=token)
     if not private:
-        logger.warning("  --hf-repo without --private: %s will be a PUBLIC dataset repo",
-                       repo_id)
+        logger.warning("  --public passed: %s will be a PUBLIC dataset repo", repo_id)
     hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
     for name in ZIP_MEMBERS:
         member = in_dir / name
@@ -219,12 +220,13 @@ def _parser() -> argparse.ArgumentParser:
                         "[/ sample.json]")
     p.add_argument("--out", type=Path, required=True, help="output zip path")
     p.add_argument("--hf-repo", default=None,
-                   help="push the packaged files to this private HF dataset repo id "
-                        "(e.g. carev01/opus-distill-2026-10); token from HF_TOKEN / "
-                        "HUGGING_FACE_HUB_TOKEN only")
-    p.add_argument("--private", action="store_true",
-                   help="create the HF repo private (recommended whenever --hf-repo "
-                        "is given -- omitting it pushes a PUBLIC repo)")
+                   help="push the packaged files to this HF dataset repo id "
+                        "(e.g. carev01/opus-distill-2026-10), PRIVATE by default; "
+                        "token from HF_TOKEN / HUGGING_FACE_HUB_TOKEN only")
+    p.add_argument("--public", action="store_true",
+                   help="create the HF repo PUBLIC instead of private. The default "
+                        "(this flag omitted) is private -- fail closed. Pass this "
+                        "only when you deliberately want a public dataset repo.")
     return p
 
 
@@ -236,7 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("  train: %d records, val: %d records",
                 manifest["counts"]["train"]["_total"], manifest["counts"]["val"]["_total"])
     if args.hf_repo:
-        push_to_hub(args.in_dir, args.hf_repo, args.private)
+        push_to_hub(args.in_dir, args.hf_repo, not args.public)
     return 0
 
 

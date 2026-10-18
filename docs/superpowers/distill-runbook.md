@@ -141,18 +141,18 @@ cp DIR/sample.json data/ft-opus/sample.json
 ```bash
 uv run --extra dev python -m scripts.distill.package_dataset \
     --in data/ft-opus --out dist/ft-opus.zip \
-    [--hf-repo carev01/ft-opus-distill --private]
+    [--hf-repo carev01/ft-opus-distill]
 ```
 
 Zips `train.jsonl`, `val.jsonl`, `sample.json` (warns and continues if absent — it is
 provenance, not training data) and a freshly-written `MANIFEST.json` (counts per
 `prompt_name`, the loss-weight mix, token estimates, and the git commit this was
-packaged at). With `--hf-repo`, pushes those files to a private HF **dataset** repo via
+packaged at). With `--hf-repo`, pushes those files to an HF **dataset** repo via
 `huggingface_hub` (not a base dependency of this project — install it first, e.g.
 `uv pip install huggingface_hub`); the token comes only from `HF_TOKEN` /
-`HUGGING_FACE_HUB_TOKEN` in the environment and is never printed. **Always pass
-`--private`** — omitting it pushes a public repo and only logs a warning, it does not
-refuse.
+`HUGGING_FACE_HUB_TOKEN` in the environment and is never printed. **Private by default
+(fail closed)** — `--public` is the explicit opt-out; pass it only when you deliberately
+want a public dataset repo (it logs a warning when you do).
 
 Hand the user either `dist/ft-opus.zip` (for Google Drive) or the HF dataset repo id —
 the notebook's section 4 ("Get the dataset") takes either.
@@ -176,10 +176,11 @@ notebook's own section numbers:
    current production fine-tune `carev01/qwen35-4b-graphrag` — that fine-tune was
    distilled from the OLD, leak-prone extraction instructions and would carry the
    leakage forward; spec section 1). LoRA config, documented in-notebook as **conservative
-   Unsloth defaults, not recovered from a prior run** — grepping this repo
-   (`grep -rni "lora\|unsloth\|learning_rate\|r=16" docs scripts notebooks`) and the HF
-   repo's README text turned up no recorded rank/lr/epoch/max_seq for the original
-   solar-pro4-distilled fine-tune:
+   Unsloth defaults, CHECKED not recovered (2026-10-17)** — the controller inspected the
+   private HF repo `carev01/qwen35-4b-graphrag` directly (README and pushed files): no
+   adapter config, no trainer config, no recorded rank/lr/epoch/max_seq for the original
+   solar-pro4-distilled run. There is nothing to recover; these are a stated starting
+   point:
    - `r=16`, `lora_alpha=16`, `lora_dropout=0.0`, targets = the standard
      q/k/v/o/gate/up/down projections, `use_gradient_checkpointing="unsloth"`.
    - `learning_rate=2e-4`, `num_train_epochs=2`, cosine schedule, `warmup_ratio=0.03`,
@@ -187,15 +188,35 @@ notebook's own section numbers:
    - Batch: `per_device_train_batch_size=1`, `gradient_accumulation_steps=16` (A100) or
      `32` (L4) at `max_seq_length=20480` with gradient checkpointing on — what fits;
      raise/lower on an OOM or on spare headroom.
-   Tune these against the held-out eval (section 7 below), not on faith.
-7. **Format + train** (sections 7-8) — chat-template rendering with thinking off
-   (`enable_thinking=False`, matching the production server's
-   `--default-chat-template-kwargs '{"enable_thinking":false}'`), `train_on_responses_only`
-   masking everything outside the assistant turn, `packing=False`, eval on val during
-   training.
-8. **Export** (section 9) — merged safetensors + Q8 GGUF, pushed to
-   `carev01/qwen35-4b-graphrag` revision `opus-distill-2026-10` (a NEW revision — the
-   current production revision is untouched and stays available for comparison).
+   Tune these against the held-out eval (this runbook's section 7, "Evaluate", below),
+   not on faith.
+7. **Format for training, aligned with the thinking-off SERVING prompt** (section 7) —
+   qwen3.5's chat template, called with `enable_thinking=False`, renders the GENERATION
+   PROMPT for an assistant turn as `"<|im_start|>assistant\n<think>\n\n</think>\n\n"`
+   (checked against `carev01/qwen35-4b-graphrag`'s own `chat_template.jinja`,
+   2026-10-17) — matching the production server's
+   `--default-chat-template-kwargs '{"enable_thinking":false}'`. The empty think block is
+   already part of the serving PROMPT, not something the model emits, so training text is
+   built as `apply_chat_template(messages[:-1], add_generation_prompt=True,
+   enable_thinking=False) + answer + "<|im_end|>\n"` — the SERVING prompt plus the
+   answer — never from a plain whole-conversation render, because the same template can
+   render a HISTORICAL assistant turn differently from the live generation prompt for
+   that turn. This mirrors `scripts/distill/chat_format.py` (also in this repo, covered
+   by `tests/unit/test_distill_chat_format.py` so the construction logic is tested
+   without a GPU); the notebook duplicates it inline rather than importing it, so Colab
+   needs no clone of this private repo.
+8. **Verify, fail loudly** (section 8) — before training starts, renders one example's
+   serving prompt independently and asserts the constructed training text equals
+   `serving_prompt + answer + "<|im_end|>\n"` exactly; an `AssertionError` here means
+   this tokenizer's real template does not match section 7's assumption and must be
+   investigated before spending any GPU time.
+9. **Train** (section 9) — `train_on_responses_only` with a `response_part` marker
+   derived from the tokenizer's own template (a live probe render), not hardcoded, so it
+   is exactly the serving-prompt suffix section 8 just verified; `packing=False`, eval on
+   val during training.
+10. **Export** (section 10) — merged safetensors + Q8 GGUF, pushed to
+    `carev01/qwen35-4b-graphrag` revision `opus-distill-2026-10` (a NEW revision — the
+    current production revision is untouched and stays available for comparison).
 
 ## 7. Evaluate (ask before any paid GPU serving step)
 

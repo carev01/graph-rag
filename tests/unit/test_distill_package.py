@@ -193,7 +193,7 @@ def test_push_to_hub_never_logs_the_token(tmp_path, monkeypatch, caplog):
     # call) -- what must never happen is logging it, which the assertion above covers.
 
 
-def test_push_to_hub_warns_when_not_private(tmp_path, monkeypatch, caplog):
+def test_push_to_hub_warns_when_public(tmp_path, monkeypatch, caplog):
     in_dir = _tiny_dataset(tmp_path)
     pkg.package(in_dir, tmp_path / "out.zip")
     monkeypatch.setenv("HF_TOKEN", "secret-token-value")
@@ -206,7 +206,20 @@ def test_push_to_hub_warns_when_not_private(tmp_path, monkeypatch, caplog):
     assert fake.created[0]["private"] is False
 
 
-def test_main_cli_with_hf_repo_calls_push(tmp_path, monkeypatch):
+def test_push_to_hub_private_logs_no_warning(tmp_path, monkeypatch, caplog):
+    in_dir = _tiny_dataset(tmp_path)
+    pkg.package(in_dir, tmp_path / "out.zip")
+    monkeypatch.setenv("HF_TOKEN", "secret-token-value")
+    fake = FakeHfApi()
+
+    with caplog.at_level(logging.WARNING):
+        pkg.push_to_hub(in_dir, "carev01/opus-distill-test", True, hf_api=fake)
+
+    assert not any("PUBLIC" in r.message for r in caplog.records)
+    assert fake.created[0]["private"] is True
+
+
+def test_main_cli_with_hf_repo_defaults_to_private(tmp_path, monkeypatch):
     in_dir = _tiny_dataset(tmp_path)
     out_zip = tmp_path / "out.zip"
     calls = []
@@ -215,10 +228,25 @@ def test_main_cli_with_hf_repo_calls_push(tmp_path, monkeypatch):
                             (in_dir, repo_id, private)))
 
     rc = pkg.main(["--in", str(in_dir), "--out", str(out_zip),
-                  "--hf-repo", "carev01/opus-distill-test", "--private"])
+                  "--hf-repo", "carev01/opus-distill-test"])
 
     assert rc == 0
     assert calls == [(in_dir, "carev01/opus-distill-test", True)]
+
+
+def test_main_cli_with_public_flag_passes_private_false(tmp_path, monkeypatch):
+    in_dir = _tiny_dataset(tmp_path)
+    out_zip = tmp_path / "out.zip"
+    calls = []
+    monkeypatch.setattr(pkg, "push_to_hub",
+                        lambda in_dir, repo_id, private, **kw: calls.append(
+                            (in_dir, repo_id, private)))
+
+    rc = pkg.main(["--in", str(in_dir), "--out", str(out_zip),
+                  "--hf-repo", "carev01/opus-distill-test", "--public"])
+
+    assert rc == 0
+    assert calls == [(in_dir, "carev01/opus-distill-test", False)]
 
 
 def test_main_cli_without_hf_repo_never_calls_push(tmp_path, monkeypatch):
