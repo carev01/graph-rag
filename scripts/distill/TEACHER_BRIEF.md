@@ -14,6 +14,18 @@ Core rules:
 - Give the best answer the prompt allows. Extract every entity and fact the chunk
   states; invent none.
 - If a line carries `rejection`, fix exactly what it names.
+
+Judgement calls, settled once so every teacher answers them the same way:
+
+- Fact text states what is configured, supported or required -- not the UI click-path
+  used to do it.
+- Edge dedup: a new fact that restates an existing fact in other words ("supports X"
+  vs "facilitates backups of X") IS a duplicate; a new fact that contains an existing
+  fact plus added detail (a number, a qualifier, a condition) is NOT.
+- Summaries: when updating an existing summary, drop its sentences that are about a
+  different entity.
+- An entity named only in a breadcrumb or section heading counts as mentioned only if
+  the body text also refers to it.
 - Echo each line's `ordinal` and `check` unchanged next to its `key`: they prove the
   answer is filed under the prompt it answers. An answer whose `ordinal`/`check` do
   not match its key's line is rejected as "answer filed under the wrong prompt".
