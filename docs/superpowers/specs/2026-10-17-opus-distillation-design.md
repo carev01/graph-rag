@@ -117,10 +117,18 @@ teacher answers and 300–400 subagent runs, which costs plan usage but no API m
 
 ## 7. Train
 
-qwen3.5-4b, Unsloth/TRL on vast.ai, as before (`docs/deploy/vast-gpu.md`), with context of at
-least 20k tokens. Starting hyperparameters come from the previous run. GPU rental costs a few
-dollars and needs user approval before renting. The result goes to a new private HF repo revision.
-The old model stays available for comparison.
+qwen3.5-4b, Unsloth/TRL, run by the user on **Google Colab** (user decision, 2026-10-17), with
+context of at least 20k tokens. Starting hyperparameters come from the previous run. The
+deliverables from this repo are:
+
+- a Colab notebook (`notebooks/distill_train.ipynb`) that mounts the dataset, trains with the
+  dataset's loss weights, and exports merged safetensors (plus a Q8 GGUF) to a new private HF
+  repo revision;
+- the train/val JSONL packaged for upload: a private HF dataset repo, or Google Drive, as the user
+  chooses at run time;
+- a short runbook.
+
+Nothing in this repo rents a GPU. The old model stays available for comparison.
 
 ## 8. Evaluate
 
@@ -128,8 +136,9 @@ Two evaluations:
 
 1. **Held-out agreement.** On the 20 held-out articles, compared with the teacher: validity rate
    (`eval_finetune.py`) and entity/fact agreement per prompt type.
-2. **End to end.** `scripts/extraction_proof.py` with the student serving the cheap tier (vLLM on
-   the rented GPU, thinking off). It is compared with the current cheap tier (solar-pro4) and the
+2. **End to end.** `scripts/extraction_proof.py` with the student serving the cheap tier (vLLM,
+   thinking off). The serving host is chosen at evaluation time: the user's Colab runtime exposed
+   over a tunnel, or the existing GGUF server, with user approval for any paid GPU. It is compared with the current cheap tier (solar-pro4) and the
    old fine-tune on the same articles. Metrics: foreign-unnamed-subject facts, grounding
    calls/dropped/injected/renamed, facts per article, and RestoresTo to each restore page's
    destination.
