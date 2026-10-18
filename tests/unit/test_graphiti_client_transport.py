@@ -238,7 +238,7 @@ def test_write_routing_and_write_sessions_are_refused():
 def test_every_query_and_session_is_read_routed(monkeypatch):
     from neo4j import READ_ACCESS, RoutingControl
     ro = ReadOnlyNeo4jDriver("bolt://localhost:1", "u", "p", database="db1")
-    inner = ro.client._driver
+    inner = ro.client._ReadOnlyAsyncDriver__driver     # the test reaches in deliberately
     seen: dict[str, Any] = {}
 
     async def _eq(query: str, **kwargs: Any) -> str:
@@ -260,6 +260,24 @@ def test_every_query_and_session_is_read_routed(monkeypatch):
     seen.clear()
     ro.client.session(database="db1")
     assert seen["session"]["default_access_mode"] == READ_ACCESS
+    asyncio.run(ro.close())
+
+
+def test_the_violation_is_a_runtime_error_never_an_os_error():
+    assert issubclass(ReadOnlyViolation, RuntimeError)
+    assert not issubclass(ReadOnlyViolation, OSError)
+
+
+def test_private_attributes_are_not_delegated():
+    ro = ReadOnlyNeo4jDriver("bolt://localhost:1", "u", "p")
+    session = ro.session()
+    for name in ("_run_transaction", "_session", "_connection"):
+        with pytest.raises(AttributeError):
+            getattr(session, name)
+    for name in ("_driver", "_pool", "_default_workspace_config"):
+        with pytest.raises(AttributeError):
+            getattr(ro.client, name)
+    assert callable(session.run) and callable(ro.client.verify_connectivity)  # public: delegated
     asyncio.run(ro.close())
 
 

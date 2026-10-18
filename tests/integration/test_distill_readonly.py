@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.utils.bulk_utils import add_nodes_and_edges_bulk
+from neo4j import WRITE_ACCESS
 from neo4j.exceptions import ClientError
 
 from scripts.distill.readonly_driver import ReadOnlyNeo4jDriver, ReadOnlyViolation
@@ -31,9 +32,13 @@ async def _count(driver) -> int:
         return rec["c"]
 
 
-async def _index_count(driver) -> int:
+async def _index_names(driver) -> set[str]:
     async with driver.session() as s:
-        return len([r async for r in await s.run("SHOW INDEXES")])
+        return {r["name"] async for r in await s.run("SHOW INDEXES YIELD name")}
+
+
+async def _index_count(driver) -> int:
+    return len(await _index_names(driver))
 
 
 @pytest_asyncio.fixture(loop_scope="module")
@@ -115,6 +120,23 @@ async def test_graphitis_final_bulk_save_is_refused(seeded, ro):
     assert await _count(seeded) == 1
 
 
+async def test_private_attributes_cannot_bypass_read_mode(seeded, ro):
+    """The review probe: the neo4j session's private _run_transaction(WRITE_ACCESS)
+    committed a node when __getattr__ delegated everything. Neither it nor the
+    unwrapped driver is reachable through the wrappers now."""
+    async def write(tx):
+        await (await tx.run("CREATE (:Probe {name: 'x'})")).consume()
+
+    async with ro.session() as s:
+        with pytest.raises(AttributeError):
+            await s._run_transaction(WRITE_ACCESS, None, write, (), {})
+    with pytest.raises(AttributeError):
+        ro.client._driver
+    with pytest.raises(AttributeError):
+        ro.session()._session
+    assert await _count(seeded) == 1
+
+
 async def test_explicit_index_build_is_refused(extract_driver, ro):
     before = await _index_count(extract_driver)
     with pytest.raises(ReadOnlyViolation):
@@ -125,12 +147,20 @@ async def test_explicit_index_build_is_refused(extract_driver, ro):
 async def test_control_graphitis_plain_driver_does_build_indices(extract_neo4j, extract_driver):
     """The control for test_construction_runs_no_index_build: the same construction
     with graphiti's own Neo4jDriver DOES build indices, so an unchanged count above
-    is evidence, not an artefact of timing. Runs last -- it writes indices."""
+    is evidence, not an artefact of timing. It writes indices, and drops them again."""
     from graphiti_core.driver.neo4j_driver import Neo4jDriver
-    before = await _index_count(extract_driver)
+    before = await _index_names(extract_driver)
     uri, user, password = extract_neo4j
     plain = Neo4jDriver(uri, user, password)
-    assert plain._init_task is not None
-    await plain._init_task
-    assert await _index_count(extract_driver) > before
-    await plain.close()
+    try:
+        assert plain._init_task is not None
+        await plain._init_task
+        assert len(await _index_names(extract_driver)) > len(before)
+    finally:
+        await plain.close()
+        # Drop what it built, so the "no index build" assertions above stay
+        # order-independent on this shared container.
+        async with extract_driver.session() as s:
+            for name in await _index_names(extract_driver) - before:
+                await (await s.run(f"DROP INDEX `{name}` IF EXISTS")).consume()
+        assert await _index_names(extract_driver) == before
