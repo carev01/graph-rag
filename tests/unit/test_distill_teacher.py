@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 from typing import Any
 
 import pytest
@@ -198,3 +200,78 @@ def test_a_stored_answer_parses_through_a_real_cheap_graphiti_client(tmp_path):
         assert out == ANSWER
     finally:
         CURRENT_PROMPT_NAME.reset(token)
+
+
+# --- Crash safety: a kill mid-write must never lose readable data or raise
+# out of AnswerStore()/pending() on restart. ---
+
+def test_a_truncated_last_line_of_answers_jsonl_is_tolerated(tmp_path, caplog):
+    good = json.dumps({"key": "k1", "answer": json.dumps(ANSWER), "meta": {}, "ts": "t"})
+    truncated = '{"key": "k2", "answ'  # no trailing newline: a kill mid-write
+    (tmp_path / "answers.jsonl").write_text(good + "\n" + truncated, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        store = AnswerStore(tmp_path)
+
+    assert store.get("k1") == json.dumps(ANSWER)
+    assert store.get("k2") is None
+    assert any("malformed last line" in r.message for r in caplog.records)
+
+
+def test_a_truncated_last_line_of_dropped_jsonl_is_tolerated(tmp_path, caplog):
+    good = json.dumps({"key": "k1", "reason": "bad json twice", "ts": "t"})
+    (tmp_path / "dropped.jsonl").write_text(good + "\n" + '{"key": "k2"', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        store = AnswerStore(tmp_path)
+
+    assert store.dropped_reason("k1") == "bad json twice"
+    assert store.dropped_reason("k2") is None
+
+
+def test_a_malformed_middle_line_of_answers_jsonl_raises_with_file_and_line(tmp_path):
+    bad = "{not valid json}"
+    good = json.dumps({"key": "k1", "answer": json.dumps(ANSWER), "meta": {}, "ts": "t"})
+    path = tmp_path / "answers.jsonl"
+    path.write_text(bad + "\n" + good + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"{re.escape(str(path))}:1"):
+        AnswerStore(tmp_path)
+
+
+def test_a_half_written_pending_file_is_skipped_not_raised(tmp_path, caplog):
+    store = AnswerStore(tmp_path)
+    (store.pending_dir / "halfwritten.json").write_text('{"prompt_name": "p", "mess',
+                                                         encoding="utf-8")
+    store.add_pending("good", {"prompt_name": "p", "messages": [], "response_format": None,
+                               "model": "m"})
+
+    with caplog.at_level(logging.WARNING):
+        result = store.pending()
+
+    assert [k for k, _ in result] == ["good"]
+    assert any("malformed pending file" in r.message for r in caplog.records)
+
+
+def test_add_pending_leaves_no_temp_files_behind(tmp_path):
+    store = AnswerStore(tmp_path)
+    store.add_pending("k1", {"prompt_name": "p", "messages": [], "response_format": None,
+                            "model": "m"})
+    assert list(store.pending_dir.glob("*.tmp")) == []
+    assert (store.pending_dir / "k1.json").exists()
+
+
+# --- note_asker / askers ---
+
+def test_note_asker_records_every_chunk_that_asked(tmp_path):
+    store = AnswerStore(tmp_path)
+    store.note_asker("k1", "chunk-a")
+    store.note_asker("k1", "chunk-b")
+    store.note_asker("k2", "chunk-a")
+
+    assert store.askers("k1") == ["chunk-a", "chunk-b"]
+    assert store.askers("k2") == ["chunk-a"]
+    assert store.askers("k3") == []
+
+    reloaded = AnswerStore(tmp_path)
+    assert reloaded.askers("k1") == ["chunk-a", "chunk-b"]

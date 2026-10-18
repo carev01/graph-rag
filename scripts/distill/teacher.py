@@ -21,17 +21,46 @@ that question/answer exchange:
 - `root/dropped.jsonl` -- append-only log of keys the validator gave up on
   (wrong schema twice, say). A dropped key must never silently re-enter the
   pending queue; replaying it raises `TeacherDropped` instead.
+- `root/askers.jsonl` -- append-only log of which chunk asked for which key
+  (`note_asker`), so a prompt answered once can be traced back to every chunk
+  that needed it.
 
 `CURRENT_PROMPT_NAME` (graph_extract.usage) is the default source for the
 request's `prompt_name`: the dedup guard sets it around every graphiti LLM
 call, so a pending request always carries the prompt type that produced it
 even though `TeacherTransport` itself has no idea which graphiti prompt is
 in flight -- it only ever sees the raw chat-completions kwargs.
+
+**Crash safety.** The harness is killed mid-run routinely (a bad round, a
+runaway subagent). Three append-only logs and one directory of small files
+must all survive that:
+
+- A pending file is written atomically (`tempfile.mkstemp` in the same
+  directory, `fsync`, `os.replace`) so a reader never observes a partially
+  written file at the real path; a stray `.tmp` file from a kill between the
+  write and the `replace` is invisible to `pending()` (it globs `*.json`,
+  never the `.tmp` suffix) and is simply orphaned.
+- Every `answers.jsonl`/`dropped.jsonl`/`askers.jsonl` append writes its whole
+  line in one `write()` call, then `flush()` + `os.fsync()`, so a kill cannot
+  land mid-line (the OS only ever has a fully-formed line buffered, or none).
+  A kill *between* two appends still leaves the file ending exactly after the
+  last trailing newline of the last completed append -- so a malformed line
+  can only ever be the last line, and only there does `_load` tolerate it.
+- `_load` skips (and logs a WARNING naming the file and line number) a
+  malformed *last* line -- a truncated `fsync`'d-up-to write. A malformed
+  line anywhere else is real corruption, not a crash artifact, and raises
+  with the file and line number rather than silently losing data.
+- `pending()` skips (and logs) a malformed pending file rather than raising:
+  it is simply re-recorded as pending on the harness's next round, since the
+  request that would have produced it will be re-asked.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import tempfile
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -40,6 +69,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from graph_extract.usage import CURRENT_PROMPT_NAME
+
+logger = logging.getLogger(__name__)
 
 
 class TeacherNeeded(Exception):
@@ -87,25 +118,51 @@ class AnswerStore:
         self.pending_dir = self.root / "pending"
         self.answers_path = self.root / "answers.jsonl"
         self.dropped_path = self.root / "dropped.jsonl"
+        self.askers_path = self.root / "askers.jsonl"
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._answers: dict[str, str] = {}
         self._dropped: dict[str, str] = {}
+        self._askers: dict[str, list[str]] = {}
         self._load()
 
+    def _load_jsonl(self, path: Path) -> list[dict]:
+        """Every record of an append-only log, tolerating a crash mid-write.
+
+        A write always lands as one complete `write()` call followed by
+        `fsync`, so a kill can only ever truncate the LAST line of the file --
+        everything before it is a sequence of fully-written, newline-terminated
+        lines. A malformed last line is therefore a crash artifact: skipped,
+        logged, and the rest of the file still loads. A malformed line
+        anywhere else cannot be explained by a crash and is raised as real
+        corruption, naming the file and 1-based line number.
+        """
+        if not path.exists():
+            return []
+        lines = path.read_text(encoding="utf-8").splitlines()
+        records = []
+        last = len(lines) - 1
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                if i == last:
+                    logger.warning(
+                        "skipping malformed last line of %s:%d (crash mid-write): %s",
+                        path, i + 1, exc)
+                    continue
+                raise ValueError(f"malformed line in {path}:{i + 1}") from exc
+        return records
+
     def _load(self) -> None:
-        if self.answers_path.exists():
-            for line in self.answers_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                rec = json.loads(line)
-                self._answers[rec["key"]] = rec["answer"]
-        if self.dropped_path.exists():
-            for line in self.dropped_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                rec = json.loads(line)
-                self._dropped[rec["key"]] = rec["reason"]
+        for rec in self._load_jsonl(self.answers_path):
+            self._answers[rec["key"]] = rec["answer"]
+        for rec in self._load_jsonl(self.dropped_path):
+            self._dropped[rec["key"]] = rec["reason"]
+        for rec in self._load_jsonl(self.askers_path):
+            self._askers.setdefault(rec["key"], []).append(rec["chunk_id"])
 
     def key_for(self, messages: list[dict], response_format: dict | None) -> str:
         canonical = _canonical_json({"messages": messages, "response_format": response_format})
@@ -117,38 +174,79 @@ class AnswerStore:
     def dropped_reason(self, key: str) -> str | None:
         return self._dropped.get(key)
 
+    def askers(self, key: str) -> list[str]:
+        return list(self._askers.get(key, []))
+
     def _pending_path(self, key: str) -> Path:
         return self.pending_dir / f"{key}.json"
+
+    def _append_jsonl(self, path: Path, record: dict) -> None:
+        """One `write()` of the whole line, then `flush` + `fsync`: the OS
+        either has the complete line buffered or it doesn't, so a kill can
+        never leave a half-written line in the file (see `_load_jsonl`)."""
+        line = json.dumps(record, default=str) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
     def put(self, key: str, answer_json: str, meta: dict) -> None:
         record = {"key": key, "answer": answer_json, "meta": meta, "ts": _utcnow()}
         with self._lock:
-            with open(self.answers_path, "a", buffering=1, encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+            self._append_jsonl(self.answers_path, record)
             self._answers[key] = answer_json
             self._pending_path(key).unlink(missing_ok=True)
 
     def add_pending(self, key: str, request: dict) -> None:
+        """Idempotent and atomic: write a temp file in `pending_dir`, fsync it,
+        then `os.replace` it onto the real path. `pending()` only ever globs
+        `*.json`, so a stray temp file from a kill between the write and the
+        replace is never mistaken for a pending request."""
         path = self._pending_path(key)
         with self._lock:
             if path.exists():
                 return
-            path.write_text(json.dumps(request, sort_keys=True, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+            fd, tmp_name = tempfile.mkstemp(dir=self.pending_dir, prefix=f".{key}.",
+                                            suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(request, sort_keys=True, ensure_ascii=False, indent=2))
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
 
     def pending(self) -> list[tuple[str, dict]]:
         out = []
         for path in sorted(self.pending_dir.glob("*.json")):
-            out.append((path.stem, json.loads(path.read_text(encoding="utf-8"))))
+            try:
+                out.append((path.stem, json.loads(path.read_text(encoding="utf-8"))))
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "skipping malformed pending file %s (crash mid-write); it will be "
+                    "re-recorded on the next round's replay: %s", path, exc)
         return out
 
     def drop(self, key: str, reason: str) -> None:
         record = {"key": key, "reason": reason, "ts": _utcnow()}
         with self._lock:
-            with open(self.dropped_path, "a", buffering=1, encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+            self._append_jsonl(self.dropped_path, record)
             self._dropped[key] = reason
             self._pending_path(key).unlink(missing_ok=True)
+
+    def note_asker(self, key: str, chunk_id: str) -> None:
+        """Record that `chunk_id` asked for `key` -- called by the harness's
+        round runner every time a chunk's replay hits this prompt, so one
+        answered key can be traced back to every chunk that needed it."""
+        record = {"key": key, "chunk_id": chunk_id, "ts": _utcnow()}
+        with self._lock:
+            self._append_jsonl(self.askers_path, record)
+            self._askers.setdefault(key, []).append(chunk_id)
 
 
 def _fake_completion(answer_json: str, *, model: str) -> SimpleNamespace:
