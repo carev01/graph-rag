@@ -53,14 +53,13 @@ fact narrows scope; summaries drop sentences about other entities; breadcrumb-on
 need a body mention; always include the documented product in extract_text; a product the
 chunk names is the fact subject, the documented product only for unnamed facts.
 
-## Finding outside the distillation
+## Veeam Agent chunks
 
 The structural chain files the Veeam Agent for Microsoft Windows / Linux document sets under
-the product "Veeam Backup & Replication", so DOCUMENT CONTEXT (and the grounding gate's
-documented product) says VBR for Agent chunks. Production attributes those chunks to VBR
-too. The teacher brief now makes the named product the fact subject, but the gate still
-injects VBR as an entity on those chunks. Worth a taxonomy fix upstream or a source-level
-product override.
+the product "Veeam Backup & Replication", so DOCUMENT CONTEXT names VBR for Agent chunks.
+That is correct: the Agents are VBR components (standalone use is rare), so attributing those
+chunks to VBR and the grounding gate adding VBR as an entity are intended. The brief's
+subject rule still makes a product the chunk names (the Agent) the subject of its facts.
 
 ## Dataset
 
@@ -74,6 +73,6 @@ dedupe_nodes) against 34/25/18/13/10%. The builder's "tokens%" column reports fu
 share, which is why it looks far off. Train is ~16.3M tokens per epoch; `resolve_edge`
 records are repeated 11×.
 
-Package: `dist/ft-opus.zip` (sha256 `53e77ae05f1bf41760251036eb897d0793ef4460d54fe4440968e8e145a08e91`),
+Pushed to the private HF dataset repo `carev01/ft-opus-distill` (train/val/sample/MANIFEST; anonymous access 401). Package: `dist/ft-opus.zip` (sha256 `53e77ae05f1bf41760251036eb897d0793ef4460d54fe4440968e8e145a08e91`),
 MANIFEST at commit `ad298e7`. Next: training on Colab (`notebooks/distill_train.ipynb`),
 then the held-out and end-to-end evaluations of spec §8.
