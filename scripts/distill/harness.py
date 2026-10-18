@@ -151,7 +151,6 @@ FINAL_SAVE_FUNCTION = "add_nodes_and_edges_bulk"
 NODE_DEDUP_PROMPT_NAME = "dedupe_nodes.nodes"
 SELF_MATCH_PROMPTS = (NODE_DEDUP_PROMPT_NAME, DEDUP_PROMPT_NAME)
 STATES = ("pending", "complete", "dropped", "error")
-FINAL_STATES = frozenset({"complete", "dropped"})
 # How long stray graphiti tasks (siblings of the call that raised, still running
 # inside an asyncio.gather) may take to finish before they are cancelled.
 DRAIN_TIMEOUT_SECONDS = 60.0
@@ -477,6 +476,9 @@ def harness_settings(base: ExtractSettings, store_root: Path) -> ExtractSettings
     - contradictions as production runs them (detection off, suppression on) and no
       strong-tier dedup retry -- a differing environment value is overridden, with
       a WARNING;
+    - the cheap tier's cache layout ON (`cheap_llm_cache_layout`, production's
+      CHEAP_LLM_CACHE_LAYOUT=true): with it off every capture is "unmoved" and the
+      student trains on a layout production never sends it in steady state;
     - NO real API key on the cheap tier or the reranker: `cheap_llm_api_key` is the
       placeholder `NO_API_KEY` and `rerank_api_key=""`. The LLM transport is the fake
       `TeacherTransport`, and graphiti's cross-encoder -- built by `build_graphiti`
@@ -486,7 +488,8 @@ def harness_settings(base: ExtractSettings, store_root: Path) -> ExtractSettings
       client whose api_key is empty, and the cross-encoder constructs one.)"""
     for name, want in (("ingest_detect_contradictions", False),
                        ("ingest_same_pair_contradictions", False),
-                       ("dedup_retry_on_strong", False)):
+                       ("dedup_retry_on_strong", False),
+                       ("cheap_llm_cache_layout", True)):
         if getattr(base, name) != want:
             logger.warning("overriding %s=%s from the environment to %s (production's "
                            "documented value)", name, getattr(base, name), want)
@@ -497,6 +500,7 @@ def harness_settings(base: ExtractSettings, store_root: Path) -> ExtractSettings
         ingest_detect_contradictions=False,
         ingest_same_pair_contradictions=False,
         dedup_retry_on_strong=False,
+        cheap_llm_cache_layout=True,
         cheap_llm_api_key=NO_API_KEY,
         rerank_api_key=""))
 
@@ -820,9 +824,17 @@ def _parse_article_chunks(art: ArticleChunks, round_no: int, log: RoundLog,
     art.chunks = good
 
 
+def skip_in_round(state: str | None, *, replay_final: bool) -> bool:
+    """A `dropped` chunk is never replayed; a `complete` one only with `replay_final`
+    (which recaptures its stored answers, e.g. after a capture-affecting fix)."""
+    if state == "dropped":
+        return True
+    return state == "complete" and not replay_final
+
+
 async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
                     settings: ExtractSettings, store: AnswerStore, log: RoundLog,
-                    read: Any) -> RoundSummary:
+                    read: Any, replay_final: bool = False) -> RoundSummary:
     round_no = log.next_round()
     latest = log.latest_states()
     pending_before = len(store.pending())
@@ -843,7 +855,8 @@ async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
                            sa.vendor, sa.product)
         for chunk in art.chunks:
             chunk_id = f"{sa.article_id}:{chunk.chunk_index}"
-            if latest.get(chunk_id, {}).get("state") in FINAL_STATES:
+            if skip_in_round(latest.get(chunk_id, {}).get("state"),
+                             replay_final=replay_final):
                 summary.skipped_final += 1
                 continue
             rec = await run_chunk(graphiti=graphiti, settings=settings, store=store, log=log,
@@ -1529,7 +1542,8 @@ async def _cmd_round(args: argparse.Namespace) -> int:
     read = _read_driver(settings)
     try:
         summary = await run_round(articles, graphiti=graphiti, settings=settings,
-                                  store=store, log=log, read=read)
+                                  store=store, log=log, read=read,
+                                  replay_final=args.replay_final)
     finally:
         await read.close()
         await graphiti.close()
@@ -1555,6 +1569,8 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--store", type=Path, required=True)
     r.add_argument("--articles", type=int, default=None,
                    help="only the first N articles of the sample (pilot)")
+    r.add_argument("--replay-final", action="store_true",
+                   help="also replay complete chunks (recapture their stored answers)")
     st = sub.add_parser("status", help="chunk states, pending prompts, self-matches")
     st.add_argument("--store", type=Path, required=True)
     b = sub.add_parser("batches", help="write the teacher's pending-request batch files")

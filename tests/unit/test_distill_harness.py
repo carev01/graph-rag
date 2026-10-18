@@ -741,6 +741,7 @@ def test_harness_settings_overrides(tmp_path: Path) -> None:
     assert s.ingest_detect_contradictions is False
     assert s.ingest_same_pair_contradictions is False
     assert s.dedup_retry_on_strong is False
+    assert s.cheap_llm_cache_layout is True
 
 
 # --- batches / intake / review-sample / export (task 4) -------------------------------
@@ -1287,3 +1288,11 @@ def test_unqueue_stale_drops_only_prompts_no_replayed_chunk_asked(tmp_path):
     n = h.unqueue_stale(store, ran={"a:0"}, asked_now={"live"})
     assert n == 1
     assert sorted(k for k, _ in store.pending()) == ["elsewhere", "live"]
+
+
+def test_skip_in_round_replays_complete_only_on_request():
+    assert h.skip_in_round("dropped", replay_final=True) is True
+    assert h.skip_in_round("complete", replay_final=False) is True
+    assert h.skip_in_round("complete", replay_final=True) is False
+    assert h.skip_in_round("pending", replay_final=False) is False
+    assert h.skip_in_round(None, replay_final=False) is False
