@@ -177,6 +177,13 @@ class AnswerStore:
     def askers(self, key: str) -> list[str]:
         return list(self._askers.get(key, []))
 
+    def answered_keys(self) -> list[str]:
+        return sorted(self._answers)
+
+    def dropped_keys(self) -> dict[str, str]:
+        """key -> the reason it was dropped."""
+        return dict(self._dropped)
+
     def _pending_path(self, key: str) -> Path:
         return self.pending_dir / f"{key}.json"
 
