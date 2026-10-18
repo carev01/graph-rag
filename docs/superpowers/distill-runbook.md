@@ -58,9 +58,10 @@ uv run --extra dev python -m scripts.distill.harness batches \
 # scripts/distill/TEACHER_BRIEF.md. Each teacher writes DIR/batches/round-N/batch-XXX.answers.jsonl.
 
 # Validate and store the answers (accepted -> store.put; a first rejection is re-queued
-# with its reason; a second rejection is dropped):
+# with its reason; a second rejection is dropped). --sample is required: it is how
+# intake resolves each key's documented product/vendor for the grounding check.
 uv run --extra dev python -m scripts.distill.harness intake \
-    --store DIR/store --answers DIR/batches/round-N/
+    --store DIR/store --answers DIR/batches/round-N/ --sample DIR/sample.json
 ```
 
 Repeat **round -> batches -> teacher -> intake** until `status` shows every chunk
@@ -75,6 +76,18 @@ section. Approval gate: the pilot's validity/re-ask rates and reviewer findings,
 spending teacher time on the full sample.
 
 ## 3. Review and export
+
+Run one more `round` first. `export` reads `<store>/capture.jsonl`, and a capture
+record for a key only gets written when a round REPLAYS it through the transport
+(`teacher.py`'s module docstring) -- `intake` accepting a key does not itself produce
+one. Exporting right after `intake`, with no further round, under-counts (`export`'s
+`missing` tally catches this and the command exits non-zero unless `--allow-missing`
+is passed):
+
+```bash
+uv run --extra dev python -m scripts.distill.harness round \
+    --sample DIR/sample.json --store DIR/store
+```
 
 **As specified in Task 4:**
 

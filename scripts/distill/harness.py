@@ -896,35 +896,122 @@ class IntakeSummary:
     requeued: int = 0           # first rejection: back on the teacher's queue
     dropped: int = 0            # second rejection: given up on
     skipped: int = 0            # answer for a key no longer pending (already resolved)
+    unanswered: int = 0         # a batch key with no parseable answer line at all
 
 
 def _answer_files(answers_dir: Path) -> list[Path]:
     return sorted(answers_dir.glob("*.answers.jsonl"))
 
 
-def _article_for_key(store: AnswerStore, articles_by_id: dict[str, SampleArticle],
-                     key: str) -> SampleArticle | None:
-    """The sample article behind one of this key's askers (`harness.run_chunk` names
-    a chunk id `"<article_id>:<chunk_index>"`), or None when no asker's article is in
-    the sample (grounding is then skipped, never guessed)."""
-    for chunk_id in store.askers(key):
+def _batch_files(answers_dir: Path) -> list[Path]:
+    """The `batches`-written request files sitting alongside the teacher's
+    `*.answers.jsonl` replies in the same directory -- everything ending in
+    `.jsonl` that is NOT an answers file."""
+    return sorted(p for p in answers_dir.glob("*.jsonl") if not p.name.endswith(".answers.jsonl"))
+
+
+def _requested_keys(answers_dir: Path) -> set[str]:
+    """Every key `batches` asked for in this round, read from our OWN files
+    (`_read_jsonl`'s strict parser is fine here -- we wrote them)."""
+    return {rec["key"] for path in _batch_files(answers_dir) for rec in _read_jsonl(path)}
+
+
+def _read_answer_lines(path: Path) -> list[dict]:
+    """A teacher's `*.answers.jsonl` file, TOLERANTLY -- this is untrusted LLM output,
+    never the harness's own, so it must never raise: a line that is not itself valid
+    JSON, or is valid JSON but not an object carrying both "key" and "answer", is
+    skipped with a WARNING naming the file and line number (a markdown code fence, a
+    blank line, or a line of prose all fail this check harmlessly and are skipped the
+    same way). An "answer" that is itself a JSON-encoded string (double-encoded) is
+    decoded once; if that inner string is not valid JSON it is passed through as-is --
+    `validate_answer`'s schema check, not this reader, is what rejects a bad answer
+    shape."""
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for i, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("intake: %s:%d is not valid JSON; skipped: %.200r",
+                           path, i + 1, line)
+            continue
+        if not isinstance(rec, dict) or "key" not in rec or "answer" not in rec:
+            logger.warning(
+                'intake: %s:%d is not a {"key", "answer"} object; skipped: %.200r',
+                path, i + 1, line)
+            continue
+        answer = rec["answer"]
+        if isinstance(answer, str):
+            try:
+                answer = json.loads(answer)
+            except json.JSONDecodeError:
+                pass          # left as the raw string; validate_answer rejects it
+            else:
+                rec = {**rec, "answer": answer}
+        out.append(rec)
+    return out
+
+
+def _articles_for_key(store: AnswerStore, articles_by_id: dict[str, SampleArticle],
+                      key: str) -> list[SampleArticle]:
+    """Every DISTINCT (vendor, product) context behind this key's askers, in a
+    deterministic order (the asker chunk ids sorted first) -- almost always one, but a
+    prompt with identical wire bytes asked by chunks of different articles can carry
+    more than one. `harness.run_chunk` names a chunk id `"<article_id>:<chunk_index>"`.
+    An asker whose article is not in the sample contributes nothing (grounding is
+    skipped for it, never guessed)."""
+    seen: dict[tuple[str, str], SampleArticle] = {}
+    for chunk_id in sorted(store.askers(key)):
         article = articles_by_id.get(chunk_id.rsplit(":", 1)[0])
         if article is not None:
-            return article
-    return None
+            seen.setdefault((article.vendor, article.product), article)
+    return list(seen.values())
+
+
+def _validate_across_contexts(prompt_name: str, messages: list, answer: Any,
+                              articles: list[SampleArticle]) -> list[str]:
+    """`validate_answer` against every distinct context in `articles` (or just the
+    ungrounded context when `articles` is empty) -- accepted only when EVERY context
+    accepts (conservative). On any rejection, the combined, de-duplicated reasons from
+    every context, prefixed with the multi-product case when there was one."""
+    contexts = articles or [None]
+    per_context: list[list[str]] = []
+    for article in contexts:
+        ctx = (build_grounding_context(prompt_name, messages, product=article.product,
+                                       vendor=article.vendor)
+              if article is not None else None)
+        per_context.append(validate_answer(prompt_name, messages, answer, grounding_ctx=ctx))
+    combined = [r for reasons in per_context for r in reasons]
+    if not combined:
+        return []
+    reasons = list(dict.fromkeys(combined))      # de-duplicated, order preserved
+    if len(articles) > 1:
+        where = [(a.vendor, a.product) for a in articles]
+        reasons = [f"multi-product key ({len(articles)} contexts {where}): " + reasons[0],
+                  *reasons[1:]]
+    return reasons
 
 
 def run_intake(store_root: Path, answers_dir: Path, sample_path: Path) -> IntakeSummary:
-    """Validate every `{"key","answer"}` line of `answers_dir`'s `*.answers.jsonl`
-    files against the request still pending under that key."""
+    """Validate every teacher-answered key in `answers_dir`'s `*.answers.jsonl` files
+    against the request still pending under that key. A key `batches` asked for in
+    this round (`_requested_keys`) that never turns up as a parseable, correctly-shaped
+    answer line in any of them stays pending untouched -- it is simply re-batched next
+    round -- and is counted as `unanswered`."""
     store = AnswerStore(store_root)
     pending = dict(store.pending())
     rejections = _rejections_by_key(store_root)
     articles_by_id = {a.article_id: a for a in load_sample(sample_path)}
     summary = IntakeSummary()
+    found_keys: set[str] = set()
     for path in _answer_files(answers_dir):
-        for rec in _read_jsonl(path):
+        for rec in _read_answer_lines(path):
             key, answer = rec["key"], rec["answer"]
+            found_keys.add(key)
             request = pending.get(key)
             if request is None:
                 summary.skipped += 1
@@ -933,11 +1020,13 @@ def run_intake(store_root: Path, answers_dir: Path, sample_path: Path) -> Intake
                 continue
             prompt_name = str(request.get("prompt_name"))
             messages = request.get("messages") or []
-            article = _article_for_key(store, articles_by_id, key)
-            grounding_ctx = (build_grounding_context(
-                prompt_name, messages, product=article.product, vendor=article.vendor)
-                if article is not None else None)
-            reasons = validate_answer(prompt_name, messages, answer, grounding_ctx=grounding_ctx)
+            articles = _articles_for_key(store, articles_by_id, key)
+            if len(articles) > 1:
+                logger.warning(
+                    "intake: %s has askers across %d distinct (vendor, product) "
+                    "contexts: %s", key, len(articles),
+                    [(a.vendor, a.product) for a in articles])
+            reasons = _validate_across_contexts(prompt_name, messages, answer, articles)
             if not reasons:
                 store.put(key, json.dumps(answer, ensure_ascii=False),
                          {"prompt_name": prompt_name, "messages": messages})
@@ -953,6 +1042,7 @@ def run_intake(store_root: Path, answers_dir: Path, sample_path: Path) -> Intake
                 summary.requeued += 1
             _append_rejection(store_root, key, reason=reason, previous_answer=answer)
             rejections.setdefault(key, []).append({"reason": reason, "previous_answer": answer})
+    summary.unanswered = len(_requested_keys(answers_dir) - found_keys)
     return summary
 
 
@@ -1134,6 +1224,8 @@ def _parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("export", help="copy accepted keys' capture records")
     ex.add_argument("--store", type=Path, required=True)
     ex.add_argument("--out", type=Path, required=True)
+    ex.add_argument("--allow-missing", action="store_true",
+                    help="exit 0 even when some accepted keys have no capture record yet")
     return p
 
 
@@ -1147,7 +1239,8 @@ def _cmd_batches(args: argparse.Namespace) -> int:
 def _cmd_intake(args: argparse.Namespace) -> int:
     summary = run_intake(args.store, args.answers, args.sample)
     print(f"intake: accepted {summary.accepted}, requeued {summary.requeued}, "
-         f"dropped {summary.dropped}, skipped {summary.skipped}")
+         f"dropped {summary.dropped}, skipped {summary.skipped}, "
+         f"unanswered {summary.unanswered}")
     return 0
 
 
@@ -1162,6 +1255,9 @@ def _cmd_export(args: argparse.Namespace) -> int:
     print(f"exported {summary.exported} record(s) to {args.out} "
          f"(missing {summary.missing}); by prompt: {dict(summary.by_prompt)}; "
          f"by layout: {dict(summary.by_layout)}")
+    if summary.missing and not args.allow_missing:
+        print("hint: run one more `round` to replay accepted answers before export")
+        return 1
     return 0
 
 

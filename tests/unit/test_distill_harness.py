@@ -876,3 +876,133 @@ def test_review_sample_is_deterministic(tmp_path: Path) -> None:
     assert lines1 == lines2
     assert lines1                               # some non-trivial fraction got sampled
     assert all({"key", "prompt_name", "messages", "answer"} <= set(line) for line in lines1)
+
+
+# --- Fix round 1: tolerant intake parsing, multi-product keys, export fails loudly ------
+
+def _other_article(article_id: str) -> SampleArticle:
+    return SampleArticle(article_id=article_id, vendor="OtherVendor", product="OtherProduct",
+                         source="Other Source", split="train",
+                         stratum="OtherVendor / OtherProduct")
+
+
+def test_intake_tolerates_a_fenced_file_double_encoding_and_a_garbage_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AnswerStore(tmp_path / "store")
+    sample_path = tmp_path / "sample.json"
+    _write_sample_json(sample_path, [_article("art-1")])
+    request_messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    request = {"prompt_name": "extract_edges.edge", "messages": request_messages,
+              "response_format": {}, "model": "m"}
+    for key in ("k1", "k2", "k3"):
+        store.add_pending(key, request)
+        store.note_asker(key, "art-1:0")
+    monkeypatch.setattr(h, "validate_answer", lambda *a, **kw: [])
+
+    answers_dir = tmp_path / "round-1"
+    answers_dir.mkdir()
+    # the batch file this round asked for -- k3 never gets a parseable answer line.
+    (answers_dir / "batch-000.jsonl").write_text(
+        "".join(json.dumps({"key": k, "prompt_name": "extract_edges.edge",
+                           "messages": request_messages, "response_schema": {}}) + "\n"
+               for k in ("k1", "k2", "k3")), encoding="utf-8")
+    (answers_dir / "batch-000.answers.jsonl").write_text(
+        "```jsonl\n"
+        + json.dumps({"key": "k1", "answer": {"ok": 1}}) + "\n"
+        + "not even json\n"
+        + json.dumps({"key": "k2", "answer": json.dumps({"ok": 2})}) + "\n"     # double-encoded
+        + "```\n"
+        + "Thanks, let me know if anything else is needed!\n",
+        encoding="utf-8")
+
+    summary = h.run_intake(store.root, answers_dir, sample_path)
+    assert (summary.accepted, summary.unanswered) == (2, 1)
+    store = AnswerStore(store.root)
+    assert json.loads(store.get("k1")) == {"ok": 1}
+    assert json.loads(store.get("k2")) == {"ok": 2}    # decoded once, not left a JSON string
+    assert store.get("k3") is None
+    assert [k for k, _ in store.pending()] == ["k3"]
+
+
+def test_intake_a_whole_fenced_file_still_ingests_every_answer(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch,
+                                                                ) -> None:
+    store = AnswerStore(tmp_path / "store")
+    sample_path = tmp_path / "sample.json"
+    _write_sample_json(sample_path, [_article("art-1")])
+    request = {"prompt_name": "extract_edges.edge",
+              "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+              "response_format": {}, "model": "m"}
+    for key in ("k1", "k2"):
+        store.add_pending(key, request)
+        store.note_asker(key, "art-1:0")
+    monkeypatch.setattr(h, "validate_answer", lambda *a, **kw: [])
+
+    answers_dir = tmp_path / "round-1"
+    answers_dir.mkdir()
+    (answers_dir / "batch-000.answers.jsonl").write_text(
+        "```jsonl\n"
+        + json.dumps({"key": "k1", "answer": {"ok": 1}}) + "\n"
+        + json.dumps({"key": "k2", "answer": {"ok": 2}}) + "\n"
+        + "```\n", encoding="utf-8")
+
+    summary = h.run_intake(store.root, answers_dir, sample_path)
+    assert summary.accepted == 2
+    store = AnswerStore(store.root)
+    assert store.get("k1") is not None and store.get("k2") is not None
+
+
+def test_articles_for_key_sorts_askers_and_deduplicates_by_vendor_product(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    store.note_asker("k", "art-2:3")
+    store.note_asker("k", "art-1:5")
+    store.note_asker("k", "art-1:0")      # same article as art-1:5 -> one context
+    articles_by_id = {"art-1": _article("art-1"), "art-2": _other_article("art-2")}
+    result = h._articles_for_key(store, articles_by_id, "k")
+    assert [(a.vendor, a.product) for a in result] == [
+        (VENDOR, PRODUCT), ("OtherVendor", "OtherProduct")]
+
+
+def test_intake_accepts_a_multi_product_key_only_if_every_context_accepts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AnswerStore(tmp_path / "store")
+    sample_path = tmp_path / "sample.json"
+    _write_sample_json(sample_path, [_article("art-1"), _other_article("art-2")])
+    messages = [{"role": "system", "content": "sys"},
+               {"role": "user", "content": "<TEXT>\nSome chunk text.\n</TEXT>\n"}]
+    request = {"prompt_name": "extract_nodes.extract_text", "messages": messages,
+              "response_format": {}, "model": "m"}
+    store.add_pending("km", request)
+    store.note_asker("km", "art-1:0")
+    store.note_asker("km", "art-2:0")
+
+    def fake_validate(prompt_name: str, msgs: list, answer: dict, *,
+                      grounding_ctx: Any = None) -> list[str]:
+        if grounding_ctx is not None and grounding_ctx.product == "OtherProduct":
+            return ["rejected for OtherProduct"]
+        return []
+
+    monkeypatch.setattr(h, "validate_answer", fake_validate)
+    answers_dir = tmp_path / "round-1"
+    answers_dir.mkdir()
+    (answers_dir / "batch-000.answers.jsonl").write_text(
+        json.dumps({"key": "km", "answer": {"extracted_entities": []}}) + "\n", encoding="utf-8")
+
+    summary = h.run_intake(store.root, answers_dir, sample_path)
+    assert summary.accepted == 0 and summary.requeued == 1
+    rejections = h._rejections_by_key(store.root)
+    assert "multi-product key" in rejections["km"][0]["reason"]
+    assert "OtherProduct" in rejections["km"][0]["reason"]
+
+
+def test_export_cli_fails_loudly_when_incomplete_unless_allow_missing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    store = AnswerStore(tmp_path / "store")
+    store.put("ka", json.dumps({"x": 1}), {"prompt_name": "extract_edges.edge"})
+    out_path = tmp_path / "out.jsonl"
+    rc = h.main(["export", "--store", str(store.root), "--out", str(out_path)])
+    assert rc == 1
+    assert "run one more `round`" in capsys.readouterr().out
+    rc2 = h.main(["export", "--store", str(store.root), "--out", str(out_path),
+                 "--allow-missing"])
+    assert rc2 == 0
