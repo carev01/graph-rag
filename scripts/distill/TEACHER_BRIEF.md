@@ -22,6 +22,9 @@ Judgement calls, settled once so every teacher answers them the same way:
 - Edge dedup: a new fact that restates an existing fact in other words ("supports X"
   vs "facilitates backups of X") IS a duplicate; a new fact that contains an existing
   fact plus added detail (a number, a qualifier, a condition) is NOT.
+  A new fact that states only part of an existing fact, adding nothing, IS a duplicate --
+  unless the existing fact narrows the claim's scope (to a plan, edition, workload or
+  condition) and the new fact states it generally: then it is NOT.
 - Summaries: when updating an existing summary, drop its sentences that are about a
   different entity.
 - An entity named only in a breadcrumb or section heading counts as mentioned only if
