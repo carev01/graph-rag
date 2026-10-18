@@ -1276,3 +1276,14 @@ def test_ensure_fixed_hash_seed_noop_when_pinned():
     h.ensure_fixed_hash_seed({"PYTHONHASHSEED": h.HASH_SEED}, lambda *a: calls.append(a))
     assert calls == []
 
+
+
+def test_unqueue_stale_drops_only_prompts_no_replayed_chunk_asked(tmp_path):
+    store = AnswerStore(tmp_path / "store")
+    for key, chunks in {"stale": ["a:0"], "live": ["a:0"], "elsewhere": ["a:0", "b:0"]}.items():
+        store.add_pending(key, {"prompt_name": "extract_edges.edge", "messages": []})
+        for c in chunks:
+            store.note_asker(key, c)
+    n = h.unqueue_stale(store, ran={"a:0"}, asked_now={"live"})
+    assert n == 1
+    assert sorted(k for k, _ in store.pending()) == ["elsewhere", "live"]

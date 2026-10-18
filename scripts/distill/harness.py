@@ -707,6 +707,7 @@ class RoundSummary:
     skipped_final: int = 0
     articles_missing: list[str] = field(default_factory=list)
     new_pending: int = 0
+    stale_unqueued: int = 0
 
 
 async def run_chunk(*, graphiti: Graphiti, settings: ExtractSettings, store: AnswerStore,
@@ -826,6 +827,8 @@ async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
     latest = log.latest_states()
     pending_before = len(store.pending())
     summary = RoundSummary(round=round_no)
+    ran: set[str] = set()
+    asked_now: set[str] = set()
     for sa in articles:
         art = await read_article_chunks(read, sa.article_id)
         if art is None:
@@ -848,8 +851,25 @@ async def run_round(articles: Sequence[SampleArticle], *, graphiti: Graphiti,
                                   vendor=vendor, product=product, source=source,
                                   round_no=round_no)
             summary.states[rec["state"]] += 1
+            ran.add(chunk_id)
+            asked_now.update(rec["pending_keys"])
+    summary.stale_unqueued = unqueue_stale(store, ran=ran, asked_now=asked_now)
     summary.new_pending = len(store.pending()) - pending_before
     return summary
+
+
+def unqueue_stale(store: AnswerStore, *, ran: set[str], asked_now: set[str]) -> int:
+    """Take off the teacher's queue every pending prompt that no chunk asked for this
+    round although every chunk that ever asked for it was replayed: its prompt bytes
+    changed (an unpinned hash seed, a code change), so its answer could never replay.
+    A prompt also asked by a chunk this round did not run is kept. Returns the count."""
+    n = 0
+    for key, _ in store.pending():
+        askers = set(store.askers(key))
+        if key not in asked_now and askers and askers <= ran:
+            store.unqueue(key)
+            n += 1
+    return n
 
 
 # --- status ----------------------------------------------------------------------------
@@ -1516,7 +1536,8 @@ async def _cmd_round(args: argparse.Namespace) -> int:
     print(f"round {summary.round}: " + ", ".join(
         f"{s} {summary.states.get(s, 0)}" for s in STATES)
           + f"; skipped (final) {summary.skipped_final}; new pending prompts "
-          f"{summary.new_pending}; articles without episodes {len(summary.articles_missing)}")
+          f"{summary.new_pending}; stale prompts unqueued {summary.stale_unqueued}; "
+          f"articles without episodes {len(summary.articles_missing)}")
     return 1 if summary.states.get("error") else 0
 
 
