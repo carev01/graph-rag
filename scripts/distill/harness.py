@@ -1,9 +1,19 @@
-"""The Opus-distillation harness: `select`, `round`, `status`.
+"""The Opus-distillation harness: `select`, `round`, `status`, `batches`, `intake`,
+`review-sample`, `export`.
 
     uv run --extra dev python -m scripts.distill.harness select --out DIR/sample.json
     uv run --extra dev python -m scripts.distill.harness round \
         --sample DIR/sample.json --store DIR/store [--articles N]
     uv run --extra dev python -m scripts.distill.harness status --store DIR/store
+    uv run --extra dev python -m scripts.distill.harness batches \
+        --store DIR/store --size 10 --out DIR/batches/round-N/
+    # a teacher subagent answers each batch-XXX.jsonl into batch-XXX.answers.jsonl
+    uv run --extra dev python -m scripts.distill.harness intake \
+        --store DIR/store --answers DIR/batches/round-N/ --sample DIR/sample.json
+    uv run --extra dev python -m scripts.distill.harness review-sample \
+        --store DIR/store --fraction 0.05 --seed 20261017 --out DIR/reviews/
+    uv run --extra dev python -m scripts.distill.harness export \
+        --store DIR/store --out DIR/capture.jsonl
 
 **`round`** runs graphiti's REAL `add_episode` on each sampled article's production
 chunks (`Episodic.content`, in `HAS_EPISODE.chunk_index` order), with the production
@@ -80,9 +90,10 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
 import traceback
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -124,6 +135,7 @@ from scripts.distill.teacher import (
     TeacherTransport,
     install_pre_layout_keys,
 )
+from scripts.distill.validate import build_grounding_context, validate_answer
 
 logger = logging.getLogger("distill.harness")
 
@@ -809,6 +821,235 @@ def status_text(store_root: Path) -> str:
     return "\n".join(lines)
 
 
+# --- batches / intake / review-sample / export (task 4) ------------------------------
+#
+# Four more stages on the same on-disk store, run between rounds:
+#
+# - `batches` writes the teacher's work: every still-pending request, grouped so one
+#   file never mixes prompt types, carrying a re-ask's `previous_answer`/`rejection`.
+# - `intake` reads the teacher's `*.answers.jsonl` replies, validates each
+#   (`scripts.distill.validate.validate_answer`) and accepts, re-queues (first
+#   rejection) or drops (second) it.
+# - `review-sample` draws ~5% of accepted answers, stratified by prompt type, for a
+#   reviewer subagent.
+# - `export` copies the capture record of every accepted key into the production
+#   capture format, preferring the "moved" wire layout (`calls.jsonl` tells layouts
+#   apart; see the module docstring).
+#
+# A rejection's history lives in its own append-only log (`AnswerStore` has no notion
+# of "rejected once already" -- that is this task's own bookkeeping, not the
+# store's): `<store>/rejections.jsonl`, one record per rejection, `key` ->
+# `{"reason", "previous_answer"}`. The SECOND rejection of a key is what turns into
+# `store.drop`.
+
+REJECTIONS_FILENAME = "rejections.jsonl"
+
+
+def _rejections_by_key(store_root: Path) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = defaultdict(list)
+    for rec in _read_jsonl(store_root / REJECTIONS_FILENAME):
+        out[rec["key"]].append(rec)
+    return out
+
+
+def _append_rejection(store_root: Path, key: str, *, reason: str, previous_answer: Any) -> None:
+    _append_jsonl(store_root / REJECTIONS_FILENAME, {
+        "key": key, "reason": reason, "previous_answer": previous_answer, "ts": _utcnow()})
+
+
+def write_batches(store_root: Path, out_dir: Path, *, size: int) -> list[Path]:
+    """`<out_dir>/batch-NNN.jsonl`: every pending request, grouped by prompt type (one
+    file never mixes types) with at most `size` lines each. A key already rejected
+    once carries `previous_answer`/`rejection` so the teacher fixes exactly that."""
+    store = AnswerStore(store_root)
+    rejections = _rejections_by_key(store_root)
+    by_prompt: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    for key, request in store.pending():
+        by_prompt[str(request.get("prompt_name"))].append((key, request))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    n = 0
+    for prompt_name in sorted(by_prompt):
+        items = sorted(by_prompt[prompt_name], key=lambda kv: kv[0])
+        for i in range(0, len(items), size):
+            lines = []
+            for key, request in items[i:i + size]:
+                line = {"key": key, "prompt_name": prompt_name,
+                        "messages": request.get("messages"),
+                        "response_schema": request.get("response_format")}
+                history = rejections.get(key)
+                if history:
+                    line["previous_answer"] = history[-1]["previous_answer"]
+                    line["rejection"] = history[-1]["reason"]
+                lines.append(line)
+            path = out_dir / f"batch-{n:03d}.jsonl"
+            path.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n"
+                                    for line in lines), encoding="utf-8")
+            paths.append(path)
+            n += 1
+    return paths
+
+
+@dataclass
+class IntakeSummary:
+    accepted: int = 0
+    requeued: int = 0           # first rejection: back on the teacher's queue
+    dropped: int = 0            # second rejection: given up on
+    skipped: int = 0            # answer for a key no longer pending (already resolved)
+
+
+def _answer_files(answers_dir: Path) -> list[Path]:
+    return sorted(answers_dir.glob("*.answers.jsonl"))
+
+
+def _article_for_key(store: AnswerStore, articles_by_id: dict[str, SampleArticle],
+                     key: str) -> SampleArticle | None:
+    """The sample article behind one of this key's askers (`harness.run_chunk` names
+    a chunk id `"<article_id>:<chunk_index>"`), or None when no asker's article is in
+    the sample (grounding is then skipped, never guessed)."""
+    for chunk_id in store.askers(key):
+        article = articles_by_id.get(chunk_id.rsplit(":", 1)[0])
+        if article is not None:
+            return article
+    return None
+
+
+def run_intake(store_root: Path, answers_dir: Path, sample_path: Path) -> IntakeSummary:
+    """Validate every `{"key","answer"}` line of `answers_dir`'s `*.answers.jsonl`
+    files against the request still pending under that key."""
+    store = AnswerStore(store_root)
+    pending = dict(store.pending())
+    rejections = _rejections_by_key(store_root)
+    articles_by_id = {a.article_id: a for a in load_sample(sample_path)}
+    summary = IntakeSummary()
+    for path in _answer_files(answers_dir):
+        for rec in _read_jsonl(path):
+            key, answer = rec["key"], rec["answer"]
+            request = pending.get(key)
+            if request is None:
+                summary.skipped += 1
+                logger.warning(
+                    "intake: %s has no pending request (already resolved); skipped", key)
+                continue
+            prompt_name = str(request.get("prompt_name"))
+            messages = request.get("messages") or []
+            article = _article_for_key(store, articles_by_id, key)
+            grounding_ctx = (build_grounding_context(
+                prompt_name, messages, product=article.product, vendor=article.vendor)
+                if article is not None else None)
+            reasons = validate_answer(prompt_name, messages, answer, grounding_ctx=grounding_ctx)
+            if not reasons:
+                store.put(key, json.dumps(answer, ensure_ascii=False),
+                         {"prompt_name": prompt_name, "messages": messages})
+                summary.accepted += 1
+                continue
+            reason = "; ".join(reasons)
+            history = rejections.get(key)
+            if history:
+                store.drop(key, f"re-ask rejected again: first={history[-1]['reason']!r}; "
+                                f"second={reason!r}")
+                summary.dropped += 1
+            else:
+                summary.requeued += 1
+            _append_rejection(store_root, key, reason=reason, previous_answer=answer)
+            rejections.setdefault(key, []).append({"reason": reason, "previous_answer": answer})
+    return summary
+
+
+def _accepted_prompt_names(store_root: Path) -> dict[str, str]:
+    """key -> prompt_name, from the meta `intake` recorded at accept time (the latest
+    record per key wins, same as every other append-only log here)."""
+    out: dict[str, str] = {}
+    for rec in _read_jsonl(store_root / "answers.jsonl"):
+        name = (rec.get("meta") or {}).get("prompt_name")
+        if name:
+            out[rec["key"]] = name
+    return out
+
+
+def write_review_sample(store_root: Path, out_dir: Path, *, fraction: float,
+                        seed: int) -> Path:
+    """`<out_dir>/review-sample.jsonl`: about `fraction` of accepted answers, sampled
+    independently within each prompt type with a seeded shuffle keyed on
+    `(seed, "review", prompt_name)` -- deterministic for a fixed store and seed."""
+    store = AnswerStore(store_root)
+    accepted = set(store.answered_keys())
+    meta_by_key = {rec["key"]: rec.get("meta") or {}
+                  for rec in _read_jsonl(store_root / "answers.jsonl")}
+    prompt_by_key = {k: v for k, v in _accepted_prompt_names(store_root).items()
+                     if k in accepted}
+    by_prompt: dict[str, list[str]] = defaultdict(list)
+    for key, name in prompt_by_key.items():
+        by_prompt[name].append(key)
+    selected: list[str] = []
+    for name in sorted(by_prompt):
+        keys = sorted(by_prompt[name])
+        random.Random(f"{seed}|review|{name}").shuffle(keys)
+        selected.extend(sorted(keys[:round(len(keys) * fraction)]))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "review-sample.jsonl"
+    lines = [{"key": key, "prompt_name": prompt_by_key.get(key),
+             "messages": meta_by_key.get(key, {}).get("messages"),
+             "answer": json.loads(store.get(key) or "null")}
+            for key in selected]
+    path.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines),
+                    encoding="utf-8")
+    return path
+
+
+@dataclass
+class ExportSummary:
+    exported: int = 0
+    missing: int = 0                             # accepted key with no capture record
+    by_prompt: Counter = field(default_factory=Counter)
+    by_layout: Counter = field(default_factory=Counter)
+
+
+def export_capture(store_root: Path, out_path: Path) -> ExportSummary:
+    """`<out_path>`: one production-format capture record per accepted key. Every
+    `capture.jsonl` record is matched back to its logical key by recomputing its
+    WIRE hash (`AnswerStore.key_for` over the record's own `messages`/
+    `response_format`) and looking it up in `calls.jsonl`'s wire_key -> (key, layout)
+    map; among a key's matches the "moved" layout wins (production steady state),
+    else "unmoved". Dropped keys are excluded. Records are copied unchanged."""
+    store = AnswerStore(store_root)
+    accepted = set(store.answered_keys()) - set(store.dropped_keys())
+    wire_index: dict[str, tuple[str, str]] = {}
+    for rec in _read_jsonl(store_root / "calls.jsonl"):
+        wire_index[rec["wire_key"]] = (rec["key"], rec["layout"])
+    by_key: dict[str, dict[str, dict]] = defaultdict(dict)
+    for rec in _read_jsonl(store_root / "capture.jsonl"):
+        wire_key = store.key_for(rec.get("messages") or [], rec.get("response_format"))
+        found = wire_index.get(wire_key)
+        if found is None:
+            continue
+        key, layout = found
+        if key in accepted:
+            by_key[key].setdefault(layout, rec)
+    summary = ExportSummary()
+    chosen: list[dict] = []
+    for key in sorted(accepted):
+        layouts = by_key.get(key, {})
+        if "moved" in layouts:
+            rec, layout = layouts["moved"], "moved"
+        elif "unmoved" in layouts:
+            rec, layout = layouts["unmoved"], "unmoved"
+        elif layouts:
+            layout, rec = next(iter(layouts.items()))
+        else:
+            summary.missing += 1
+            continue
+        chosen.append(rec)
+        summary.exported += 1
+        summary.by_prompt[str(rec.get("prompt_name"))] += 1
+        summary.by_layout[layout] += 1
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in chosen),
+        encoding="utf-8")
+    return summary
+
+
 # --- CLI -------------------------------------------------------------------------------
 
 def _read_driver(settings: ExtractSettings) -> Any:
@@ -877,7 +1118,51 @@ def _parser() -> argparse.ArgumentParser:
                    help="only the first N articles of the sample (pilot)")
     st = sub.add_parser("status", help="chunk states, pending prompts, self-matches")
     st.add_argument("--store", type=Path, required=True)
+    b = sub.add_parser("batches", help="write the teacher's pending-request batch files")
+    b.add_argument("--store", type=Path, required=True)
+    b.add_argument("--size", type=int, default=10)
+    b.add_argument("--out", type=Path, required=True)
+    i = sub.add_parser("intake", help="validate and store the teacher's answers")
+    i.add_argument("--store", type=Path, required=True)
+    i.add_argument("--answers", type=Path, required=True)
+    i.add_argument("--sample", type=Path, required=True)
+    rs = sub.add_parser("review-sample", help="sample accepted answers for the reviewer")
+    rs.add_argument("--store", type=Path, required=True)
+    rs.add_argument("--fraction", type=float, default=0.05)
+    rs.add_argument("--seed", type=int, default=20261017)
+    rs.add_argument("--out", type=Path, required=True)
+    ex = sub.add_parser("export", help="copy accepted keys' capture records")
+    ex.add_argument("--store", type=Path, required=True)
+    ex.add_argument("--out", type=Path, required=True)
     return p
+
+
+def _cmd_batches(args: argparse.Namespace) -> int:
+    paths = write_batches(args.store, args.out, size=args.size)
+    total = sum(len(_read_jsonl(p)) for p in paths)
+    print(f"wrote {len(paths)} batch file(s) to {args.out}: {total} pending request(s)")
+    return 0
+
+
+def _cmd_intake(args: argparse.Namespace) -> int:
+    summary = run_intake(args.store, args.answers, args.sample)
+    print(f"intake: accepted {summary.accepted}, requeued {summary.requeued}, "
+         f"dropped {summary.dropped}, skipped {summary.skipped}")
+    return 0
+
+
+def _cmd_review_sample(args: argparse.Namespace) -> int:
+    path = write_review_sample(args.store, args.out, fraction=args.fraction, seed=args.seed)
+    print(f"wrote {path}: {len(_read_jsonl(path))} answer(s) for review")
+    return 0
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    summary = export_capture(args.store, args.out)
+    print(f"exported {summary.exported} record(s) to {args.out} "
+         f"(missing {summary.missing}); by prompt: {dict(summary.by_prompt)}; "
+         f"by layout: {dict(summary.by_layout)}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -888,6 +1173,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.cmd == "select":
         return asyncio.run(_cmd_select(args))
+    if args.cmd == "batches":
+        return _cmd_batches(args)
+    if args.cmd == "intake":
+        return _cmd_intake(args)
+    if args.cmd == "review-sample":
+        return _cmd_review_sample(args)
+    if args.cmd == "export":
+        return _cmd_export(args)
     return asyncio.run(_cmd_round(args))
 
 

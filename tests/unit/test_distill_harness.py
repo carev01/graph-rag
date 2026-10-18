@@ -739,3 +739,140 @@ def test_harness_settings_overrides(tmp_path: Path) -> None:
     assert s.ingest_detect_contradictions is False
     assert s.ingest_same_pair_contradictions is False
     assert s.dedup_retry_on_strong is False
+
+
+# --- batches / intake / review-sample / export (task 4) -------------------------------
+
+def _write_sample_json(path: Path, articles: list[SampleArticle]) -> None:
+    from dataclasses import asdict
+    path.write_text(json.dumps({"articles": [asdict(a) for a in articles]}), encoding="utf-8")
+
+
+def test_batches_groups_by_prompt_type_with_at_most_size_per_file(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    for i in range(5):
+        store.add_pending(f"edge-{i}", {"prompt_name": "extract_edges.edge",
+                                         "messages": [{"role": "user", "content": f"e{i}"}],
+                                         "response_format": {}, "model": "m"})
+    for i in range(3):
+        store.add_pending(f"sum-{i}", {"prompt_name": "extract_nodes.extract_summaries_batch",
+                                        "messages": [{"role": "user", "content": f"s{i}"}],
+                                        "response_format": {}, "model": "m"})
+    paths = h.write_batches(store.root, tmp_path / "batches", size=2)
+    all_lines = [line for p in paths for line in h._read_jsonl(p)]
+    assert len(all_lines) == 8
+    assert {line["key"] for line in all_lines} == {f"edge-{i}" for i in range(5)} | {
+        f"sum-{i}" for i in range(3)}
+    for p in paths:
+        lines = h._read_jsonl(p)
+        assert len(lines) <= 2
+        assert len({line["prompt_name"] for line in lines}) == 1
+        for line in lines:
+            assert "response_schema" in line
+            assert "previous_answer" not in line and "rejection" not in line
+
+
+def test_intake_accepts_requeues_once_then_drops_on_a_second_rejection(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AnswerStore(tmp_path / "store")
+    sample_path = tmp_path / "sample.json"
+    _write_sample_json(sample_path, [_article("art-1")])
+    request = {"prompt_name": "extract_edges.edge",
+              "messages": [{"role": "system", "content": "s"},
+                           {"role": "user", "content": "u"}],
+              "response_format": {}, "model": "m"}
+    for key in ("k1", "k2", "k3-unknown"):
+        if key != "k3-unknown":
+            store.add_pending(key, request)
+            store.note_asker(key, "art-1:0")
+
+    def fake_validate(prompt_name: str, messages: list, answer: dict, *,
+                      grounding_ctx: Any = None) -> list[str]:
+        return [] if answer.get("ok") else [f"bad:{answer}"]
+
+    monkeypatch.setattr(h, "validate_answer", fake_validate)
+
+    answers_dir = tmp_path / "round-1"
+    answers_dir.mkdir()
+    (answers_dir / "batch-000.answers.jsonl").write_text(
+        "".join(json.dumps(line) + "\n" for line in [
+            {"key": "k1", "answer": {"ok": True}},
+            {"key": "k2", "answer": {"ok": False, "n": 1}},
+            {"key": "k3-unknown", "answer": {"ok": True}}]), encoding="utf-8")
+
+    summary = h.run_intake(store.root, answers_dir, sample_path)
+    assert (summary.accepted, summary.requeued, summary.dropped, summary.skipped) == (1, 1, 0, 1)
+    store = AnswerStore(store.root)
+    assert store.get("k1") is not None
+    assert store.dropped_reason("k2") is None
+    assert any(k for k, _ in store.pending() if k == "k2")
+    rejections = h._rejections_by_key(store.root)
+    assert len(rejections["k2"]) == 1
+
+    answers_dir2 = tmp_path / "round-2"
+    answers_dir2.mkdir()
+    (answers_dir2 / "batch-000.answers.jsonl").write_text(
+        json.dumps({"key": "k2", "answer": {"ok": False, "n": 2}}) + "\n", encoding="utf-8")
+    summary2 = h.run_intake(store.root, answers_dir2, sample_path)
+    assert (summary2.accepted, summary2.requeued, summary2.dropped) == (0, 0, 1)
+    store = AnswerStore(store.root)
+    assert store.dropped_reason("k2") is not None
+    assert store.pending() == []
+
+
+def test_export_prefers_the_moved_layout_and_excludes_dropped_keys(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    store.put("ka", json.dumps({"x": 1}), {"prompt_name": "extract_edges.edge"})
+    store.drop("kb", "bad")
+
+    msgs_unmoved = [{"role": "system", "content": "s"}, {"role": "user", "content": "u-unmoved"}]
+    msgs_moved = [{"role": "system", "content": "s+tail"}, {"role": "user", "content": "u-moved"}]
+    msgs_dropped = [{"role": "system", "content": "s"}, {"role": "user", "content": "u-dropped"}]
+    wk_unmoved = store.key_for(msgs_unmoved, None)
+    wk_moved = store.key_for(msgs_moved, None)
+    wk_dropped = store.key_for(msgs_dropped, None)
+    h._append_jsonl(store.root / "calls.jsonl", {
+        "key": "ka", "wire_key": wk_unmoved, "layout": "unmoved",
+        "prompt_name": "extract_edges.edge", "chunk_id": "art-1:0"})
+    h._append_jsonl(store.root / "calls.jsonl", {
+        "key": "ka", "wire_key": wk_moved, "layout": "moved",
+        "prompt_name": "extract_edges.edge", "chunk_id": "art-1:0"})
+    h._append_jsonl(store.root / "calls.jsonl", {
+        "key": "kb", "wire_key": wk_dropped, "layout": "unmoved",
+        "prompt_name": "extract_edges.edge", "chunk_id": "art-1:1"})
+    h._append_jsonl(store.root / "capture.jsonl", {
+        "call_id": "1", "messages": msgs_unmoved, "response_format": None,
+        "prompt_name": "extract_edges.edge", "completion": "{}", "finish_reason": "stop"})
+    h._append_jsonl(store.root / "capture.jsonl", {
+        "call_id": "2", "messages": msgs_moved, "response_format": None,
+        "prompt_name": "extract_edges.edge", "completion": "{}", "finish_reason": "stop"})
+    h._append_jsonl(store.root / "capture.jsonl", {
+        "call_id": "3", "messages": msgs_dropped, "response_format": None,
+        "prompt_name": "extract_edges.edge", "completion": "{}", "finish_reason": "stop"})
+
+    out_path = tmp_path / "export" / "capture.jsonl"
+    summary = h.export_capture(store.root, out_path)
+    assert summary.exported == 1 and summary.missing == 0
+    assert summary.by_layout == {"moved": 1}
+    assert summary.by_prompt == {"extract_edges.edge": 1}
+    exported = h._read_jsonl(out_path)
+    assert len(exported) == 1
+    assert exported[0]["call_id"] == "2"
+    assert exported[0]["messages"] == msgs_moved
+
+
+def test_review_sample_is_deterministic(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    for i in range(20):
+        name = "extract_edges.edge" if i % 2 else "extract_nodes.extract_text"
+        store.put(f"k{i}", json.dumps({"i": i}), {
+            "prompt_name": name,
+            "messages": [{"role": "system", "content": "s"},
+                        {"role": "user", "content": f"u{i}"}]})
+    path1 = h.write_review_sample(store.root, tmp_path / "r1", fraction=0.5, seed=20261017)
+    path2 = h.write_review_sample(store.root, tmp_path / "r2", fraction=0.5, seed=20261017)
+    lines1 = h._read_jsonl(path1)
+    lines2 = h._read_jsonl(path2)
+    assert lines1 == lines2
+    assert lines1                               # some non-trivial fraction got sampled
+    assert all({"key", "prompt_name", "messages", "answer"} <= set(line) for line in lines1)
