@@ -26,6 +26,9 @@ Judgement calls, settled once so every teacher answers them the same way:
   different entity.
 - An entity named only in a breadcrumb or section heading counts as mentioned only if
   the body text also refers to it.
+- Always include the documented product (DOCUMENT CONTEXT) in an `extract_text` answer,
+  even when the chunk's facts are about another product it names: never leave it for the
+  production grounding gate to add -- the validator rejects an answer the gate would fix.
 - Echo each line's `ordinal` and `check` unchanged next to its `key`: they prove the
   answer is filed under the prompt it answers. An answer whose `ordinal`/`check` do
   not match its key's line is rejected as "answer filed under the wrong prompt".
