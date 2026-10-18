@@ -3,9 +3,10 @@ import copy
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 from graphiti_core import Graphiti
+from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.llm_client import OpenAIClient, LLMConfig
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
@@ -216,8 +217,23 @@ def _drop_temperature(client: AsyncOpenAI) -> AsyncOpenAI:
 def _is_azure(base_url: str) -> bool:
     return "azure.com" in base_url or "cognitiveservices" in base_url
 
-def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
+def _llm_client(s: ExtractSettings, *, tier: str = "strong", transport: Any = None):
+    """graphiti's LLM client for one tier.
+
+    `transport`, when given, replaces ONLY the raw `AsyncOpenAI(...)` of the
+    chat-completions branch below; every wrapper applied to the raw client is
+    applied to it, in the same order (the distillation harness swaps in a fake
+    AsyncOpenAI that serves teacher answers). It must expose a writable
+    `chat.completions.create`. The Azure (Responses API) and Anthropic (own
+    adapter, strips maxItems) branches build a different transport surface, so a
+    `transport` there raises ValueError rather than silently skipping a wrapper.
+    """
     cfg = _llm_config(s)
+    if transport is not None and (_is_azure(s.llm_base_url) or is_anthropic(s.llm_base_url)):
+        raise ValueError(
+            "an injected transport is only supported on the OpenAI-compatible "
+            f"chat-completions branch, not for base URL {s.llm_base_url!r} "
+            "(Azure/Anthropic build their own transport)")
     # Explicit timeout + retries: a cloud endpoint can drop a connection
     # (observed: an OpenRouter socket stuck in CLOSE_WAIT hung the whole run).
     # A bounded per-request timeout makes a dead request abort and retry.
@@ -248,9 +264,10 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong"):
             claude = wrap_client(claude, StaticTailLearner())
         return OpenAIGenericClient(config=cfg, client=claude,
                                    structured_output_mode="json_schema")
-    raw = instrument(AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
-                                 timeout=s.llm_timeout_seconds, max_retries=4),
-                     tier=tier, capture_path=s.llm_capture_path)
+    if transport is None:
+        transport = AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
+                                timeout=s.llm_timeout_seconds, max_retries=4)
+    raw = instrument(transport, tier=tier, capture_path=s.llm_capture_path)
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
         if s.llm_openrouter_reasoning_effort:
@@ -307,7 +324,10 @@ def _batch_capped_embeddings(client: AsyncOpenAI, max_batch: int) -> AsyncOpenAI
     return client
 
 
-def build_graphiti(s: ExtractSettings, *, tier: str = "strong") -> Graphiti:
+def build_graphiti(s: ExtractSettings, *, tier: str = "strong", transport: Any = None,
+                   graph_driver: GraphDriver | None = None) -> Graphiti:
+    """`transport` -> `_llm_client`; `graph_driver`, when given, is used instead of
+    a driver built from `s.neo4j_uri`. Both default to the production behaviour."""
     # Candidate searches shipped fact_embedding (768 floats x 20 candidates,
     # twice per extracted fact) only for graphiti to pop it on arrival -- 2.8x on
     # the query that dominates ingestion. Idempotent; safe to call per build.
@@ -334,10 +354,14 @@ def build_graphiti(s: ExtractSettings, *, tier: str = "strong") -> Graphiti:
     # CRITICAL: pass an explicit LOCAL reranker so Graphiti does not build its
     # default OpenAIRerankerClient() pointed at api.openai.com.
     reranker = OpenAIRerankerClient(config=_llm_config(s))
-    llm = _llm_client(s, tier=tier)
-    g = Graphiti(s.neo4j_uri, s.neo4j_user, s.neo4j_password,
-                 llm_client=llm, embedder=embedder,
-                 cross_encoder=reranker, max_coroutines=s.max_coroutines)
+    llm = _llm_client(s, tier=tier, transport=transport)
+    if graph_driver is not None:
+        g = Graphiti(graph_driver=graph_driver, llm_client=llm, embedder=embedder,
+                     cross_encoder=reranker, max_coroutines=s.max_coroutines)
+    else:
+        g = Graphiti(s.neo4j_uri, s.neo4j_user, s.neo4j_password,
+                     llm_client=llm, embedder=embedder,
+                     cross_encoder=reranker, max_coroutines=s.max_coroutines)
     # Graphiti.close() only closes the Neo4j driver; also close the AsyncOpenAI
     # clients we created (LLM + embedder) so they don't leak, esp. in a
     # long-running CLI that builds one Graphiti per invocation.
@@ -369,14 +393,25 @@ def _cheap_view_settings(s: ExtractSettings) -> ExtractSettings:
         llm_timeout_seconds=s.cheap_llm_timeout_seconds))
 
 
-def build_cheap_graphiti(s: ExtractSettings) -> Graphiti:
+def build_cheap_graphiti(s: ExtractSettings, *, transport: Any = None,
+                         graph_driver: GraphDriver | None = None) -> Graphiti:
     """Build a Graphiti whose LLM points at the cheap model (ling). Reuses
     build_graphiti with a cheap-tier settings view; embedder/reranker/Neo4j and
-    the group_id are unchanged, so both tiers share one embedding space."""
+    the group_id are unchanged, so both tiers share one embedding space.
+
+    `transport` replaces only the raw AsyncOpenAI (every production wrapper is
+    still applied to it) and `graph_driver` replaces the driver built from the
+    URI -- the distillation harness's two substitutions. Both default to None,
+    which is today's behaviour exactly."""
     cheap = _cheap_view_settings(s)
     # The reranker built by build_graphiti is harmless here: it is not invoked
     # during add_episode (the cheap client is used for ingestion only).
-    return build_graphiti(cheap, tier="cheap")
+    injected: dict[str, Any] = {}
+    if transport is not None:
+        injected["transport"] = transport
+    if graph_driver is not None:
+        injected["graph_driver"] = graph_driver
+    return build_graphiti(cheap, tier="cheap", **injected)
 
 def build_embedder(s: ExtractSettings) -> OpenAIEmbedder:
     """The single shared embedder (TEI/Jina) used everywhere — extracted so the
@@ -443,10 +478,15 @@ async def add_text_episode(graphiti: Graphiti, s: ExtractSettings, *, name: str,
                            body: str, source_description: str,
                            reference_time: datetime,
                            instructions: str = EXTRACTION_INSTRUCTIONS,
-                           context: str = "") -> AddEpisodeResults:
+                           context: str = "",
+                           previous_episode_uuids: list[str] | None = None,
+                           ) -> AddEpisodeResults:
+    """`previous_episode_uuids` is passed straight to graphiti: None (the default)
+    lets graphiti look up the group's last episodes itself, as before."""
     return await graphiti.add_episode(
         name=name, episode_body=body, source_description=source_description,
         reference_time=reference_time, source=EpisodeType.text, group_id=s.group_id,
         entity_types=ENTITY_TYPES, excluded_entity_types=EXCLUDED_ENTITY_TYPES,
         edge_types=EDGE_TYPES, edge_type_map=EDGE_TYPE_MAP,
-        custom_extraction_instructions=instructions + context)
+        custom_extraction_instructions=instructions + context,
+        previous_episode_uuids=previous_episode_uuids)
