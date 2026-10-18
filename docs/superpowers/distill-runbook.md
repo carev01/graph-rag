@@ -76,7 +76,14 @@ re-ask, or for an answer that differs from the one already rejected -- the same 
 answer seen again leaves the key pending (`already rejected`).
 
 Repeat **round -> batches -> teacher -> intake** until `status` shows every chunk
-`complete` or `dropped` (no `pending`, no `error`). Re-asked prompts carry
+`complete` or `dropped` (no `pending`, no `error`). graphiti 0.30.1's `add_episode` is
+sequential (extract_text -> dedupe_nodes, when any entity needs the LLM -> extract_edges ->
+resolve_edge, one per edge, in parallel -> extract_summaries_batch), so a chunk advances one
+stage per round: about five rounds, with the parallelism across chunks, not stages.
+The CLI pins `PYTHONHASHSEED=0` (re-executing itself once): graphiti renders entity
+labels from a set, and under another seed the stage-2 prompts change bytes and answers
+never replay. A round also unqueues any pending prompt that no replayed chunk asked for
+again ("stale prompts unqueued"), so a teacher is never sent a prompt that can't replay. Re-asked prompts carry
 `"previous_answer"`/`"rejection"` in their next batch line, so a teacher fixing a
 rejected answer sees exactly what was wrong. `status` (and `report`) also show
 **"answered but not replayed in the latest round"**: accepted keys no round has replayed
