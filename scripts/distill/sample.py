@@ -13,7 +13,8 @@ production's ingest driver uses for its DOCUMENT CONTEXT: the lowest source id
 **Cheap tier only.** The student replaces the cheap tier, so every article production
 routes to the STRONG tier is excluded before allocation (counted per stratum as
 `excluded_strong_tier`): a dense matrix by production's own `is_dense_matrix` (with
-`ExtractSettings`' thresholds, over the live chunks joined in chunk order), or an
+`ExtractSettings`' thresholds, over the article's markdown rebuilt exactly from its
+live chunks -- `rebuild_markdown`), or an
 article with a chunk longer than `cheap_max_chunk_tokens` (only strong-tier chunking
 makes one). The `table` hard case is therefore always a cheap-tier table.
 
@@ -241,15 +242,30 @@ def _hard_cases(rec: Any, affected: set[str]) -> tuple[str, ...]:
     return tuple(flags)
 
 
+def rebuild_markdown(bodies: Sequence[str]) -> str:
+    """The article markdown production routed on, from its episode bodies in chunk
+    order. `episode_builder.build_episodes` writes each body as
+    `"[<title> › <chapter>]\n" + chunk.text`, and the chunks are contiguous,
+    content-preserving spans of the markdown -- so dropping each body's first
+    (prefix) line and concatenating with NO separator gives the markdown back
+    exactly. (Joining the bodies as they are would add one prefix line per chunk
+    and dilute `is_dense_matrix`'s table-line ratio.)"""
+    out = []
+    for body in bodies:
+        _prefix, sep, text = body.partition("\n")
+        out.append(text if sep else "")
+    return "".join(out)
+
+
 async def read_dense_ids(driver: Any, ids: list[str],
                          thresholds: RoutingThresholds) -> set[str]:
     """The articles production's router sends to the strong tier as dense matrices:
-    `is_dense_matrix` over the article's live chunks joined in chunk order (the graph
-    holds the chunks, not the original markdown -- the closest reconstruction)."""
+    `is_dense_matrix` over the article's markdown rebuilt exactly from its live
+    chunks (`rebuild_markdown`)."""
     dense: set[str] = set()
     for i in range(0, len(ids), TEXTS_BATCH):
         for rec in await _records(driver, CHUNK_TEXTS_QUERY, {"ids": ids[i:i + TEXTS_BATCH]}):
-            if is_dense_matrix("\n\n".join(rec["texts"]),
+            if is_dense_matrix(rebuild_markdown(rec["texts"]),
                                ratio_threshold=thresholds.dense_table_line_ratio,
                                pipe_threshold=thresholds.dense_pipe_count):
                 dense.add(rec["id"])

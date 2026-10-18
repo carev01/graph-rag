@@ -42,7 +42,8 @@ reference_time`, `ORDER BY valid_at DESC`, then reversed (chronological). The li
 graph has moved on since, so `PREVIOUS_EPISODES_QUERY` mirrors that query (read
 only) EXCLUDING this chunk's own production episode, its later siblings, and every
 episode created after this chunk's production episode (the graph as it stood at
-original ingest), with a deterministic tie-break (`valid_at DESC, created_at DESC,
+original ingest -- an upper-bound approximation under concurrent workers, see the
+query's comment), with a deterministic tie-break (`valid_at DESC, created_at DESC,
 uuid`). The result goes to graphiti as `previous_episode_uuids`, oldest first.
 graphiti fetches them with `EpisodicNode.get_by_uuids`, whose query has no ORDER BY;
 `HarnessGraphDriver` returns that query's rows in the order of the uuids passed, so
@@ -155,6 +156,14 @@ EPISODES_QUERY = (
 # source=text), minus this chunk's own episode, its later siblings and anything
 # created after it, with a deterministic tie-break. Reversed by the caller, as
 # graphiti reverses it.
+#
+# The created_at cut-off is an APPROXIMATION (an upper bound on what production
+# saw). graphiti stamps an episode's created_at when add_episode STARTS but saves
+# the episode only at its END (the final bulk save), and no saved-at timestamp
+# exists. Under concurrent production workers, an episode created just before this
+# chunk's -- by another worker, still mid-extraction -- was not yet in the graph
+# when this chunk's retrieve_episodes ran, yet passes `created_at <= $created_at`
+# here. Sequential ingest (one article at a time) has no such window.
 PREVIOUS_EPISODES_QUERY = (
     "MATCH (e:Episodic) "
     "WHERE e.valid_at <= $reference_time "

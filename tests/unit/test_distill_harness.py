@@ -75,14 +75,16 @@ INGEST_T0 = datetime(2026, 4, 1, 9, tzinfo=timezone.utc)   # when art-1 was inge
 GROUP = "backup-docs"
 
 
-def _graph_episodes(n_chunks: dict[str, int]) -> list[dict]:
+def _graph_episodes(n_chunks: dict[str, int],
+                    text_of: dict[str, str] | None = None) -> list[dict]:
     """Every :Episodic the fake graph holds. Each sampled article's chunks share the
     reference time and were created one minute apart, in chunk order; other
     articles' episodes surround them."""
     eps = []
     for a_i, (a, n) in enumerate(sorted(n_chunks.items())):
         for k in range(n):
-            eps.append({"uuid": _uuid(a, k), "content": _content(k, a), "valid_at": REF_DT,
+            eps.append({"uuid": _uuid(a, k), "content": _content(k, (text_of or {}).get(a, a)),
+                        "valid_at": REF_DT,
                         "created_at": INGEST_T0 + timedelta(hours=a_i, minutes=k),
                         "group_id": GROUP, "source": "text"})
     for i in range(12):            # older documents, ingested earlier
@@ -113,9 +115,12 @@ class FakeRead:
     document-context query (through a READ session, as IngestDriver runs it)."""
 
     def __init__(self, n_chunks: dict[str, int], *, names: frozenset[str] = frozenset(),
-                 facts: frozenset[str] = frozenset()) -> None:
+                 facts: frozenset[str] = frozenset(),
+                 text_of: dict[str, str] | None = None) -> None:
+        """`text_of` maps an article to the article whose chunk texts it repeats."""
         self.n_chunks = n_chunks
-        self.episodes = _graph_episodes(n_chunks)
+        self.text_of = text_of or {}
+        self.episodes = _graph_episodes(n_chunks, self.text_of)
         self.names = names
         self.facts = facts
         self.session_modes: list[Any] = []
@@ -131,7 +136,8 @@ class FakeRead:
             rows = [{"title": "T", "source_url": f"https://docs/{a}",
                      "content_changed_at": REF, "content_changed_basis": "exact",
                      "last_updated_at": None, "chunk_index": k, "uuid": _uuid(a, k),
-                     "name": f"{a}:{k}:abcdef12", "content": _content(k, a),
+                     "name": f"{a}:{k}:abcdef12",
+                     "content": _content(k, self.text_of.get(a, a)),
                      "valid_at": REF_DT, "created_at": by_uuid[_uuid(a, k)]["created_at"]}
                     for k in range(self.n_chunks.get(a, 0))]
             return SimpleNamespace(records=rows)
@@ -238,6 +244,50 @@ async def test_pending_in_round_one_complete_in_round_two(tmp_path: Path) -> Non
 
     s3 = await _round(g, store, log, read, [_article()])
     assert s3.skipped_final == 1 and not s3.states     # complete is final
+
+
+async def test_identical_chunks_share_one_key_and_both_are_askers(tmp_path: Path) -> None:
+    """Two chunks with the same text send the same prompt: ONE pending key, with both
+    chunks recorded as its askers -- what the unqueue-unless-shared rule relies on."""
+    store, log = _stores(tmp_path)
+    g = FakeGraphiti(store, log, driver=ReadOnlyNeo4jDriver(UNREACHABLE, "u", "p"))
+    read = FakeRead({"art-1": 2, "art-2": 1}, text_of={"art-2": "art-1"})
+    await _round(g, store, log, read, [_article("art-1"), _article("art-2")])
+    states = log.latest_states()
+    (shared,) = states["art-2:0"]["pending_keys"]
+    assert states["art-1:0"]["pending_keys"] == [shared]
+    assert len(store.pending()) == 2                     # art-1:0/art-2:0 share one
+    assert store.askers(shared) == ["art-1:0", "art-2:0"]
+    # answered once, it serves both chunks
+    store.put(shared, json.dumps({"extracted_entities": []}), {})
+    await _round(g, store, log, read, [_article("art-1"), _article("art-2")])
+    states = log.latest_states()
+    assert states["art-1:0"]["state"] == states["art-2:0"]["state"] == "complete"
+    assert store.askers(shared) == ["art-1:0", "art-2:0"]   # not re-noted on replay
+
+
+async def test_dropped_chunk_keeps_a_prompt_another_chunk_asked(tmp_path: Path) -> None:
+    """The shared-asker rule end to end: art-2:0 asks the same prompt as art-1:0 and
+    then ends dropped; the shared prompt stays queued for art-1:0."""
+    store, log = _stores(tmp_path)
+    g = FakeGraphiti(store, log, driver=ReadOnlyNeo4jDriver(UNREACHABLE, "u", "p"))
+    read = FakeRead({"art-1": 1, "art-2": 1}, text_of={"art-2": "art-1"})
+    await _round(g, store, log, read, [_article("art-1")])
+    (shared,) = [k for k, _ in store.pending()]
+
+    class AsksThenDrops(FakeGraphiti):
+        async def add_episode(self, **kwargs: Any) -> Any:
+            try:
+                await FakeGraphiti.add_episode(self, **kwargs)
+            except TeacherNeeded:
+                pass
+            raise TeacherDropped("dead", "invalid twice")
+
+    g2 = AsksThenDrops(store, log, driver=ReadOnlyNeo4jDriver(UNREACHABLE, "u", "p"))
+    await _round(g2, store, log, read, [_article("art-2")])
+    assert log.latest_states()["art-2:0"]["state"] == "dropped"
+    assert store.askers(shared) == ["art-1:0", "art-2:0"]
+    assert [k for k, _ in store.pending()] == [shared]
 
 
 async def test_add_episode_arguments_match_production(tmp_path: Path) -> None:

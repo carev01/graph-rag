@@ -10,7 +10,9 @@ from typing import Any
 import pytest
 from neo4j import RoutingControl
 
+from graph_extract.chonkie_client import Chunk
 from graph_extract.config import ExtractSettings
+from graph_extract.episode_builder import build_episodes
 
 from scripts.distill import sample as smp
 from scripts.extraction_proof import AFFECTED_ARTICLES_QUERY, PRODUCT_NAMES_QUERY
@@ -56,7 +58,9 @@ def _rows() -> list[dict]:
                          "has_table": any("|---" in t for t in texts),
                          "has_pipe": any("|" in t for t in texts),
                          "max_tokens": 1500 if _long(n) else 600,
-                         "unnamed_chunk": n % 17 == 0, "_texts": texts})
+                         "unnamed_chunk": n % 17 == 0,
+                         # stored episode bodies: episode_builder's prefix line + chunk
+                         "_texts": [f"[Page {n}]\n{t}\n" for t in texts]})
     return rows
 
 
@@ -223,3 +227,50 @@ async def test_production_thresholds_are_used() -> None:
     s = ExtractSettings(_env_file=None, neo4j_uri="bolt://x", neo4j_user="u",
                         neo4j_password="p", docext_base_url="http://x", docext_read_key="k")
     assert smp.RoutingThresholds.from_settings(s) == smp.RoutingThresholds()
+
+
+def _episode_bodies(markdown: str, cuts: list[int], title: str = "Support matrix") -> list[str]:
+    """What production stored: contiguous spans of the markdown, each prefixed with
+    episode_builder's `[title › chapter]` line."""
+    bounds = [0, *cuts, len(markdown)]
+    return [f"[{title} › Reference]\n{markdown[a:b]}" for a, b in zip(bounds, bounds[1:])]
+
+
+# 5 table lines of 20 = 0.25 (production's threshold) and few pipes: dense only by ratio.
+DENSE_MD = "\n".join([f"Intro line {i}." for i in range(15)]
+                     + ["| a | b |", "|---|---|", "| 1 | 2 |", "| 3 | 4 |", "| 5 | 6 |"])
+# 4 of 20 = 0.2: clean.
+CLEAN_MD = "\n".join([f"Intro line {i}." for i in range(16)]
+                     + ["| a | b |", "|---|---|", "| 1 | 2 |", "| 3 | 4 |"])
+
+
+def test_rebuild_markdown_is_exact() -> None:
+    md = DENSE_MD
+    cuts = [37, 120, 121, len(md) - 9]             # mid-line, adjacent, near the end
+    bounds = [0, *cuts, len(md)]
+    chunks = [Chunk(text=md[a:b], start_index=a, end_index=b, token_count=1)
+              for a, b in zip(bounds, bounds[1:])]
+    episodes = build_episodes(article_id="a", title="Support matrix", chapter_path="Ref",
+                              content_hash="h" * 64, chunks=chunks, max_chunk_tokens=10_000,
+                              min_chunk_tokens=0)
+    assert smp.rebuild_markdown([e.body for e in episodes]) == md
+    assert smp.rebuild_markdown(_episode_bodies(md, cuts)) == md
+    assert smp.rebuild_markdown(["[Title only]"]) == ""
+
+
+async def test_dense_check_runs_on_the_exact_markdown() -> None:
+    """Joining the stored bodies as they are adds a prefix line per chunk and dilutes
+    the ratio (DENSE_MD would read 5/24): production's dense article must still be
+    excluded, the clean one kept."""
+    texts = {"dense": _episode_bodies(DENSE_MD, [40, 90, 140]),
+             "clean": _episode_bodies(CLEAN_MD, [40, 90, 140])}
+
+    class Texts:
+        async def execute_query(self, query: str, parameters_: dict | None = None,
+                                routing_: Any = None) -> Any:
+            assert query == smp.CHUNK_TEXTS_QUERY and routing_ == RoutingControl.READ
+            return SimpleNamespace(records=[{"id": i, "texts": texts[i]}
+                                            for i in (parameters_ or {})["ids"]])
+
+    assert await smp.read_dense_ids(Texts(), ["clean", "dense"],
+                                    smp.RoutingThresholds()) == {"dense"}
