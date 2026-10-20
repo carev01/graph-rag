@@ -16,7 +16,10 @@
 set -euo pipefail
 
 MODEL_REPO="${MODEL_REPO:-carev01/qwen35-4b-graphrag}"
-MODEL_DIR=/workspace/hf/model
+# A branch/revision of MODEL_REPO (e.g. a fine-tune pushed to its own branch); each
+# non-main revision gets its own directory so switching never mixes shards.
+MODEL_REVISION="${MODEL_REVISION:-main}"
+if [ "$MODEL_REVISION" = main ]; then MODEL_DIR=/workspace/hf/model; else MODEL_DIR="/workspace/hf/model-$MODEL_REVISION"; fi
 TUNNEL_PUBKEY="${TUNNEL_PUBKEY:-}"
 ARGS_FILE=/etc/vllm-args.conf
 KEY_ENV=/workspace/.env   # sourced by the supervised service; mode 600
@@ -57,12 +60,13 @@ if model_complete; then
   echo "   $MODEL_DIR is complete: no download"
 else
   # No token: anonymous download (the model repo is public since 2026-10-09).
-  echo "   fetching $MODEL_REPO ($([ -n "$HF_TOKEN" ] && echo "with token" || echo "anonymous"))"
+  echo "   fetching $MODEL_REPO@$MODEL_REVISION ($([ -n "$HF_TOKEN" ] && echo "with token" || echo "anonymous"))"
   mkdir -p "$MODEL_DIR"
-  HF_TOKEN="$HF_TOKEN" python - "$MODEL_REPO" "$MODEL_DIR" <<'EOF'
+  HF_TOKEN="$HF_TOKEN" python - "$MODEL_REPO" "$MODEL_DIR" "$MODEL_REVISION" <<'EOF'
 import os, sys
 from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[1], local_dir=sys.argv[2], token=os.environ.get("HF_TOKEN") or False)
+snapshot_download(sys.argv[1], local_dir=sys.argv[2], revision=sys.argv[3],
+                  token=os.environ.get("HF_TOKEN") or False)
 EOF
   model_complete || { echo "   download incomplete"; exit 1; }
 fi
