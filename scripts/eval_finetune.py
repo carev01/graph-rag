@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import collections
 import json
+import os
 import random
 import sys
 import time
@@ -43,7 +44,8 @@ def pick_records(by_prompt: dict[str, list[dict]], per_prompt: int,
     return picked
 
 
-async def call(session, base_url, msgs, model, sem, timeout):
+async def call(session, base_url, msgs, model, sem, timeout, response_format=None,
+               headers=None):
     body = {"model": model, "messages": msgs,
             # Explicit: the server defaults are temperature 0.7 / top_k 20 /
             # top_p 0.8 / presence_penalty 1.5. A presence penalty punishes
@@ -52,10 +54,13 @@ async def call(session, base_url, msgs, model, sem, timeout):
             # index-array failure WORSE.
             "temperature": 0, "top_p": 1.0, "presence_penalty": 0,
             "max_tokens": 4096}
+    if response_format is not None:
+        # Production's cheap tier sends graphiti's json_schema (structured outputs).
+        body["response_format"] = response_format
     async with sem:
         t = time.time()
         try:
-            r = await session.post(base_url, json=body, timeout=timeout)
+            r = await session.post(base_url, json=body, timeout=timeout, headers=headers)
             out = r.json()
         except Exception as e:  # noqa: BLE001 - any failure is a result, not a crash
             return None, f"{type(e).__name__}: {str(e)[:120]}", time.time() - t
@@ -76,7 +81,15 @@ async def main() -> int:
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--guided", action="store_true",
+                    help="send each record's response_schema as response_format, as the "
+                         "production cheap tier does (structured outputs)")
+    ap.add_argument("--api-key-env", default="EVAL_API_KEY",
+                    help="environment variable holding the endpoint's API key (sent as a "
+                         "Bearer header when set; never taken on the command line)")
     args = ap.parse_args()
+    key = os.environ.get(args.api_key_env, "").strip()
+    headers = {"Authorization": f"Bearer {key}"} if key else None
 
     by_prompt = collections.defaultdict(list)
     for line in args.val.open():
@@ -94,7 +107,9 @@ async def main() -> int:
             nonlocal done
             msgs = [m for m in rec["messages"] if m["role"] != "assistant"]
             txt, finish, dt = await call(session, args.base_url, msgs, args.model, sem,
-                                         args.timeout)
+                                         args.timeout,
+                                         rec.get("response_schema") if args.guided else None,
+                                         headers)
             done += 1
             if done % 10 == 0:
                 print(f"  [{done}/{len(picked)}]", flush=True)
@@ -106,14 +121,16 @@ async def main() -> int:
     defects = collections.defaultdict(collections.Counter)
     lat = collections.defaultdict(list)
     rows = []
-    for rec, txt, finish, dt in results:
+    for idx, (rec, txt, finish, dt) in enumerate(results):
         name = rec["prompt_name"]
+        ref = rec["messages"][-1]["content"]
         s = stats[name]
         s["n"] += 1
         lat[name].append(dt)
         if txt is None:
             s["call_error"] += 1
-            rows.append({"prompt": name, "outcome": "call_error", "detail": finish})
+            rows.append({"idx": idx, "prompt": name, "outcome": "call_error", "detail": finish,
+                         "reference": ref})
             continue
         if finish != "stop":
             s["truncated"] += 1
@@ -121,14 +138,16 @@ async def main() -> int:
             payload = json.loads(txt)
         except Exception:
             s["unparseable"] += 1
-            rows.append({"prompt": name, "outcome": "unparseable"})
+            rows.append({"idx": idx, "prompt": name, "outcome": "unparseable", "output": txt,
+                         "reference": ref})
             continue
         try:
             obj = RESPONSE_MODELS[name](**payload)
         except Exception as e:  # noqa: BLE001
             s["schema_invalid"] += 1
             defects[name][f"schema:{type(e).__name__}"] += 1
-            rows.append({"prompt": name, "outcome": "schema_invalid", "detail": str(e)[:200]})
+            rows.append({"idx": idx, "prompt": name, "outcome": "schema_invalid",
+                         "detail": str(e)[:200], "output": txt, "reference": ref})
             continue
         msgs = [m for m in rec["messages"] if m["role"] != "assistant"]
         found = validate_capture(name, msgs, obj, allow_overlong_summaries=True)
@@ -138,9 +157,10 @@ async def main() -> int:
                 defects[name][d.split(":")[0]] += 1
         else:
             s["clean"] += 1
-        rows.append({"prompt": name, "outcome": "clean" if not found else "semantic_defect",
-                     "defects": found,
-                     "exact_match": txt.strip() == rec["messages"][-1]["content"].strip()})
+        rows.append({"idx": idx, "prompt": name,
+                     "outcome": "clean" if not found else "semantic_defect",
+                     "defects": found, "output": txt, "reference": ref,
+                     "exact_match": txt.strip() == ref.strip()})
 
     print(f"\n{'='*78}\nHELD-OUT RESULT ({args.model})\n{'='*78}")
     print(f"{'prompt':42} {'n':>4} {'clean':>6} {'defect':>7} {'bad json':>9} {'err':>4} {'p50 s':>6}")
@@ -159,7 +179,7 @@ async def main() -> int:
         if defects[name]:
             print(f"\n  {name} defects: {dict(defects[name])}")
     if args.out:
-        args.out.write_text(json.dumps(rows, indent=2)[:2_000_000])
+        args.out.write_text(json.dumps(rows, indent=2))
         print(f"\nper-record detail -> {args.out}")
     return 0
 

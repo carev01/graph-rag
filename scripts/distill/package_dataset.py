@@ -4,7 +4,7 @@ private Hugging Face dataset repo (spec 2026-10-17 section 7, Task 6).
 
     uv run --extra dev python -m scripts.distill.package_dataset \\
         --in data/ft-opus --out dist/ft-opus.zip \\
-        [--hf-repo carev01/<name> [--public]]
+        [--hf-repo carev01/<name> [--hf-revision <branch>] [--public]]
 
 READ-ONLY on the dataset directory except for writing `MANIFEST.json` into it.
 Makes no Neo4j, LLM or embedder call. The `--hf-repo` push is the only network
@@ -187,8 +187,12 @@ def _hf_token() -> str:
         "using --hf-repo; this script never takes a token on the command line")
 
 
-def push_to_hub(in_dir: Path, repo_id: str, private: bool, *, hf_api: Any = None) -> None:
+def push_to_hub(in_dir: Path, repo_id: str, private: bool, *, hf_api: Any = None,
+                revision: str | None = None) -> None:
     """Push the packaged files to a private HF dataset repo via `huggingface_hub`.
+
+    `revision` pushes to that branch (created if missing) instead of `main`, so a
+    rebuilt dataset can sit next to the one an earlier run trained on.
 
     The token is read ONLY from the environment and is never logged or
     returned -- only whether one was found, via the `RuntimeError` above, not
@@ -202,13 +206,18 @@ def push_to_hub(in_dir: Path, repo_id: str, private: bool, *, hf_api: Any = None
     if not private:
         logger.warning("  --public passed: %s will be a PUBLIC dataset repo", repo_id)
     hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
+    if revision:
+        hf_api.create_branch(repo_id=repo_id, repo_type="dataset", branch=revision,
+                             exist_ok=True)
     for name in ZIP_MEMBERS:
         member = in_dir / name
         if not member.exists():
             continue
         hf_api.upload_file(path_or_fileobj=str(member), path_in_repo=name,
-                           repo_id=repo_id, repo_type="dataset", token=token)
-    logger.info("  pushed %s -> hf://datasets/%s (private=%s)", in_dir, repo_id, private)
+                           repo_id=repo_id, repo_type="dataset", token=token,
+                           revision=revision)
+    logger.info("  pushed %s -> hf://datasets/%s@%s (private=%s)", in_dir, repo_id,
+                revision or "main", private)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -223,6 +232,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="push the packaged files to this HF dataset repo id "
                         "(e.g. carev01/opus-distill-2026-10), PRIVATE by default; "
                         "token from HF_TOKEN / HUGGING_FACE_HUB_TOKEN only")
+    p.add_argument("--hf-revision", default=None,
+                   help="push to this branch of --hf-repo (created if missing) "
+                        "instead of main")
     p.add_argument("--public", action="store_true",
                    help="create the HF repo PUBLIC instead of private. The default "
                         "(this flag omitted) is private -- fail closed. Pass this "
@@ -238,7 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info("  train: %d records, val: %d records",
                 manifest["counts"]["train"]["_total"], manifest["counts"]["val"]["_total"])
     if args.hf_repo:
-        push_to_hub(args.in_dir, args.hf_repo, not args.public)
+        push_to_hub(args.in_dir, args.hf_repo, not args.public, revision=args.hf_revision)
     return 0
 
 
