@@ -140,12 +140,16 @@ class FakeHfApi:
     def __init__(self):
         self.created: list[dict] = []
         self.uploaded: list[dict] = []
+        self.branches: list[dict] = []
 
     def create_repo(self, **kwargs):
         self.created.append(kwargs)
 
     def upload_file(self, **kwargs):
         self.uploaded.append(kwargs)
+
+    def create_branch(self, **kwargs):
+        self.branches.append(kwargs)
 
 
 def test_push_to_hub_uses_injected_fake_api(tmp_path, monkeypatch):
@@ -164,6 +168,44 @@ def test_push_to_hub_uses_injected_fake_api(tmp_path, monkeypatch):
     for u in fake.uploaded:
         assert u["repo_id"] == "carev01/opus-distill-test"
         assert u["repo_type"] == "dataset"
+
+
+def test_push_to_hub_to_a_revision_creates_the_branch_and_uploads_there(tmp_path, monkeypatch):
+    in_dir = _tiny_dataset(tmp_path)
+    pkg.package(in_dir, tmp_path / "out.zip")
+    monkeypatch.setenv("HF_TOKEN", "secret-token-value")
+    fake = FakeHfApi()
+
+    pkg.push_to_hub(in_dir, "carev01/opus-distill-test", True, hf_api=fake, revision="v2")
+
+    assert fake.branches == [{"repo_id": "carev01/opus-distill-test", "repo_type": "dataset",
+                              "branch": "v2", "exist_ok": True}]
+    assert fake.uploaded and {u["revision"] for u in fake.uploaded} == {"v2"}
+
+
+def test_push_to_hub_without_revision_leaves_branches_alone(tmp_path, monkeypatch):
+    in_dir = _tiny_dataset(tmp_path)
+    pkg.package(in_dir, tmp_path / "out.zip")
+    monkeypatch.setenv("HF_TOKEN", "secret-token-value")
+    fake = FakeHfApi()
+
+    pkg.push_to_hub(in_dir, "carev01/opus-distill-test", True, hf_api=fake)
+
+    assert fake.branches == []
+    assert all(u.get("revision") is None for u in fake.uploaded)
+
+
+def test_main_cli_passes_hf_revision(tmp_path, monkeypatch):
+    in_dir = _tiny_dataset(tmp_path)
+    calls = []
+    monkeypatch.setattr(pkg, "push_to_hub",
+                        lambda in_dir, repo_id, private, **kw: calls.append(kw))
+
+    rc = pkg.main(["--in", str(in_dir), "--out", str(tmp_path / "out.zip"),
+                   "--hf-repo", "carev01/opus-distill-test", "--hf-revision", "v2"])
+
+    assert rc == 0
+    assert calls == [{"revision": "v2"}]
 
 
 def test_push_to_hub_without_token_raises_and_touches_no_api(tmp_path, monkeypatch):

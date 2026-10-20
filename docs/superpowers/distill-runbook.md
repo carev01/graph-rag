@@ -147,7 +147,7 @@ uv run --extra dev python scripts/build_extraction_dataset.py \
     --from-capture DIR/capture.jsonl \
     --articles-from DIR/sample.json \
     --loss-basis completion \
-    --upsample --max-repeat 12 \
+    --upsample --upsample-basis example --max-repeat 12 \
     --max-prompt-tokens 20480 --chars-per-token 3.0 \
     --no-repair \
     --out data/ft-opus
@@ -175,6 +175,16 @@ defaults):
   `assign_loss_weights`'s docstring is explicit that the weight values depend on which
   masking regime they assume. Mismatched basis doesn't break the upsample-based mix (see
   below), but keeps `meta.loss_basis` honest about what the file actually assumes.
+- **`--upsample-basis example`** (v2, 2026-10-20): aim the repeats at EXAMPLE share,
+  not token share. Unsloth cannot count `num_items_in_batch` for qwen3.5, so each
+  micro-batch loss is a mean over its own tokens; at the notebook's batch size of 1
+  every example is one equal unit of gradient, whatever its length. The v1 build (no
+  flag: the upsample followed `--loss-basis completion`) hit the mix in completion
+  tokens, which under this trainer gave `extract_edges.edge` 2.6% of the gradient
+  against 34% and `resolve_edge` 82%. v2 from the same capture: 2,898 train rows
+  (edges x4, summaries x4, extract_text x2, dedupe_nodes x2, resolve_edge x1) at
+  34/24/16/17/9% of examples; val unchanged (byte-identical, 255 records). Compare
+  the report's `n%` column, not `tokens%`, to `target%`.
 - **`--upsample --max-repeat 12`**: the notebook does not implement a custom
   weighted-loss trainer (TRL's `SFTTrainer`, which Unsloth wraps, has no per-example
   weight it would honour) — it trains plain SFT on the **upsampled** train split, which
@@ -198,7 +208,7 @@ cp DIR/sample.json data/ft-opus/sample.json
 ```bash
 uv run --extra dev python -m scripts.distill.package_dataset \
     --in data/ft-opus --out dist/ft-opus.zip \
-    [--hf-repo carev01/ft-opus-distill]
+    [--hf-repo carev01/ft-opus-distill [--hf-revision v2]]
 ```
 
 Zips `train.jsonl`, `val.jsonl`, `sample.json` (warns and continues if absent — it is
@@ -209,7 +219,9 @@ packaged at). With `--hf-repo`, pushes those files to an HF **dataset** repo via
 `uv pip install huggingface_hub`); the token comes only from `HF_TOKEN` /
 `HUGGING_FACE_HUB_TOKEN` in the environment and is never printed. **Private by default
 (fail closed)** — `--public` is the explicit opt-out; pass it only when you deliberately
-want a public dataset repo (it logs a warning when you do).
+want a public dataset repo (it logs a warning when you do). `--hf-revision` pushes to a
+branch (created if missing) instead of `main`: v1 stays on `main`, v2 is on `v2`, and the
+notebook's `HF_DATASET_REVISION` picks one.
 
 Hand the user either `dist/ft-opus.zip` (for Google Drive) or the HF dataset repo id —
 the notebook's section 4 ("Get the dataset") takes either.
@@ -220,18 +232,32 @@ Open `notebooks/distill_train.ipynb` in Colab (A100 recommended; an L4 works wit
 smaller batch size the notebook's config cell documents). Steps, matching the
 notebook's own section numbers:
 
+**The run is resumable (v2, 2026-10-20; v1's Colab runtime died mid-training and lost
+everything).** Checkpoints (every `SAVE_STEPS` = 25 optimizer steps, last
+`SAVE_TOTAL_LIMIT` = 3 kept), the final adapter and the eval metrics live on Google
+Drive under `MyDrive/graph-rag-distill/<RUN_NAME>/`. After a runtime death: reconnect,
+**Runtime -> Run all**. Section 9 resumes from the newest checkpoint; if the final
+adapter is already there it skips training; section 10 always reloads the adapter from
+Drive, so a death during export costs only the export. Change neither the dataset nor
+the training config between a crash and its resume. Rotated-out checkpoints land in the
+Drive trash, which counts against quota.
+
 1. **Install** (section 1) — the current `pip install unsloth` (which brings its own
    compatible TRL/PEFT/transformers/datasets), then `trl`, `datasets` and
    `huggingface_hub` unpinned. Every pip command's output is shown and a failed install
    raises; the installed versions are printed.
 2. **HF token** (section 2) — set a Colab secret named `HF_TOKEN`, or export it in the
    runtime's environment; the notebook never hardcodes one and never prints it.
-3. **Configure** (section 3) — pick `DATA_SOURCE` (`"hf_dataset"` or `"drive"`), and if
-   `"drive"`, mount it and point `DRIVE_DATA_DIR` at the unzipped `dist/ft-opus.zip`.
+3. **Configure** (section 3) — pick `DATA_SOURCE` (`"hf_dataset"` with
+   `HF_DATASET_REVISION`, or `"drive"` with `DRIVE_DATA_DIR` pointing at the unzipped
+   package), and `RUN_NAME` (a new name starts a new run; the same name resumes).
+   **Mount Drive** (section 3a) — always, for the checkpoints; it lists what is already
+   on Drive for this run.
 4. **Get the dataset** (section 4) — downloads or reads `train.jsonl`/`val.jsonl`.
-5. **Mix report** (section 5) — prints the realised per-prompt-type share and
-   `meta.loss_weight`/`repeat_index`, and warns if `meta.loss_basis` isn't `"completion"`
-   (see step 4's note above).
+5. **Mix report** (section 5) — prints the realised per-prompt-type EXAMPLE share
+   (this trainer's gradient share) and `meta.loss_weight`/`repeat_index`, warns if
+   `meta.loss_basis` isn't `"completion"` and if `meta.upsample_basis` isn't `"example"`
+   (see step 4's notes above).
 6. **Load model + LoRA** (section 6) — base `Qwen/Qwen3.5-4B` (the BASE model, not the
    current production fine-tune `carev01/qwen35-4b-graphrag` — that fine-tune was
    distilled from the OLD, leak-prone extraction instructions and would carry the
@@ -278,7 +304,9 @@ notebook's own section numbers:
    the cell decodes one example's unmasked labels and asserts they equal the answer plus
    `<|im_end|>` (a trailing newline allowed); on a mismatch it prints both strings and
    raises.
-10. **Export** (section 10) — merged safetensors + Q8 GGUF, pushed to
+10. **Export** (section 10) — reloads the final adapter from Drive, smoke-tests three
+    short held-out prompts (each reply must parse as a JSON object), then saves merged
+    safetensors + Q8 GGUF locally and uploads them with `HfApi` to
     `carev01/qwen35-4b-graphrag` revision `opus-distill-2026-10` (a NEW revision — the
     current production revision is untouched and stays available for comparison).
 

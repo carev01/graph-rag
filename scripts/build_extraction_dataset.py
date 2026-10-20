@@ -1931,7 +1931,7 @@ def _tokens_by_prompt(records: list[dict], basis: str) -> dict[str, int]:
 
 
 def upsample_train(train: list[dict], max_repeat: int, basis: str = "full") -> list[dict]:
-    """Repeat TRAIN records so TARGET_MIX is approached in TOKEN share.
+    """Repeat TRAIN records so TARGET_MIX is approached in TOKEN (or EXAMPLE) share.
 
     **Not** `round(loss_weight)`. That weight is mean-normalised so the effective
     learning rate stays comparable to an unweighted run -- correct for
@@ -1954,10 +1954,23 @@ def upsample_train(train: list[dict], max_repeat: int, basis: str = "full") -> l
     val loss toward the repeated prompts, and a repeat crossing the split
     boundary would be leakage.
 
+    `basis="example"` balances EXAMPLE counts instead of tokens. It is the right
+    basis for a trainer whose loss is a per-example mean -- batch size 1 with the
+    micro-batch loss averaged over its own tokens, which is what Unsloth does for
+    qwen3.5 (it cannot count `num_items_in_batch`, so every micro-batch loss is a
+    mean). There each example carries the same gradient weight whatever its length,
+    and a token-share upsample silently misweights: the v1 Opus run put
+    `extract_edges.edge` at 2.6% of examples -- so ~2.6% of the gradient -- against a
+    34% target, while the completion-token report read 35%.
+
     Every emitted copy, including the first, gets a distinct `meta.repeat_index`
-    so a deduplicating pipeline downstream cannot silently collapse them back.
+    so a deduplicating pipeline downstream cannot silently collapse them back, and
+    `meta.upsample_basis` so the file says which share the repeats aimed at.
     """
-    tokens = _tokens_by_prompt(train, basis)
+    if basis not in ("full", "completion", "example"):
+        raise ValueError(f"basis must be 'full', 'completion' or 'example', got {basis!r}")
+    tokens = (dict(Counter(r["prompt_name"] for r in train)) if basis == "example"
+              else _tokens_by_prompt(train, basis))
     ratios = {p: tokens[p] / TARGET_MIX[p]
               for p in tokens if TARGET_MIX.get(p) and tokens[p]}
     if not ratios:
@@ -1980,6 +1993,7 @@ def upsample_train(train: list[dict], max_repeat: int, basis: str = "full") -> l
             rec = dict(r)
             rec["meta"] = dict(r["meta"])
             rec["meta"]["repeat_index"] = i
+            rec["meta"]["upsample_basis"] = basis
             out.append(rec)
     return out
 
@@ -2182,6 +2196,12 @@ async def main() -> int:
                    help="emit each TRAIN record round(loss_weight) times (min 1, capped "
                         "at --max-repeat) instead of relying on meta.loss_weight at train "
                         "time; val is never upsampled")
+    p.add_argument("--upsample-basis", choices=("full", "completion", "example"),
+                   default=None,
+                   help="share --upsample aims TARGET_MIX at: full-record tokens, "
+                        "completion tokens, or example counts (a trainer whose loss is "
+                        "a per-example mean, e.g. Unsloth qwen3.5 at batch size 1). "
+                        "Default: --loss-basis")
     p.add_argument("--max-repeat", type=int, default=12,
                    help="cap on repeats per record when --upsample is set (default 8)")
     p.add_argument("--sample-only", action="store_true",
@@ -2309,9 +2329,11 @@ async def main() -> int:
         return 1
 
     if args.upsample:
-        upsampled = upsample_train(train, args.max_repeat, args.loss_basis)
+        upsampled = upsample_train(train, args.max_repeat,
+                                   args.upsample_basis or args.loss_basis)
         if args.report:
-            _print_upsample_report(train, upsampled, val, args.max_repeat)
+            _print_upsample_report(train, upsampled, val, args.max_repeat,
+                                   args.upsample_basis or args.loss_basis)
         train = upsampled
 
     _write(args.out / "train.jsonl", train)
@@ -2494,33 +2516,39 @@ def _print_mix(records: list[dict], weights: dict[str, float]) -> None:
 
 
 def _print_upsample_report(before: list[dict], after: list[dict], val: list[dict],
-                           max_repeat: int) -> None:
+                           max_repeat: int, basis: str = "full") -> None:
     """Report how close TRAIN repetition got to TARGET_MIX, and that val is untouched."""
     n_before: dict[str, int] = defaultdict(int)
     n_after: dict[str, int] = defaultdict(int)
     full_after: dict[str, int] = defaultdict(int)
+    comp_after: dict[str, int] = defaultdict(int)
     for r in before:
         n_before[r["prompt_name"]] += 1
     for r in after:
         n_after[r["prompt_name"]] += 1
         full_after[r["prompt_name"]] += sum(len(m["content"]) for m in r["messages"]) // 4
+        comp_after[r["prompt_name"]] += len(r["messages"][-1]["content"]) // 4
     total_after, total_full_after = sum(n_after.values()), sum(full_after.values())
+    total_comp_after = sum(comp_after.values())
     seen_max_repeat = max((r["meta"]["repeat_index"] for r in after), default=-1) + 1
-    logger.info("--- upsample (max-repeat=%d, realised max=%d): TRAIN only ---",
-                max_repeat, seen_max_repeat)
+    logger.info("--- upsample (basis=%s, max-repeat=%d, realised max=%d): TRAIN only ---",
+                basis, max_repeat, seen_max_repeat)
     logger.info("  val split unchanged: %d records (never upsampled)", len(val))
-    logger.info("  %-40s %8s %8s %9s %10s %9s", "prompt", "before", "after", "n%",
-                "tokens%", "target%")
+    logger.info("  %-40s %8s %8s %9s %10s %12s %9s", "prompt", "before", "after", "n%",
+                "tokens%", "completion%", "target%")
     for name in TARGET_MIX:
         if not n_after.get(name):
             continue
-        logger.info("  %-40s %8d %8d %8.1f%% %9.1f%% %8.1f%%", name,
+        logger.info("  %-40s %8d %8d %8.1f%% %9.1f%% %11.1f%% %8.1f%%", name,
                     n_before.get(name, 0), n_after[name],
                     100 * n_after[name] / total_after,
                     100 * full_after[name] / total_full_after,
+                    100 * comp_after[name] / max(1, total_comp_after),
                     100 * TARGET_MIX[name])
+    column = {"example": "n%", "full": "tokens%", "completion": "completion%"}[basis]
     logger.info("  rounding + the repeat cap mean this approaches but does not exactly")
-    logger.info("  hit TARGET_MIX -- compare 'tokens%' above to 'target%'.\n")
+    logger.info("  hit TARGET_MIX -- compare '%s' (the %s basis) to 'target%%'.\n",
+                column, basis)
 
 
 if __name__ == "__main__":
