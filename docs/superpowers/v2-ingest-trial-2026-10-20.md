@@ -1,0 +1,81 @@
+# Distilled v2 as the cheap extraction tier — end-to-end ingest trial, 2026-10-20
+
+**Question:** with the Opus-distilled qwen3.5-4b (`carev01/qwen35-4b-graphrag@opus-distill-2026-10`,
+"v2") as the cheap tier, the GPU-worker setup of `deploy/helm` (routing on, dense tables still on
+gpt-5-mini), does extraction match today's routed setup (solar-pro4 + gpt-5-mini)?
+**Run:** `scripts/haiku_extract_ab.py --arms routed,v2 --judge routed,v2 --articles 60 --cap 3
+--exclude <distill sample.json>`. 60 articles from the regenerated D6 sample (13 vendors; none of
+them in the distillation data, and 9 of the 13 vendors absent from it entirely). Each arm ran in
+its own throwaway Neo4j at 4 articles at a time. v2 was served by vLLM on a vast.ai RTX 4090
+($0.416/h). Cache layout was on in both arms, as in the distillation capture.
+The engagement gate passed before any fan-out: vLLM's own success counter rose by 46 for 46
+cheap-tier calls, and 8 episodes were written. Facts were judged by the chunk-A/B judge (DeepSeek
+V4 Flash) against the source markdown.
+**Spend:** $2.66 in total: extraction $1.70, judge $0.17, unsupported-fact re-judge ~$0.05,
+GPU $0.75.
+
+**Decision: do not switch yet.** v2 holds most of the facts, but it doubles the unsupported ones,
+and it brings no speed gain.
+
+## Results
+
+Extraction over all 60 articles (51 cheap-tier, 9 dense → gpt-5-mini in both arms):
+
+| | routed (today) | routed, v2 cheap tier |
+|---|---|---|
+| failed articles | 0 | 0 |
+| episodes | 267 | 267 |
+| facts written | 1,641 | 1,553 (−5%) |
+| entities | 1,372 | 1,167 (−15%) |
+| invalid dedup indices | 0 of 172 calls | 0 of 174 calls |
+| median seconds per article | 31.3 | 32.0 |
+| cheap-tier API cost (51 articles) | $0.29 | $0 (GPU billed per hour) |
+
+Judge (49 articles scored; 11 large articles came back with a malformed judge reply, as in the
+2026-10-14 Haiku run):
+
+| | n | routed distinct / unsupported | v2 distinct / unsupported | v2 share (total, median) |
+|---|---|---|---|---|
+| **cheap tier: the model comparison** | 41 | 509 / 13 | 453 / **32** | 0.89, 0.96 |
+| cheap, vendors seen in distillation | 6 | 111 / 1 | 107 / 11 | 0.96, 1.07 |
+| cheap, unseen vendors | 35 | 398 / 12 | 346 / 21 | 0.87, 0.88 |
+| dense tier: same model, both arms (noise floor) | 8 | 126 / 12 | 132 / 19 | 1.05, 0.98 |
+
+The dense-tier row is the run-to-run noise floor: the same model in both arms still moved
+unsupported counts by 12 → 19. The cheap tier's 13 → 32 goes past that, and a re-judge of the 15
+articles where v2 had unsupported facts confirmed it (v2 34, routed 11).
+
+**What the unsupported facts look like.** They are not wild hallucinations. They are
+over-inference and subject substitution: a requirement restated for a sibling product
+("Veeam Software Appliance provides unstructured data backup", repeated for the Infrastructure
+Appliance), plausible platform facts the page never states ("Azure Resource Manager controls
+whether an operation can be performed through Azure RBAC"), and taxonomy children promoted into
+facts ("Client Tags are a type of query tag"). In a citation system that is worse than a missing
+fact.
+
+## What it shows
+
+- **Held-out validity did not predict end-to-end quality.** The 96.5% held-out validity
+  (same day, `opus-distillation-run-2026-10-18.md`) checks that the JSON is usable. It says
+  nothing about faithfulness, and faithfulness is where v2 falls short.
+- **Coverage generalises unevenly.** v2 keeps 96% of the distinct facts on the 4 distilled
+  vendors, but only 87% on the 9 unseen ones. The distillation sample covered Veeam, Microsoft,
+  AWS and Cohesity.
+- **No speed gain at this concurrency.** Per-article latency is the same. The GPU's advantage
+  is throughput: at 4 articles per arm it is mostly idle.
+- **Cost only pays at saturation.** solar-pro4 cost $0.0057 per cheap-tier article here. A $0.42/h
+  GPU breaks even at about 74 articles/h, against ~420/h measured at concurrency 48 in the
+  2026-10-08 pilot. That makes the GPU about 4× cheaper when kept busy, roughly $0.005 saved per
+  article.
+
+## Next, if v2 is pursued
+
+1. **Test `checkpoint-100` first; it is the cheapest lever.** Val loss bottomed there, and the
+   final model's over-generation fits the overfitting seen in the loss curve. The test needs a
+   Colab export, then `--arms v2 --reuse run/rows.jsonl` (routed is reused): about $0.2 judge
+   plus ~$0.5 GPU.
+2. **For a v3, broaden the vendors and teach abstention.** Capture Opus on more vendors (the
+   unseen-vendor gap), and keep the per-example mix. The notes in
+   `distill-colab-log-notes` (1 epoch or repeats ≤2, `load_best_model_at_end`) also apply.
+3. **Re-run this trial as the gate.** Adopt when the cheap tier reaches distinct share ≥ 0.95
+   (median) and unsupported facts at or below routed's, the chunk-A/B judge's adoption rule.
