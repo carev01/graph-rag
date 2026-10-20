@@ -76,3 +76,23 @@ records are repeated 11×.
 Pushed to the private HF dataset repo `carev01/ft-opus-distill` (train/val/sample/MANIFEST; anonymous access 401). Package: `dist/ft-opus.zip` (sha256 `53e77ae05f1bf41760251036eb897d0793ef4460d54fe4440968e8e145a08e91`),
 MANIFEST at commit `ad298e7`. Next: training on Colab (`notebooks/distill_train.ipynb`),
 then the held-out and end-to-end evaluations of spec §8.
+
+## v2 dataset (2026-10-20)
+
+The first Colab run died mid-training (~step 850 of 1,190) and its checkpoints were on the
+runtime's local disk, so nothing survived. Before restarting, the dataset was rebuilt to fix
+the mix: the notebook's loss is a per-example mean (Unsloth cannot count
+`num_items_in_batch` for qwen3.5; batch size 1), so every example is one equal unit of
+gradient, and v1's completion-token-share upsample left `extract_edges.edge` at 2.6% of
+examples against its 34% target (`resolve_edge`, repeated 11x, at 82%).
+
+Same capture and sample, `--upsample-basis example`: train 2,898 rows (edges x4,
+summaries x4, extract_text x2, dedupe_nodes x2, resolve_edge x1 -> 33.5/16.4/16.8/8.9/24.4%
+of examples against 34/18/13/10/25%), ~13.9M tokens per epoch, 364 optimizer steps over
+2 epochs. Same 1,388 unique train records as v1; val byte-identical (255 records), so v1
+and v2 held-out scores are comparable. Package `dist/ft-opus-v2.zip` (sha256
+`dd0da9dc69ccbed108aeaa2a84923861ac34bad44839a4060a857214821f01f9`), MANIFEST at
+commit `82efadb`; destined for branch `v2` of `carev01/ft-opus-distill` (v1 stays on
+`main`).
+
+The notebook now checkpoints to Google Drive and resumes on Run-all (runbook section 6).
