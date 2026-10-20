@@ -91,8 +91,8 @@ summaries x4, extract_text x2, dedupe_nodes x2, resolve_edge x1 -> 33.5/16.4/16.
 of examples against 34/18/13/10/25%), ~13.9M tokens per epoch, 364 optimizer steps over
 2 epochs. Same 1,388 unique train records as v1; val byte-identical (255 records), so v1
 and v2 held-out scores are comparable. Package `dist/ft-opus-v2.zip` (sha256
-`dd0da9dc69ccbed108aeaa2a84923861ac34bad44839a4060a857214821f01f9`), MANIFEST at
-commit `82efadb`; destined for branch `v2` of `carev01/ft-opus-distill` (v1 stays on
-`main`).
+`4e211eb8d11fc4464ac1fe177fe0919cf72f59e14c3db4d8f65676854a56ceb7`), MANIFEST at
+commit `350ed00`; pushed to branch `v2` of the private `carev01/ft-opus-distill`
+(remote files sha-verified against local; v1 stays on `main`; anonymous access refused).
 
 The notebook now checkpoints to Google Drive and resumes on Run-all (runbook section 6).
