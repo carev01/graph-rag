@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.build_extraction_dataset import (  # noqa: E402
     RESPONSE_MODELS,
+    response_schema,
     validate_capture,
 )
 
@@ -44,6 +45,30 @@ def pick_records(by_prompt: dict[str, list[dict]], per_prompt: int,
     return picked
 
 
+def response_format_for(rec: dict) -> dict:
+    """The `response_format` payload for one record under `--guided`.
+
+    A dataset record's `response_schema` is the response model's NAME (the full
+    payloads live in the package's schemas.json), and a name sent as
+    `response_format` is a 400 on every request. Build the payload the cheap tier
+    is served from the prompt name instead; a record that already carries the full
+    payload (the harness capture) is sent as is.
+    """
+    given = rec.get("response_schema")
+    if isinstance(given, dict):
+        return given
+    return response_schema(rec["prompt_name"])
+
+
+def reply_or_error(status: int, out: object) -> tuple[str | None, str | None]:
+    """(content, finish_reason) of a chat-completions reply, or (None, why) when the
+    server answered with an error body -- never (None, None), which hides the cause."""
+    if status != 200 or not isinstance(out, dict) or not out.get("choices"):
+        return None, f"HTTP {status}: {json.dumps(out)[:300]}"
+    ch = out["choices"][0]
+    return ch.get("message", {}).get("content"), ch.get("finish_reason")
+
+
 async def call(session, base_url, msgs, model, sem, timeout, response_format=None,
                headers=None):
     body = {"model": model, "messages": msgs,
@@ -61,11 +86,14 @@ async def call(session, base_url, msgs, model, sem, timeout, response_format=Non
         t = time.time()
         try:
             r = await session.post(base_url, json=body, timeout=timeout, headers=headers)
-            out = r.json()
+            try:
+                out = r.json()
+            except ValueError:
+                out = r.text
         except Exception as e:  # noqa: BLE001 - any failure is a result, not a crash
             return None, f"{type(e).__name__}: {str(e)[:120]}", time.time() - t
-    ch = out.get("choices", [{}])[0]
-    return ch.get("message", {}).get("content"), ch.get("finish_reason"), time.time() - t
+    txt, finish = reply_or_error(r.status_code, out)
+    return txt, finish, time.time() - t
 
 
 async def main() -> int:
@@ -108,13 +136,24 @@ async def main() -> int:
             msgs = [m for m in rec["messages"] if m["role"] != "assistant"]
             txt, finish, dt = await call(session, args.base_url, msgs, args.model, sem,
                                          args.timeout,
-                                         rec.get("response_schema") if args.guided else None,
+                                         response_format_for(rec) if args.guided else None,
                                          headers)
             done += 1
             if done % 10 == 0:
                 print(f"  [{done}/{len(picked)}]", flush=True)
             return rec, txt, finish, dt
 
+        # Smoke gate: one record per prompt type must come back as a reply before
+        # the full set runs -- a request the server rejects fails 255 times otherwise.
+        smoke = [recs[0] for _name, recs in sorted(by_prompt.items())]
+        failed = [(rec["prompt_name"], finish) for rec, txt, finish, _dt
+                  in await asyncio.gather(*(one(r) for r in smoke)) if txt is None]
+        if failed:
+            for name, why in failed:
+                print(f"SMOKE FAILED {name}: {why}", flush=True)
+            return 2
+        print(f"smoke ok: {len(smoke)} prompt types answered", flush=True)
+        done = 0
         results = await asyncio.gather(*(one(r) for r in picked))
 
     stats = collections.defaultdict(lambda: collections.Counter())
