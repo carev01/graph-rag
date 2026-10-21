@@ -79,3 +79,36 @@ fact.
    `distill-colab-log-notes` (1 epoch or repeats ≤2, `load_best_model_at_end`) also apply.
 3. **Re-run this trial as the gate.** Adopt when the cheap tier reaches distinct share ≥ 0.95
    (median) and unsupported facts at or below routed's, the chunk-A/B judge's adoption rule.
+
+## Follow-up, 2026-10-21: is the teacher the source?
+
+The same judge (DeepSeek V4 Flash, strict: plausible knowledge the text doesn't state counts
+as unsupported) scored every Opus `extract_edges` target against the chunk it came from, and,
+on the 45 held-out chunks, Opus, v2 and the old fine-tune blind and shuffled in one list.
+Spend $0.12.
+
+| | facts | unsupported | rate |
+|---|---|---|---|
+| Opus, train targets (243 chunks) | 1,378 | 29 | 2.1% |
+| Opus, held-out (45 chunks) | 256 | 2 | 0.8% |
+| v2, same 45 held-out chunks | 247 | 11 | 4.5% |
+| old fine-tune, 26 of them | 108 | 8 | 7.4% |
+
+Per chunk, v2 had more unsupported facts than Opus on 10 and fewer on 1 (34 tied); a sign
+test gives p ≈ 0.006. The gap comes from the student, not from the teacher. Opus's targets
+are already clean, so filtering them would change little (29 facts).
+
+One case shows where the student's extra facts come from. v2 wrote the same fact ("At the
+Check Configuration step of the Configuration Restore wizard, Veeam Backup & Replication
+analyzes...") on two unrelated Veeam chunks. Neither chunk, nor its previous messages, nor
+any training record contains it. It appears in a third held-out page. The base model knows
+the vendor docs from pretraining and writes them in as if the page said them.
+
+Consequences for another round:
+- Cleaning the teacher data won't fix it.
+- Early stopping (`checkpoint-100`) is still worth testing: an overfitted student is more
+  confident, so it may write in more remembered knowledge. The 45-chunk comparison above
+  is a cheap pre-gate before the end-to-end trial.
+- If `checkpoint-100` doesn't close the gap, more of the same training is unlikely to. A
+  fact-level grounding check in the pipeline (as the entity grounding gate does for entity
+  names) would address it for any cheap model, solar-pro4 included.
