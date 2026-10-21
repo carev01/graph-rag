@@ -8,6 +8,10 @@ Arms:
 - `haiku`: Claude Haiku 5.5 for everything, thinking disabled, cache layout on.
 - `luna`: openai/gpt-6-luna on OpenRouter for everything, reasoning "none", strict
   schemas (OpenAI structured outputs reject graphiti's otherwise), cache layout on.
+- `v2`: production's GPU-worker setup -- routed, with the cheap tier on the distilled
+  qwen35-4b-graphrag served by vLLM (`V2_BASE_URL`, key in `V2_API_KEY`; never on the
+  command line), cache layout on as in the distillation capture, dense tables still on
+  gpt-5-mini. Its cheap-tier tokens cost $0 here: the GPU is billed by the hour.
 Each arm ingests the SAME articles into its own throwaway Neo4j testcontainer; the
 production graph is never touched. Arms already measured can be reused from a previous
 run's rows.jsonl (`--reuse`): same sample, same code, so only the judge reruns.
@@ -15,17 +19,28 @@ run's rows.jsonl (`--reuse`): same sample, same code, so only the judge reruns.
     uv run python scripts/haiku_extract_ab.py --sample d6_sample.json --out DIR \
         --arms luna --reuse PREV/rows.jsonl --judge routed,luna --cap 6 [--smoke]
 
+`--exclude SAMPLE.json` drops the articles a distillation sample trained on
+(`articles[].split == "train"`), so a fine-tune is never scored on its own training data.
+
 Engagement gate (CLAUDE.md cost rule), run before anything else spends: each new
 single-model arm's first GATE_N articles run alone, and the run refuses to continue
 unless that arm's model served every LLM call with the variable under test engaged
 (haiku: Claude only, cache read; luna: every captured request to gpt-6-luna with
-reasoning "none" and a closed schema) and episodes were written. `--smoke` stops there.
+reasoning "none" and a closed schema; v2: vLLM's own success counter rose by exactly the
+cheap-tier calls) and episodes were written. `--smoke` stops there.
 
 Measured per arm: articles failed (recorded, never skipped silently), episodes, facts,
 entities, dedup index validity (dedup_guard), tokens, dollars, wall time; then the
 chunk-A/B judge scores the judged pair's facts against the source markdown (distinct
 supported ideas, unsupported facts). Articles run `--concurrency` at a time per arm;
 production's warm-up ordering is not reproduced, so duplicates are not measured here.
+
+Document context (2026-10-21): each article's real Vendor->Product->Source chain is
+written into every arm's Neo4j (vendor and product from DocExtractor's article endpoint,
+source name from the sample), so extraction runs as in production: with the
+per-article DOCUMENT CONTEXT sentence, and with the grounding gate scoped to the
+documented product. Runs before that date had neither. `--no-chain` reproduces them.
+Rows record `document_context`, and `--reuse` refuses rows from the other setting.
 """
 from __future__ import annotations
 
@@ -58,10 +73,102 @@ from graph_extract.usage import CURRENT_USAGE_TALLY, UsageTally, get_tally  # no
 RATES = {"cheap": (0.09, 0.018, 0.36),       # solar-pro4 via OpenRouter/Upstage
          "strong": (0.25, 0.025, 2.00),      # gpt-5-mini on Azure
          "haiku": (0.10, 0.010, 0.50),       # Claude Haiku 5.5 (< 100k-token prompts)
-         "luna": (0.10, 0.010, 0.50)}        # openai/gpt-6-luna on OpenRouter
+         "luna": (0.10, 0.010, 0.50),        # openai/gpt-6-luna on OpenRouter
+         "local": (0.0, 0.0, 0.0)}           # vLLM on a rented GPU, billed per hour
 HAIKU_MODEL = "claude-haiku-5-5"
 LUNA_MODEL = "openai/gpt-6-luna"
+V2_MODEL = "qwen35-graphrag"
 GATE_N = 2
+# Arms that keep production's routing: the article's tier comes from the router, and
+# each tier is priced at that arm's rate.
+ROUTED_ARMS = {"routed": {"cheap": "cheap", "strong": "strong"},
+               "v2": {"cheap": "local", "strong": "strong"}}
+
+
+CHAIN_WRITE = (
+    "UNWIND $rows AS r "
+    "MATCH (a:Article {id: r.article}) "
+    "MERGE (v:Vendor {id: r.vendor.id}) SET v.name = r.vendor.name "
+    "MERGE (p:Product {id: r.product.id}) SET p.name = r.product.name, "
+    "  p.vendor_id = r.vendor.id "
+    "MERGE (s:Source {id: r.source.id}) SET s.name = r.source.name "
+    "MERGE (v)-[:HAS_PRODUCT]->(p) MERGE (p)-[:HAS_SOURCE]->(s) "
+    "MERGE (s)-[:HAS_ARTICLE]->(a)")
+CHAIN_COUNT = (
+    "MATCH (:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)"
+    "-[:HAS_ARTICLE]->(a:Article) WHERE a.id IN $ids RETURN count(DISTINCT a) AS n")
+
+
+def chain_from_docext(article: dict, source_name: str) -> dict:
+    """The structural chain graph-sync would write for this article."""
+    vendor, product, source_id = (article.get("vendor"), article.get("product"),
+                                  article.get("source_id"))
+    if not (vendor and vendor.get("id") and product and product.get("id") and source_id
+            and source_name):
+        raise SystemExit(f"article {article.get('id')}: DocExtractor returned no complete "
+                         "vendor/product/source -- cannot write its document context")
+    return {"article": article["id"],
+            "vendor": {"id": vendor["id"], "name": vendor["name"]},
+            "product": {"id": product["id"], "name": product["name"]},
+            "source": {"id": source_id, "name": source_name}}
+
+
+def check_reuse_context(rows: list[dict], chain: bool) -> None:
+    other = [r for r in rows if bool(r.get("document_context")) != chain]
+    if other:
+        raise SystemExit(
+            f"--reuse: {len(other)} rows were extracted "
+            f"{'without' if chain else 'with'} document context, this run "
+            f"{'with' if chain else 'without'} it -- not comparable "
+            f"({'drop --no-chain' if not chain else 'pass --no-chain'} or rerun those arms)")
+
+
+async def fetch_chains(articles: list[dict]) -> None:
+    """Sets `a["chain"]` on every article, before anything spends."""
+    s = get_extract_settings()
+    async with make_docext_client(base_url=s.docext_base_url, read_key=s.docext_read_key,
+                                  admin_key=s.docext_admin_key,
+                                  verify_tls=s.docext_verify_tls) as dx:
+        for a in articles:
+            resp = await dx.get(f"/api/articles/{a['id']}")
+            resp.raise_for_status()
+            a["chain"] = chain_from_docext(resp.json(), a.get("source") or "")
+
+
+async def seed_chains(driver, articles: list[dict]) -> None:
+    rows = [a["chain"] for a in articles if a.get("chain")]
+    if not rows:
+        return
+    await driver.execute_query(CHAIN_WRITE, rows=rows)
+    r = await driver.execute_query(CHAIN_COUNT, ids=[c["article"] for c in rows])
+    n = r.records[0]["n"]
+    if n != len(rows):
+        raise SystemExit(f"structural chains written for {n} of {len(rows)} articles")
+
+
+def rate_key(arm: str, tier: str) -> str:
+    return ROUTED_ARMS[arm][tier] if arm in ROUTED_ARMS else tier
+
+
+def train_article_ids(distill_sample: dict) -> set[str]:
+    return {a["article_id"] for a in distill_sample["articles"] if a.get("split") == "train"}
+
+
+def vllm_success_total(metrics_text: str) -> float:
+    """Sum of vLLM's `vllm:request_success_total` over every label set."""
+    total = 0.0
+    for line in metrics_text.splitlines():
+        if line.startswith("vllm:request_success_total"):
+            total += float(line.rsplit(" ", 1)[1])
+    return total
+
+
+async def vllm_requests(base_url: str) -> float:
+    root = base_url.rstrip("/").removesuffix("/v1")
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(f"{root}/metrics")
+        r.raise_for_status()
+        return vllm_success_total(r.text)
 
 
 def arm_settings(name: str, base: ExtractSettings, out: Path) -> dict:
@@ -85,6 +192,14 @@ def arm_settings(name: str, base: ExtractSettings, out: Path) -> dict:
                 "llm_cache_layout": True,
                 "extraction_routing": False,
                 "llm_capture_path": str(out / "capture-luna.jsonl")}
+    if name == "v2":
+        import os
+        url, key = os.environ.get("V2_BASE_URL", ""), os.environ.get("V2_API_KEY", "").strip()
+        if not url or not key:
+            raise SystemExit("v2 arm needs V2_BASE_URL and V2_API_KEY")
+        return {"cheap_llm_base_url": url, "cheap_llm_api_key": key,
+                "cheap_llm_model": V2_MODEL, "cheap_llm_client_mode": "generic_json_schema",
+                "cheap_llm_timeout_seconds": 900.0, "cheap_llm_cache_layout": True}
     raise SystemExit(f"unknown arm {name!r}")
 
 
@@ -109,23 +224,24 @@ async def ingest_one(name: str, ingest, driver, a: dict, spend: Spend, out: Path
     tally = UsageTally()
     CURRENT_USAGE_TALLY.set(tally)        # this task's own context
     start = time.perf_counter()
-    row: dict = {"arm": name, "article_id": a["id"], "vendor": a.get("vendor")}
+    row: dict = {"arm": name, "article_id": a["id"], "vendor": a.get("vendor"),
+                 "document_context": bool(a.get("chain"))}
     try:
         res = await ingest.ingest_article(a["id"])
         g = await _article_graph(driver, a["id"])
-        tier = name if name != "routed" else res.tier
+        tier = res.tier if name in ROUTED_ARMS else name
         row.update(tier=tier, episodes=res.episodes_added, facts=g["facts"],
                    entities=g["entities"], dedup=asdict(res.dedup),
                    fact_texts=g["fact_texts"], error=None)
     except Exception as exc:              # recorded and counted, never dropped
-        tier = name if name != "routed" else "cheap"
+        tier = "cheap" if name in ROUTED_ARMS else name
         row.update(tier=tier, episodes=0, facts=0, entities=0, dedup=None,
                    fact_texts=[], error=f"{type(exc).__name__}: {exc}"[:500])
     row.update(seconds=round(time.perf_counter() - start, 1),
                prompt_tokens=tally.prompt_tokens, cached_tokens=tally.cached_tokens,
                completion_tokens=tally.completion_tokens, llm_calls=tally.calls,
-               cost=article_cost(row["tier"], tally.prompt_tokens, tally.cached_tokens,
-                                 tally.completion_tokens))
+               cost=article_cost(rate_key(name, row["tier"]), tally.prompt_tokens,
+                                 tally.cached_tokens, tally.completion_tokens))
     spend.add(row["cost"])
     with (out / "rows.jsonl").open("a") as f:
         f.write(json.dumps(row) + "\n")
@@ -150,14 +266,18 @@ async def run_arm(name: str, articles: list[dict], spend: Spend, out: Path,
         ingest, graphiti, docext, driver = await _build_ingest_driver(s)
         try:
             await _seed(driver, articles)
+            await seed_chains(driver, articles)
             todo = list(articles)
             if gate:
                 calls0, claude0 = get_tally().calls, ac.CLAUDE_USAGE.calls
+                vllm0 = await vllm_requests(s.cheap_llm_base_url) if name == "v2" else 0.0
                 for a in todo[:GATE_N]:
                     rows.append(await ingest_one(name, ingest, driver, a, spend, out))
                 todo = todo[GATE_N:]
+                vllm_delta = (await vllm_requests(s.cheap_llm_base_url) - vllm0
+                              if name == "v2" else 0.0)
                 check_gate(name, rows, get_tally().calls - calls0,
-                           ac.CLAUDE_USAGE.calls - claude0, out)
+                           ac.CLAUDE_USAGE.calls - claude0, out, vllm_delta)
                 if gate_ok is not None:
                     gate_ok.set()
                 if gate == "smoke":
@@ -180,7 +300,7 @@ async def run_arm(name: str, articles: list[dict], spend: Spend, out: Path,
 
 
 def check_gate(name: str, rows: list[dict], llm_calls: int, claude_calls: int,
-               out: Path) -> None:
+               out: Path, vllm_delta: float = 0.0) -> None:
     episodes = sum(r["episodes"] for r in rows)
     problems = []
     if llm_calls == 0:
@@ -216,6 +336,14 @@ def check_gate(name: str, rows: list[dict], llm_calls: int, claude_calls: int,
             problems.append(f"{len(open_schema)} request(s) without a closed schema")
         cached = sum(r.get("cached_tokens", 0) for r in recs)
         detail = f"{len(recs)} gpt-6-luna requests, reasoning none, {cached} cached"
+    elif name == "v2":
+        cheap_calls = sum(r["llm_calls"] for r in rows if r["tier"] == "cheap")
+        if cheap_calls == 0:
+            problems.append("no cheap-tier article among the gate articles")
+        elif vllm_delta != cheap_calls:
+            problems.append(f"vLLM served {vllm_delta:.0f} requests for {cheap_calls} "
+                            "cheap-tier calls")
+        detail = f"{vllm_delta:.0f} vLLM requests = {cheap_calls} cheap-tier calls"
     if problems:
         raise SystemExit(f"ENGAGEMENT GATE FAILED ({name}) -- refusing to spend: "
                          + "; ".join(problems))
@@ -310,15 +438,30 @@ async def main() -> None:
     ap.add_argument("--judge", default="routed,haiku", help="the pair to judge")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--smoke", action="store_true", help="stop after the gate")
+    ap.add_argument("--no-chain", action="store_true",
+                    help="no structural chain: extraction without document context, as "
+                         "every run before 2026-10-21")
+    ap.add_argument("--exclude", help="a distillation sample.json: its train articles are "
+                                      "dropped from the sample")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     sample = json.loads(Path(args.sample).read_text())
+    if args.exclude:
+        train = train_article_ids(json.loads(Path(args.exclude).read_text()))
+        kept = [a for a in sample if a["id"] not in train]
+        print(f"--exclude: dropped {len(sample) - len(kept)} distillation train articles",
+              flush=True)
+        sample = kept
     rng = random.Random(20261014)
     articles = rng.sample(sample, min(args.articles, len(sample)))
     ids = {a["id"] for a in articles}
     print(f"{len(articles)} articles from {len({a.get('vendor') for a in articles})} "
           f"vendors", flush=True)
+    if not args.no_chain:
+        await fetch_chains(articles)
+        print(f"document context: {len({a['chain']['product']['id'] for a in articles})} "
+              "products from DocExtractor", flush=True)
     run_now = [a for a in args.arms.split(",") if a]
     pair = [a for a in args.judge.split(",") if a]
     spend = Spend(args.cap)
@@ -344,6 +487,7 @@ async def main() -> None:
             if r["arm"] not in run_now and r["article_id"] in ids:
                 reused.setdefault(r["arm"], []).append(r)
         for arm, rows in reused.items():
+            check_reuse_context(rows, chain=not args.no_chain)
             print(f"reusing {arm}: {len(rows)} rows from {args.reuse}", flush=True)
     missing = [a for a in pair if a not in run_now and len(reused.get(a, [])) != len(ids)]
     if missing:
@@ -371,6 +515,7 @@ async def main() -> None:
     finished = dict(zip(tasks, await asyncio.gather(*tasks.values())))
     by_arm_rows = {**reused, **finished}
     results.update(wall_seconds=round(time.perf_counter() - started), spend_cap=args.cap,
+                   document_context=not args.no_chain,
                    claude_usage=asdict(ac.CLAUDE_USAGE),
                    array_overruns=asdict(ac.ARRAY_OVERRUNS),
                    reused=sorted(reused),
