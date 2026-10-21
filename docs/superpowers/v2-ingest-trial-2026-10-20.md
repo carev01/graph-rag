@@ -162,3 +162,47 @@ article's real Vendor→Product→Source chain: vendor and product from DocExtra
 source name from the sample. A free check confirmed all 60 trial articles now resolve a
 documented product through the production `_document_context` lookup. `--no-chain`
 reproduces the old runs, and `--reuse` refuses rows from the other setting.
+
+## Follow-up, 2026-10-21 (evening): the adoption test, with document context
+
+The same 60 articles, routed vs ckpt100. Both arms extracted afresh with each article's
+structural chain written (`cebaa43`), so every prompt carried the DOCUMENT CONTEXT
+sentence and the grounding gate was scoped. All 171 captured ckpt100 edge prompts
+carried it. The judge ran twice over the same facts. Extraction cost $1.77; the two
+judge passes cost $0.29.
+
+**Results (53 articles scored by both passes; each cell is pass 1 + pass 2):**
+
+| | n | routed distinct / unsupported | ckpt100 distinct / unsupported | share (total, median) |
+|---|---|---|---|---|
+| all scored by both passes | 53 | 768+788 / 67+38 | 757+756 / 51+40 | 0.97, 1.00 |
+| cheap tier | 45 | 620+639 / 62+35 | 603+603 / 49+38 | 0.96, 1.00 |
+| cheap, vendors seen in distillation | 4 | 28+33 / 4+1 | 33+33 / 1+1 | 1.08, 0.78 |
+| cheap, unseen vendors | 41 | 592+606 / 58+34 | 570+570 / 48+37 | 0.95, 1.00 |
+| dense tier (gpt-5-mini in both arms) | 8 | 148+149 / 5+3 | 154+153 / 2+2 | 1.03, 1.02 |
+
+- **Unsupported facts: ckpt100 91 against routed 105 over the two passes.** Pass 1 was
+  51 against 67; pass 2 was 40 against 38. Per article, ckpt100 had fewer on 15, more on
+  18, and the same on 20. That is parity, not a proven gain. The judge noise shows again:
+  routed's identical facts scored 67 unsupported in one pass and 38 in the next.
+- **Distinct facts: median share 1.00** (adoption needs ≥ 0.95); the total share is 0.97
+  overall and 0.96 on the cheap tier.
+- **Speed:** median 35.7 s per cheap-tier article against 32.5 s. Cost: the cheap tier
+  that ckpt100 replaces cost $0.30 across these 51 articles.
+- **One failure (1 of 51 cheap-tier articles):** `0c9570dd`, a 26-chunk Microsoft
+  licensing page. On one chunk, a long licence list, ckpt100 enumerated
+  service-plan/licence edges until it hit `max_tokens` (16,384). graphiti retried the
+  identical call, it truncated again each time, and the article failed with a
+  `JSONDecodeError`. routed extracted the page, 53 facts. The article-level dense-table
+  router did not catch this page because the table is a small share of a long article.
+
+**Verdict: ckpt100 meets the adoption rule**: median distinct share 1.00, and
+unsupported facts at parity (91 vs 105 summed over two passes). Before it takes the
+production cheap tier, one fix is needed. A cheap-tier reply that truncates
+(`finish_reason == "length"`) should be retried once on the strong tier, as
+`dedup_guard` already does for dedup replies, instead of failing the whole article.
+
+**DPO data for a further round** was captured on the same rental: ckpt100 alone on 700
+fresh articles (`scripts/distill/dpo_sample.py`, none from the distillation or trial
+samples, dense matrices excluded), every call recorded (`--capture`). See
+`docs/superpowers/distill-runbook.md` §8 for the pair builder and the Colab notebook.
