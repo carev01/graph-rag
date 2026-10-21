@@ -48,3 +48,32 @@ def test_v2_arm_points_only_the_cheap_tier_at_vllm(monkeypatch: pytest.MonkeyPat
     assert s["cheap_llm_model"] == "qwen35-graphrag"
     assert s["cheap_llm_cache_layout"] is True
     assert "extraction_routing" not in s and "llm_base_url" not in s
+
+
+def test_chain_comes_from_docext_vendor_product_and_the_sample_source() -> None:
+    art = {"id": "a1", "source_id": "s1", "vendor": {"id": "v1", "name": "Veeam"},
+           "product": {"id": "p1", "name": "Veeam Backup & Replication"}}
+    assert ab.chain_from_docext(art, "User Guide") == {
+        "article": "a1", "vendor": {"id": "v1", "name": "Veeam"},
+        "product": {"id": "p1", "name": "Veeam Backup & Replication"},
+        "source": {"id": "s1", "name": "User Guide"}}
+
+
+@pytest.mark.parametrize("missing", ["vendor", "product", "source_id"])
+def test_chain_refuses_an_incomplete_article(missing: str) -> None:
+    art = {"id": "a1", "source_id": "s1", "vendor": {"id": "v1", "name": "Veeam"},
+           "product": {"id": "p1", "name": "VBR"}}
+    art[missing] = None
+    with pytest.raises(SystemExit, match="a1"):
+        ab.chain_from_docext(art, "User Guide")
+
+
+def test_reused_rows_must_match_the_document_context_setting() -> None:
+    old = [{"arm": "routed", "article_id": "a"}]            # pre-chain rows lack the key
+    new = [{"arm": "routed", "article_id": "a", "document_context": True}]
+    ab.check_reuse_context(new, chain=True)
+    ab.check_reuse_context(old, chain=False)
+    with pytest.raises(SystemExit, match="document context"):
+        ab.check_reuse_context(old, chain=True)
+    with pytest.raises(SystemExit, match="document context"):
+        ab.check_reuse_context(new, chain=False)

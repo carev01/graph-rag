@@ -34,6 +34,13 @@ entities, dedup index validity (dedup_guard), tokens, dollars, wall time; then t
 chunk-A/B judge scores the judged pair's facts against the source markdown (distinct
 supported ideas, unsupported facts). Articles run `--concurrency` at a time per arm;
 production's warm-up ordering is not reproduced, so duplicates are not measured here.
+
+Document context (2026-10-21): each article's real Vendor->Product->Source chain is
+written into every arm's Neo4j (vendor and product from DocExtractor's article endpoint,
+source name from the sample), so extraction runs as in production: with the
+per-article DOCUMENT CONTEXT sentence, and with the grounding gate scoped to the
+documented product. Runs before that date had neither. `--no-chain` reproduces them.
+Rows record `document_context`, and `--reuse` refuses rows from the other setting.
 """
 from __future__ import annotations
 
@@ -76,6 +83,67 @@ GATE_N = 2
 # each tier is priced at that arm's rate.
 ROUTED_ARMS = {"routed": {"cheap": "cheap", "strong": "strong"},
                "v2": {"cheap": "local", "strong": "strong"}}
+
+
+CHAIN_WRITE = (
+    "UNWIND $rows AS r "
+    "MATCH (a:Article {id: r.article}) "
+    "MERGE (v:Vendor {id: r.vendor.id}) SET v.name = r.vendor.name "
+    "MERGE (p:Product {id: r.product.id}) SET p.name = r.product.name, "
+    "  p.vendor_id = r.vendor.id "
+    "MERGE (s:Source {id: r.source.id}) SET s.name = r.source.name "
+    "MERGE (v)-[:HAS_PRODUCT]->(p) MERGE (p)-[:HAS_SOURCE]->(s) "
+    "MERGE (s)-[:HAS_ARTICLE]->(a)")
+CHAIN_COUNT = (
+    "MATCH (:Vendor)-[:HAS_PRODUCT]->(:Product)-[:HAS_SOURCE]->(:Source)"
+    "-[:HAS_ARTICLE]->(a:Article) WHERE a.id IN $ids RETURN count(DISTINCT a) AS n")
+
+
+def chain_from_docext(article: dict, source_name: str) -> dict:
+    """The structural chain graph-sync would write for this article."""
+    vendor, product, source_id = (article.get("vendor"), article.get("product"),
+                                  article.get("source_id"))
+    if not (vendor and vendor.get("id") and product and product.get("id") and source_id
+            and source_name):
+        raise SystemExit(f"article {article.get('id')}: DocExtractor returned no complete "
+                         "vendor/product/source -- cannot write its document context")
+    return {"article": article["id"],
+            "vendor": {"id": vendor["id"], "name": vendor["name"]},
+            "product": {"id": product["id"], "name": product["name"]},
+            "source": {"id": source_id, "name": source_name}}
+
+
+def check_reuse_context(rows: list[dict], chain: bool) -> None:
+    other = [r for r in rows if bool(r.get("document_context")) != chain]
+    if other:
+        raise SystemExit(
+            f"--reuse: {len(other)} rows were extracted "
+            f"{'without' if chain else 'with'} document context, this run "
+            f"{'with' if chain else 'without'} it -- not comparable "
+            f"({'drop --no-chain' if not chain else 'pass --no-chain'} or rerun those arms)")
+
+
+async def fetch_chains(articles: list[dict]) -> None:
+    """Sets `a["chain"]` on every article, before anything spends."""
+    s = get_extract_settings()
+    async with make_docext_client(base_url=s.docext_base_url, read_key=s.docext_read_key,
+                                  admin_key=s.docext_admin_key,
+                                  verify_tls=s.docext_verify_tls) as dx:
+        for a in articles:
+            resp = await dx.get(f"/api/articles/{a['id']}")
+            resp.raise_for_status()
+            a["chain"] = chain_from_docext(resp.json(), a.get("source") or "")
+
+
+async def seed_chains(driver, articles: list[dict]) -> None:
+    rows = [a["chain"] for a in articles if a.get("chain")]
+    if not rows:
+        return
+    await driver.execute_query(CHAIN_WRITE, rows=rows)
+    r = await driver.execute_query(CHAIN_COUNT, ids=[c["article"] for c in rows])
+    n = r.records[0]["n"]
+    if n != len(rows):
+        raise SystemExit(f"structural chains written for {n} of {len(rows)} articles")
 
 
 def rate_key(arm: str, tier: str) -> str:
@@ -156,7 +224,8 @@ async def ingest_one(name: str, ingest, driver, a: dict, spend: Spend, out: Path
     tally = UsageTally()
     CURRENT_USAGE_TALLY.set(tally)        # this task's own context
     start = time.perf_counter()
-    row: dict = {"arm": name, "article_id": a["id"], "vendor": a.get("vendor")}
+    row: dict = {"arm": name, "article_id": a["id"], "vendor": a.get("vendor"),
+                 "document_context": bool(a.get("chain"))}
     try:
         res = await ingest.ingest_article(a["id"])
         g = await _article_graph(driver, a["id"])
@@ -197,6 +266,7 @@ async def run_arm(name: str, articles: list[dict], spend: Spend, out: Path,
         ingest, graphiti, docext, driver = await _build_ingest_driver(s)
         try:
             await _seed(driver, articles)
+            await seed_chains(driver, articles)
             todo = list(articles)
             if gate:
                 calls0, claude0 = get_tally().calls, ac.CLAUDE_USAGE.calls
@@ -368,6 +438,9 @@ async def main() -> None:
     ap.add_argument("--judge", default="routed,haiku", help="the pair to judge")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--smoke", action="store_true", help="stop after the gate")
+    ap.add_argument("--no-chain", action="store_true",
+                    help="no structural chain: extraction without document context, as "
+                         "every run before 2026-10-21")
     ap.add_argument("--exclude", help="a distillation sample.json: its train articles are "
                                       "dropped from the sample")
     args = ap.parse_args()
@@ -385,6 +458,10 @@ async def main() -> None:
     ids = {a["id"] for a in articles}
     print(f"{len(articles)} articles from {len({a.get('vendor') for a in articles})} "
           f"vendors", flush=True)
+    if not args.no_chain:
+        await fetch_chains(articles)
+        print(f"document context: {len({a['chain']['product']['id'] for a in articles})} "
+              "products from DocExtractor", flush=True)
     run_now = [a for a in args.arms.split(",") if a]
     pair = [a for a in args.judge.split(",") if a]
     spend = Spend(args.cap)
@@ -410,6 +487,7 @@ async def main() -> None:
             if r["arm"] not in run_now and r["article_id"] in ids:
                 reused.setdefault(r["arm"], []).append(r)
         for arm, rows in reused.items():
+            check_reuse_context(rows, chain=not args.no_chain)
             print(f"reusing {arm}: {len(rows)} rows from {args.reuse}", flush=True)
     missing = [a for a in pair if a not in run_now and len(reused.get(a, [])) != len(ids)]
     if missing:
@@ -437,6 +515,7 @@ async def main() -> None:
     finished = dict(zip(tasks, await asyncio.gather(*tasks.values())))
     by_arm_rows = {**reused, **finished}
     results.update(wall_seconds=round(time.perf_counter() - started), spend_cap=args.cap,
+                   document_context=not args.no_chain,
                    claude_usage=asdict(ac.CLAUDE_USAGE),
                    array_overruns=asdict(ac.ARRAY_OVERRUNS),
                    reused=sorted(reused),
