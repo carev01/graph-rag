@@ -360,3 +360,35 @@ page's destination.
 
 Write the results to a report under `docs/superpowers/` (not this runbook — this is the
 procedure, the report is the evidence).
+
+## 8. DPO round on the student's own unsupported facts (built 2026-10-21)
+
+For when SFT has the coverage but the student still writes facts the chunk does not
+support. The 2026-10-21 teacher judge traced these to the student, not to Opus's targets.
+Data stays outside the public repo (`graph-rag-distill/<date>-dpo/`).
+
+```bash
+# 1. Fresh articles: none from the distillation sample (any split) or a trial sample;
+#    dense matrices dropped (the strong tier serves those). Free, read-only.
+uv run --extra dev python -m scripts.distill.dpo_sample --out DIR/dpo_sample.json \
+    --exclude DISTILL/sample.json --exclude TRIAL/d6_sample.json --articles 700
+# 2. On-policy capture: the SFT model on vLLM extracts them, every call recorded
+#    (GPU billed by the hour; the cheap tier costs $0 per token).
+V2_BASE_URL=... V2_API_KEY=... uv run --extra dev python scripts/haiku_extract_ab.py \
+    --sample DIR/dpo_sample.json --out DIR/capture-run --articles 700 --arms v2 \
+    --judge none --capture --concurrency 8 --cap 1
+# 3. Pairs: each edge reply judged twice; an edge is dropped only when both passes call
+#    it unsupported; chosen = the reply minus those edges, rejected = the reply. PAID (judge).
+uv run --extra dev python -m scripts.distill.dpo_pairs \
+    --capture DIR/capture-run/capture-v2.jsonl --out DIR/pairs --budget 4
+# 4. Package and push (private), then run notebooks/distill_dpo.ipynb on Colab.
+cp DIR/dpo_sample.json DIR/pairs/sample.json
+uv run --extra dev python -m scripts.distill.package_dataset --in DIR/pairs \
+    --out DIR/dist/dpo1.zip --hf-repo carev01/ft-opus-distill --hf-revision dpo1
+```
+
+The notebook starts from the merged SFT revision the pairs were captured with, so the
+data is on-policy. It adds an NLL term on `chosen` (`rpo_alpha`) against coverage loss,
+keeps the best checkpoint by eval loss, and checks that the trainer's tokenised row is
+the serving prompt plus answer plus `<|im_end|>`. It pushes a new revision. Validate
+that revision like any other (section 7), on the trial articles the DPO data excluded.
