@@ -310,6 +310,13 @@ Drive trash, which counts against quota.
     `carev01/qwen35-4b-graphrag` revision `opus-distill-2026-10` (a NEW revision — the
     current production revision is untouched and stays available for comparison).
 
+
+**Exporting an intermediate checkpoint instead of the final adapter:** use
+`notebooks/export_checkpoint.ipynb`. It takes `checkpoint-<step>` from Drive, shows that
+step's eval loss from the checkpoint's own trainer state, smoke-tests it, and pushes merged
+safetensors to its own revision (`opus-distill-2026-10-ckpt<step>`). It never overwrites a
+revision that already holds weights.
+
 ## 7. Evaluate (ask before any paid GPU serving step)
 
 Two evaluations, spec section 8:

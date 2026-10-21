@@ -3,8 +3,9 @@ per-prompt counts, token estimates and the loss-weight mix, and pushes to a priv
 HF dataset repo through a dependency-injected, fake `HfApi` -- no network, and
 `huggingface_hub` need not even be installed for any of this to run.
 
-Also: `notebooks/distill_train.ipynb` is valid JSON (and valid nbformat, when the
-optional `nbformat` package is importable).
+Also: `notebooks/distill_train.ipynb` and `notebooks/export_checkpoint.ipynb` are valid
+JSON with compiling code cells (and valid nbformat, when the optional `nbformat` package
+is importable).
 """
 from __future__ import annotations
 
@@ -307,12 +308,16 @@ def test_main_cli_without_hf_repo_never_calls_push(tmp_path, monkeypatch):
 # notebook validity
 # --------------------------------------------------------------------------- #
 
-def test_notebook_is_valid_json_and_nbformat_if_available():
-    nb_path = REPO_ROOT / "notebooks" / "distill_train.ipynb"
+@pytest.mark.parametrize("name", ["distill_train.ipynb", "export_checkpoint.ipynb"])
+def test_notebook_is_valid_json_and_nbformat_if_available(name):
+    nb_path = REPO_ROOT / "notebooks" / name
     assert nb_path.exists(), f"missing {nb_path}"
     raw = json.loads(nb_path.read_text(encoding="utf-8"))
     assert raw.get("nbformat") == 4
     assert raw.get("cells")
+    for i, cell in enumerate(raw["cells"]):
+        if cell["cell_type"] == "code":
+            compile("".join(cell["source"]), f"{name}[{i}]", "exec")
 
     try:
         import nbformat
