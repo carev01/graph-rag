@@ -2,6 +2,10 @@ name: image
 on:
   push:
     branches: [main]
+    # Only the image's inputs (the Dockerfile copies pyproject.toml, uv.lock and src/):
+    # a notebook- or docs-only push builds nothing. workflow_dispatch builds on demand.
+    paths: ["src/**", "pyproject.toml", "uv.lock", "Dockerfile", ".dockerignore",
+            ".github/workflows/image.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +27,11 @@ jobs:
         with:
           context: .
           push: true
+          # A plain image manifest, not an index: with provenance on, every build also left
+          # two untagged GHCR versions (the amd64 manifest and an "unknown/unknown"
+          # attestation) beside the tagged index.
+          provenance: false
+          sbom: false
           tags: |
             ghcr.io/carev01/graph-rag:sha-${{ steps.meta.outputs.short }}
             ghcr.io/carev01/graph-rag:main

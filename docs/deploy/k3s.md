@@ -16,6 +16,10 @@ you fill in (`<N>`, `<revision>`, `<private-dir>`, `<new-size>`, `<pod>`, `<trie
 - `helm` (v4 on this host; `helm version` to confirm).
 - The image built by the `image` GitHub Actions workflow (`.github/workflows/image.yml`):
   `ghcr.io/carev01/graph-rag:sha-abc1234` (7-char short SHA of the commit on `main`).
+  Only a push that changes the image's inputs builds one (since 2026-10-22: `src/`,
+  `pyproject.toml`, `uv.lock`, `Dockerfile`, the workflow itself), so after a docs- or
+  notebook-only commit deploy the newest such commit:
+  `git log -1 --format=%h origin/main -- src pyproject.toml uv.lock Dockerfile .dockerignore .github/workflows/image.yml`.
   The chart enforces the format: `image.tag` must match `^sha-[0-9a-f]{7}$` (lowercase
   hex) or `helm upgrade`/`helm template` fails fast with a clear message — a bare commit
   SHA, an uppercase hex digit, or a moving tag like `:main` is rejected before anything
