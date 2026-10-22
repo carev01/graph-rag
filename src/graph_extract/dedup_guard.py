@@ -43,9 +43,18 @@ A detectable drop is strictly better than an undetectable merge.
 The same wrapper also hosts the grounding gate (grounding.py, 2026-10-17): the
 `extract_nodes.extract_text` reply is filtered to the entities the chunk text
 mentions, inside a CURRENT_GROUNDING context only.
+
+And the unusable-reply fallback (2026-10-21, `cheap_truncation_fallback`): on ANY
+prompt, a cheap-tier reply graphiti cannot use -- cut off at max_tokens
+(`TruncatedReply`, raised by the cheap client before graphiti's identical retries),
+unparseable or empty after those retries, or a prompt over the model's context window
+-- is re-issued once, as authored, on the strong tier. The strong reply then goes
+through the same grounding / dedup handling as a cheap one would have. A failing
+fallback propagates: the episode fails loudly, as it would have without one.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -53,7 +62,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+import openai
+from graphiti_core.llm_client.errors import EmptyResponseError
 from graphiti_core.prompts.models import Message
+
+from graph_extract.graphiti_client import TruncatedReply
 
 from graph_extract.grounding import (
     CURRENT_GROUNDING,
@@ -98,6 +111,11 @@ class DedupIndexStats:
     retried: int = 0                    # invalid calls re-issued on the fallback
     retry_clean: int = 0                # ... whose fallback reply was in range
     retry_dirty: int = 0                # ... whose fallback reply was ALSO out of range
+    # Any prompt, not only dedup: cheap-tier replies graphiti could not use
+    # (truncated, unparseable/empty, prompt over the context window), each re-issued
+    # on the strong tier when the truncation fallback is installed.
+    unusable_replies: int = 0
+    unusable_retried: int = 0
 
     def merge(self, other: DedupIndexStats) -> None:
         for f in fields(self):
@@ -146,6 +164,18 @@ def parse_candidate_counts(messages: list[Message]) -> tuple[int, int] | None:
     if related != list(range(n)) or existing != list(range(n, n + m)):
         return None
     return n, m
+
+
+def unusable_reason(exc: BaseException) -> str | None:
+    """Why a reply is unusable in a way another model may fix, else None (rate limits,
+    timeouts, auth and other errors are not the cheap model's output and propagate)."""
+    if isinstance(exc, TruncatedReply):
+        return "truncated"
+    if isinstance(exc, json.JSONDecodeError | EmptyResponseError):
+        return "unparseable"
+    if isinstance(exc, openai.BadRequestError) and "maximum context length" in str(exc):
+        return "context_overflow"
+    return None
 
 
 def _int_list(value: object) -> list[int] | None:
@@ -208,6 +238,8 @@ class DedupIndexGuard:
     # Sink for extract_text calls made with no grounding context open (other
     # callers than IngestDriver): the gate is a no-op there, but counted.
     grounding_unscoped: GroundingStats = field(default_factory=GroundingStats)
+    # Re-issues an unusable reply (any prompt); None leaves the error to propagate.
+    truncation_fallback: Any | None = None
 
     def stats(self) -> DedupIndexStats:
         return CURRENT_DEDUP_STATS.get() or self.unscoped
@@ -217,19 +249,25 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                         unscoped: DedupIndexStats,
                         timings: PromptTimings | None = None,
                         suppress_contradictions: bool = False,
-                        grounding_unscoped: GroundingStats | None = None) -> DedupIndexGuard:
+                        grounding_unscoped: GroundingStats | None = None,
+                        truncation_fallback: Any | None = None) -> DedupIndexGuard:
     """Wrap `graphiti.llm_client.generate_response` in place (the same instance-
     attribute pattern as the chat.completions wrappers in graphiti_client.py).
     `graphiti` only needs an `llm_client` attribute.
 
     `grounding_unscoped` is the sink for extract_text calls made with no grounding
     context open; pass one object to every tier's guard so a caller (the worker's
-    batch line) can report the bypass count."""
+    batch line) can report the bypass count.
+
+    `truncation_fallback` (the strong tier's `.raw`, cheap tier only) re-issues any
+    reply graphiti cannot use -- see `unusable_reason`. Independent of `fallback`,
+    which serves only out-of-range dedup indices."""
     client = graphiti.llm_client
     orig = client.generate_response
     guard = DedupIndexGuard(fallback=fallback, unscoped=unscoped, raw=_Raw(orig),
                             timings=timings or PromptTimings(),
-                            grounding_unscoped=grounding_unscoped or GroundingStats())
+                            grounding_unscoped=grounding_unscoped or GroundingStats(),
+                            truncation_fallback=truncation_fallback)
 
     def _suppressed(response: Any, stats: DedupIndexStats) -> Any:
         """Clear the WHOLE contradicted_facts list -- same-pair and cross-pair
@@ -260,6 +298,27 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
         finally:
             guard.timings.finish(label, (time.perf_counter() - t0) * 1000.0, at)
 
+    async def _primary(name: str, messages, *args: Any, **kwargs: Any) -> Any:
+        """This tier's call; an unusable reply is re-issued once on the truncation
+        fallback, with the messages as they were before this tier's client mutated
+        them."""
+        pristine = [Message(role=msg.role, content=msg.content) for msg in messages]
+        try:
+            return await _timed(orig, name, messages, *args, **kwargs)
+        except Exception as exc:
+            reason = unusable_reason(exc)
+            if reason is None:
+                raise
+            stats = guard.stats()
+            stats.unusable_replies += 1
+            if guard.truncation_fallback is None:
+                raise
+            stats.unusable_retried += 1
+            logger.warning("unusable %s reply (%s: %s); re-issuing on the strong tier",
+                           name, reason, str(exc)[:200])
+            return await _timed(guard.truncation_fallback.generate_response,
+                                f"{name}:unusable-retry", pristine, *args, **kwargs)
+
     async def generate_response(messages: list[Message], *args: Any, **kwargs: Any) -> Any:
         name = kwargs.get("prompt_name") or "unknown"
         # Published for the duration of this call so usage.py's capture (several
@@ -269,14 +328,14 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
         token = CURRENT_PROMPT_NAME.set(name)
         try:
             if name == EXTRACT_TEXT_PROMPT_NAME:
-                response = await _timed(orig, name, messages, *args, **kwargs)
+                response = await _primary(name, messages, *args, **kwargs)
                 ctx = CURRENT_GROUNDING.get()
                 if ctx is None:
                     note_unscoped(guard.grounding_unscoped)
                     return response
                 return filter_entities(response, ctx)
             if name != DEDUP_PROMPT_NAME:
-                return await _timed(orig, name, messages, *args, **kwargs)
+                return await _primary(name, messages, *args, **kwargs)
             stats = guard.stats()
             stats.calls += 1
             counts = parse_candidate_counts(messages)
@@ -285,12 +344,12 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                 logger.warning("dedup prompt not parseable (graphiti prompt format changed?); "
                                "index check skipped for this call")
                 return _suppressed(
-                    await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs), stats)
+                    await _primary(DEDUP_PROMPT_NAME, messages, *args, **kwargs), stats)
             n, m = counts
             # graphiti's clients append schema/language text to the messages IN PLACE;
             # keep a pristine copy so the fallback sees the prompt as authored.
             pristine = [Message(role=msg.role, content=msg.content) for msg in messages]
-            response = await _timed(orig, DEDUP_PROMPT_NAME, messages, *args, **kwargs)
+            response = await _primary(DEDUP_PROMPT_NAME, messages, *args, **kwargs)
             verdict = _classify(response, n, m)
             if verdict is not None:
                 # Recorded BEFORE the clean-path return: a same-pair contradiction is

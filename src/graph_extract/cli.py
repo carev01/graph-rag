@@ -139,7 +139,10 @@ async def _build_ingest_driver(
                 fallback=strong_guard.raw if settings.dedup_retry_on_strong else None,
                 unscoped=DedupIndexStats(), timings=timings,
                 suppress_contradictions=not settings.ingest_same_pair_contradictions,
-                grounding_unscoped=grounding_unscoped)
+                grounding_unscoped=grounding_unscoped,
+                # Truncated / unparseable / over-context cheap replies, any prompt.
+                truncation_fallback=(strong_guard.raw
+                                     if settings.cheap_truncation_fallback else None))
             cheap_tier = ExtractionTier(
                 "cheap", cheap_graphiti,
                 EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,

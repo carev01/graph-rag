@@ -202,6 +202,15 @@ production cheap tier, one fix is needed. A cheap-tier reply that truncates
 (`finish_reason == "length"`) should be retried once on the strong tier, as
 `dedup_guard` already does for dedup replies, instead of failing the whole article.
 
+*Built 2026-10-22 (`cheap_truncation_fallback`, default on).* The cheap client raises
+`TruncatedReply` on a `length` finish instead of letting graphiti retry the cut-off JSON
+4 times. `dedup_guard` then re-issues the call once on the strong tier, for any prompt,
+with the prompt as authored. It does the same for a reply that is still unparseable or
+empty after graphiti's retries, and for a prompt over the model's context window: the
+700-article capture had one such failure, a vLLM 400. The strong reply goes through
+grounding and dedup checks as usual. `unusable_replies` / `unusable_retried` are
+reported on the article and worker batch lines.
+
 **DPO data for a further round** was captured on the same rental: ckpt100 alone on 700
 fresh articles (`scripts/distill/dpo_sample.py`, none from the distillation or trial
 samples, dense matrices excluded), every call recorded (`--capture`). See

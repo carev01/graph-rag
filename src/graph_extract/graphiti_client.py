@@ -214,6 +214,30 @@ def _drop_temperature(client: AsyncOpenAI) -> AsyncOpenAI:
     return client
 
 
+class TruncatedReply(Exception):
+    """A chat-completions reply cut off at max_tokens (finish_reason "length").
+
+    Deliberately not a JSONDecodeError: graphiti retries those (4 attempts, with
+    backoff), and a deterministic model truncates identically every time.
+    dedup_guard catches it and re-issues the call on the strong tier."""
+
+
+def _raise_on_truncation(client: AsyncOpenAI) -> AsyncOpenAI:
+    orig = client.chat.completions.create
+
+    async def create(*args, **kwargs):
+        resp = await orig(*args, **kwargs)
+        choices = getattr(resp, "choices", None) or []
+        if choices and getattr(choices[0], "finish_reason", None) == "length":
+            raise TruncatedReply(
+                f"reply cut off at max_tokens={kwargs.get('max_tokens')} "
+                f"(model {kwargs.get('model', '?')})")
+        return resp
+
+    client.chat.completions.create = create  # type: ignore[method-assign]
+    return client
+
+
 def _is_azure(base_url: str) -> bool:
     return "azure.com" in base_url or "cognitiveservices" in base_url
 
@@ -268,6 +292,10 @@ def _llm_client(s: ExtractSettings, *, tier: str = "strong", transport: Any = No
         transport = AsyncOpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
                                 timeout=s.llm_timeout_seconds, max_retries=4)
     raw = instrument(transport, tier=tier, capture_path=s.llm_capture_path)
+    if s.llm_raise_on_truncation:
+        # Inside every other wrapper, outside the capture: the truncated reply is
+        # still recorded before the raise.
+        raw = _raise_on_truncation(raw)
     if "openrouter" in s.llm_base_url:
         raw = _inject_openrouter_provider(raw)
         if s.llm_openrouter_reasoning_effort:
@@ -390,7 +418,8 @@ def _cheap_view_settings(s: ExtractSettings) -> ExtractSettings:
         llm_base_url=s.cheap_llm_base_url, llm_model=s.cheap_llm_model,
         llm_api_key=s.cheap_llm_api_key, llm_client_mode=s.cheap_llm_client_mode,
         llm_cache_layout=s.cheap_llm_cache_layout,
-        llm_timeout_seconds=s.cheap_llm_timeout_seconds))
+        llm_timeout_seconds=s.cheap_llm_timeout_seconds,
+        llm_raise_on_truncation=s.cheap_truncation_fallback))
 
 
 def build_cheap_graphiti(s: ExtractSettings, *, transport: Any = None,

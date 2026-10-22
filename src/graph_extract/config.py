@@ -103,6 +103,11 @@ class ExtractSettings(BaseSettings):
     # take it, and with OpenRouter's require_parameters routing that leaves NO
     # endpoint (a 404, measured 2026-10-14). False drops it from extraction calls.
     llm_send_temperature: bool = True
+    # Raise TruncatedReply on a finish_reason="length" chat-completions reply instead of
+    # handing graphiti a cut-off JSON prefix (which it retries identically 4 times, with
+    # backoff, then fails). Never set directly: the cheap view maps it from
+    # cheap_truncation_fallback, whose guard catches it and asks the strong tier.
+    llm_raise_on_truncation: bool = False
     # Per-request timeout of the strong-tier client (and, through the cheap view, of the
     # cheap tier's via cheap_llm_timeout_seconds). One 90 s value for every tier starved
     # the vast.ai GPU tier: at ~47 generated tokens/s per request an answer over ~4k
@@ -468,6 +473,13 @@ class ExtractSettings(BaseSettings):
     cheap_llm_cache_layout: bool = False
     cheap_llm_timeout_seconds: float = 90.0   # mapped onto llm_timeout_seconds (cheap view)
     cheap_max_chunk_tokens: int = 900   # smaller chunks for the verbose cheap model
+    # Re-issue ONCE on the strong tier a cheap-tier reply graphiti cannot use: cut off at
+    # max_tokens, unparseable or empty after graphiti's own retries, or a prompt over the
+    # model's context window (dedup_guard). Measured 2026-10-21: the distilled 4B
+    # enumerated edges to the 16,384-token limit on 1 article in 51, graphiti's
+    # identical retries truncated the same way and the article failed; all 17 malformed
+    # replies in a 700-article capture were truncations. ON by default.
+    cheap_truncation_fallback: bool = True
     # Route an article to the STRONG tier when it is a dense table:
     dense_table_line_ratio: float = 0.25
     dense_pipe_count: int = 200
