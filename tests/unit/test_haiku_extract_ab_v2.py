@@ -77,3 +77,15 @@ def test_reused_rows_must_match_the_document_context_setting() -> None:
         ab.check_reuse_context(old, chain=True)
     with pytest.raises(SystemExit, match="document context"):
         ab.check_reuse_context(new, chain=False)
+
+
+def test_capture_writes_each_arm_to_its_own_file(tmp_path) -> None:
+    assert ab.capture_settings("v2", tmp_path, True) == {
+        "llm_capture_path": str(tmp_path / "capture-v2.jsonl")}
+    assert ab.capture_settings("v2", tmp_path, False) == {}
+
+
+@pytest.mark.parametrize(("value", "arms"), [("none", []), ("", []), ("routed,v2", ["routed", "v2"]),
+                                             ("v2,", ["v2"])])
+def test_arm_list_reads_none_as_no_arm(value: str, arms: list[str]) -> None:
+    assert ab.arm_list(value) == arms

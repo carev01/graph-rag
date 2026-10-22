@@ -19,14 +19,18 @@ Three sections:
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
 from graphiti_core.edges import EntityEdge
 from graphiti_core.llm_client.config import ModelSize
+from graphiti_core.llm_client.errors import EmptyResponseError, RateLimitError
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.prompts.lib import prompt_library
 from graphiti_core.prompts.models import Message
@@ -38,7 +42,9 @@ from graph_extract.dedup_guard import (
     DedupIndexStats,
     install_dedup_guard,
     parse_candidate_counts,
+    unusable_reason,
 )
+from graph_extract.graphiti_client import TruncatedReply
 from graph_extract import grounding
 from graph_extract.grounding import (
     CURRENT_GROUNDING,
@@ -660,3 +666,121 @@ async def test_grounding_applies_on_both_tiers():
     finally:
         CURRENT_GROUNDING.reset(token)
     assert ctx.stats.dropped == 2
+
+
+# ------------------------------------------- unusable cheap replies (2026-10-21)
+
+class _FailingLLM(_ScriptedLLM):
+    """Mutates the messages like a real client, then raises."""
+
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__()
+        self.exc = exc
+
+    async def generate_response(self, messages, *args, **kwargs):
+        self.seen.append(kwargs)
+        self.seen_content.append([m.content for m in messages])
+        messages[0].content += " <lang-suffix>"
+        raise self.exc
+
+
+def _bad_request(message: str) -> openai.BadRequestError:
+    req = httpx.Request("POST", "http://vllm/v1/chat/completions")
+    return openai.BadRequestError(message, response=httpx.Response(400, request=req),
+                                  body=None)
+
+
+_CONTEXT_MSG = ("This model's maximum context length is 65536 tokens. However, you "
+                "requested 16384 output tokens and your prompt contains at least 49153 "
+                "input tokens")
+
+
+@pytest.mark.parametrize("exc,reason", [
+    (TruncatedReply("cut"), "truncated"),
+    (json.JSONDecodeError("Expecting value", "{", 1), "unparseable"),
+    (EmptyResponseError("empty"), "unparseable"),
+    (_bad_request(_CONTEXT_MSG), "context_overflow"),
+    (_bad_request("invalid schema"), None),
+    (RateLimitError("slow down"), None),
+    (RuntimeError("boom"), None),
+])
+def test_unusable_reason_names_only_failures_another_model_can_fix(exc, reason):
+    assert unusable_reason(exc) == reason
+
+
+async def test_a_truncated_reply_is_reissued_on_the_strong_tier_with_pristine_messages():
+    primary = _FailingLLM(TruncatedReply("cut off at max_tokens=16384"))
+    strong = _ScriptedLLM({"edges": []})
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None, unscoped=stats,
+                        truncation_fallback=strong)
+    msgs = [Message(role="system", content="sys"), Message(role="user", content="chunk")]
+    out = await primary.generate_response(msgs, max_tokens=16384,
+                                          prompt_name="extract_edges.edge")
+    assert out == {"edges": []}
+    assert strong.seen_content[0] == ["sys", "chunk"]
+    assert strong.seen[0] == {"max_tokens": 16384, "prompt_name": "extract_edges.edge"}
+    assert (stats.unusable_replies, stats.unusable_retried) == (1, 1)
+
+
+async def test_an_over_context_dedup_prompt_falls_back_and_is_still_checked():
+    primary = _FailingLLM(_bad_request(_CONTEXT_MSG))
+    strong = _ScriptedLLM(_dedup_response([1], [3]))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None, unscoped=stats,
+                        suppress_contradictions=True, truncation_fallback=strong)
+    out = await _call(primary, 2, 2)
+    assert out == _dedup_response([1], [])          # suppression still applies
+    assert stats.calls == 1 and stats.unusable_retried == 1
+    assert stats.contradictions_suppressed == 1
+
+
+async def test_a_strong_extraction_reply_is_still_grounding_filtered():
+    primary = _FailingLLM(json.JSONDecodeError("Unterminated string", "{", 1))
+    strong = _ScriptedLLM(_entities("AWS Backup", "Azure Blob Storage"))
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None,
+                        unscoped=DedupIndexStats(), truncation_fallback=strong)
+    ctx = GroundingContext(text="+ Azure Blob + AWS RDS MySQL +", allowed=("Securiti.ai",),
+                           stats=GroundingStats())
+    token = CURRENT_GROUNDING.set(ctx)
+    try:
+        out = await _extract(primary)
+    finally:
+        CURRENT_GROUNDING.reset(token)
+    assert [e["name"] for e in out["extracted_entities"]] == ["Azure Blob Storage"]
+    assert len(strong.seen) == 1
+
+
+async def test_without_a_truncation_fallback_the_error_propagates_and_is_counted():
+    primary = _FailingLLM(TruncatedReply("cut"))
+    stats = DedupIndexStats()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=_ScriptedLLM(),
+                        unscoped=stats)
+    with pytest.raises(TruncatedReply):
+        await primary.generate_response([Message(role="user", content="u")],
+                                        prompt_name="extract_edges.edge")
+    assert (stats.unusable_replies, stats.unusable_retried) == (1, 0)
+
+
+async def test_other_errors_never_reach_the_truncation_fallback():
+    primary = _FailingLLM(RateLimitError("slow down"))
+    strong = _ScriptedLLM()
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None,
+                        unscoped=DedupIndexStats(), truncation_fallback=strong)
+    with pytest.raises(RateLimitError):
+        await primary.generate_response([Message(role="user", content="u")],
+                                        prompt_name="extract_edges.edge")
+    assert strong.seen == []
+
+
+async def test_a_failing_truncation_fallback_propagates():
+    class _Boom:
+        async def generate_response(self, *a, **k):
+            raise RuntimeError("strong tier down")
+
+    primary = _FailingLLM(TruncatedReply("cut"))
+    install_dedup_guard(SimpleNamespace(llm_client=primary), fallback=None,
+                        unscoped=DedupIndexStats(), truncation_fallback=_Boom())
+    with pytest.raises(RuntimeError, match="strong tier down"):
+        await primary.generate_response([Message(role="user", content="u")],
+                                        prompt_name="extract_edges.edge")

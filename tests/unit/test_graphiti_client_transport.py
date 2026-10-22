@@ -90,8 +90,8 @@ def test_the_injected_transport_receives_the_production_wrapped_request():
 
 
 def test_the_wrappers_run_in_production_order(monkeypatch):
-    """Same order as the default path: instrument, openrouter, penalties, bound,
-    strict, drop temperature, cache layout."""
+    """Same order as the default path: instrument, truncation, openrouter, penalties,
+    bound, strict, drop temperature, cache layout."""
     order: list[str] = []
 
     def rec(name: str):
@@ -101,6 +101,7 @@ def test_the_wrappers_run_in_production_order(monkeypatch):
         return wrap
 
     monkeypatch.setattr(gc, "instrument", rec("instrument"))
+    monkeypatch.setattr(gc, "_raise_on_truncation", rec("truncation"))
     monkeypatch.setattr(gc, "_inject_openrouter_provider", rec("provider"))
     monkeypatch.setattr(gc, "_inject_openrouter_reasoning", rec("reasoning"))
     monkeypatch.setattr(gc, "_inject_penalties", rec("penalties"))
@@ -111,8 +112,8 @@ def test_the_wrappers_run_in_production_order(monkeypatch):
     s = _settings(cheap_llm_cache_layout=True, llm_openrouter_reasoning_effort="low",
                   llm_frequency_penalty=0.1, llm_strict_schema=True,
                   llm_send_temperature=False)
-    expected = ["instrument", "provider", "reasoning", "penalties", "bound", "strict",
-                "drop_temperature", "cache_layout"]
+    expected = ["instrument", "truncation", "provider", "reasoning", "penalties", "bound",
+                "strict", "drop_temperature", "cache_layout"]
     fake = FakeTransport()
     gc._llm_client(gc._cheap_view_settings(s), tier="cheap", transport=fake)
     assert order == expected
@@ -288,3 +289,54 @@ def test_a_clone_stays_read_only():
     with pytest.raises(ReadOnlyViolation):
         asyncio.run(other.execute_query("RETURN 1", routing_="w"))
     asyncio.run(ro.close())
+
+
+class TruncatingTransport(FakeTransport):
+    """Answers every call with a JSON prefix cut off at max_tokens."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        async def create(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content='{"extracted_entities": [{"na'),
+                    finish_reason="length")],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5,
+                                      prompt_tokens_details=None),
+                model="fake-model")
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+
+def test_a_truncated_cheap_reply_raises_at_once_without_graphiti_s_retries(tmp_path):
+    """graphiti retries a JSONDecodeError 4 times with 5-120 s backoff, and a
+    deterministic model truncates identically each time. TruncatedReply is not
+    retryable, so the cheap model is asked exactly once -- and the reply is still
+    captured."""
+    cap = tmp_path / "capture.jsonl"
+    fake = TruncatingTransport()
+    g = gc.build_cheap_graphiti(_settings(llm_capture_path=str(cap)), transport=fake)
+    with pytest.raises(gc.TruncatedReply, match="max_tokens"):
+        _extract(g)
+    assert len(fake.calls) == 1
+    rec = json.loads(cap.read_text().splitlines()[0])
+    assert rec["finish_reason"] == "length"
+
+
+def test_the_truncation_wrapper_follows_the_cheap_fallback_switch(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(gc, "_raise_on_truncation", lambda c: calls.append(c) or c)
+    gc._llm_client(gc._cheap_view_settings(_settings()), tier="cheap",
+                   transport=FakeTransport())
+    assert len(calls) == 1, "on by default for the cheap tier"
+    gc._llm_client(gc._cheap_view_settings(_settings(cheap_truncation_fallback=False)),
+                   tier="cheap", transport=FakeTransport())
+    gc._llm_client(_settings(), tier="strong", transport=FakeTransport())
+    assert len(calls) == 1, "off when switched off, and never on the strong tier"
+
+
+def test_a_reply_that_stopped_normally_passes_the_truncation_wrapper():
+    g = gc.build_cheap_graphiti(_settings(), transport=FakeTransport())
+    assert _extract(g) == ANSWER

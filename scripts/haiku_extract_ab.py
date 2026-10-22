@@ -41,6 +41,11 @@ source name from the sample), so extraction runs as in production: with the
 per-article DOCUMENT CONTEXT sentence, and with the grounding gate scoped to the
 documented product. Runs before that date had neither. `--no-chain` reproduces them.
 Rows record `document_context`, and `--reuse` refuses rows from the other setting.
+
+`--capture` writes every LLM call of each arm run now to `capture-<arm>.jsonl` (prompt as
+sent, completion, prompt type, tier): the on-policy material a DPO round is built from
+(`scripts/distill/dpo_pairs.py`). `--judge none` skips the judge, for a capture-only run;
+`--arms none --reuse ROWS` reruns only the judge (a second pass over the same facts).
 """
 from __future__ import annotations
 
@@ -171,6 +176,16 @@ async def vllm_requests(base_url: str) -> float:
         return vllm_success_total(r.text)
 
 
+def capture_settings(name: str, out: Path, capture: bool) -> dict:
+    """`--capture`: the arm's calls go to capture-<arm>.jsonl (luna always captures)."""
+    return {"llm_capture_path": str(out / f"capture-{name}.jsonl")} if capture else {}
+
+
+def arm_list(value: str) -> list[str]:
+    """`--arms`/`--judge` value -> arm names; "none" (or empty) is no arm."""
+    return [] if value.strip() in ("", "none") else [a for a in value.split(",") if a]
+
+
 def arm_settings(name: str, base: ExtractSettings, out: Path) -> dict:
     if name == "routed":
         return {"cheap_llm_cache_layout": True}
@@ -252,8 +267,8 @@ async def ingest_one(name: str, ingest, driver, a: dict, spend: Spend, out: Path
 
 
 async def run_arm(name: str, articles: list[dict], spend: Spend, out: Path,
-                  concurrency: int, gate: str = "", gate_ok: asyncio.Event | None = None
-                  ) -> list[dict]:
+                  concurrency: int, gate: str = "", gate_ok: asyncio.Event | None = None,
+                  capture: bool = False) -> list[dict]:
     """`gate` "gate" runs the engagement gate first (and sets `gate_ok` on a pass);
     "smoke" stops after it."""
     rows: list[dict] = []
@@ -262,7 +277,7 @@ async def run_arm(name: str, articles: list[dict], spend: Spend, out: Path,
         s = base.model_copy(update={
             "neo4j_uri": neo.get_connection_url(), "neo4j_user": "neo4j",
             "neo4j_password": neo.password, "group_id": f"hx-{name}",
-            **arm_settings(name, base, out)})
+            **arm_settings(name, base, out), **capture_settings(name, out, capture)})
         ingest, graphiti, docext, driver = await _build_ingest_driver(s)
         try:
             await _seed(driver, articles)
@@ -433,9 +448,11 @@ async def main() -> None:
     ap.add_argument("--articles", type=int, default=200)
     ap.add_argument("--cap", type=float, required=True,
                     help="authorised spend, USD (extraction + judge)")
-    ap.add_argument("--arms", default="routed,haiku", help="arms to run now")
+    ap.add_argument("--arms", default="routed,haiku", help="arms to run now (none: judge only)")
     ap.add_argument("--reuse", help="a previous run's rows.jsonl for arms not run now")
-    ap.add_argument("--judge", default="routed,haiku", help="the pair to judge")
+    ap.add_argument("--judge", default="routed,haiku", help="the pair to judge (none: skip)")
+    ap.add_argument("--capture", action="store_true",
+                    help="write every LLM call of each arm run now to capture-<arm>.jsonl")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--smoke", action="store_true", help="stop after the gate")
     ap.add_argument("--no-chain", action="store_true",
@@ -462,8 +479,10 @@ async def main() -> None:
         await fetch_chains(articles)
         print(f"document context: {len({a['chain']['product']['id'] for a in articles})} "
               "products from DocExtractor", flush=True)
-    run_now = [a for a in args.arms.split(",") if a]
-    pair = [a for a in args.judge.split(",") if a]
+    run_now = arm_list(args.arms)
+    pair = arm_list(args.judge)
+    if pair and len(pair) != 2:
+        raise SystemExit(f"--judge takes two arms or none, not {pair}")
     spend = Spend(args.cap)
     gated = [a for a in run_now if a != "routed"]
     # Judge pricing is looked up before anything spends: a model missing from the
@@ -476,7 +495,8 @@ async def main() -> None:
 
     if args.smoke:
         name = gated[0]
-        rows = await run_arm(name, articles[:GATE_N], spend, out, 1, gate="smoke")
+        rows = await run_arm(name, articles[:GATE_N], spend, out, 1, gate="smoke",
+                             capture=args.capture)
         print(json.dumps({name: summarise(rows)}, indent=1))
         return
 
@@ -502,7 +522,8 @@ async def main() -> None:
     for name in gated:
         ok = asyncio.Event()
         tasks[name] = asyncio.create_task(
-            run_arm(name, articles, spend, out, args.concurrency, gate="gate", gate_ok=ok))
+            run_arm(name, articles, spend, out, args.concurrency, gate="gate", gate_ok=ok,
+                    capture=args.capture))
         waiter = asyncio.create_task(ok.wait())
         await asyncio.wait({tasks[name], waiter}, return_when=asyncio.FIRST_COMPLETED)
         if not ok.is_set():
@@ -511,7 +532,7 @@ async def main() -> None:
             raise SystemExit(f"{name} arm ended before its gate passed")
     if "routed" in run_now:
         tasks["routed"] = asyncio.create_task(
-            run_arm("routed", articles, spend, out, args.concurrency))
+            run_arm("routed", articles, spend, out, args.concurrency, capture=args.capture))
     finished = dict(zip(tasks, await asyncio.gather(*tasks.values())))
     by_arm_rows = {**reused, **finished}
     results.update(wall_seconds=round(time.perf_counter() - started), spend_cap=args.cap,
@@ -522,7 +543,8 @@ async def main() -> None:
                    **{arm: summarise(rows) for arm, rows in by_arm_rows.items()})
     (out / "results.json").write_text(json.dumps(results, indent=1))
     by_arm = {arm: {r["article_id"]: r for r in rows} for arm, rows in by_arm_rows.items()}
-    results["judge"] = await judge(pair, by_arm, out, spend, judge_rates)
+    if pair:
+        results["judge"] = await judge(pair, by_arm, out, spend, judge_rates)
     results["spend_total"] = round(spend.total, 4)
     (out / "results.json").write_text(json.dumps(results, indent=1))
     print(json.dumps(results, indent=1), flush=True)
