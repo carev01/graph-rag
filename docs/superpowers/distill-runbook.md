@@ -388,7 +388,7 @@ uv run --extra dev python -m scripts.distill.package_dataset --in DIR/pairs \
 ```
 
 The notebook starts from the merged SFT revision the pairs were captured with, so the
-data is on-policy. It adds an NLL term on `chosen` (`rpo_alpha`) against coverage loss,
+data is on-policy. It adds an NLL term on `chosen` (`rpo_alpha`, or TRL 1.x's `"sft"` loss) against coverage loss,
 keeps the best checkpoint by eval loss, and checks that the trainer's tokenised row is
 the serving prompt plus answer plus `<|im_end|>`. It pushes a new revision. Validate
 that revision like any other (section 7), on the trial articles the DPO data excluded.
