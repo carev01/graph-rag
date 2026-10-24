@@ -392,3 +392,49 @@ data is on-policy. It adds an NLL term on `chosen` (`rpo_alpha`, or TRL 1.x's `"
 keeps the best checkpoint by eval loss, and checks that the trainer's tokenised row is
 the serving prompt plus answer plus `<|im_end|>`. It pushes a new revision. Validate
 that revision like any other (section 7), on the trial articles the DPO data excluded.
+
+## 9. dpo4: coverage-balanced pairs, Claude labels, gate on Vast (2026-10-24)
+
+Spec: `docs/superpowers/specs/2026-10-24-dpo-coverage-pairs-design.md`. Data in
+`graph-rag-distill/2026-10-24-dpo4/` (`D`). dpo3's capture and DeepSeek labels are in
+`graph-rag-distill/2026-10-21-dpo/` (`D3`).
+
+```bash
+# 1. Calibration: Sonnet vs Opus on 100 existing replies. Sonnet is the labeller only if
+#    recall >= 0.90 with no missing or edge-count-mismatched reply: read `labeller` in
+#    D/calibration.json (calibrate exits 0 either way).
+uv run --extra dev python -m scripts.distill.dpo_labels calibration-sample \
+    --capture D3/capture-run/capture-v2.jsonl --deepseek D3/pairs --out D/calibration-ids.json
+for m in sonnet opus; do
+  uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind label \
+      --capture D3/capture-run/capture-v2.jsonl --ids D/calibration-ids.json --store D/store/label-$m
+done
+#    batches -> subagents (model per store, DPO_LABEL_BRIEF.md) -> intake, until nothing is pending
+uv run --extra dev python -m scripts.distill.dpo_labels calibrate --ids D/calibration-ids.json \
+    --sonnet D/store/label-sonnet --opus D/store/label-opus --out D/calibration.json
+# 2. Fresh articles (none from any earlier sample) and the Vast capture (instance STOPPED after)
+uv run --extra dev python -m scripts.distill.dpo_sample --out D/dpo_sample.json --articles 1000 \
+    --seed 20261024 --exclude DISTILL/sample.json --exclude TRIAL/d6_sample.json \
+    --exclude D3/dpo_sample.json
+# 3. Labelling with the calibrated labeller L (sonnet or opus, from calibration.json), the Opus
+#    re-check, the Opus missed edges. D/store/label-$L is the calibration store for L: reused.
+L=$(uv run --extra dev python -c 'import json; print(json.load(open("D/calibration.json"))["labeller"])')
+C="--capture D3/capture-run/capture-v2.jsonl --capture D/capture-run/capture-v2.jsonl"
+uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind label $C --store D/store/label-$L
+uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind recheck $C \
+    --labels D/store/label-$L --store D/store/recheck-opus
+uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind missed $C \
+    --labels D/store/label-$L --recheck D/store/recheck-opus --store D/store/missed-opus --n 600
+# 4. Pairs and reports
+uv run --extra dev python -m scripts.distill.dpo_coverage $C --labels D/store/label-$L \
+    --labeller $L --recheck D/store/recheck-opus --missed D/store/missed-opus \
+    --deepseek D3/pairs --out D/pairs
+# 5. Package (private) -> notebooks/distill_dpo.ipynb on Colab -> adapter revision dpo4-ckpt<step>
+# 6. Gate on the restarted instance. dpo_gate_remote.sh runs there (/workspace/dpo4, with
+#    val.jsonl copied up); the HF token goes on stdin, never on the command line. Exit 0 = pass,
+#    1 = gate failed, 2 = adapter not engaged (no gate).
+ssh ... 'bash /workspace/dpo4/dpo_gate_remote.sh gate dpo4-ckpt<step>' < <hf-token on stdin>
+```
+
+The gate is the dpo3 bar, unchanged, on the A val pairs, against the bf16 merge served by
+vLLM. B and C are reported. A failed gate ends DPO: ckpt100 stays.
