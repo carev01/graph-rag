@@ -212,3 +212,35 @@ def test_intake_counts_malformed_rows_without_crashing(tmp_path: Path) -> None:
     batch.with_suffix(".answers.jsonl").write_text('[1, 2]\n"str"\n{"key": ["x"]}\n')
     assert dl.intake(store, tmp_path / "r") == {"unparseable_line": 3}
     assert key in dict(store.pending())
+
+
+def test_replaying_intake_skips_rows_from_an_earlier_round(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    key = dl.task_key("label", "c1")
+    store.add_pending(key, dl.label_request(_rec("c1")))
+    batch = dl.write_batches(store, tmp_path / "r", size=10)[0]
+    line = json.loads(batch.read_text())
+    _answers_file(batch, [{"key": key, "ordinal": 1, "check": line["check"],
+                           "answer": {"labels": []}}])
+    assert dl.intake(store, tmp_path / "r") == {"reasked": 1}
+    assert dl.intake(store, tmp_path / "r") == {"stale": 1}
+    pending = dict(store.pending())
+    assert key in pending and "rejection" in pending[key]
+    assert store.dropped_reason(key) is None
+
+
+def test_calibrate_missing_reply_fails_the_bar(tmp_path: Path) -> None:
+    opus = {f"c{i}": [_lab("unsupported")] for i in range(10)}
+    sonnet = {f"c{i}": [_lab("unsupported")] for i in range(9)}
+    res = dl.calibrate(list(opus), sonnet, opus)
+    assert res["missing"] == ["c9"] and res["edge_count_mismatch"] == []
+    assert res["passed"] is False and res["labeller"] == "opus"
+
+
+def test_calibrate_length_mismatch_fails_the_bar() -> None:
+    opus = {"c0": [_lab("unsupported")], "c1": [_lab("unsupported")]}
+    sonnet = {"c0": [_lab("unsupported"), _lab("stated")], "c1": [_lab("unsupported")]}
+    res = dl.calibrate(["c0", "c1"], sonnet, opus)
+    assert res["edge_count_mismatch"] == ["c0"] and res["missing"] == []
+    assert res["passed"] is False and res["labeller"] == "opus"
+    assert res["matrix"] == {"unsupported|unsupported": 1}

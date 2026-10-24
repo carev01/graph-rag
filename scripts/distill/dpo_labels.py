@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import json
 import random
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -258,6 +259,11 @@ def intake(store: AnswerStore, answers_dir: Path) -> Counter:
             if store.get(key) is not None or key not in pending:
                 counts["not_pending"] += 1
                 continue
+            if lines[key].get("rejection") != pending[key].get("rejection"):
+                # an answer from an earlier round of this key: its batch line predates the
+                # re-ask now pending, so it must not be judged against the new request
+                counts["stale"] += 1
+                continue
             request = pending.pop(key)
             if (row.get("ordinal"), row.get("check")) != (lines[key]["ordinal"], lines[key]["check"]):
                 _reject(store, key, request, row.get("answer"),
@@ -337,10 +343,16 @@ def calibration_ids(recs: list[dict], ds: dict[str, list[tuple[str, str]]], n: i
 
 def calibrate(ids: list[str], sonnet: dict[str, list[dict]],
               opus: dict[str, list[dict]]) -> dict:
-    """Recall of Opus `unsupported` edges by Sonnet; the labeller is sonnet at >= 0.90."""
+    """Recall of Opus `unsupported` edges by Sonnet; the labeller is sonnet only when the
+    recall is >= 0.90 AND every id is labelled by both and has the same edge count."""
+    missing = sorted(cid for cid in ids if cid not in sonnet or cid not in opus)
+    gap = set(missing)
+    mismatch = sorted(cid for cid in ids if cid not in gap
+                      and len(sonnet[cid]) != len(opus[cid]))
+    gap |= set(mismatch)
     matrix: Counter = Counter()
     for cid in ids:
-        if cid not in sonnet or cid not in opus:
+        if cid in gap:
             continue
         for o, s in zip(opus[cid], sonnet[cid]):
             matrix[f"{o['verdict']}|{s['verdict']}"] += 1
@@ -349,10 +361,11 @@ def calibrate(ids: list[str], sonnet: dict[str, list[dict]],
         raise ValueError("Opus labelled no edge unsupported in the calibration sample -- "
                          "the 0.90 recall bar cannot decide")
     recall = matrix["unsupported|unsupported"] / opus_unsup
-    passed = recall >= 0.90 - 1e-9
+    passed = recall >= 0.90 - 1e-9 and not missing and not mismatch
     return {"replies": sum(cid in sonnet and cid in opus for cid in ids),
             "opus_unsupported": opus_unsup, "recall": recall, "passed": passed,
-            "labeller": "sonnet" if passed else "opus", "matrix": dict(sorted(matrix.items()))}
+            "labeller": "sonnet" if passed else "opus", "matrix": dict(sorted(matrix.items())),
+            "missing": missing, "edge_count_mismatch": mismatch}
 
 
 def recheck_targets(recs: list[dict], labels: dict[str, list[dict]]) -> dict[str, list[int]]:
@@ -461,6 +474,10 @@ def main(argv: list[str] | None = None) -> int:
                         load_answers(AnswerStore(a.opus), "label", ids))
         a.out.write_text(json.dumps(res, indent=2))
         print(json.dumps(res, indent=2))
+        if res["missing"] or res["edge_count_mismatch"]:
+            print(f"calibration FAILED: {len(res['missing'])} replies missing from one labeller, "
+                  f"{len(res['edge_count_mismatch'])} with mismatched edge counts -- "
+                  "labeller stays opus", file=sys.stderr)
     elif a.cmd == "status":
         for root in a.store:
             st = AnswerStore(root)
