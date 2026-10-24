@@ -403,7 +403,7 @@ variables everywhere below, so a paste never writes into the repo:
 D=/home/openclaw/Documents/Shared/projects/graph-rag-distill/2026-10-24-dpo4    # this round
 D3=/home/openclaw/Documents/Shared/projects/graph-rag-distill/2026-10-21-dpo    # dpo3: capture, DeepSeek labels
 DISTILL=/home/openclaw/Documents/Shared/projects/graph-rag-distill/2026-10-18   # section 8's DISTILL: holds sample.json
-TRIAL=<directory holding d6_sample.json>                                        # section 8's TRIAL: the d6 trial sample
+TRIAL=$D/trial                                                                  # section 8's TRIAL: the d6 trial sample
 mkdir -p "$D"
 ```
 
@@ -426,7 +426,10 @@ uv run --extra dev python -m scripts.distill.dpo_labels calibrate --ids $D/calib
 uv run --extra dev python -m scripts.distill.dpo_sample --out $D/dpo_sample.json --articles 1000 \
     --seed 20261024 --exclude $DISTILL/sample.json --exclude $TRIAL/d6_sample.json \
     --exclude $D3/dpo_sample.json
-V2_BASE_URL=... V2_API_KEY=... uv run --extra dev python scripts/haiku_extract_ab.py \
+#    The key is read from its file into the environment: it never appears on a command
+#    line or in shell history. 18080 is the ssh tunnel to the instance's vLLM.
+V2_BASE_URL=http://127.0.0.1:18080/v1 V2_API_KEY=$(tr -d '[:space:]' < ~/.config/graph-rag/vast/api_key) \
+    uv run --extra dev python scripts/haiku_extract_ab.py \
     --sample $D/dpo_sample.json --out $D/capture-run --articles 1000 --arms v2 \
     --judge none --capture --concurrency 8 --cap 1
 # 3. Labelling with the calibrated labeller L (sonnet or opus, from calibration.json), the Opus
