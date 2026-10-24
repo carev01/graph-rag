@@ -12,8 +12,10 @@ I/O this script performs.
 
 ZIP CONTENTS
 ------------
-Exactly `train.jsonl`, `val.jsonl`, `sample.json` and a freshly-written
-`MANIFEST.json`, read from `--in`. `train.jsonl`/`val.jsonl` are
+`train.jsonl`, `val.jsonl`, `sample.json` and a freshly-written `MANIFEST.json`,
+read from `--in`, plus `val_eval.jsonl` when `--in` has one (dpo4: the trainer's
+fixed eval subset, written by `dpo_coverage build`; optional, so older datasets
+still package). `train.jsonl`/`val.jsonl` are
 `build_extraction_dataset.py`'s own output (record shape: `prompt_name`,
 `response_schema`, `messages`, `meta.loss_weight`/`meta.repeat_index`/...; see
 its `_record` and `assign_loss_weights`). `sample.json` is Task 3 harness
@@ -70,11 +72,12 @@ logger = logging.getLogger(__name__)
 TRAIN_FILE = "train.jsonl"
 VAL_FILE = "val.jsonl"
 SAMPLE_FILE = "sample.json"
+VAL_EVAL_FILE = "val_eval.jsonl"   # dpo4: the trainer's fixed eval subset
 MANIFEST_FILE = "MANIFEST.json"
 REQUIRED_FILES = (TRAIN_FILE, VAL_FILE)
-OPTIONAL_FILES = (SAMPLE_FILE,)
+OPTIONAL_FILES = (SAMPLE_FILE, VAL_EVAL_FILE)
 # Order matters only for the zip's directory listing.
-ZIP_MEMBERS = (TRAIN_FILE, VAL_FILE, SAMPLE_FILE, MANIFEST_FILE)
+ZIP_MEMBERS = (TRAIN_FILE, VAL_FILE, VAL_EVAL_FILE, SAMPLE_FILE, MANIFEST_FILE)
 
 HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
 

@@ -326,3 +326,14 @@ def test_notebook_is_valid_json_and_nbformat_if_available(name):
         return
     nb = nbformat.reads(nb_path.read_text(encoding="utf-8"), as_version=4)
     nbformat.validate(nb)
+
+
+def test_package_ships_val_eval_when_present(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    for name in ("train.jsonl", "val.jsonl", "val_eval.jsonl"):
+        (in_dir / name).write_text(json.dumps({"prompt_name": "p", "messages": []}) + "\n")
+    out = tmp_path / "out.zip"
+    pkg.package(in_dir, out)
+    with zipfile.ZipFile(out) as zf:
+        assert "val_eval.jsonl" in zf.namelist()

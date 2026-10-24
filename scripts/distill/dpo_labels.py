@@ -285,14 +285,17 @@ def intake(store: AnswerStore, answers_dir: Path) -> Counter:
     return counts
 
 
-def read_records(paths: list[Path]) -> list[dict]:
-    """The judgeable student edge replies of every capture, one per call_id."""
-    lines = [ln for p in paths for ln in Path(p).read_text().splitlines() if ln.strip()]
-    recs, _ = edge_records(lines)
+def read_records_from_lines(lines: list[str]) -> list[dict]:
+    """The judgeable student edge replies, one per call_id (first occurrence wins)."""
+    recs, _ = edge_records([ln for ln in lines if ln.strip()])
     seen: dict[str, dict] = {}
     for r in recs:
         seen.setdefault(r["id"], r)
     return list(seen.values())
+
+
+def read_records(paths: list[Path]) -> list[dict]:
+    return read_records_from_lines([ln for p in paths for ln in Path(p).read_text().splitlines()])
 
 
 def load_answers(store: AnswerStore, kind: str, ids: list[str]) -> dict[str, Any]:

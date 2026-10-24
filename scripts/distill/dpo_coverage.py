@@ -18,17 +18,19 @@ the `build` CLI (task 3) does the I/O.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import random
 import re
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import jsonschema
 
-from scripts.distill.dpo_pairs import PROMPT, fact_line, serialise, tag
+from scripts.distill.dpo_pairs import PROMPT, fact_line, serialise, split_of, tag
 
 MIN_QUOTE_CHARS = 12   # a shorter "quote" (a bare entity name) proves nothing
 BAND = 0.1             # |mean(len(chosen edges) - len(rejected edges))| per split
@@ -233,3 +235,151 @@ def val_eval_subset(val: list[dict], n: int, seed: str) -> list[dict]:
     for t in sorted(by_type):
         out += _seeded(by_type[t], f"E:{seed}")[: take[t]]
     return out
+
+
+def assemble(recs: list[dict], labels: dict[str, list[dict]],
+             rechecks: dict[str, dict[int, dict]], missed: dict[str, list],
+             labeller: str, val_fraction: float) -> tuple[dict, Counter, Counter]:
+    """Each labelled reply gives at most one pair: A when an edge is confirmed unsupported;
+    else, for a clean reply, C when its missed edges survive, otherwise a B candidate."""
+    by_split = {s: {"A": [], "B": [], "C": []} for s in ("train", "val")}
+    stats: Counter = Counter()
+    c_why: Counter = Counter()
+    for rec in recs:
+        lab = labels.get(rec["id"])
+        if lab is None:
+            stats["unlabelled"] += 1
+            continue
+        if len(lab) != len(rec["payload"]["edges"]):
+            stats["label_count_mismatch"] += 1
+            continue
+        rl = classify(lab, rechecks.get(rec["id"], {}), current_message(rec))
+        bucket = by_split[split_of(rec["group"], val_fraction)]
+        if rl.confirmed:
+            pair = build_a(rec, rl, lab, labeller)
+            if pair is None:
+                stats["a_all_unsupported"] += 1
+            else:
+                bucket["A"].append(pair)
+            continue
+        if not rl.clean:
+            stats["disputed_only"] += 1
+            continue
+        stats["clean"] += 1
+        if rec["id"] in missed:
+            pair, why = build_c(rec, rl, missed[rec["id"]], labeller)
+            c_why.update(why)
+            if pair is not None:
+                bucket["C"].append(pair)
+                continue
+        pair = build_b(rec, rl, lab, labeller)
+        if pair is None:
+            stats["b_too_few_verified"] += 1
+        else:
+            bucket["B"].append(pair)
+    return by_split, stats, c_why
+
+
+def final_label(rl: ReplyLabels, i: int) -> str:
+    if i in rl.confirmed:
+        return "confirmed"
+    if i in rl.disputed:
+        return "disputed"
+    return rl.verdicts[i]
+
+
+def labels_report(recs: list[dict], labels: dict[str, list[dict]],
+                  rechecks: dict[str, dict[int, dict]], c_why: Counter,
+                  ds: dict[str, list[tuple[str, str]]] | None) -> dict:
+    verdicts: Counter = Counter()
+    finals: Counter = Counter()
+    categories: Counter = Counter()
+    stated = unverified = 0
+    vs_ds: Counter = Counter()
+    for rec in recs:
+        lab = labels.get(rec["id"])
+        if lab is None or len(lab) != len(rec["payload"]["edges"]):
+            continue
+        rl = classify(lab, rechecks.get(rec["id"], {}), current_message(rec))
+        for i, x in enumerate(lab):
+            verdicts[x["verdict"]] += 1
+            finals[final_label(rl, i)] += 1
+            if i in rl.confirmed:
+                categories[x.get("category")] += 1
+            if x["verdict"] == "stated":
+                stated += 1
+                unverified += not rl.verified[i]
+        if ds is not None and rec["id"] in ds and len(ds[rec["id"]]) == len(lab):
+            for i, (v1, v2) in enumerate(ds[rec["id"]]):
+                both = "both_unsupported" if v1 == v2 == "unsupported" else (
+                    "one_unsupported" if "unsupported" in (v1, v2) else "neither")
+                vs_ds[f"{both}|{final_label(rl, i)}"] += 1
+    report: dict = {"first_label": dict(verdicts), "final": dict(finals),
+                    "confirmed_categories": dict(categories),
+                    "stated_unverified_share": unverified / stated if stated else 0.0,
+                    "missed_edges_rejected": dict(c_why)}
+    if ds is not None:
+        both = sum(v for k, v in vs_ds.items() if k.startswith("both_unsupported|"))
+        report["deepseek"] = {"matrix": dict(sorted(vs_ds.items())),
+                              "both_unsupported_edges": both,
+                              "of_which_confirmed": vs_ds["both_unsupported|confirmed"]}
+    return report
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def main(argv: list[str] | None = None) -> int:
+    from scripts.distill.dpo_labels import (deepseek_verdicts, load_answers, load_recheck,
+                                            read_records)
+    from scripts.distill.teacher import AnswerStore
+
+    ap = argparse.ArgumentParser(prog="dpo_coverage")
+    ap.add_argument("--capture", type=Path, action="append", required=True)
+    ap.add_argument("--labels", type=Path, required=True)
+    ap.add_argument("--labeller", choices=("sonnet", "opus"), required=True)
+    ap.add_argument("--recheck", type=Path, required=True)
+    ap.add_argument("--missed", type=Path, required=True)
+    ap.add_argument("--deepseek", type=Path, help="dpo3 pairs dir, for the comparison")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--val-fraction", type=float, default=0.2)
+    ap.add_argument("--eval-size", type=int, default=120)
+    ap.add_argument("--seed", default="20261024")
+    a = ap.parse_args(argv)
+    recs = read_records(a.capture)
+    ids = [r["id"] for r in recs]
+    labels = load_answers(AnswerStore(a.labels), "label", ids)
+    rechecks = load_recheck(AnswerStore(a.recheck), ids)
+    missed = load_answers(AnswerStore(a.missed), "missed", ids)
+    by_split, stats, c_why = assemble(recs, labels, rechecks, missed, a.labeller,
+                                      a.val_fraction)
+    a.out.mkdir(parents=True, exist_ok=True)
+    out: dict[str, list[dict]] = {}
+    for split, kinds in by_split.items():
+        if not kinds["A"]:
+            raise SystemExit(f"no A pairs in {split} -- nothing to measure or train on")
+        out[split] = balance(kinds["A"], kinds["B"], kinds["C"], seed=f"{a.seed}:{split}")
+        _write_jsonl(a.out / f"{split}.jsonl", out[split])
+    val_eval = val_eval_subset(out["val"], a.eval_size, seed=a.seed)
+    _write_jsonl(a.out / "val_eval.jsonl", val_eval)
+    summary = {
+        "replies": len(recs), "labelled": len(labels), "labeller": a.labeller, **stats,
+        "candidates": {s: {k: len(v) for k, v in kinds.items()} for s, kinds in by_split.items()},
+        "pairs": {s: dict(Counter(p["meta"]["type"] for p in rows)) for s, rows in out.items()},
+        "mean_delta": {s: round(mean_delta(rows), 4) for s, rows in out.items()},
+        "val_eval": dict(Counter(p["meta"]["type"] for p in val_eval)),
+        "groups": {s: len({p["meta"]["group"] for p in rows}) for s, rows in out.items()},
+    }
+    (a.out / "summary.json").write_text(json.dumps(summary, indent=2))
+    ds = deepseek_verdicts(a.deepseek) if a.deepseek else None
+    (a.out / "labels_report.json").write_text(
+        json.dumps(labels_report(recs, labels, rechecks, c_why, ds), indent=2))
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
