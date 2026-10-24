@@ -133,6 +133,17 @@ def test_batches_intake_reask_once_then_drop(tmp_path: Path) -> None:
     assert store.dropped_reason(k2) and k2 not in dict(store.pending())
 
 
+def test_intake_refuses_a_file_or_a_directory_without_answers(tmp_path: Path) -> None:
+    store = AnswerStore(tmp_path / "store")
+    store.add_pending(dl.task_key("label", "c1"), dl.label_request(_rec("c1")))
+    batch = dl.write_batches(store, tmp_path / "round-1", size=2)[0]
+    with pytest.raises(FileNotFoundError):
+        dl.intake(store, tmp_path / "round-1")             # no answers written yet
+    _answers_file(batch, [])
+    with pytest.raises(NotADirectoryError):
+        dl.intake(store, batch.with_suffix(".answers.jsonl"))
+
+
 def test_intake_rejects_an_answer_under_the_wrong_ordinal(tmp_path: Path) -> None:
     store = AnswerStore(tmp_path / "store")
     req = dl.label_request(_rec("c1"))

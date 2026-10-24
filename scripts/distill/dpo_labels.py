@@ -232,10 +232,18 @@ def _reject(store: AnswerStore, key: str, request: dict, answer: Any, reason: st
 
 def intake(store: AnswerStore, answers_dir: Path) -> Counter:
     """Read every `batch-NNN.answers.jsonl` under `answers_dir`: an answer is stored only
-    under a key of its own batch file, with that line's ordinal and check echoed."""
+    under a key of its own batch file, with that line's ordinal and check echoed. A path
+    that is not a directory, or holds no answers file, is an error: globbing it would
+    silently store nothing."""
+    answers_dir = Path(answers_dir)
+    if not answers_dir.is_dir():
+        raise NotADirectoryError(f"--answers takes the batch directory, not a file: {answers_dir}")
+    ans_paths = sorted(answers_dir.glob("batch-*.answers.jsonl"))
+    if not ans_paths:
+        raise FileNotFoundError(f"no batch-*.answers.jsonl in {answers_dir}")
     counts: Counter = Counter()
     pending = dict(store.pending())
-    for ans_path in sorted(Path(answers_dir).glob("batch-*.answers.jsonl")):
+    for ans_path in ans_paths:
         batch_path = ans_path.with_name(ans_path.name.replace(".answers.jsonl", ".jsonl"))
         lines = {}
         for raw in batch_path.read_text(encoding="utf-8").splitlines():
