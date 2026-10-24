@@ -178,3 +178,58 @@ def test_score_command_writes_gate_json_and_exit_code(tmp_path: Path, monkeypatc
                  str(tmp_path / "base.jsonl"), "--dpo", str(tmp_path / "same.jsonl"),
                  "--out", str(tmp_path / "smoke.json")])
     assert rc == 2
+
+
+def test_smoke_with_no_comparable_pairs_has_its_own_exit_code(tmp_path: Path) -> None:
+    val = [_rec("A", [0, 2], [0, 1, 2], "a1")]
+    (tmp_path / "val.jsonl").write_text("".join(json.dumps(r) + "\n" for r in val))
+    _gen(tmp_path / "base.jsonl", [{"call_id": "zz", "prefix_text": "", "gen_text": "",
+                                    "gen_ids": [1]}])
+    _gen(tmp_path / "dpo.jsonl", [{"call_id": "zz", "prefix_text": "", "gen_text": "",
+                                   "gen_ids": [2]}])
+    rc = g.main(["score", "--smoke", "--val", str(tmp_path / "val.jsonl"), "--base",
+                 str(tmp_path / "base.jsonl"), "--dpo", str(tmp_path / "dpo.jsonl"),
+                 "--out", str(tmp_path / "smoke.json")])
+    assert rc == g.SMOKE_NO_PAIRS == 3
+    assert json.loads((tmp_path / "smoke.json").read_text()) == {"pairs": 0, "identical": None}
+
+
+def test_smoke_differing_outputs_exit_zero_and_identical_exit_two(tmp_path: Path) -> None:
+    val = [_rec("A", [0, 2], [0, 1, 2], "a1")]
+    (tmp_path / "val.jsonl").write_text("".join(json.dumps(r) + "\n" for r in val))
+    row = {"call_id": "a1", "prefix_text": "", "gen_text": "", "gen_ids": [1]}
+    _gen(tmp_path / "base.jsonl", [row])
+    _gen(tmp_path / "dpo.jsonl", [{**row, "gen_ids": [2]}])
+    _gen(tmp_path / "same.jsonl", [row])
+    args = ["score", "--smoke", "--val", str(tmp_path / "val.jsonl"), "--base",
+            str(tmp_path / "base.jsonl"), "--out", str(tmp_path / "smoke.json")]
+    assert g.main([*args, "--dpo", str(tmp_path / "dpo.jsonl")]) == 0
+    assert g.main([*args, "--dpo", str(tmp_path / "same.jsonl")]) == g.SMOKE_IDENTICAL == 2
+
+
+class ByteTok(CharTok):
+    """One token per UTF-8 byte: a split can fall inside a multibyte character."""
+
+    def __call__(self, text: str, add_special_tokens: bool = False) -> dict:
+        return {"input_ids": list(text.encode("utf-8"))}
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        return bytes(ids).decode("utf-8", errors="replace")
+
+
+def test_a_split_inside_a_multibyte_character_decodes_whole() -> None:
+    reply = '{"edges": [{"fact": "café au lait"}]}'
+    raw = list(reply.encode("utf-8"))
+    cut = reply.encode("utf-8").index("é".encode("utf-8")) + 1     # between its two bytes
+    tok = ByteTok()
+    assert "�" in tok.decode(raw[:cut]) and "�" in tok.decode(raw[cut:])
+    prefix_text, gen_text = g.split_texts(tok, raw[:cut], raw[cut:])
+    assert prefix_text + gen_text == reply
+    assert "�" not in prefix_text + gen_text
+
+
+def test_prepare_exposes_the_reply_part_of_the_prefix_as_ids() -> None:
+    r = _rec("A", [0, 2], [0, 1, 2])
+    p = g.prepare(r, CharTok())
+    assert p["prefix_ids"][len("<p>u</p>"):] == p["reply_prefix_ids"]
+    assert g.split_texts(CharTok(), p["reply_prefix_ids"], [ord("x")]) == (p["prefix_text"], "x")

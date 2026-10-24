@@ -38,6 +38,8 @@ if [ "$CMD" = gate ]; then
   set -e
   if [ "$src" = 2 ]; then
     echo "smoke: both models' continuations are token-identical -- adapter not engaged; no gate"; exit 2
+  elif [ "$src" = 3 ]; then
+    echo "smoke: NO comparable pairs (no smoke pair had both generations and a split point) -- nothing was compared, the adapter is neither shown engaged nor idle; no gate"; exit 3
   elif [ "$src" != 0 ]; then
     echo "smoke step failed with exit code $src (not a token-identity result); no gate"; exit "$src"
   fi

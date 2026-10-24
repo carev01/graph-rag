@@ -38,6 +38,8 @@ TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"
 _TRIPLE = re.compile(r'"source_entity_name": "(.*?)", "target_entity_name": "(.*?)", '
                      r'"relation_type": "(.*?)"')
 MARKER = "adapter_revision.txt"   # written into the merged dir: which adapter revision it is
+SMOKE_IDENTICAL = 2    # `score --smoke`: every continuation is token-identical (adapter not engaged)
+SMOKE_NO_PAIRS = 3     # `score --smoke`: no pair has both generations and a split point
 COUNTS = ("removed", "removed_written", "added", "added_written", "kept", "kept_written", "json")
 
 
@@ -64,9 +66,18 @@ def prepare(record: dict, tok: Any) -> dict | None:
     if split is None:
         return None
     return {"call_id": record["meta"]["call_id"], "type": record["meta"]["type"],
-            "prefix_ids": ch[:split],
+            "prefix_ids": ch[:split], "reply_prefix_ids": ch[n_prompt:split],
             "prefix_text": tok.decode(ch[n_prompt:split], skip_special_tokens=True),
             "max_tokens": min(max(len(ch), len(rj)) - split + 256, 4096)}
+
+
+def split_texts(tok: Any, reply_prefix_ids: list[int], gen_ids: list[int]) -> tuple[str, str]:
+    """(prefix_text, gen_text) with prefix_text + gen_text == the reply decoded as one
+    sequence: decoding the two halves separately garbles a character the split cuts in
+    two. prefix_text ends before any character the prefix alone leaves incomplete."""
+    whole = tok.decode([*reply_prefix_ids, *gen_ids], skip_special_tokens=True)
+    cut = len(tok.decode(reply_prefix_ids, skip_special_tokens=True).rstrip("\ufffd"))
+    return whole[:cut], whole[cut:]
 
 
 def score_pair(record: dict, prefix_text: str, gen_text: str) -> dict:
@@ -225,7 +236,7 @@ def generate(model: Path, tokenizer: Path, val: Path, out: Path, limit: int, ful
         for r in sorted(records, key=lambda r: len(r["messages"][1]["content"]))[: limit or 3]:
             ids = tok(serving_prompt(tok, r["messages"]), add_special_tokens=False)["input_ids"]
             prepared.append({"call_id": r["meta"]["call_id"], "type": r["meta"]["type"],
-                             "prefix_ids": ids, "prefix_text": "", "max_tokens": 4096})
+                             "prefix_ids": ids, "reply_prefix_ids": [], "max_tokens": 4096})
     else:
         for r in records[: limit or None]:
             p = prepare(r, tok)
@@ -240,10 +251,11 @@ def generate(model: Path, tokenizer: Path, val: Path, out: Path, limit: int, ful
                          for p in prepared])
     with Path(out).open("w", encoding="utf-8") as fh:
         for p, o in zip(prepared, outs):
+            gen_ids = list(o.outputs[0].token_ids)
+            prefix_text, gen_text = split_texts(tok, p["reply_prefix_ids"], gen_ids)
             fh.write(json.dumps({"call_id": p["call_id"], "type": p["type"],
-                                 "prefix_text": p["prefix_text"], "gen_text": o.outputs[0].text,
-                                 "gen_ids": list(o.outputs[0].token_ids)},
-                                ensure_ascii=False) + "\n")
+                                 "prefix_text": prefix_text, "gen_text": gen_text,
+                                 "gen_ids": gen_ids}, ensure_ascii=False) + "\n")
     print(f"generated {len(prepared)} ({skipped} pairs with no split point skipped) -> {out}")
 
 
@@ -282,10 +294,15 @@ def score(val: Path, base_gen: Path, dpo_gen: Path, out: Path, smoke: bool,
     gd = {r["call_id"]: r for r in _read_jsonl(dpo_gen)}
     ids = [cid for cid in records if cid in gb and cid in gd]
     if smoke:
+        if not ids:
+            Path(out).write_text(json.dumps({"pairs": 0, "identical": None}))
+            print("smoke: no pair has both generations (a pair with no split point is "
+                  "skipped) -- nothing to compare")
+            return SMOKE_NO_PAIRS
         same = all(gb[c]["gen_ids"] == gd[c]["gen_ids"] for c in ids)
         Path(out).write_text(json.dumps({"pairs": len(ids), "identical": same}))
         print(f"smoke: {len(ids)} pairs, token-identical: {same}")
-        return 2 if same or not ids else 0
+        return SMOKE_IDENTICAL if same else 0
     rows = {lbl: [score_pair(records[c], g[c]["prefix_text"], g[c]["gen_text"]) for c in ids]
             for lbl, g in (("ckpt100", gb), ("dpo", gd))}
     tot = {k: {lbl: totals(rows[lbl], k) for lbl in rows} for k in ("A", "B", "C")}
