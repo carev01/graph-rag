@@ -395,45 +395,69 @@ that revision like any other (section 7), on the trial articles the DPO data exc
 
 ## 9. dpo4: coverage-balanced pairs, Claude labels, gate on Vast (2026-10-24)
 
-Spec: `docs/superpowers/specs/2026-10-24-dpo-coverage-pairs-design.md`. Data in
-`graph-rag-distill/2026-10-24-dpo4/` (`D`). dpo3's capture and DeepSeek labels are in
-`graph-rag-distill/2026-10-21-dpo/` (`D3`).
+Spec: `docs/superpowers/specs/2026-10-24-dpo-coverage-pairs-design.md`. All data lives
+outside the repo tree, under `graph-rag-distill/`. Define the paths once and use the
+variables everywhere below, so a paste never writes into the repo:
+
+```bash
+D=/home/openclaw/Documents/Shared/projects/graph-rag-distill/2026-10-24-dpo4    # this round
+D3=/home/openclaw/Documents/Shared/projects/graph-rag-distill/2026-10-21-dpo    # dpo3: capture, DeepSeek labels
+DISTILL=/home/openclaw/Documents/Shared/projects/graph-rag-distill/2026-10-18   # section 8's DISTILL: holds sample.json
+TRIAL=<directory holding d6_sample.json>                                        # section 8's TRIAL: the d6 trial sample
+mkdir -p "$D"
+```
 
 ```bash
 # 1. Calibration: Sonnet vs Opus on 100 existing replies. Sonnet is the labeller only if
 #    recall >= 0.90 with no missing or edge-count-mismatched reply: read `labeller` in
-#    D/calibration.json (calibrate exits 0 either way).
+#    $D/calibration.json (calibrate exits 0 either way).
 uv run --extra dev python -m scripts.distill.dpo_labels calibration-sample \
-    --capture D3/capture-run/capture-v2.jsonl --deepseek D3/pairs --out D/calibration-ids.json
+    --capture $D3/capture-run/capture-v2.jsonl --deepseek $D3/pairs --out $D/calibration-ids.json
 for m in sonnet opus; do
   uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind label \
-      --capture D3/capture-run/capture-v2.jsonl --ids D/calibration-ids.json --store D/store/label-$m
+      --capture $D3/capture-run/capture-v2.jsonl --ids $D/calibration-ids.json --store $D/store/label-$m
 done
 #    batches -> subagents (model per store, DPO_LABEL_BRIEF.md) -> intake, until nothing is pending
-uv run --extra dev python -m scripts.distill.dpo_labels calibrate --ids D/calibration-ids.json \
-    --sonnet D/store/label-sonnet --opus D/store/label-opus --out D/calibration.json
-# 2. Fresh articles (none from any earlier sample) and the Vast capture (instance STOPPED after)
-uv run --extra dev python -m scripts.distill.dpo_sample --out D/dpo_sample.json --articles 1000 \
-    --seed 20261024 --exclude DISTILL/sample.json --exclude TRIAL/d6_sample.json \
-    --exclude D3/dpo_sample.json
+uv run --extra dev python -m scripts.distill.dpo_labels calibrate --ids $D/calibration-ids.json \
+    --sonnet $D/store/label-sonnet --opus $D/store/label-opus --out $D/calibration.json
+# 2. Fresh articles (none from any earlier sample), then the on-policy capture on the Vast
+#    instance (vLLM serving ckpt100; the instance is STOPPED after the capture). The capture
+#    is the section 8 step 2 command with this round's paths:
+uv run --extra dev python -m scripts.distill.dpo_sample --out $D/dpo_sample.json --articles 1000 \
+    --seed 20261024 --exclude $DISTILL/sample.json --exclude $TRIAL/d6_sample.json \
+    --exclude $D3/dpo_sample.json
+V2_BASE_URL=... V2_API_KEY=... uv run --extra dev python scripts/haiku_extract_ab.py \
+    --sample $D/dpo_sample.json --out $D/capture-run --articles 1000 --arms v2 \
+    --judge none --capture --concurrency 8 --cap 1
 # 3. Labelling with the calibrated labeller L (sonnet or opus, from calibration.json), the Opus
-#    re-check, the Opus missed edges. D/store/label-$L is the calibration store for L: reused.
-L=$(uv run --extra dev python -c 'import json; print(json.load(open("D/calibration.json"))["labeller"])')
-C="--capture D3/capture-run/capture-v2.jsonl --capture D/capture-run/capture-v2.jsonl"
-uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind label $C --store D/store/label-$L
+#    re-check, the Opus missed edges. $D/store/label-$L is the calibration store for L: reused.
+L=$(uv run --extra dev python -c 'import json, sys; print(json.load(open(sys.argv[1]))["labeller"])' \
+    "$D/calibration.json")
+C="--capture $D3/capture-run/capture-v2.jsonl --capture $D/capture-run/capture-v2.jsonl"
+uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind label $C --store $D/store/label-$L
 uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind recheck $C \
-    --labels D/store/label-$L --store D/store/recheck-opus
+    --labels $D/store/label-$L --store $D/store/recheck-opus
 uv run --extra dev python -m scripts.distill.dpo_labels tasks --kind missed $C \
-    --labels D/store/label-$L --recheck D/store/recheck-opus --store D/store/missed-opus --n 600
+    --labels $D/store/label-$L --recheck $D/store/recheck-opus --store $D/store/missed-opus --n 600
 # 4. Pairs and reports
-uv run --extra dev python -m scripts.distill.dpo_coverage $C --labels D/store/label-$L \
-    --labeller $L --recheck D/store/recheck-opus --missed D/store/missed-opus \
-    --deepseek D3/pairs --out D/pairs
+uv run --extra dev python -m scripts.distill.dpo_coverage $C --labels $D/store/label-$L \
+    --labeller $L --recheck $D/store/recheck-opus --missed $D/store/missed-opus \
+    --deepseek $D3/pairs --out $D/pairs
 # 5. Package (private) -> notebooks/distill_dpo.ipynb on Colab -> adapter revision dpo4-ckpt<step>
-# 6. Gate on the restarted instance. dpo_gate_remote.sh runs there (/workspace/dpo4, with
-#    val.jsonl copied up); the HF token goes on stdin, never on the command line. Exit 0 = pass,
-#    1 = gate failed, 2 = adapter not engaged (no gate).
-ssh ... 'bash /workspace/dpo4/dpo_gate_remote.sh gate dpo4-ckpt<step>' < <hf-token on stdin>
+# 6. Gate, on the restarted Vast instance. Copy the gate code and the val pairs up first
+#    (<port> and <host> are the instance's ssh port and address):
+scp -P <port> scripts/distill/dpo_gate.py scripts/distill/chat_format.py \
+    scripts/distill/dpo_gate_remote.sh $D/pairs/val.jsonl root@<host>:/workspace/dpo4/
+#    dpo_gate_remote.sh runs THERE (/workspace/dpo4). The HF token is piped on stdin from a
+#    one-line file kept outside the repo (HF_TOKEN_FILE) -- never on a command line, never
+#    printed or written to disk. Exit 0 = pass, 1 = gate failed, 2 = adapter not engaged
+#    (token-identical smoke), 3 = smoke had no comparable pairs (nothing compared); 2 and 3
+#    mean no gate ran.
+ssh -p <port> root@<host> 'bash /workspace/dpo4/dpo_gate_remote.sh gate dpo4-ckpt<step>' < "$HF_TOKEN_FILE"
+# 7. Copy the verdict back, then STOP the instance (keep its disk). Destroy it only at the
+#    end of the round, after the last run that needs it.
+scp -P <port> root@<host>:/workspace/dpo4/gate.json $D/gate.json
+#    stop the instance from the Vast console / CLI now.
 ```
 
 The gate is the dpo3 bar, unchanged, on the A val pairs, against the bf16 merge served by
