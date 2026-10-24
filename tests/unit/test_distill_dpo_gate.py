@@ -64,6 +64,31 @@ def test_prepare_finds_the_split_and_sizes_the_budget() -> None:
     assert g.prepare(same, CharTok()) is None
 
 
+def test_prepare_budget_covers_the_longer_reply() -> None:
+    r = _rec("C", [0, 1, 2, 3], [0])   # chosen longer than rejected
+    p = g.prepare(r, CharTok())
+    full_c, full_r = "<p>u</p>" + r["chosen"], "<p>u</p>" + r["rejected"]
+    split = len(p["prefix_ids"])
+    assert len(full_c) > len(full_r)
+    assert p["max_tokens"] == min(len(full_c) - split + 256, 4096)
+
+
+def test_check_gate_ties_the_pass_to_the_merged_adapter() -> None:
+    ok = {"passed": True, "adapter_revision": "dpo4-ckpt40"}
+    assert g.check_gate(ok, "dpo4-ckpt40") == []
+    assert "revision" in g.check_gate(ok, "dpo4-ckpt60")[0]
+    assert "marker" in g.check_gate(ok, None)[0]
+    assert g.check_gate({"passed": False, "adapter_revision": "x"}, "x") == ["gate did not pass"]
+    old = {"passed": True}   # a gate.json that never recorded a revision
+    assert g.check_gate(old, "dpo4-ckpt40")
+
+
+def test_copyable_skips_weights_and_the_stale_index() -> None:
+    assert not g.copyable("model-00001-of-00002.safetensors")
+    assert not g.copyable("model.safetensors.index.json")
+    assert g.copyable("tokenizer.json") and g.copyable("chat_template.jinja")
+
+
 def test_score_pair_a_b_c() -> None:
     a = _rec("A", [0, 2], [0, 1, 2])
     prefix = '{"edges": [' + json.dumps(_e(0)) + ", "
@@ -142,9 +167,10 @@ def test_score_command_writes_gate_json_and_exit_code(tmp_path: Path, monkeypatc
     _gen(tmp_path / "dpo.jsonl", dpo)
     rc = g.main(["score", "--val", str(tmp_path / "val.jsonl"), "--base",
                  str(tmp_path / "base.jsonl"), "--dpo", str(tmp_path / "dpo.jsonl"),
-                 "--out", str(tmp_path / "gate.json")])
+                 "--out", str(tmp_path / "gate.json"), "--revision", "dpo4-ckpt40"])
     gate = json.loads((tmp_path / "gate.json").read_text())
     assert rc == 0 and gate["passed"] is True
+    assert gate["adapter_revision"] == "dpo4-ckpt40"
     assert gate["totals"]["A"]["dpo"]["removed_written"] == 0
     assert gate["totals"]["C"]["dpo"]["added_written"] == 1
     _gen(tmp_path / "same.jsonl", base)

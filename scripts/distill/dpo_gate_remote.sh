@@ -25,27 +25,35 @@ if [ "$CMD" = gate ]; then
   sleep 5
   echo "GPU memory in use after stopping the server: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   python -c "import peft" 2>/dev/null || pip install -q peft
-  rm -rf adapter merged
-  hf download "$ADAPTER_REPO" --revision "$REV" --local-dir adapter \
-      --include adapter_model.safetensors adapter_config.json
+  rm -rf adapter merged gate.json smoke.json smoke-*.jsonl gen-*.jsonl   # nothing from a previous run survives
+  hf download "$ADAPTER_REPO" adapter_model.safetensors adapter_config.json \
+      --revision "$REV" --local-dir adapter
   unset HF_TOKEN
-  python dpo_gate.py merge --base "$BASE" --adapter adapter --out merged
+  python dpo_gate.py merge --base "$BASE" --adapter adapter --out merged --revision "$REV"
   python dpo_gate.py generate --model "$BASE" --tokenizer "$BASE" --val val.jsonl --out smoke-base.jsonl --limit 2
   python dpo_gate.py generate --model merged --tokenizer "$BASE" --val val.jsonl --out smoke-dpo.jsonl --limit 2
-  python dpo_gate.py score --smoke --val val.jsonl --base smoke-base.jsonl --dpo smoke-dpo.jsonl --out smoke.json \
-    || { echo "smoke: both models' continuations are token-identical -- adapter not engaged; no gate"; exit 2; }
+  set +e
+  python dpo_gate.py score --smoke --val val.jsonl --base smoke-base.jsonl --dpo smoke-dpo.jsonl --out smoke.json
+  src=$?
+  set -e
+  if [ "$src" = 2 ]; then
+    echo "smoke: both models' continuations are token-identical -- adapter not engaged; no gate"; exit 2
+  elif [ "$src" != 0 ]; then
+    echo "smoke step failed with exit code $src (not a token-identity result); no gate"; exit "$src"
+  fi
   python dpo_gate.py generate --model "$BASE" --tokenizer "$BASE" --val val.jsonl --out gen-base.jsonl
   python dpo_gate.py generate --model merged --tokenizer "$BASE" --val val.jsonl --out gen-dpo.jsonl
   python dpo_gate.py generate --model merged --tokenizer "$BASE" --val val.jsonl --out smoke-json.jsonl --full --limit 3
   set +e
-  python dpo_gate.py score --val val.jsonl --base gen-base.jsonl --dpo gen-dpo.jsonl --out gate.json
+  python dpo_gate.py score --val val.jsonl --base gen-base.jsonl --dpo gen-dpo.jsonl --out gate.json --revision "$REV"
   rc=$?
   set -e
   echo "gate exit code: $rc (0 pass, 1 fail)"
   exit $rc
 elif [ "$CMD" = push ]; then
-  python -c "import json; assert json.load(open('gate.json'))['passed'], 'gate did not pass'"
-  python dpo_gate.py push --merged merged --repo "$EXPORT_REPO" --revision "$EXPORT_REV" --smoke-json smoke-json.jsonl
+  # push itself refuses unless gate.json passed AND judged the adapter revision merged/ was built from
+  python dpo_gate.py push --merged merged --repo "$EXPORT_REPO" --revision "$EXPORT_REV" \
+      --smoke-json smoke-json.jsonl --gate gate.json
 else
   echo "unknown command $CMD"; exit 1
 fi

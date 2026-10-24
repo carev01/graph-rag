@@ -3,10 +3,11 @@ Runs ON the Vast GPU instance (scripts/distill/dpo_gate_remote.sh drives it); th
 and statistics are pure and unit-tested, the GPU commands import torch / transformers /
 peft / vllm lazily.
 
-    python dpo_gate.py merge --base B --adapter A --out M      # bf16 merge, adapter engaged?
+    python dpo_gate.py merge --base B --adapter A --out M --revision REV  # bf16 merge, adapter engaged?
     python dpo_gate.py generate --model M --tokenizer B --val V --out G [--limit N] [--full]
-    python dpo_gate.py score --base G0 --dpo G1 --val V --out gate.json [--smoke]
-    python dpo_gate.py push --merged M --repo R --revision REV --smoke-json G   # after a pass
+    python dpo_gate.py score --base G0 --dpo G1 --val V --out gate.json --revision REV [--smoke]
+    python dpo_gate.py push --merged M --repo R --revision EXPORT_REV --smoke-json G --gate gate.json
+                                                               # only if gate.json passed for M's adapter
 
 Each model continues every val pair greedily from the token prefix chosen and rejected
 share, and edges are compared as exact (source, target, relation) triples. The pass bar,
@@ -36,6 +37,7 @@ MIN_BASELINE_REMOVED = 10
 TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 _TRIPLE = re.compile(r'"source_entity_name": "(.*?)", "target_entity_name": "(.*?)", '
                      r'"relation_type": "(.*?)"')
+MARKER = "adapter_revision.txt"   # written into the merged dir: which adapter revision it is
 COUNTS = ("removed", "removed_written", "added", "added_written", "kept", "kept_written", "json")
 
 
@@ -64,7 +66,7 @@ def prepare(record: dict, tok: Any) -> dict | None:
     return {"call_id": record["meta"]["call_id"], "type": record["meta"]["type"],
             "prefix_ids": ch[:split],
             "prefix_text": tok.decode(ch[n_prompt:split], skip_special_tokens=True),
-            "max_tokens": min(len(rj) - split + 256, 4096)}
+            "max_tokens": min(max(len(ch), len(rj)) - split + 256, 4096)}
 
 
 def score_pair(record: dict, prefix_text: str, gen_text: str) -> dict:
@@ -151,7 +153,27 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 # --- GPU-side commands (lazy imports; not unit-tested) -------------------------------------
 
-def merge(base: Path, adapter: Path, out: Path) -> None:
+def copyable(name: str) -> bool:
+    """Base-dir files carried into the merged dir: tokenizer, chat template, configs. Never
+    weights, and never the base's shard index (save_pretrained writes the merged one)."""
+    return not name.endswith((".safetensors", ".safetensors.index.json"))
+
+
+def check_gate(gate: dict, marker: str | None) -> list[str]:
+    """Why `gate` does not license pushing the merged model whose marker file says `marker`
+    (empty list: it does)."""
+    why = []
+    if not gate.get("passed"):
+        why.append("gate did not pass")
+    if marker is None:
+        why.append("the merged model has no adapter-revision marker")
+    elif gate.get("adapter_revision") != marker:
+        why.append(f"gate.json judged adapter revision {gate.get('adapter_revision')!r}, "
+                   f"the merged model is {marker!r}")
+    return why
+
+
+def merge(base: Path, adapter: Path, out: Path, revision: str) -> None:
     import torch
     import transformers
     from peft import PeftModel
@@ -166,7 +188,7 @@ def merge(base: Path, adapter: Path, out: Path) -> None:
     print(f"adapter loaded: {live} non-zero lora_B tensors", flush=True)
     peft.merge_and_unload().save_pretrained(str(out), safe_serialization=True)
     for f in base.iterdir():   # tokenizer, chat template, processor configs
-        if f.is_file() and not f.name.endswith(".safetensors") and not (out / f.name).exists():
+        if f.is_file() and copyable(f.name) and not (out / f.name).exists():
             shutil.copy2(f, out / f.name)
 
     def weight_map(d: Path) -> dict[str, str]:
@@ -187,6 +209,7 @@ def merge(base: Path, adapter: Path, out: Path) -> None:
     diff = differing(targets, equal)
     assert diff, "the merged model's LoRA target weights equal ckpt100's: the adapter is not engaged"
     print(f"merged: {len(diff)} of {len(targets)} target tensors differ from ckpt100", flush=True)
+    (out / MARKER).write_text(revision, encoding="utf-8")   # last: only a complete merge has one
 
 
 def generate(model: Path, tokenizer: Path, val: Path, out: Path, limit: int, full: bool,
@@ -224,11 +247,15 @@ def generate(model: Path, tokenizer: Path, val: Path, out: Path, limit: int, ful
     print(f"generated {len(prepared)} ({skipped} pairs with no split point skipped) -> {out}")
 
 
-def push(merged: Path, repo: str, revision: str, smoke_json: Path) -> None:
+def push(merged: Path, repo: str, revision: str, smoke_json: Path, gate_json: Path) -> None:
     import os
 
     from huggingface_hub import HfApi
 
+    marker_file = merged / MARKER
+    marker = marker_file.read_text(encoding="utf-8").strip() if marker_file.exists() else None
+    refusal = check_gate(json.loads(Path(gate_json).read_text(encoding="utf-8")), marker)
+    assert not refusal, "refusing to push: " + "; ".join(refusal)
     smoke = _read_jsonl(smoke_json)
     assert len(smoke) == 3, f"expected 3 smoke replies, got {len(smoke)}"
     for row in smoke:
@@ -248,7 +275,8 @@ def push(merged: Path, repo: str, revision: str, smoke_json: Path) -> None:
     print(f"DONE: {repo}@{revision}")
 
 
-def score(val: Path, base_gen: Path, dpo_gen: Path, out: Path, smoke: bool) -> int:
+def score(val: Path, base_gen: Path, dpo_gen: Path, out: Path, smoke: bool,
+          revision: str = "") -> int:
     records = {r["meta"]["call_id"]: r for r in _read_jsonl(val)}
     gb = {r["call_id"]: r for r in _read_jsonl(base_gen)}
     gd = {r["call_id"]: r for r in _read_jsonl(dpo_gen)}
@@ -264,7 +292,7 @@ def score(val: Path, base_gen: Path, dpo_gen: Path, out: Path, smoke: bool) -> i
     passed, why = decide(tot["A"]["ckpt100"], tot["A"]["dpo"])
     a_b = [r for r in rows["ckpt100"] if r["type"] == "A"]
     a_d = [r for r in rows["dpo"] if r["type"] == "A"]
-    gate = {"passed": passed, "why": why, "pairs_scored": len(ids),
+    gate = {"passed": passed, "adapter_revision": revision, "why": why, "pairs_scored": len(ids),
             "pairs_missing": len(records) - len(ids), "totals": tot,
             "stats": {**bootstrap(a_b, a_d),
                       "sign_removed": sign_test([r["removed_written"] for r in a_b],
@@ -287,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--base", type=Path, required=True)
     m.add_argument("--adapter", type=Path, required=True)
     m.add_argument("--out", type=Path, required=True)
+    m.add_argument("--revision", required=True)
     gn = sub.add_parser("generate")
     gn.add_argument("--model", type=Path, required=True)
     gn.add_argument("--tokenizer", type=Path, required=True)
@@ -301,20 +330,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dpo", type=Path, required=True)
     s.add_argument("--out", type=Path, required=True)
     s.add_argument("--smoke", action="store_true")
+    s.add_argument("--revision", default="")
     p = sub.add_parser("push")
     p.add_argument("--merged", type=Path, required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--revision", required=True)
     p.add_argument("--smoke-json", type=Path, required=True)
+    p.add_argument("--gate", type=Path, required=True)
     a = ap.parse_args(argv)
     if a.cmd == "merge":
-        merge(a.base, a.adapter, a.out)
+        merge(a.base, a.adapter, a.out, a.revision)
     elif a.cmd == "generate":
         generate(a.model, a.tokenizer, a.val, a.out, a.limit, a.full, a.max_model_len)
     elif a.cmd == "score":
-        return score(a.val, a.base, a.dpo, a.out, a.smoke)
+        return score(a.val, a.base, a.dpo, a.out, a.smoke, a.revision)
     elif a.cmd == "push":
-        push(a.merged, a.repo, a.revision, a.smoke_json)
+        push(a.merged, a.repo, a.revision, a.smoke_json, a.gate)
     return 0
 
 
