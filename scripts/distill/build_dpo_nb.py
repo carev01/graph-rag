@@ -306,8 +306,9 @@ for _name, _rows in (("train", train_records), ("val", val_records), ("val_eval"
     _types = Counter(r["meta"]["type"] for r in _rows)
     _mean = sum(r["meta"]["delta"] for r in _rows) / len(_rows)
     print(f"{_name}: {len(_rows)} pairs {dict(sorted(_types.items()))}, mean edge delta {_mean:+.3f}")
-assert abs(sum(r["meta"]["delta"] for r in train_records) / len(train_records)) <= 0.1, (
-    "train set is not length-balanced (spec: |mean delta| <= 0.1)")
+for _name, _rows in (("train", train_records), ("val", val_records)):   # val_eval: print only
+    assert abs(sum(r["meta"]["delta"] for r in _rows) / len(_rows)) <= 0.1, (
+        f"{_name} set is not length-balanced (spec: |mean delta| <= 0.1)")
 assert len(train_records) >= 50, "too few pairs for a DPO round -- capture more first"
 """),
     md("""
@@ -611,7 +612,7 @@ def last_complete_checkpoint(ckpt_dir: Path) -> str | None:
 
 
 if FINAL_MARKER.exists():
-    print(f"final adapter already on Drive ({FINAL_ADAPTER_DIR}) -- skipping to export. "
+    print(f"final adapter already on Drive ({FINAL_ADAPTER_DIR}) -- skipping to the selection (section 10). "
           "Delete that folder to train again.")
 else:
     _last = last_complete_checkpoint(CKPT_DIR)

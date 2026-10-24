@@ -40,3 +40,17 @@ def test_embedded_selection_is_the_module_and_runs(tmp_path: Path) -> None:
     exec(src, ns)
     hist = [{"step": 0, "eval_logps/chosen": -45.0}, {"step": 10, "eval_logps/chosen": -45.5}]
     assert ns["select_step"](hist, 1.0) == 10
+
+
+def test_length_balance_is_asserted_for_train_and_val_not_val_eval(tmp_path: Path) -> None:
+    cell = next(c for c in _cells(tmp_path) if "def read_jsonl" in c)
+    assert 'for _name, _rows in (("train", train_records), ("val", val_records)):' in cell
+    assert "set is not length-balanced (spec: |mean delta| <= 0.1)" in cell
+    assert cell.count("length-balanced") == 1       # val_eval is print-only
+    assert '("val_eval", val_eval_records)' in cell
+
+
+def test_no_export_wording_left_in_the_resume_message(tmp_path: Path) -> None:
+    text = "\n".join(_cells(tmp_path))
+    assert "skipping to export" not in text
+    assert "skipping to the selection (section 10)" in text
