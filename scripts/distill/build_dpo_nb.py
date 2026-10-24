@@ -4,7 +4,8 @@ import json
 import sys
 from pathlib import Path
 
-REPO = Path("/home/openclaw/Documents/Shared/projects/graph-rag")
+REPO = Path(__file__).resolve().parents[2]
+SELECT_SRC = (REPO / "scripts/distill/dpo_select.py").read_text()
 train_nb = json.loads((REPO / "notebooks/distill_train.ipynb").read_text())
 
 
@@ -26,42 +27,37 @@ assert "drive.mount" in src_of(9) and "CKPT_DIR" in src_of(9), "training noteboo
 
 cells = [
     md("""
-# DPO round -- qwen3.5-4b extraction model (Colab)
+# DPO round dpo4 -- qwen3.5-4b extraction model (Colab)
 
 Starts from the SFT checkpoint `opus-distill-2026-10-ckpt100` and runs one round of
-Direct Preference Optimisation against the student's OWN unsupported facts, then pushes
-the merged model as a new revision of `carev01/qwen35-4b-graphrag`.
+Direct Preference Optimisation on coverage-balanced pairs. It then uploads ONE selected
+LoRA adapter to the private repo `carev01/qwen35-4b-graphrag-dpo-adapters`. The gate and
+the export run on the Vast GPU (`scripts/distill/dpo_gate.py`), never from Colab.
 
-**Why (2026-10-21).** The teacher judge showed Opus's training targets are clean (0.8%
-unsupported on held-out chunks). The unsupported facts the distilled model writes come
-from the student itself, some from pretraining knowledge of the vendor docs. SFT only
-ever shows good outputs, so it cannot train that out. DPO shows the model its own reply
-with the invented fact (`rejected`) next to the same reply without it (`chosen`).
+**Why dpo4 (2026-10-24).** dpo3's pairs were all deletions (`chosen` = `rejected` minus the
+unsupported edges), so "write fewer edges" scored on every pair. Its checkpoint-10 cut the
+removed edges to 0.71 of ckpt100's but the kept ones to 0.85, failing the 0.90 bar.
 
-**The dataset** comes from `scripts/distill/dpo_pairs.py`. ckpt100 served on vLLM
-extracted 700 fresh articles, none of them in the distillation or trial samples
-(`haiku_extract_ab.py --capture`). Each edge reply was judged twice, and a fact counts as
-unsupported only when both passes agree. `chosen` differs from `rejected` only by those
-edges, so preference moves away from the invented facts and not from extraction in
-general.
+**The dataset** (`scripts/distill/dpo_coverage.py`, labels by Claude subagents) has three
+pair types, each from ckpt100's own replies:
+- **A** drops the confirmed-unsupported edges;
+- **B** keeps a supported edge that `rejected` drops;
+- **C** appends the supported edges ckpt100 missed.
 
-**Guards against the known DPO failure modes:**
-- *Losing coverage*: an NLL term on `chosen` (`NLL_ALPHA`: TRL's `rpo_alpha`, or its `"sft"` loss) keeps the
-  likelihood of the good edges up. The end-to-end trial gates on distinct facts too.
-- *Broken JSON*: guided decoding enforces the schema at serving time. This notebook also
-  smoke-tests three held-out prompts before pushing.
-- *Training a different completion than vLLM serves*: section 8 decodes the trainer's own
-  tokenised row and checks it equals serving prompt + answer + `<|im_end|>`.
-- *Overfitting* (v2 overfit after step 100): the best checkpoint by eval loss is kept
-  (`load_best_model_at_end`), and checkpoints are saved at every eval so it is never
-  rotated out.
+The mean edge-count difference between chosen and rejected is within +/-0.1, so length
+carries no signal.
 
-**Runtime:** L4 or A100. Edge prompts run to several thousand tokens, and DPO runs each
-pair's chosen, rejected and reference passes. It **never overwrites** a revision that
-already holds weights.
+**Checkpoint selection by likelihood, not val loss** (dpo3: val loss kept falling while
+`logps/chosen` collapsed). The rule is the last checkpoint whose eval `logps/chosen` is
+within `LOGPS_TOLERANCE` (1 nat) of step 0's. `LikelihoodStop` ends training at the first
+eval below that line, since nothing after it could be selected.
+
+**Guards kept from dpo3:** causal_conv1d kernel off for training, torch.compile off, the
+gradient guard, `eval_on_start`, and the check that the trainer trains the serving prompt.
 
 **Use:** set the HF token secret (section 2), check section 3, then **Runtime -> Run all**.
-A dead runtime resumes from the last checkpoint on Drive.
+A dead runtime resumes from the last checkpoint on Drive. Hand back the adapter revision
+that section 10 prints.
 """),
     md("## 1. Install packages\n\nSame install as `distill_train.ipynb` section 1."),
     code(src_of(3)),
@@ -201,11 +197,11 @@ from pathlib import Path
 # --- dataset: dpo_pairs.py output (train.jsonl / val.jsonl), "drive" or "hf_dataset" -------
 DATA_SOURCE = "hf_dataset"
 HF_DATASET_REPO = "carev01/ft-opus-distill"   # private
-HF_DATASET_REVISION = "dpo1"
-DRIVE_DATA_DIR = "/content/drive/MyDrive/ft-opus-dpo1"   # only when DATA_SOURCE == "drive"
+HF_DATASET_REVISION = "dpo4"
+DRIVE_DATA_DIR = "/content/drive/MyDrive/ft-opus-dpo4"   # only when DATA_SOURCE == "drive"
 
 # --- Google Drive: checkpoints, final adapter, metrics (survive a runtime death) ----------
-RUN_NAME = "opus-distill-dpo3"     # dpo1: 5e-6, too weak; dpo2: 5e-5 on a broken kernel
+RUN_NAME = "opus-distill-dpo4"     # dpo3: 5e-5, deletion-only pairs taught brevity
 DRIVE_RUN_DIR = Path("/content/drive/MyDrive/graph-rag-distill") / RUN_NAME
 CKPT_DIR = DRIVE_RUN_DIR / "checkpoints"
 FINAL_ADAPTER_DIR = DRIVE_RUN_DIR / "final-adapter"
@@ -227,25 +223,23 @@ LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj",
 
 # --- DPO -----------------------------------------------------------------------------------
 BETA = 0.1                 # strength of the pull towards the reference (ckpt100)
-NLL_ALPHA = 1.0            # NLL on chosen (rpo_alpha / "sft" loss): protects coverage; 0 = plain DPO
-LEARNING_RATE = 5e-5       # dpo1's 5e-6 moved the split-point log-odds by only +0.34
+NLL_ALPHA = 2.0            # NLL on chosen ("sft" loss, a per-token mean); 1.0 did not stop dpo3's displacement
+LEARNING_RATE = 2e-5       # dpo3 5e-5 displaced chosen by step 20; dpo1 5e-6 did nothing
 NUM_TRAIN_EPOCHS = 2
 WARMUP_RATIO = 0.1
 LR_SCHEDULER_TYPE = "cosine"
 PER_DEVICE_TRAIN_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 8
 EVAL_STEPS = 10            # also the save interval, so the best checkpoint is on Drive
-SAVE_TOTAL_LIMIT = 4
+SAVE_TOTAL_LIMIT = None     # adapters are small; selection needs every checkpoint
 SEED = 20261021
 GRAD_NORM_LIMIT = 1000.0   # training guard: stop on a larger norm from GRAD_NORM_FROM_STEP on
 GRAD_NORM_FROM_STEP = 12   # dpo1: >100k for steps 1-10 (before the first eval), then <6
 
-# --- export ----------------------------------------------------------------------------------
-HF_MODEL_REVISION = "opus-distill-2026-10-dpo3"
-MAX_REMOVED_SHARE = 0.75   # gate: DPO writes at most this share of ckpt100's removed edges
-MIN_KEPT_SHARE = 0.90      # ... and at least this share of ckpt100's kept edges
-MIN_BASELINE_REMOVED = 10  # ckpt100 must write this many removed edges, or nothing is measurable
-HF_MODEL_PRIVATE = False   # the repo is public by design; a branch cannot be more private
+LOGPS_TOLERANCE = 1.0      # selection: eval logps/chosen may fall at most this far below step 0
+
+# --- hand-off: ONE adapter to a PRIVATE repo; the gate and export run on Vast ---------------
+HF_ADAPTER_REPO = "carev01/qwen35-4b-graphrag-dpo-adapters"
 
 OUT_DIR = Path("/content/outputs/opus-distill-dpo")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -255,14 +249,14 @@ print("config set")
     code(src_of(9)),
     md("## 4. Get the dataset"),
     code("""
-DATA_DIR = Path("/content/data/ft-opus-dpo1")
+DATA_DIR = Path("/content/data/ft-opus-dpo4")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 if DATA_SOURCE == "drive":
     DATA_DIR = Path(DRIVE_DATA_DIR)
 elif DATA_SOURCE == "hf_dataset":
     from huggingface_hub import hf_hub_download
-    for fname in ("train.jsonl", "val.jsonl", "MANIFEST.json", "sample.json"):
+    for fname in ("train.jsonl", "val.jsonl", "val_eval.jsonl", "MANIFEST.json", "sample.json"):
         try:
             p = hf_hub_download(repo_id=HF_DATASET_REPO, repo_type="dataset",
                                 filename=fname, revision=HF_DATASET_REVISION, token=HF_TOKEN)
@@ -275,15 +269,16 @@ elif DATA_SOURCE == "hf_dataset":
 else:
     raise ValueError(f"unknown DATA_SOURCE {DATA_SOURCE!r}")
 
-assert (DATA_DIR / "train.jsonl").exists() and (DATA_DIR / "val.jsonl").exists(), DATA_DIR
+assert all((DATA_DIR / f).exists() for f in ("train.jsonl", "val.jsonl", "val_eval.jsonl")), DATA_DIR
 print(f"dataset ready at {DATA_DIR}")
 """),
     md("""
 ## 5. Load the pairs and check their shape
 
-Every record: `messages` = `[system, user]` exactly as vLLM received them, `chosen` and
-`rejected` = the reply JSON. `chosen` must parse, hold fewer edges than `rejected`, and
-every chosen edge must appear in `rejected` unchanged.
+Every record: `messages` = `[system, user]` exactly as vLLM received them; `chosen` and
+`rejected` = the reply JSON. An A pair's chosen is a strict subset of rejected; a B or C
+pair's rejected is a strict subset of chosen. `meta.delta` must match, and the train set's
+mean delta must be within +/-0.1. `val_eval.jsonl` is the trainer's fixed eval subset.
 """),
     code("""
 import json
@@ -297,22 +292,29 @@ def read_jsonl(path: Path) -> list[dict]:
 
 train_records = read_jsonl(DATA_DIR / "train.jsonl")
 val_records = read_jsonl(DATA_DIR / "val.jsonl")
+val_eval_records = read_jsonl(DATA_DIR / "val_eval.jsonl")
 for _r in train_records + val_records:
     assert [m["role"] for m in _r["messages"]] == ["system", "user"], _r["meta"]
     _c, _x = json.loads(_r["chosen"])["edges"], json.loads(_r["rejected"])["edges"]
-    assert 0 < len(_c) < len(_x), _r["meta"]
-    assert all(e in _x for e in _c), _r["meta"]
-_cats = Counter(c for r in train_records for f in r["meta"]["removed"] for c in f["categories"][:1])
-print(f"train pairs {len(train_records)}, val pairs {len(val_records)}")
-print(f"facts removed (train): {sum(len(r['meta']['removed']) for r in train_records)}; "
-      f"categories {dict(_cats)}")
+    _small, _big = (_c, _x) if _r["meta"]["type"] == "A" else (_x, _c)
+    assert 0 < len(_small) < len(_big), _r["meta"]
+    assert all(e in _big for e in _small), _r["meta"]
+    assert _r["meta"]["delta"] == len(_c) - len(_x), _r["meta"]
+_val_ids = {r["meta"]["call_id"] for r in val_records}
+assert all(r["meta"]["call_id"] in _val_ids for r in val_eval_records), "val_eval is not a subset of val"
+for _name, _rows in (("train", train_records), ("val", val_records), ("val_eval", val_eval_records)):
+    _types = Counter(r["meta"]["type"] for r in _rows)
+    _mean = sum(r["meta"]["delta"] for r in _rows) / len(_rows)
+    print(f"{_name}: {len(_rows)} pairs {dict(sorted(_types.items()))}, mean edge delta {_mean:+.3f}")
+assert abs(sum(r["meta"]["delta"] for r in train_records) / len(train_records)) <= 0.1, (
+    "train set is not length-balanced (spec: |mean delta| <= 0.1)")
 assert len(train_records) >= 50, "too few pairs for a DPO round -- capture more first"
 """),
     md("""
 ## 6. Download the starting model and attach LoRA
 
 The merged bf16 weights of `START_REVISION` go to `START_DIR`. A fixed path matters: the
-saved adapter records it as its base, and the export (section 10) reloads from there.
+saved adapter records it as its base.
 """),
     code("""
 from huggingface_hub import snapshot_download
@@ -406,7 +408,8 @@ def build(records: list[dict], mark: str) -> Dataset:
     rows, dropped = [], 0
     for r in records:
         p = to_pair(r, mark)
-        n = len(TEXT_TOK(p["prompt"] + p["rejected"], add_special_tokens=False)["input_ids"])
+        n = max(len(TEXT_TOK(p["prompt"] + p[k], add_special_tokens=False)["input_ids"])
+                for k in ("chosen", "rejected"))   # a C pair's chosen is the longer one
         if n > MAX_SEQ_LENGTH:
             dropped += 1
             continue
@@ -475,9 +478,7 @@ dpo_config = DPOConfig(
     save_strategy="steps",
     save_steps=EVAL_STEPS,
     save_total_limit=SAVE_TOTAL_LIMIT,
-    load_best_model_at_end=True,
-    metric_for_best_model="eval_loss",
-    greater_is_better=False,
+    load_best_model_at_end=False,   # dpo4: selection by logps/chosen (section 10), not val loss
     max_length=MAX_SEQ_LENGTH,
     seed=SEED,
     bf16=torch.cuda.is_bf16_supported(),
@@ -519,6 +520,25 @@ class GradGuard(TrainerCallback):
             raise RuntimeError(f"step {state.global_step}: grad_norm {g:.4g} > "
                                f"{GRAD_NORM_LIMIT} -- stopping")
 
+""" + SELECT_SRC + """
+
+class LikelihoodStop(TrainerCallback):
+    # The dpo4 selection rule, live: stop at the first eval whose logps/chosen falls more
+    # than LOGPS_TOLERANCE below step 0's -- nothing after it could be selected. Stateless
+    # (reads state.log_history), so a resumed run keeps its step-0 baseline.
+    def on_evaluate(self, args, state, control, metrics=None, **kw):
+        if LOGPS_KEY not in (metrics or {}):
+            raise RuntimeError(f"eval metrics have no {LOGPS_KEY}: the selection rule cannot run")
+        series = eval_logps(state.log_history)
+        if not series or series[0][0] != 0:
+            raise RuntimeError("no step-0 eval in the log history -- is eval_on_start off?")
+        start, (step, value) = series[0][1], series[-1]
+        if step and below_line(start, value, LOGPS_TOLERANCE):
+            print(f"  step {step}: eval logps/chosen {value:.2f} < {start:.2f} - "
+                  f"{LOGPS_TOLERANCE} -- stopping (selection rule)", flush=True)
+            control.should_training_stop = True
+        return control
+
 
 def make_trainer(mark: str) -> DPOTrainer:
     # TRL 1.x copies the untrained adapter into a frozen "ref" adapter (= ckpt100, since
@@ -528,7 +548,8 @@ def make_trainer(mark: str) -> DPOTrainer:
     print(f"building datasets (completion mark {mark!r})")
     return DPOTrainer(model=model, ref_model=None, args=dpo_config,
                       train_dataset=build(train_records, mark),
-                      eval_dataset=build(val_records, mark), callbacks=[GradGuard()],
+                      eval_dataset=build(val_eval_records, mark),
+                      callbacks=[GradGuard(), LikelihoodStop()],
                       **{_tok_kw: tokenizer})
 
 
@@ -563,16 +584,16 @@ if _tail not in _OK_TAILS:
 print(f"OK: trains on serving prompt + answer + {_tail!r}")
 """),
     md("""
-## 9. Train (resumable), then evaluate on the held-out pairs
+## 9. Train (resumable)
 
-`eval_rewards/accuracies` is the share of held-out pairs where the model now prefers the
-reply without the invented fact more than ckpt100 did. Look for it well above 0.5, and
-for `eval_logps/chosen` not collapsing (that is the coverage risk).
+Watch `eval_logps/chosen` at every eval: section 10 keeps the last checkpoint within
+`LOGPS_TOLERANCE` of step 0's value, and training stops by itself at the first eval below
+that line ("stopping (selection rule)"). `eval_rewards/accuracies` well above 0.5 means
+the model separates the pairs.
 
 The gradient guard prints "grad guard: inspecting gradients..." once, then the gradient
-norm of each of the first `GRAD_NORM_FROM_STEP` steps. dpo1 had >100k there until the
-first eval; with `eval_on_start` they should be single digits. Either way the run
-continues; it stops on a NaN/inf gradient, or a norm above `GRAD_NORM_LIMIT` later.
+norm of each of the first `GRAD_NORM_FROM_STEP` steps; it stops on a NaN/inf gradient, or
+a norm above `GRAD_NORM_LIMIT` later.
 """),
     code("""
 import json as _json
@@ -596,201 +617,61 @@ else:
     _last = last_complete_checkpoint(CKPT_DIR)
     print(f"resuming from {_last}" if _last else "no checkpoint on Drive -- starting fresh")
     train_result = trainer.train(resume_from_checkpoint=_last)
-    eval_metrics = trainer.evaluate()   # the best checkpoint (load_best_model_at_end)
-    print(_json.dumps(eval_metrics, indent=2))
     model.save_pretrained(str(FINAL_ADAPTER_DIR), selected_adapters=["default"])  # not TRL's "ref"
     tokenizer.save_pretrained(str(FINAL_ADAPTER_DIR))
     (DRIVE_RUN_DIR / "train_result.json").write_text(_json.dumps(train_result.metrics, indent=2))
-    (DRIVE_RUN_DIR / "eval_metrics.json").write_text(_json.dumps(eval_metrics, indent=2))
     (DRIVE_RUN_DIR / "log_history.json").write_text(
         _json.dumps(trainer.state.log_history, indent=2))
     FINAL_MARKER.write_text("adapter + tokenizer fully saved\\n")
-    print(f"best checkpoint: {trainer.state.best_model_checkpoint}")
-    _acc = eval_metrics.get("eval_rewards/accuracies")
-    if _acc is not None and _acc < 0.6:
-        print(f"WARNING: held-out reward accuracy {_acc:.2f} -- DPO barely separated the pairs")
 """),
     md("""
-## 10. Gate -- does the DPO model stop writing the removed edges?
+## 10. Select the checkpoint and hand it off
 
-Reloads the DPO model (ckpt100 + the final adapter) and ckpt100 itself. For each val pair,
-both continue greedily from the prefix `chosen` and `rejected` share up to the split, and
-finish the reply. Edges are counted by (source, target, relation):
-
-- **removed edges written**: the unsupported edges the pair deleted (57 in dpo1's val set);
-- **kept edges written**: the edges `chosen` keeps after the split (141);
-- **valid JSON** replies.
-
-**Pass:** the DPO model writes at most `MAX_REMOVED_SHARE` of ckpt100's removed edges, at
-least `MIN_KEPT_SHARE` of its kept edges, and no fewer valid JSON replies; ckpt100 must
-write at least `MIN_BASELINE_REMOVED` removed edges, or the set cannot show a reduction.
-(dpo2 reference: ckpt100 wrote 27 removed / 59 kept, 39 JSON; ~30 min per model on an L4.)
-
-**Why not the old gate.** It checked whether greedy picks `chosen`'s token at the split.
-But there `chosen` starts the NEXT edge, so a model that stops writing the removed edge
-and opens a different one scored zero, and a removed edge that came back later was never
-seen. `starts_removed` below is that token-level view, for reference only.
+Applies the rule to `log_history.json` and prints the trajectory. If no checkpoint after
+step 0 qualifies, the round fails here, with no gate. Otherwise the selected checkpoint's
+adapter goes to the PRIVATE repo `HF_ADAPTER_REPO`, revision `dpo4-ckpt<step>`.
 """),
     code("""
-import gc
-import re
-import time
-
-for _name in ("trainer", "model"):
-    globals().pop(_name, None)
-gc.collect()
-torch.cuda.empty_cache()
-
-assert FINAL_MARKER.exists(), f"no complete final adapter at {FINAL_ADAPTER_DIR}"
-assert any(START_DIR.glob("*.safetensors")), "run section 6 first (the adapter's base)"
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=str(FINAL_ADAPTER_DIR), max_seq_length=MAX_SEQ_LENGTH,
-    load_in_4bit=LOAD_IN_4BIT, dtype=None)
-FastLanguageModel.for_inference(model)
-base, base_tok = FastLanguageModel.from_pretrained(
-    model_name=str(START_DIR), max_seq_length=MAX_SEQ_LENGTH,
-    load_in_4bit=LOAD_IN_4BIT, dtype=None)
-FastLanguageModel.for_inference(base)
-
-_TRIPLE = re.compile(r'"source_entity_name": "(.*?)", "target_entity_name": "(.*?)", "relation_type": "(.*?)"')
-
-
-def _triples(text: str) -> tuple[set, bool]:
-    try:
-        return {(e["source_entity_name"], e["target_entity_name"], e["relation_type"])
-                for e in json.loads(text)["edges"]}, True
-    except (ValueError, KeyError, TypeError):
-        return set(_TRIPLE.findall(text)), False
-
-
-@torch.inference_mode()
-def rest_from_split(m, r: dict) -> dict | None:
-    p = to_pair(r, "")
-    n_prompt = len(TEXT_TOK(p["prompt"], add_special_tokens=False)["input_ids"])
-    ch = TEXT_TOK(p["prompt"] + p["chosen"], add_special_tokens=False)["input_ids"]
-    rj = TEXT_TOK(p["prompt"] + p["rejected"], add_special_tokens=False)["input_ids"]
-    split = next((i for i, (a, b) in enumerate(zip(ch, rj)) if a != b), None)
-    if split is None:
-        return None
-    ids = torch.tensor([ch[:split]], device=m.device)
-    out = m.generate(input_ids=ids, attention_mask=torch.ones_like(ids), do_sample=False,
-                     max_new_tokens=min(len(rj) - split + 256, 4096))
-    new = out[0][split:].tolist()
-    prefix = TEXT_TOK.decode(ch[n_prompt:split], skip_special_tokens=True)
-    gen, ok = _triples(prefix + TEXT_TOK.decode(new, skip_special_tokens=True))
-    done = set(_TRIPLE.findall(prefix))            # edges already complete before the split
-    removed = _triples(r["rejected"])[0] - _triples(r["chosen"])[0]
-    kept = _triples(r["chosen"])[0] - done
-    return {"removed": len(removed), "removed_written": len(removed & gen),
-            "kept": len(kept), "kept_written": len(kept & gen), "json": ok,
-            "starts_removed": bool(new) and new[0] == rj[split]}
-
-
-_tot, _per_pair = {}, {}
-for _label, _m in (("ckpt100", base), ("dpo", model)):
-    _t0 = time.time()
-    _per_pair[_label] = []
-    for _i, _r in enumerate(val_records, 1):
-        _per_pair[_label].append(rest_from_split(_m, _r))
-        if _i % 5 == 0 or _i == len(val_records):
-            print(f"  [{_label}] {_i}/{len(val_records)} pairs, {time.time() - _t0:.0f}s", flush=True)
-    _rows = [x for x in _per_pair[_label] if x]
-    _tot[_label] = {k: sum(x[k] for x in _rows) for k in _rows[0]}
-    print(f"[{_label}] {len(_rows)} pairs, {time.time() - _t0:.0f}s: {_tot[_label]}")
-(DRIVE_RUN_DIR / "gate_continuation.json").write_text(
-    json.dumps({"totals": _tot, "per_pair": _per_pair}, indent=1))
-
-_b, _d = _tot["ckpt100"], _tot["dpo"]
-print(f"removed edges written: dpo {_d['removed_written']} vs ckpt100 {_b['removed_written']} "
-      f"(of {_b['removed']}); kept: dpo {_d['kept_written']} vs {_b['kept_written']} "
-      f"(of {_b['kept']}); JSON: dpo {_d['json']} vs {_b['json']}")
-assert _b["removed_written"] >= MIN_BASELINE_REMOVED, (
-    f"ckpt100 writes only {_b['removed_written']} of the removed edges greedily -- too few "
-    "for this val set to measure a reduction; the gate cannot decide")
-GATE_PASSED = (_d["removed_written"] <= MAX_REMOVED_SHARE * _b["removed_written"]
-               and _d["kept_written"] >= MIN_KEPT_SHARE * _b["kept_written"]
-               and _d["json"] >= _b["json"])
-assert GATE_PASSED, "gate failed -- not exporting (results saved to gate_continuation.json on Drive)"
-print("GATE PASSED")
-"""),
-    md("""
-## 10a. Export -- merged bf16 safetensors to a NEW revision
-
-Runs only after the gate passed. Refuses a revision that already has its own commits,
-checks three short held-out prompts still come back as JSON (both models' edge counts side
-by side: a large drop means DPO is cutting supported edges too), merges to bf16, uploads,
-and checks the Hub's shards equal the merged index.
-"""),
-    code("""
-import gc
 import json as _json
 
 from huggingface_hub import HfApi
 
-assert globals().get("GATE_PASSED"), "run the gate first; export only after it passes"
+_hist = _json.loads((DRIVE_RUN_DIR / "log_history.json").read_text())
+for _s, _v in eval_logps(_hist):
+    print(f"eval @ {_s:>4}: logps/chosen {_v:.2f}")
+SELECTED_STEP = select_step(_hist, LOGPS_TOLERANCE)
+assert SELECTED_STEP is not None, (
+    f"no checkpoint after step 0 kept logps/chosen within {LOGPS_TOLERANCE} nat of step 0's "
+    "-- the round fails here, no gate (spec section 5)")
+_ckpt = CKPT_DIR / f"checkpoint-{SELECTED_STEP}"
+assert (_ckpt / "adapter_model.safetensors").exists(), f"{_ckpt} has no adapter"
+ADAPTER_REVISION = f"dpo4-ckpt{SELECTED_STEP}"
 api = HfApi(token=HF_TOKEN)
-# A new branch is a copy of main, weights included, so "the branch holds weights" cannot
-# be the test: refuse only a branch that has moved away from main (an earlier export).
-_refs = {b.name: b.target_commit
-         for b in api.list_repo_refs(HF_MODEL_REPO, repo_type="model").branches}
-assert _refs.get(HF_MODEL_REVISION, _refs["main"]) == _refs["main"], (
-    f"{HF_MODEL_REPO}@{HF_MODEL_REVISION} already has its own commits (an earlier export?)"
-    " -- choose a new HF_MODEL_REVISION")
-api.create_branch(repo_id=HF_MODEL_REPO, repo_type="model", branch=HF_MODEL_REVISION,
-                  exist_ok=True)
-
-
-def edges_of(m, t, prompt: str) -> int | None:
-    ids = t(text=prompt, return_tensors="pt").to(m.device)
-    out = m.generate(**ids, max_new_tokens=4096, do_sample=False)   # 1024 cut an 11-edge reply
-    reply = t.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=True)
-    try:
-        return len(_json.loads(reply)["edges"])
-    except (ValueError, KeyError, TypeError):
-        print(f"  not JSON: {reply[:160]!r} ... {reply[-160:]!r}")
-        return None
-
-
-for _r in sorted(val_records, key=lambda r: len(r["messages"][1]["content"]))[:3]:
-    _prompt = to_pair(_r, "")["prompt"]
-    _n_dpo, _n_base = edges_of(model, tokenizer, _prompt), edges_of(base, base_tok, _prompt)
-    print(f"edges: dpo {_n_dpo}, ckpt100 {_n_base}, chosen {len(_json.loads(_r['chosen'])['edges'])}")
-    assert _n_dpo is not None, "the DPO model did not answer in JSON -- do not upload this export"
-print("smoke test passed")
-del base, base_tok
-gc.collect()
-torch.cuda.empty_cache()
-
-merged_dir = OUT_DIR / "merged-safetensors"
-model.save_pretrained_merged(str(merged_dir), tokenizer, save_method="merged_16bit")
-_index = json.loads((merged_dir / "model.safetensors.index.json").read_text())
-_missing = sorted(set(_index["weight_map"].values())
-                  - {p.name for p in merged_dir.glob("*.safetensors")})
-assert not _missing, f"merged save is missing shards: {_missing}"
-api.upload_folder(repo_id=HF_MODEL_REPO, repo_type="model", folder_path=str(merged_dir),
-                  revision=HF_MODEL_REVISION,
-                  delete_patterns=["*.safetensors", "*.gguf"],   # no shard of main's survives
-                  commit_message=f"{RUN_NAME}: DPO on {START_REVISION}, merged bf16")
-_pushed = {f for f in api.list_repo_files(HF_MODEL_REPO, repo_type="model",
-                                          revision=HF_MODEL_REVISION)
-           if f.endswith((".safetensors", ".gguf"))}
-assert _pushed == set(_index["weight_map"].values()), f"Hub shards != merged index: {_pushed}"
-print(f"DONE: {HF_MODEL_REPO}@{HF_MODEL_REVISION}")
+api.create_repo(HF_ADAPTER_REPO, repo_type="model", private=True, exist_ok=True)
+assert api.model_info(HF_ADAPTER_REPO).private, f"{HF_ADAPTER_REPO} is not private -- refusing"
+api.create_branch(HF_ADAPTER_REPO, repo_type="model", branch=ADAPTER_REVISION, exist_ok=True)
+for _f in ("adapter_model.safetensors", "adapter_config.json"):
+    api.upload_file(path_or_fileobj=str(_ckpt / _f), path_in_repo=_f, repo_id=HF_ADAPTER_REPO,
+                    repo_type="model", revision=ADAPTER_REVISION)
+api.upload_file(path_or_fileobj=str(DRIVE_RUN_DIR / "log_history.json"),
+                path_in_repo="log_history.json", repo_id=HF_ADAPTER_REPO, repo_type="model",
+                revision=ADAPTER_REVISION)
+print(f"DONE: {HF_ADAPTER_REPO}@{ADAPTER_REVISION} -- hand this name back")
 """),
     md("""
 ## 11. Next -- outside this notebook
 
-Hand the revision name back. It is validated like ckpt100, on the SAME 60 trial articles
-(none of them in the DPO data): held-out eval (`scripts/eval_finetune.py --guided`), the
-45-chunk faithfulness check, then `scripts/haiku_extract_ab.py --arms v2 --reuse
-<adoption-trial rows>` against the adoption trial's routed rows, judged twice.
+Hand back the adapter revision. The gate runs on the Vast GPU against the bf16 merge
+(`scripts/distill/dpo_gate_remote.sh gate <revision>`), with the pass bar unchanged from
+dpo3. Only after a pass, and with authorisation, the same merged weights are pushed to
+`carev01/qwen35-4b-graphrag@opus-distill-2026-10-dpo4` and the adoption trial runs.
 """),
 ]
 
 nb = {"cells": cells, "metadata": {**train_nb["metadata"],
                                    "colab": {"name": "distill_dpo.ipynb", "provenance": []}},
       "nbformat": train_nb["nbformat"], "nbformat_minor": train_nb["nbformat_minor"]}
-out = REPO / "notebooks/distill_dpo.ipynb"
+out = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "notebooks/distill_dpo.ipynb"
 out.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n")
 for i, c in enumerate(cells):
     if c["cell_type"] == "code":
