@@ -76,6 +76,16 @@ class ReplyLabels:
     def clean(self) -> bool:
         return not self.confirmed and not self.disputed
 
+    @property
+    def has_unverified(self) -> bool:
+        """A `stated` label whose quote is not in the chunk: the reply can never be a C
+        pair (spec section 3)."""
+        return any(v == "stated" and not ok for v, ok in zip(self.verdicts, self.verified))
+
+    @property
+    def c_eligible(self) -> bool:
+        return self.clean and not self.has_unverified
+
 
 def classify(labels: list[dict], recheck: dict[int, dict], current: str) -> ReplyLabels:
     verdicts = tuple(lab["verdict"] for lab in labels)
@@ -132,11 +142,60 @@ def _pair_key(e: dict) -> frozenset:
     return frozenset((e.get("source_entity_name"), e.get("target_entity_name")))
 
 
+_DEFAULT_EDGE_KEYS = ("source_entity_name", "target_entity_name", "relation_type", "fact",
+                      "valid_at", "invalid_at", "episode_indices")
+
+
+def _edge_keys(rec: dict) -> list[str]:
+    """The Edge properties in the call's schema order (the order ckpt100 writes them);
+    the reply's own first edge, then the default seven, when the schema has none."""
+    schema = ((rec.get("response_format") or {}).get("json_schema") or {}).get("schema") or {}
+    props = ((schema.get("$defs") or {}).get("Edge") or {}).get("properties")
+    if isinstance(props, dict) and props:
+        return list(props)
+    edges = rec["payload"]["edges"]
+    return list(edges[0]) if edges else list(_DEFAULT_EDGE_KEYS)
+
+
+def _most_common(values: list[Any]) -> Any:
+    """The most frequent value (JSON-compared, first seen wins a tie); None for no values."""
+    if not values:
+        return None
+    count = Counter(json.dumps(v, sort_keys=True) for v in values)
+    top = max(count.values())
+    for v in values:
+        if count[json.dumps(v, sort_keys=True)] == top:
+            return v
+
+
+def rebuild_edge(rec: dict, e: dict) -> dict:
+    """Opus's edge in ckpt100's shape: every schema property in schema order, `quote` and
+    unknown keys dropped. `valid_at` and `episode_indices` copy the reply's own convention
+    (ckpt100 writes the prompt's REFERENCE_TIME and [0]); an Opus `valid_at` whose date
+    differs from the REFERENCE_TIME's is a date stated in the text and is kept."""
+    reply = rec["payload"]["edges"]
+    ref_date = tag(rec["messages"][1]["content"], "REFERENCE_TIME")[:10]
+    reply_valid = [x["valid_at"] for x in reply if isinstance(x.get("valid_at"), str)]
+    opus_valid = e.get("valid_at") if isinstance(e.get("valid_at"), str) else None
+    if opus_valid is not None and ref_date and opus_valid[:10] != ref_date:
+        valid_at = opus_valid
+    elif reply_valid:
+        valid_at = _most_common(reply_valid)
+    else:
+        valid_at = opus_valid
+    episodes = _most_common([x["episode_indices"] for x in reply
+                             if isinstance(x.get("episode_indices"), list)])
+    values = {**e, "valid_at": valid_at,
+              "invalid_at": e["invalid_at"] if isinstance(e.get("invalid_at"), str) else None,
+              "episode_indices": episodes if episodes is not None else [0]}
+    return {k: values.get(k) for k in _edge_keys(rec)}
+
+
 def missed_edges(rec: dict, proposed: list[Any]) -> tuple[list[tuple[dict, str]], Counter]:
-    """The Opus edges that may be appended, as (edge without its quote, quote), and why
-    the others were not: both entities listed, not a self-loop, no existing (or already
-    added) edge between the same two entities in either direction, a verified quote, and
-    a valid edge under the call's response schema."""
+    """The Opus edges that may be appended, as (rebuilt edge, quote), and why the others
+    were not: both entities listed, not a self-loop, no existing (or already added) edge
+    between the same two entities in either direction, a verified quote, and a valid edge
+    under the call's response schema (checked on the rebuilt edge)."""
     names = entity_names(rec)
     current = current_message(rec)
     schema = ((rec.get("response_format") or {}).get("json_schema") or {}).get("schema")
@@ -148,7 +207,7 @@ def missed_edges(rec: dict, proposed: list[Any]) -> tuple[list[tuple[dict, str]]
             why["not_object"] += 1
             continue
         src, tgt = e.get("source_entity_name"), e.get("target_entity_name")
-        edge = {k: v for k, v in e.items() if k != "quote"}
+        edge = rebuild_edge(rec, e)
         if not isinstance(src, str) or not isinstance(tgt, str) \
                 or src not in names or tgt not in names:
             why["entity_not_listed"] += 1
@@ -179,6 +238,8 @@ def build_c(rec: dict, rl: ReplyLabels, proposed: list[Any],
     """chosen = a clean reply plus its verified missed edges, appended after its last edge."""
     if not rl.clean:
         return None, Counter({"reply_not_clean": 1})
+    if rl.has_unverified:
+        return None, Counter({"reply_has_unverified": 1})
     added, why = missed_edges(rec, proposed)
     if not added:
         return None, why
@@ -356,13 +417,14 @@ def main(argv: list[str] | None = None) -> int:
     missed = load_answers(AnswerStore(a.missed), "missed", ids)
     by_split, stats, c_why = assemble(recs, labels, rechecks, missed, a.labeller,
                                       a.val_fraction)
-    a.out.mkdir(parents=True, exist_ok=True)
     out: dict[str, list[dict]] = {}
-    for split, kinds in by_split.items():
+    for split, kinds in by_split.items():     # check both splits before writing anything
         if not kinds["A"]:
             raise SystemExit(f"no A pairs in {split} -- nothing to measure or train on")
         out[split] = balance(kinds["A"], kinds["B"], kinds["C"], seed=f"{a.seed}:{split}")
-        _write_jsonl(a.out / f"{split}.jsonl", out[split])
+    a.out.mkdir(parents=True, exist_ok=True)
+    for split, rows in out.items():
+        _write_jsonl(a.out / f"{split}.jsonl", rows)
     val_eval = val_eval_subset(out["val"], a.eval_size, seed=a.seed)
     _write_jsonl(a.out / "val_eval.jsonl", val_eval)
     summary = {

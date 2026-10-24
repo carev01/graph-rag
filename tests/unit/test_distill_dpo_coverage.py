@@ -222,3 +222,99 @@ def test_build_c_counts_a_non_string_entity_name_instead_of_crashing() -> None:
     keyed = {**_edge("X", "Y"), "target_entity_name": {"name": "Y"}, "quote": Q}
     pair, why = dc.build_c(rec, clean, [listed, keyed], "opus")
     assert pair is None and why == {"entity_not_listed": 2}
+
+
+REF = "2026-06-28 16:01:21.257268+00:00  # ISO 8601 (UTC); used to resolve relative time mentions"
+STAMP = "2026-06-28T16:01:21.257268Z"
+SCHEMA_KEYS = ["source_entity_name", "target_entity_name", "relation_type", "fact",
+               "valid_at", "invalid_at", "episode_indices"]
+
+
+def _stamped_rec(n: int = 3) -> dict:
+    rec = _rec(n)
+    user = rec["messages"][1]["content"] + f"<REFERENCE_TIME>\n{REF}\n</REFERENCE_TIME>\n"
+    rec["messages"][1] = {"role": "user", "content": user}
+    rec["payload"] = {"edges": [{**e, "valid_at": STAMP} for e in rec["payload"]["edges"]]}
+    return rec
+
+
+def _opus_edge(**over: object) -> dict:
+    """An Opus-style edge: keys out of order, only the four required fields plus the quote."""
+    base = {"quote": Q, "fact": "fact X-Y", "target_entity_name": "Y",
+            "source_entity_name": "X", "relation_type": "R"}
+    return {**base, **over}
+
+
+def _appended(rec: dict, proposed: list) -> list[dict]:
+    rl = dc.classify([_lab("stated")] * len(rec["payload"]["edges"]), {}, CUR)
+    pair, _ = dc.build_c(rec, rl, proposed, "opus")
+    return json.loads(pair["chosen"])["edges"][len(rec["payload"]["edges"]):]
+
+
+def test_c_appended_edge_has_the_reply_edges_key_list() -> None:
+    rec = _stamped_rec()
+    (added,) = _appended(rec, [_opus_edge()])
+    reply_keys = list(rec["payload"]["edges"][0])
+    assert reply_keys == SCHEMA_KEYS
+    assert list(added) == reply_keys
+    assert "quote" not in added
+
+
+def test_c_appended_edge_copies_the_replys_valid_at_and_episode_indices() -> None:
+    rec = _stamped_rec()
+    rec["payload"]["edges"][2]["valid_at"] = "2020-01-01T00:00:00.000000Z"   # a minority
+    (added,) = _appended(rec, [_opus_edge(valid_at="2026-06-28T09:00:00Z")])   # same day
+    assert added["valid_at"] == STAMP
+    assert added["episode_indices"] == [0]
+    assert added["invalid_at"] is None
+    assert (added["source_entity_name"], added["relation_type"], added["fact"]) == (
+        "X", "R", "fact X-Y")
+
+
+def test_c_appended_edge_keeps_a_date_opus_took_from_the_text() -> None:
+    rec = _stamped_rec()
+    (added,) = _appended(rec, [_opus_edge(valid_at="2024-03-01T00:00:00Z",
+                                          invalid_at="2025-01-01T00:00:00Z")])
+    assert added["valid_at"] == "2024-03-01T00:00:00Z"
+    assert added["invalid_at"] == "2025-01-01T00:00:00Z"
+
+
+def test_c_appended_edge_episode_indices_is_the_most_common_one() -> None:
+    rec = _stamped_rec(3)
+    rec["payload"]["edges"][0]["episode_indices"] = [1, 2]
+    rec["payload"]["edges"][1]["episode_indices"] = [1, 2]
+    (added,) = _appended(rec, [_opus_edge(episode_indices=[5])])
+    assert added["episode_indices"] == [1, 2]
+
+
+def test_c_appended_edge_without_reply_conventions_uses_opus_or_defaults() -> None:
+    rec = _rec(2)                     # reply edges carry valid_at None, no REFERENCE_TIME
+    (a,) = _appended(rec, [_opus_edge(valid_at="2024-03-01T00:00:00Z")])
+    assert a["valid_at"] == "2024-03-01T00:00:00Z" and a["episode_indices"] == [0]
+    (b,) = _appended(_rec(2), [_opus_edge(valid_at=7, invalid_at=7)])
+    assert b["valid_at"] is None and b["invalid_at"] is None
+
+
+def test_c_rebuilt_edge_is_schema_validated() -> None:
+    rec = _stamped_rec()
+    rl = dc.classify([_lab("stated")] * 3, {}, CUR)
+    pair, why = dc.build_c(rec, rl, [_opus_edge(fact=["not a string"])], "opus")
+    assert pair is None and why == {"schema": 1}
+
+
+def test_c_rebuilt_edge_follows_the_schema_not_opuss_extra_keys() -> None:
+    rec = _stamped_rec()
+    (added,) = _appended(rec, [_opus_edge(confidence=0.9)])
+    assert list(added) == SCHEMA_KEYS
+
+
+def test_build_c_refuses_a_reply_with_an_unverified_stated_edge() -> None:
+    rec = _rec(3)
+    labels = [_lab("stated"), _lab("stated"), _lab("stated", quote="not in the chunk at all")]
+    rl = dc.classify(labels, {}, CUR)
+    assert rl.clean and rl.has_unverified
+    pair, why = dc.build_c(rec, rl, [{**_edge("X", "Y"), "quote": Q}], "opus")
+    assert pair is None and why == {"reply_has_unverified": 1}
+    # a previous_only edge has no quote to verify: not a reason to refuse
+    ok = dc.classify([_lab("stated"), _lab("previous_only"), _lab("stated")], {}, CUR)
+    assert not ok.has_unverified

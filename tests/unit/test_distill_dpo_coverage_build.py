@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.distill import dpo_coverage as dc
 from scripts.distill import dpo_labels as dl
 from scripts.distill import dpo_pairs as dp
@@ -124,3 +126,27 @@ def test_same_call_id_in_two_captures_gives_one_pair(tmp_path: Path) -> None:
     by_split, stats, _ = dc.assemble(recs, labels, {}, {}, "sonnet", 0.0)
     assert sorted(p["meta"]["call_id"] for p in by_split["train"]["B"]) == ["x", "y"]
     assert stats["clean"] == 2
+
+
+def test_main_writes_nothing_when_val_has_no_a_pairs(tmp_path: Path) -> None:
+    rows, labels, rechecks = [], {}, {}
+    for split in ("train", "val"):
+        for j, title in enumerate(_titles(split, 2)):
+            cid = f"{split}{j}"
+            rows.append(_line(cid, title))
+            if split == "train" and j == 0:       # train has an A pair, val has none
+                labels[cid] = [_lab("stated"), _lab("stated"), _lab("unsupported")]
+                rechecks[cid] = {"2": {"verdict": "unsupported", "category": "other", "why": "w"}}
+            else:
+                labels[cid] = [_lab("stated")] * 3
+    cap = tmp_path / "capture.jsonl"
+    cap.write_text("\n".join(rows) + "\n")
+    _store(tmp_path / "label", "label", labels)
+    _store(tmp_path / "recheck", "recheck", rechecks)
+    AnswerStore(tmp_path / "missed")
+    out = tmp_path / "pairs"
+    with pytest.raises(SystemExit, match="val"):
+        dc.main(["--capture", str(cap), "--labels", str(tmp_path / "label"), "--labeller",
+                 "sonnet", "--recheck", str(tmp_path / "recheck"), "--missed",
+                 str(tmp_path / "missed"), "--out", str(out), "--val-fraction", "0.5"])
+    assert not out.exists() or not list(out.iterdir())

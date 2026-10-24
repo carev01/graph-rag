@@ -382,10 +382,29 @@ def recheck_targets(recs: list[dict], labels: dict[str, list[dict]]) -> dict[str
     return out
 
 
+def recheck_wait(recs: list[dict], labels: dict[str, list[dict]],
+                 rechecks: dict[str, dict[int, dict]],
+                 recheck_store: AnswerStore) -> tuple[list[str], list[str]]:
+    """(replies whose re-check can still arrive, replies whose re-check task was dropped).
+    A dropped re-check leaves its replies disputed -- never clean -- so they are not waited
+    for and never reach the missed pass."""
+    waiting: list[str] = []
+    dropped: list[str] = []
+    for cid in recheck_targets(recs, labels):
+        if cid in rechecks:
+            continue
+        if recheck_store.dropped_reason(task_key("recheck", cid)):
+            dropped.append(cid)
+        else:
+            waiting.append(cid)
+    return waiting, dropped
+
+
 def missed_candidates(recs: list[dict], labels: dict[str, list[dict]],
                       rechecks: dict[str, dict[int, dict]], n: int, seed: str) -> list[str]:
     clean = [r["id"] for r in recs if r["id"] in labels
-             and classify(labels[r["id"]], rechecks.get(r["id"], {}), current_message(r)).clean]
+             and classify(labels[r["id"]], rechecks.get(r["id"], {}),
+                          current_message(r)).c_eligible]
     return _seeded_ids(clean, f"missed:{seed}")[:n]
 
 
@@ -446,12 +465,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 if not a.recheck:
                     raise SystemExit("--recheck is required for missed")
-                rechecks = load_recheck(AnswerStore(a.recheck), ids)
-                unchecked = [cid for cid, idx in recheck_targets(recs, labels).items()
-                             if cid not in rechecks]
+                recheck_store = AnswerStore(a.recheck)
+                rechecks = load_recheck(recheck_store, ids)
+                unchecked, dropped_recheck = recheck_wait(recs, labels, rechecks, recheck_store)
                 if unchecked:
                     raise SystemExit(f"{len(unchecked)} replies still await their re-check -- "
                                      "finish recheck before choosing missed tasks")
+                label_store = AnswerStore(a.labels)
+                dropped_label = [cid for cid in ids if cid not in labels
+                                 and label_store.dropped_reason(task_key("label", cid))]
+                print(f"missed: {len(dropped_recheck)} excluded for a dropped re-check, "
+                      f"{len(dropped_label)} excluded for a dropped label task")
                 by_id = {r["id"]: r for r in recs}
                 todo = {cid: missed_request(by_id[cid])
                         for cid in missed_candidates(recs, labels, rechecks, a.n, a.seed)}

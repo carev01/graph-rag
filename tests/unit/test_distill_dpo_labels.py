@@ -244,3 +244,54 @@ def test_calibrate_length_mismatch_fails_the_bar() -> None:
     assert res["edge_count_mismatch"] == ["c0"] and res["missing"] == []
     assert res["passed"] is False and res["labeller"] == "opus"
     assert res["matrix"] == {"unsupported|unsupported": 1}
+
+
+def test_missed_candidates_skip_a_reply_with_an_unverified_stated_edge() -> None:
+    recs = [_rec("ok"), _rec("bad")]
+    labels = {"ok": [_lab("stated")] * 3,
+              "bad": [_lab("stated"), _lab("stated"), {**_lab("stated"), "quote": "not in the chunk!"}]}
+    assert dl.missed_candidates(recs, labels, {}, n=5, seed="s") == ["ok"]
+
+
+def _recheck_cli_inputs(tmp_path: Path) -> list[str]:
+    """Three replies each with one unsupported edge: c0 re-checked, c1 re-check dropped,
+    c2 never re-checked; c3's label task was dropped."""
+    from scripts.distill import dpo_pairs as dp
+    lines = []
+    for cid in ("c0", "c1", "c2", "c3"):
+        rec = _rec(cid)
+        lines.append(json.dumps({
+            "call_id": cid, "tier": "cheap", "prompt_name": dp.PROMPT, "model": dp.STUDENT_MODEL,
+            "finish_reason": "stop", "messages": [
+                {"role": "system", "content": "sys\nDOCUMENT CONTEXT: This chunk comes from x."},
+                rec["messages"][1]],
+            "response_format": {"type": "json_schema"},
+            "completion": json.dumps({"edges": rec["payload"]["edges"]})}))
+    cap = tmp_path / "capture.jsonl"
+    cap.write_text("\n".join(lines) + "\n")
+    label, recheck = AnswerStore(tmp_path / "label"), AnswerStore(tmp_path / "recheck")
+    for cid in ("c0", "c1", "c2"):
+        label.put(dl.task_key("label", cid), json.dumps(
+            [_lab("stated"), _lab("stated"), _lab("unsupported")]), {})
+    label.drop(dl.task_key("label", "c3"), "malformed twice")
+    recheck.put(dl.task_key("recheck", "c0"),
+                json.dumps({"2": {"verdict": "supported", "category": None, "why": "w"}}), {})
+    recheck.drop(dl.task_key("recheck", "c1"), "malformed twice")
+    return ["tasks", "--kind", "missed", "--capture", str(cap), "--store",
+            str(tmp_path / "missed"), "--labels", str(tmp_path / "label"), "--recheck",
+            str(tmp_path / "recheck")]
+
+
+def test_missed_tasks_wait_only_for_rechecks_that_can_still_arrive(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = _recheck_cli_inputs(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        dl.main(argv)
+    assert "1 replies still await their re-check" in str(exc.value)      # c2 only, not c1
+    AnswerStore(tmp_path / "recheck").put(
+        dl.task_key("recheck", "c2"),
+        json.dumps({"2": {"verdict": "supported", "category": None, "why": "w"}}), {})
+    assert dl.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "1 excluded for a dropped re-check" in out
+    assert "1 excluded for a dropped label" in out
