@@ -277,8 +277,9 @@ print(f"dataset ready at {DATA_DIR}")
 
 Every record: `messages` = `[system, user]` exactly as vLLM received them; `chosen` and
 `rejected` = the reply JSON. An A pair's chosen is a strict subset of rejected; a B or C
-pair's rejected is a strict subset of chosen. `meta.delta` must match, and the train set's
-mean delta must be within +/-0.1. `val_eval.jsonl` is the trainer's fixed eval subset.
+pair's rejected is a strict subset of chosen. `meta.delta` must match, and the
+train and val mean deltas must each be within +/-0.1. `val_eval.jsonl` is the trainer's
+fixed eval subset (its mean delta is printed only).
 """),
     code("""
 import json
@@ -406,7 +407,7 @@ def to_pair(r: dict, mark: str) -> dict:
 
 
 def build(records: list[dict], mark: str) -> Dataset:
-    rows, dropped = [], 0
+    rows, deltas, dropped = [], [], 0
     for r in records:
         p = to_pair(r, mark)
         n = max(len(TEXT_TOK(p["prompt"] + p[k], add_special_tokens=False)["input_ids"])
@@ -415,7 +416,9 @@ def build(records: list[dict], mark: str) -> Dataset:
             dropped += 1
             continue
         rows.append(p)
-    print(f"  {len(rows)} pairs kept, {dropped} over {MAX_SEQ_LENGTH} tokens dropped")
+        deltas.append(r["meta"]["delta"])
+    print(f"  {len(rows)} pairs kept, {dropped} over {MAX_SEQ_LENGTH} tokens dropped; "
+          f"mean edge delta after the length filter {sum(deltas) / max(len(deltas), 1):+.3f}")
     return Dataset.from_list(rows)
 
 
@@ -662,9 +665,10 @@ print(f"DONE: {HF_ADAPTER_REPO}@{ADAPTER_REVISION} -- hand this name back")
     md("""
 ## 11. Next -- outside this notebook
 
-Hand back the adapter revision. The gate runs on the Vast GPU against the bf16 merge
-(`scripts/distill/dpo_gate_remote.sh gate <revision>`), with the pass bar unchanged from
-dpo3. Only after a pass, and with authorisation, the same merged weights are pushed to
+Hand back the adapter revision. The gate runs on the Vast GPU instance against the bf16
+merge: `scripts/distill/dpo_gate_remote.sh` runs THERE over ssh, with the HF token on stdin
+(`docs/superpowers/distill-runbook.md`, runbook section 9 step 6), and the pass bar is
+unchanged from dpo3. Only after a pass, and with authorisation, the same merged weights are pushed to
 `carev01/qwen35-4b-graphrag@opus-distill-2026-10-dpo4` and the adoption trial runs.
 """),
 ]

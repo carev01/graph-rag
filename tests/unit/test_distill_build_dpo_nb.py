@@ -54,3 +54,23 @@ def test_no_export_wording_left_in_the_resume_message(tmp_path: Path) -> None:
     text = "\n".join(_cells(tmp_path))
     assert "skipping to export" not in text
     assert "skipping to the selection (section 10)" in text
+
+
+def test_section_5_says_train_and_val_must_balance(tmp_path: Path) -> None:
+    text = "\n".join(_cells(tmp_path))
+    assert "train set's\nmean delta must be within" not in text
+    assert "train and val mean deltas must each be within +/-0.1" in text
+
+
+def test_last_cell_points_the_gate_to_the_runbook_not_a_local_command(tmp_path: Path) -> None:
+    last = _cells(tmp_path)[-1]
+    assert "dpo_gate_remote.sh" in last and "Vast" in last
+    assert "runbook section 9 step 6" in last
+    assert "scripts/distill/dpo_gate_remote.sh gate <revision>" not in last
+
+
+def test_build_prints_the_mean_delta_after_the_length_filter(tmp_path: Path) -> None:
+    cell = next(c for c in _cells(tmp_path) if "def build(" in c)
+    assert "mean edge delta after the length filter" in cell
+    body = cell.split("def build(", 1)[1].split("\n\n\n", 1)[0]
+    assert "assert" not in body.replace("assert prompt", "")   # print only
