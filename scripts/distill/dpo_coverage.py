@@ -262,17 +262,18 @@ def _seeded(rows: list[dict], seed: str) -> list[dict]:
 
 
 def balance(a: list[dict], b_pool: list[dict], c: list[dict], *, seed: str,
-            band: float = BAND) -> list[dict]:
+            band: float = BAND, target: float = 0.0) -> list[dict]:
     """Every A pair; C pairs dropped in seeded order while the mean is above +band; then B
-    candidates added in seeded order while it is below -band. Raises when the band is
-    still out of reach."""
+    candidates added in seeded order while it is below `target` (0: filling only to -band
+    left chosen 0.1 edge shorter on average, a lean towards dpo3's "write less"). Raises
+    when the band is still out of reach."""
     pairs = [*a, *c]
     c_order = _seeded(c, f"C:{seed}")
     while pairs and mean_delta(pairs) > band and c_order:
         gone = c_order.pop()["meta"]["call_id"]
         pairs = [p for p in pairs if p["meta"]["call_id"] != gone]
     b_order = _seeded(b_pool, f"B:{seed}")
-    while mean_delta(pairs) < -band and b_order:
+    while mean_delta(pairs) < target and b_order:
         pairs.append(b_order.pop())
     if pairs and abs(mean_delta(pairs)) > band:
         raise BalanceError(f"mean edge delta {mean_delta(pairs):+.3f} outside +/-{band} with "

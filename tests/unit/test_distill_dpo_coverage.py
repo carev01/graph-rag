@@ -188,6 +188,16 @@ def test_balance_fills_b_until_the_mean_is_in_band() -> None:
     assert out == dc.balance(a, b_pool, c, seed="s")
 
 
+def test_balance_fills_b_to_the_target_not_just_the_band_edge() -> None:
+    a = [_p(f"a{i}", "A", -1) for i in range(10)]
+    b_pool = [_p(f"b{i}", "B", 1) for i in range(20)]
+    edge = dc.balance(a, b_pool, [], seed="s", target=-dc.BAND)
+    assert sum(p["meta"]["type"] == "B" for p in edge) == 9
+    out = dc.balance(a, b_pool, [], seed="s")
+    assert sum(p["meta"]["type"] == "B" for p in out) == 10
+    assert dc.mean_delta(out) == 0.0
+
+
 def test_balance_trims_c_then_fills_b_when_c_overshoots() -> None:
     a = [_p("a0", "A", -1)]
     c = [_p(f"c{i}", "C", 3) for i in range(3)]

@@ -71,7 +71,8 @@ works out as follows:
 To balance:
 1. Keep every A and C pair.
 2. If the sum is still negative, add B candidates in seeded order until the mean reaches
-   the band.
+   0. (Amended 2026-10-25 at the O4 review: filling only to -0.1 left chosen 0.1 edge
+   shorter on average, a lean towards dpo3's "write less"; B candidates were plentiful.)
 3. If C alone overshoots, drop C pairs in seeded order instead.
 
 The builder asserts the band and reports the final mean.
