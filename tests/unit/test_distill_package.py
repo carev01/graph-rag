@@ -309,7 +309,7 @@ def test_main_cli_without_hf_repo_never_calls_push(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("name", ["distill_train.ipynb", "export_checkpoint.ipynb",
-                                  "distill_dpo.ipynb"])
+                                  "distill_dpo.ipynb", "distill_verifier.ipynb"])
 def test_notebook_is_valid_json_and_nbformat_if_available(name):
     nb_path = REPO_ROOT / "notebooks" / name
     assert nb_path.exists(), f"missing {nb_path}"
