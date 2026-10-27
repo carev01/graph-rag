@@ -84,8 +84,9 @@ def test_score_missing_and_duplicate_predictions(tmp_path: Path) -> None:
     p.write_text("\n".join(json.dumps(x) for x in (
         {"call_id": "a", "reply": _reply(UN), "step": 50},
         {"call_id": "a", "reply": _reply(ST), "step": 50})) + "\n")
-    replies, dupes, bad = ve.read_predictions(p)
-    assert replies == {"a": _reply(UN)} and dupes == 1 and bad == 0   # first wins
+    preds = ve.read_predictions(p)
+    replies = preds.replies
+    assert replies == {"a": _reply(UN)} and preds.duplicates == 1 and preds.unusable == 0   # first wins
     recs = [_rec("a", ["confirmed"]), _rec("b", ["confirmed"])]
     m = ve.score(recs, replies, "P1", resamples=50)
     assert m["parse_fail"] == 0.5 and m["counts"]["missing"] == 1 and m["catch"] == 0.5
@@ -134,5 +135,43 @@ def test_read_predictions_skips_and_counts_partial_lines(tmp_path: Path) -> None
                  + '{"call_id": "b", "reply": "{\\"lab' + "\n"          # runtime died mid-write
                  + json.dumps({"call_id": "c"}) + "\n"                    # no reply field
                  + json.dumps({"call_id": "b", "reply": _reply(ST), "step": 50}) + "\n")
-    replies, dupes, bad = ve.read_predictions(p)
-    assert replies == {"a": _reply(UN), "b": _reply(ST)} and dupes == 0 and bad == 2
+    preds = ve.read_predictions(p)
+    assert preds.replies == {"a": _reply(UN), "b": _reply(ST)}
+    assert preds.duplicates == 0 and preds.unusable == 2
+
+
+def test_read_predictions_reports_steps(tmp_path: Path) -> None:
+    p = tmp_path / "pred.jsonl"
+    p.write_text("".join(json.dumps({"call_id": c, "reply": "x", "step": s}) + "\n"
+                         for c, s in (("a", 50), ("b", 75))))
+    assert ve.read_predictions(p).steps == {50, 75}
+
+
+def test_score_counts_stray_ids_and_cut_off_replies() -> None:
+    recs = [_rec("a", ["confirmed"]), _rec("b", ["stated", "stated"])]
+    long_text = '{"labels": [{"n": 1, "verdict": "stated", "quote": "' + "w " * 400
+    replies = {"a": _reply(UN), "b": long_text, "zz": _reply(ST)}
+    m = ve.score(recs, replies, "P1", resamples=20, count_tokens=lambda t: len(t.split()))
+    assert m["counts"]["stray"] == 1                       # "zz" is not a test call id
+    assert m["counts"]["cut_off"] == 1                     # b: unparseable and at 64+160*2 tokens
+    assert m["counts"]["parse_failed"] == 1
+    m = ve.score(recs, replies, "P1", resamples=20)
+    assert m["counts"]["cut_off"] is None                  # no tokenizer, not measured
+
+
+def test_cut_off_threshold() -> None:
+    assert ve.cap_tokens(2) == 384
+    assert ve.cut_off(383, 2) and not ve.cut_off(300, 2)
+
+
+def test_score_of_an_empty_test_set_does_not_crash() -> None:
+    m = ve.score([], {}, "P1", resamples=10)
+    assert m["replies"] == 0 and m["catch"] == 0.0 and m["catch_ci"] == [0.0, 0.0]
+    assert not ve.passes(m)[0]
+
+
+def test_lexical_stopwords_are_removed_before_the_plural_strip() -> None:
+    rec = {"meta": {"call_id": "x", "final": ["stated"], "categories": [None],
+                    "facts": ["Veeam -> S3: this is the S3 of Veeam"],
+                    "current": "Veeam writes to S3."}}
+    assert ve.lexical_drops(rec, 0.5) == [False]          # nothing distinctive left: kept

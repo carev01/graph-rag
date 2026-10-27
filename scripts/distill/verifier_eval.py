@@ -19,6 +19,8 @@ import json
 import random
 import re
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from scripts.distill.dpo_coverage import norm_ws, quote_ok
@@ -64,29 +66,46 @@ def drops(parsed: list[dict] | None, current: str, policy: str, n: int) -> list[
     return out
 
 
-def read_predictions(path: Path) -> tuple[dict[str, str], int, int]:
-    """(replies by call id, repeated ids, unusable lines). First reply wins. A line that
-    does not parse or lacks call_id/reply -- a dead runtime's half-written tail -- is
-    counted and skipped; its call id then counts as missing unless written again."""
-    replies: dict[str, str] = {}
-    dupes = bad = 0
+@dataclass
+class Predictions:
+    replies: dict[str, str] = field(default_factory=dict)   # by call id, first reply wins
+    duplicates: int = 0
+    unusable: int = 0          # lines that do not parse or lack call_id/reply
+    steps: set = field(default_factory=set)                 # checkpoint steps seen
+
+
+def cap_tokens(n: int) -> int:
+    """The notebook's generation cap for a reply over n facts (section 10)."""
+    return 64 + 160 * n
+
+
+def cut_off(reply_tokens: int, n: int) -> bool:
+    """A reply at the cap (re-tokenising decoded text can differ by a token or two)."""
+    return reply_tokens >= cap_tokens(n) - 2
+
+
+def read_predictions(path: Path) -> Predictions:
+    """A line that does not parse or lacks call_id/reply -- a dead runtime's half-written
+    tail -- is counted and skipped; its call id then counts as missing unless written again."""
+    out = Predictions()
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
             row = json.loads(line)
         except ValueError:
-            bad += 1
+            out.unusable += 1
             continue
         if not (isinstance(row, dict) and isinstance(row.get("call_id"), str)
                 and isinstance(row.get("reply"), str)):
-            bad += 1
+            out.unusable += 1
             continue
-        if row["call_id"] in replies:
-            dupes += 1
+        out.steps.add(row.get("step"))
+        if row["call_id"] in out.replies:
+            out.duplicates += 1
             continue
-        replies[row["call_id"]] = row["reply"]
-    return replies, dupes, bad
+        out.replies[row["call_id"]] = row["reply"]
+    return out
 
 
 def _reply_counts(rec: dict, dropped: list[bool]) -> Counter:
@@ -110,15 +129,19 @@ def _ci95(xs: list[float]) -> list[float]:
 
 
 def score(records: list[dict], replies: dict[str, str], policy: str, resamples: int = 10_000,
-          seed: int = 20261027) -> dict:
+          seed: int = 20261027, count_tokens: Callable[[str], int] | None = None) -> dict:
+    """`count_tokens` (the model's tokenizer) lets unparseable replies that hit the
+    generation cap be told apart from format failures; without it `cut_off` is None."""
     per_reply: list[Counter] = []
-    missing = failed = 0
+    missing = failed = cut = 0
     for rec in records:
         n = len(rec["meta"]["final"])
         text = replies.get(rec["meta"]["call_id"])
         parsed = parse_reply(text, n) if text is not None else None
         missing += text is None
         failed += parsed is None
+        if parsed is None and text is not None and count_tokens is not None:
+            cut += cut_off(count_tokens(text), n)
         per_reply.append(_reply_counts(rec, drops(parsed, rec["meta"]["current"], policy, n)))
     tot: Counter = sum(per_reply, Counter())
     rng = random.Random(seed)
@@ -139,7 +162,8 @@ def score(records: list[dict], replies: dict[str, str], policy: str, resamples: 
         "catch_by_category": {c: _share(tot, f"cat:{c}") for c in cats},
         "counts": {"confirmed": tot["confirmed"], "stated": tot["stated"],
                    "previous_only": tot["previous_only"], "missing": missing,
-                   "parse_failed": failed},
+                   "parse_failed": failed, "cut_off": cut if count_tokens is not None else None,
+                   "stray": len(set(replies) - {r["meta"]["call_id"] for r in records})},
     }
 
 
@@ -155,7 +179,10 @@ def passes(m: dict) -> tuple[bool, list[str]]:
 
 
 def _words(text: str) -> set[str]:
-    return {w.rstrip(".").removesuffix("s") for w in _WORD.findall(norm_ws(text).lower())}
+    """Lower-cased words minus the stopwords, then a crude plural strip ("is" must not
+    become "i" and count as distinctive)."""
+    raw = {w.rstrip(".") for w in _WORD.findall(norm_ws(text).lower())}
+    return {w.removesuffix("s") for w in raw - STOPWORDS}
 
 
 def lexical_drops(record: dict, threshold: float) -> list[bool]:
@@ -165,7 +192,7 @@ def lexical_drops(record: dict, threshold: float) -> list[bool]:
     out = []
     for fact in record["meta"]["facts"]:
         names, _, text = fact.partition(": ")
-        words = _words(text) - _words(names.replace(" -> ", " ")) - STOPWORDS
+        words = _words(text) - _words(names.replace(" -> ", " "))
         out.append(bool(words) and len(words & current) / len(words) < threshold)
     return out
 
@@ -194,10 +221,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--predictions", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--resamples", type=int, default=10_000)
+    ap.add_argument("--tokenizer", type=Path,
+                    help="dir with the model's tokenizer.json, to count cut-off replies "
+                         "(needs the `tokenizers` package: uv run --with tokenizers)")
     a = ap.parse_args(argv)
     test = _read_jsonl(a.data / "test.jsonl")
-    replies, dupes, bad = read_predictions(a.predictions)
-    policies = {p: score(test, replies, p, resamples=a.resamples) for p in POLICIES}
+    preds = read_predictions(a.predictions)
+    count_tokens = None
+    if a.tokenizer:
+        from tokenizers import Tokenizer   # lazy: not a base dependency
+        tok = Tokenizer.from_file(str(a.tokenizer / "tokenizer.json"))
+        count_tokens = lambda t: len(tok.encode(t, add_special_tokens=False).ids)  # noqa: E731
+    policies = {p: score(test, preds.replies, p, resamples=a.resamples,
+                         count_tokens=count_tokens) for p in POLICIES}
     verdicts = {p: passes(m) for p, m in policies.items()}
     passing = [p for p in POLICIES if verdicts[p][0]]
     threshold = tune_threshold(_read_jsonl(a.data / "train.jsonl"))
@@ -206,7 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         "passed": bool(passing), "policy": passing[0] if passing else None,
         "policies": {p: {**m, "passed": verdicts[p][0], "why": verdicts[p][1]}
                      for p, m in policies.items()},
-        "duplicate_predictions": dupes, "unusable_prediction_lines": bad,
+        "duplicate_predictions": preds.duplicates, "unusable_prediction_lines": preds.unusable,
+        "prediction_steps": sorted(preds.steps, key=str),
         "baseline": {"threshold": threshold, "catch": _share(base, "confirmed"),
                      "false_drop": _share(base, "stated")},
         "bar": {"MIN_CATCH": MIN_CATCH, "MAX_FALSE_DROP": MAX_FALSE_DROP,
@@ -217,6 +254,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{p}: catch {m['catch']:.3f} {m['catch_ci']}, false drops {m['false_drop']:.3f} "
               f"{m['false_drop_ci']}, parse failures {m['parse_fail']:.3f} -> "
               f"{'PASS' if verdicts[p][0] else 'FAIL ' + '; '.join(verdicts[p][1])}")
+    c = policies["P1"]["counts"]
+    print(f"predictions: {c['missing']} missing, {c['stray']} stray, {preds.duplicates} repeated, "
+          f"{preds.unusable} unusable lines, steps {sorted(preds.steps, key=str)}; "
+          f"parse failures cut off at the cap: {c['cut_off']}")
     print(f"baseline (threshold {threshold}): catch {report['baseline']['catch']:.3f}, "
           f"false drops {report['baseline']['false_drop']:.3f}")
     return 0 if passing else 1
