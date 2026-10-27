@@ -337,3 +337,26 @@ def test_package_ships_val_eval_when_present(tmp_path):
     pkg.package(in_dir, out)
     with zipfile.ZipFile(out) as zf:
         assert "val_eval.jsonl" in zf.namelist()
+
+
+def test_package_and_push_ship_test_when_present(tmp_path, monkeypatch):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    for name in ("train.jsonl", "val.jsonl", "test.jsonl"):
+        (in_dir / name).write_text(json.dumps({"prompt_name": "p", "messages": []}) + "\n")
+    out = tmp_path / "out.zip"
+    pkg.package(in_dir, out)
+    with zipfile.ZipFile(out) as zf:
+        assert "test.jsonl" in zf.namelist()
+    monkeypatch.setenv("HF_TOKEN", "x")
+    uploaded = []
+
+    class Fake:
+        def create_repo(self, **kw):
+            pass
+
+        def upload_file(self, **kw):
+            uploaded.append(kw["path_in_repo"])
+
+    pkg.push_to_hub(in_dir, "o/r", True, hf_api=Fake())
+    assert "test.jsonl" in uploaded
