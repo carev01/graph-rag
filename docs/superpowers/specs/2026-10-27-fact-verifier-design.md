@@ -58,9 +58,10 @@ The 20% becomes **test**, scored once at the end. Of the remaining groups, a see
 becomes **dev**, for eval loss during training. Test articles are the dpo4 val articles,
 so neither the verifier nor any DPO checkpoint trained on them.
 
-**Builder**: `scripts/distill/verifier_data.py` writes `train.jsonl`, `dev.jsonl`,
-`test.jsonl` (chat records: system + user + assistant, as `distill_train.ipynb` reads) and
-`summary.json` (counts per split and per final label). It packages through
+**Builder**: `scripts/distill/verifier_data.py` writes `train.jsonl`, `val.jsonl` (the dev
+split -- `package_dataset.py` and the notebook expect that name), `test.jsonl` (chat
+records: system + user + assistant, plus `meta` with the final labels, the fact texts and
+the CURRENT MESSAGE for scoring) and `summary.json` (counts per split and per final label). It packages through
 `package_dataset.py` to `carev01/ft-opus-distill@verifier1` (private).
 
 ## 4. Training (Colab notebook `notebooks/distill_verifier.ipynb`)
