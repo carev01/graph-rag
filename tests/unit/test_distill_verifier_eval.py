@@ -84,8 +84,8 @@ def test_score_missing_and_duplicate_predictions(tmp_path: Path) -> None:
     p.write_text("\n".join(json.dumps(x) for x in (
         {"call_id": "a", "reply": _reply(UN), "step": 50},
         {"call_id": "a", "reply": _reply(ST), "step": 50})) + "\n")
-    replies, dupes = ve.read_predictions(p)
-    assert replies == {"a": _reply(UN)} and dupes == 1          # first wins
+    replies, dupes, bad = ve.read_predictions(p)
+    assert replies == {"a": _reply(UN)} and dupes == 1 and bad == 0   # first wins
     recs = [_rec("a", ["confirmed"]), _rec("b", ["confirmed"])]
     m = ve.score(recs, replies, "P1", resamples=50)
     assert m["parse_fail"] == 0.5 and m["counts"]["missing"] == 1 and m["catch"] == 0.5
@@ -121,3 +121,18 @@ def test_main_writes_report_and_exit_code(tmp_path: Path) -> None:
     report = json.loads(out.read_text())
     assert rc == 0 and report["passed"] and report["policy"] == "P1"
     assert set(report["policies"]) == {"P1", "P2"} and "baseline" in report
+
+
+def test_parse_reply_unhashable_verdict_is_a_parse_failure() -> None:
+    assert ve.parse_reply(json.dumps({"labels": [{"n": 1, "verdict": ["stated"]}]}), 1) is None
+    assert ve.parse_reply(json.dumps({"labels": [{"n": 1, "verdict": {"v": 1}}]}), 1) is None
+
+
+def test_read_predictions_skips_and_counts_partial_lines(tmp_path: Path) -> None:
+    p = tmp_path / "pred.jsonl"
+    p.write_text(json.dumps({"call_id": "a", "reply": _reply(UN), "step": 50}) + "\n"
+                 + '{"call_id": "b", "reply": "{\\"lab' + "\n"          # runtime died mid-write
+                 + json.dumps({"call_id": "c"}) + "\n"                    # no reply field
+                 + json.dumps({"call_id": "b", "reply": _reply(ST), "step": 50}) + "\n")
+    replies, dupes, bad = ve.read_predictions(p)
+    assert replies == {"a": _reply(UN), "b": _reply(ST)} and dupes == 0 and bad == 2

@@ -61,3 +61,13 @@ def test_selection_rules() -> None:
     assert not vs.should_stop([0.3, 0.2, 0.21, 0.22], 3)
     assert vs.should_stop([0.3, 0.2, 0.21, 0.22, 0.25], 3)
     assert not vs.should_stop([0.3, 0.2, 0.21, 0.19, 0.25], 3)
+
+
+def test_prediction_reloads_the_selected_checkpoint_and_checks_batching(tmp_path: Path) -> None:
+    cell = next(c for c in _cells(tmp_path) if "SELECTED_STEP = select_dev_step" in c)
+    assert "FastLanguageModel.from_pretrained(" in cell and "model_name=str(_ckpt)" in cell
+    assert "load_adapter" not in cell and "set_adapter" not in cell
+    assert "del trainer" in cell
+    assert "PRED_BATCH = 1" in cell                 # fallback when batched != batch-1 on dev
+    assert "dev agreement" in cell
+    assert "drop_partial_tail(PRED_PATH)" in cell   # a half-written line from a dead runtime

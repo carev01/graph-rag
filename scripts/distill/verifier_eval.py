@@ -47,7 +47,8 @@ def parse_reply(text: str, n: int) -> list[dict] | None:
         k = lab.get("n") if isinstance(lab, dict) else None
         if type(k) is not int or not 1 <= k <= n or out[k - 1] is not None:
             return None
-        if lab.get("verdict") not in VERDICTS:
+        verdict = lab.get("verdict")
+        if not isinstance(verdict, str) or verdict not in VERDICTS:
             return None
         out[k - 1] = lab
     return [lab for lab in out if lab is not None]
@@ -63,18 +64,29 @@ def drops(parsed: list[dict] | None, current: str, policy: str, n: int) -> list[
     return out
 
 
-def read_predictions(path: Path) -> tuple[dict[str, str], int]:
+def read_predictions(path: Path) -> tuple[dict[str, str], int, int]:
+    """(replies by call id, repeated ids, unusable lines). First reply wins. A line that
+    does not parse or lacks call_id/reply -- a dead runtime's half-written tail -- is
+    counted and skipped; its call id then counts as missing unless written again."""
     replies: dict[str, str] = {}
-    dupes = 0
+    dupes = bad = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except ValueError:
+            bad += 1
+            continue
+        if not (isinstance(row, dict) and isinstance(row.get("call_id"), str)
+                and isinstance(row.get("reply"), str)):
+            bad += 1
+            continue
         if row["call_id"] in replies:
             dupes += 1
             continue
         replies[row["call_id"]] = row["reply"]
-    return replies, dupes
+    return replies, dupes, bad
 
 
 def _reply_counts(rec: dict, dropped: list[bool]) -> Counter:
@@ -184,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resamples", type=int, default=10_000)
     a = ap.parse_args(argv)
     test = _read_jsonl(a.data / "test.jsonl")
-    replies, dupes = read_predictions(a.predictions)
+    replies, dupes, bad = read_predictions(a.predictions)
     policies = {p: score(test, replies, p, resamples=a.resamples) for p in POLICIES}
     verdicts = {p: passes(m) for p, m in policies.items()}
     passing = [p for p in POLICIES if verdicts[p][0]]
@@ -194,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         "passed": bool(passing), "policy": passing[0] if passing else None,
         "policies": {p: {**m, "passed": verdicts[p][0], "why": verdicts[p][1]}
                      for p, m in policies.items()},
-        "duplicate_predictions": dupes,
+        "duplicate_predictions": dupes, "unusable_prediction_lines": bad,
         "baseline": {"threshold": threshold, "catch": _share(base, "confirmed"),
                      "false_drop": _share(base, "stated")},
         "bar": {"MIN_CATCH": MIN_CATCH, "MAX_FALSE_DROP": MAX_FALSE_DROP,

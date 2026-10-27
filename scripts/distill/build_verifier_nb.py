@@ -369,12 +369,17 @@ else:
     md("""
 ## 10. Select the checkpoint, predict the test split, hand off
 
-Picks the lowest dev loss from `log_history.json`, loads that checkpoint's adapter, and
-writes greedy, thinking-off replies for every test record to Drive (resumable: done call ids
-are skipped). Then uploads the adapter, the log and the predictions to the PRIVATE repo
-`HF_ADAPTER_REPO`, revision `verifier1-ckpt<step>`.
+Picks the lowest dev loss from `log_history.json` and loads that checkpoint into a FRESH
+model (the training model still holds the final-step adapter). Before the test split it
+checks itself on dev records: replies must parse, and batched generation must give the
+same verdicts as batch 1 (left padding on this hybrid-attention model), else predictions
+run at batch 1. Then it writes greedy, thinking-off replies for every test record to Drive
+(resumable: done call ids are skipped, a half-written last line is dropped) and uploads
+the adapter, the log and the predictions to the PRIVATE repo `HF_ADAPTER_REPO`, revision
+`verifier1-ckpt<step>`.
 """),
     code("""
+import gc
 import json as _json
 
 from huggingface_hub import HfApi
@@ -388,19 +393,21 @@ _ckpt = CKPT_DIR / f"checkpoint-{SELECTED_STEP}"
 assert (_ckpt / "adapter_model.safetensors").exists(), f"{_ckpt} has no adapter"
 ADAPTER_REVISION = f"verifier1-ckpt{SELECTED_STEP}"
 
-model.load_adapter(str(_ckpt), adapter_name="selected")
-model.set_adapter("selected")
+# A fresh model with the selected checkpoint's adapter (distill_train's reload pattern).
+del trainer
+del model
+gc.collect()
+torch.cuda.empty_cache()
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name=str(_ckpt), max_seq_length=MAX_SEQ_LENGTH, load_in_4bit=LOAD_IN_4BIT,
+    dtype=None, token=HF_TOKEN)
 FastLanguageModel.for_inference(model)
 TEXT_TOK = getattr(tokenizer, "tokenizer", tokenizer)
 TEXT_TOK.padding_side = "left"
 if TEXT_TOK.pad_token is None:
     TEXT_TOK.pad_token = TEXT_TOK.eos_token
 END_ID = TEXT_TOK.convert_tokens_to_ids("<|im_end|>")
-
-PRED_PATH = DRIVE_RUN_DIR / f"test_predictions-ckpt{SELECTED_STEP}.jsonl"
-_done = set()
-if PRED_PATH.exists():
-    _done = {_json.loads(x)["call_id"] for x in PRED_PATH.read_text().splitlines() if x.strip()}
+print(f"loaded {_ckpt.name} into a fresh model")
 
 
 def serving_prompt(r: dict) -> str:
@@ -408,21 +415,78 @@ def serving_prompt(r: dict) -> str:
                                          add_generation_prompt=True, enable_thinking=False)
 
 
+def generate(batch: list[dict]) -> list[str]:
+    enc = TEXT_TOK([serving_prompt(r) for r in batch], return_tensors="pt", padding=True,
+                   add_special_tokens=False).to("cuda")
+    cap = 64 + 160 * max(len(r["meta"]["final"]) for r in batch)   # facts, not answers
+    with torch.no_grad():
+        out = model.generate(**enc, max_new_tokens=cap, do_sample=False,
+                             eos_token_id=END_ID, pad_token_id=TEXT_TOK.pad_token_id)
+    return [TEXT_TOK.decode(ids, skip_special_tokens=True)
+            for ids in out[:, enc["input_ids"].shape[1]:]]
+
+
+def verdicts(text: str, n: int):
+    try:
+        labels = _json.loads(text)["labels"]
+        by_n = {lab["n"]: lab["verdict"] for lab in labels}
+    except (ValueError, KeyError, TypeError):
+        return None
+    return tuple(by_n.get(k) for k in range(1, n + 1)) if len(by_n) == n == len(labels) else None
+
+
+# --- self-check on dev: parse rate, agreement with the targets, batched == batch 1 ---------
+_probe = sorted(val_records, key=lambda r: len(serving_prompt(r)))[:8]
+_single = [generate([r])[0] for r in _probe]
+_batched = [t for i in range(0, len(_probe), PRED_BATCH) for t in generate(_probe[i:i + PRED_BATCH])]
+_n_facts = [len(r["meta"]["final"]) for r in _probe]
+_v1 = [verdicts(t, n) for t, n in zip(_single, _n_facts)]
+_vb = [verdicts(t, n) for t, n in zip(_batched, _n_facts)]
+_want = [verdicts(r["messages"][2]["content"], n) for r, n in zip(_probe, _n_facts)]
+_parsed = sum(v is not None for v in _v1)
+_match = sum(a == b for v, w in zip(_v1, _want) if v is not None for a, b in zip(v, w))
+_same = sum((a == b) if a is not None else (s == t)
+            for a, b, s, t in zip(_v1, _vb, _single, _batched))
+print(f"dev agreement: {_parsed}/{len(_probe)} replies parse at batch 1; verdicts match the "
+      f"targets on {_match}/{sum(n for v, n in zip(_v1, _n_facts) if v is not None)} facts; "
+      f"batched == batch 1 on {_same}/{len(_probe)}")
+assert _parsed > 0, "no dev reply parses -- adapter or prompt is wrong; not predicting the test split"
+if _same < len(_probe):
+    print(f"WARNING: batch {PRED_BATCH} changes the verdicts -- predicting at batch 1")
+    PRED_BATCH = 1
+
+
+def drop_partial_tail(path: Path) -> None:
+    # A runtime that died mid-write leaves a half line; appending to it would corrupt the file.
+    if not path.exists():
+        return
+    lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    good = []
+    for x in lines:
+        try:
+            row = _json.loads(x)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and "call_id" in row and "reply" in row:
+            good.append(x)
+    if len(good) != len(lines):
+        print(f"dropping {len(lines) - len(good)} unusable line(s) from {path.name}")
+        path.write_text("".join(g + "\\n" for g in good), encoding="utf-8")
+
+
+PRED_PATH = DRIVE_RUN_DIR / f"test_predictions-ckpt{SELECTED_STEP}.jsonl"
+drop_partial_tail(PRED_PATH)
+_done = set()
+if PRED_PATH.exists():
+    _done = {_json.loads(x)["call_id"] for x in PRED_PATH.read_text().splitlines() if x.strip()}
 _todo = sorted((r for r in test_records if r["meta"]["call_id"] not in _done),
                key=lambda r: len(serving_prompt(r)))
-print(f"{len(_done)} predictions already on Drive, {len(_todo)} to go")
+print(f"{len(_done)} predictions already on Drive, {len(_todo)} to go (batch {PRED_BATCH})")
 with PRED_PATH.open("a", encoding="utf-8") as _fh:
     for _i in range(0, len(_todo), PRED_BATCH):
         _batch = _todo[_i:_i + PRED_BATCH]
-        _enc = TEXT_TOK([serving_prompt(r) for r in _batch], return_tensors="pt", padding=True,
-                        add_special_tokens=False).to("cuda")
-        _cap = 64 + 160 * max(len(r["meta"]["final"]) for r in _batch)   # facts, not answers
-        with torch.no_grad():
-            _out = model.generate(**_enc, max_new_tokens=_cap, do_sample=False,
-                                  eos_token_id=END_ID, pad_token_id=TEXT_TOK.pad_token_id)
-        for _r, _ids in zip(_batch, _out[:, _enc["input_ids"].shape[1]:]):
-            _fh.write(_json.dumps({"call_id": _r["meta"]["call_id"],
-                                   "reply": TEXT_TOK.decode(_ids, skip_special_tokens=True),
+        for _r, _text in zip(_batch, generate(_batch)):
+            _fh.write(_json.dumps({"call_id": _r["meta"]["call_id"], "reply": _text,
                                    "step": SELECTED_STEP}, ensure_ascii=False) + "\\n")
         _fh.flush()
         print(f"  {min(_i + PRED_BATCH, len(_todo))}/{len(_todo)}", flush=True)
