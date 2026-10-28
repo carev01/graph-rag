@@ -381,6 +381,7 @@ the adapter, the log and the predictions to the PRIVATE repo `HF_ADAPTER_REPO`, 
     code("""
 import gc
 import json as _json
+import os
 
 from huggingface_hub import HfApi
 
@@ -482,14 +483,18 @@ if PRED_PATH.exists():
 _todo = sorted((r for r in test_records if r["meta"]["call_id"] not in _done),
                key=lambda r: len(serving_prompt(r)))
 print(f"{len(_done)} predictions already on Drive, {len(_todo)} to go (batch {PRED_BATCH})")
-with PRED_PATH.open("a", encoding="utf-8") as _fh:
-    for _i in range(0, len(_todo), PRED_BATCH):
-        _batch = _todo[_i:_i + PRED_BATCH]
-        for _r, _text in zip(_batch, generate(_batch)):
-            _fh.write(_json.dumps({"call_id": _r["meta"]["call_id"], "reply": _text,
-                                   "step": SELECTED_STEP}, ensure_ascii=False) + "\\n")
+# One open/append/close per batch: Colab's Drive mount uploads on close, so a file held
+# open for the whole loop lost ~650 written rows when a runtime died (2026-10-27).
+for _i in range(0, len(_todo), PRED_BATCH):
+    _batch = _todo[_i:_i + PRED_BATCH]
+    _rows = [_json.dumps({"call_id": _r["meta"]["call_id"], "reply": _text,
+                          "step": SELECTED_STEP}, ensure_ascii=False) + "\\n"
+             for _r, _text in zip(_batch, generate(_batch))]
+    with PRED_PATH.open("a", encoding="utf-8") as _fh:
+        _fh.write("".join(_rows))
         _fh.flush()
-        print(f"  {min(_i + PRED_BATCH, len(_todo))}/{len(_todo)}", flush=True)
+        os.fsync(_fh.fileno())
+    print(f"  {min(_i + PRED_BATCH, len(_todo))}/{len(_todo)}", flush=True)
 _n = len({_json.loads(x)["call_id"] for x in PRED_PATH.read_text().splitlines() if x.strip()})
 assert _n == len(test_records), f"{_n} predictions for {len(test_records)} test records"
 

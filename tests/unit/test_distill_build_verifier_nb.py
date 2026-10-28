@@ -71,3 +71,12 @@ def test_prediction_reloads_the_selected_checkpoint_and_checks_batching(tmp_path
     assert "PRED_BATCH = 1" in cell                 # fallback when batched != batch-1 on dev
     assert "dev agreement" in cell
     assert "drop_partial_tail(PRED_PATH)" in cell   # a half-written line from a dead runtime
+
+
+def test_predictions_reach_drive_after_every_batch(tmp_path: Path) -> None:
+    # Colab's Drive mount uploads on close: one file held open for the whole loop lost
+    # ~650 written rows when the runtime died (2026-10-27).
+    cell = next(c for c in _cells(tmp_path) if "SELECTED_STEP = select_dev_step" in c)
+    loop = cell.split("for _i in range(0, len(_todo), PRED_BATCH):")[1]
+    assert 'with PRED_PATH.open("a", encoding="utf-8") as _fh:' in loop
+    assert "os.fsync(_fh.fileno())" in loop
