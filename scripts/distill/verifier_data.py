@@ -8,7 +8,8 @@ section 3). One chat record per ckpt100 `extract_edges.edge` reply:
 
 Labels are Opus's final ones (`dpo_coverage.final_label`). Disputed facts and `stated`
 facts whose quote is not in the chunk are left out of the FACTS list, so the model never
-trains on an uncertain label. Split by article group: dpo4's val articles are the test
+trains on an uncertain label. `--upsample-confirmed N` repeats train replies holding a
+confirmed-unsupported fact N times (the recall follow-up). Split by article group: dpo4's val articles are the test
 set; a seeded share of the rest is dev, written as val.jsonl.
 
     uv run --extra dev python -m scripts.distill.verifier_data \\
@@ -108,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--val-fraction", type=float, default=0.2)
     ap.add_argument("--dev-fraction", type=float, default=0.05)
     ap.add_argument("--seed", default="20261027")
+    ap.add_argument("--upsample-confirmed", type=int, default=1,
+                    help="train only: write each reply holding a confirmed-unsupported fact N "
+                         "times (spec section 6's recall follow-up uses 3); dev/test unchanged")
     a = ap.parse_args(argv)
     recs = read_records(a.capture)
     ids = [r["id"] for r in recs]
@@ -127,13 +131,15 @@ def main(argv: list[str] | None = None) -> int:
         if record is None:
             skipped.update(k for k in why if k in ("label_count_mismatch", "no_facts_left"))
             continue
-        rows[split].append(record)
+        copies = a.upsample_confirmed if split == "train" and "confirmed" in record["meta"]["final"] else 1
+        rows[split].extend([record] * copies)
     a.out.mkdir(parents=True, exist_ok=True)
     for split, name in SPLIT_FILES.items():
         with (a.out / name).open("w", encoding="utf-8") as fh:
             for r in rows[split]:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-    summary = {"replies": len(recs), "records": {s: len(v) for s, v in rows.items()},
+    summary = {"replies": len(recs), "upsample_confirmed": a.upsample_confirmed,
+               "records": {s: len(v) for s, v in rows.items()},
                "skipped": dict(skipped), "facts": {s: dict(c) for s, c in facts.items()},
                "groups": {s: len({r["meta"]["group"] for r in v}) for s, v in rows.items()}}
     (a.out / "summary.json").write_text(json.dumps(summary, indent=2))

@@ -38,12 +38,17 @@ assert "training text does not equal serving prompt" in src_of(19), "training no
 
 cells = [
     md("""
-# Fact verifier verifier1 -- qwen3.5-4b (Colab)
+# Fact verifier verifier2 -- qwen3.5-4b (Colab)
 
 Trains a LoRA adapter on `Qwen/Qwen3.5-4B` that labels every fact ckpt100 extracted from a
 chunk: `stated` (with a quote from the chunk), `unsupported` (with a category) or
 `previous_only`. Training data: the dpo4 Opus labels (`scripts/distill/verifier_data.py`).
 Spec: `docs/superpowers/specs/2026-10-27-fact-verifier-design.md`.
+
+**verifier2 is the spec's one recall follow-up (section 6).** verifier1 (ckpt200) caught
+0.275 of the unsupported facts at 0.013 false drops (P2): a recall-only miss. verifier2
+trains on the same data with each reply holding an unsupported fact repeated 3 times;
+dev and test are unchanged, so the two runs compare directly.
 
 **Selection:** the checkpoint with the lowest dev loss. Training stops by itself once the
 last `DEV_PATIENCE` evals all sit above the best before them.
@@ -71,11 +76,11 @@ from pathlib import Path
 # --- dataset: verifier_data.py output (train / val = dev / test) ----------------------------
 DATA_SOURCE = "hf_dataset"
 HF_DATASET_REPO = "carev01/ft-opus-distill"   # private
-HF_DATASET_REVISION = "verifier1"
-DRIVE_DATA_DIR = "/content/drive/MyDrive/ft-opus-verifier1"   # only when DATA_SOURCE == "drive"
+HF_DATASET_REVISION = "verifier2"
+DRIVE_DATA_DIR = "/content/drive/MyDrive/ft-opus-verifier2"   # only when DATA_SOURCE == "drive"
 
 # --- Google Drive: checkpoints, final adapter, predictions (survive a runtime death) ---------
-RUN_NAME = "opus-verifier1"
+RUN_NAME = "opus-verifier2"
 DRIVE_RUN_DIR = Path("/content/drive/MyDrive/graph-rag-distill") / RUN_NAME
 CKPT_DIR = DRIVE_RUN_DIR / "checkpoints"
 FINAL_ADAPTER_DIR = DRIVE_RUN_DIR / "final-adapter"
@@ -120,7 +125,7 @@ print("config set")
     code(src_of(9)),
     md("## 4. Get the dataset"),
     code("""
-DATA_DIR = Path("/content/data/ft-opus-verifier1")
+DATA_DIR = Path("/content/data/ft-opus-verifier2")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 if DATA_SOURCE == "drive":
@@ -376,7 +381,7 @@ same verdicts as batch 1 (left padding on this hybrid-attention model), else pre
 run at batch 1. Then it writes greedy, thinking-off replies for every test record to Drive
 (resumable: done call ids are skipped, a half-written last line is dropped) and uploads
 the adapter, the log and the predictions to the PRIVATE repo `HF_ADAPTER_REPO`, revision
-`verifier1-ckpt<step>`.
+`verifier2-ckpt<step>`.
 """),
     code("""
 import gc
@@ -392,7 +397,7 @@ SELECTED_STEP = select_dev_step(_hist)
 assert SELECTED_STEP is not None, "no eval in the log history -- nothing to select"
 _ckpt = CKPT_DIR / f"checkpoint-{SELECTED_STEP}"
 assert (_ckpt / "adapter_model.safetensors").exists(), f"{_ckpt} has no adapter"
-ADAPTER_REVISION = f"verifier1-ckpt{SELECTED_STEP}"
+ADAPTER_REVISION = f"verifier2-ckpt{SELECTED_STEP}"
 
 # A fresh model with the selected checkpoint's adapter (distill_train's reload pattern).
 del trainer

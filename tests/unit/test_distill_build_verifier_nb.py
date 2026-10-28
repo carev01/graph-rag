@@ -22,14 +22,14 @@ def _cells(tmp_path: Path) -> list[str]:
 
 def test_settings_guards_and_handoff(tmp_path: Path) -> None:
     text = "\n".join(_cells(tmp_path))
-    for needle in ('BASE_MODEL_ID = "Qwen/Qwen3.5-4B"', 'HF_DATASET_REVISION = "verifier1"',
+    for needle in ('BASE_MODEL_ID = "Qwen/Qwen3.5-4B"', 'HF_DATASET_REVISION = "verifier2"',
                    "LEARNING_RATE = 2e-4", "NUM_TRAIN_EPOCHS = 2", "WARMUP_RATIO = 0.03",
                    "EVAL_STEPS = 25", "SAVE_TOTAL_LIMIT = None", "DEV_PATIENCE = 3",
                    "MAX_SEQ_LENGTH = 20480", "USE_HUB_CAUSAL_CONV1D = False",
                    "torch._dynamo.config.disable = True", "class GradGuard", "class DevLossStop",
                    "load_best_model_at_end=False", '"test.jsonl"', "train_on_responses_only",
                    'HF_ADAPTER_REPO = "carev01/qwen35-4b-graphrag-verifier"',
-                   'ADAPTER_REVISION = f"verifier1-ckpt{SELECTED_STEP}"',
+                   'ADAPTER_REVISION = f"verifier2-ckpt{SELECTED_STEP}"',
                    "test_predictions-ckpt", "enable_thinking=False", 'padding_side = "left"'):
         assert needle in text, needle
     assert "save_pretrained_merged" not in text and "push_to_hub_gguf" not in text

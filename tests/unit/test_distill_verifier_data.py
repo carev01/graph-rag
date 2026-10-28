@@ -115,3 +115,28 @@ def test_main_writes_three_splits_and_counts_unlabelled(tmp_path: Path, monkeypa
     assert summary["records"] == {"train": len(rows["train"]), "dev": len(rows["val"]),
                                   "test": len(rows["test"])}
     assert all(r["prompt_name"] == "verify_edges" for v in rows.values() for r in v)
+
+
+def test_main_upsamples_confirmed_replies_in_train_only(tmp_path: Path, monkeypatch) -> None:
+    recs = [_rec(2, f"c{i}", f"ctx|Article {i}") for i in range(80)]
+    monkeypatch.setattr(vd, "read_records", lambda paths: recs)
+    labels = {r["id"]: [_lab("stated"), _lab("unsupported" if i % 2 else "stated")]
+              for i, r in enumerate(recs)}
+    _write_store(tmp_path / "lab", "label", labels)
+    _write_store(tmp_path / "re", "recheck",
+                 {cid: {"1": {"verdict": "unsupported", "category": "other", "why": "w"}}
+                  for cid in labels})
+    args = ["--capture", str(tmp_path / "cap.jsonl"), "--labels", str(tmp_path / "lab"),
+            "--recheck", str(tmp_path / "re")]
+    vd.main([*args, "--out", str(tmp_path / "v1")])
+    vd.main([*args, "--out", str(tmp_path / "v2"), "--upsample-confirmed", "3"])
+    rows = {(v, s): [json.loads(x) for x in (tmp_path / v / f"{s}.jsonl").read_text().splitlines()]
+            for v in ("v1", "v2") for s in ("train", "val", "test")}
+    has_conf = lambda r: "confirmed" in r["meta"]["final"]   # noqa: E731
+    n1 = sum(map(has_conf, rows[("v1", "train")]))
+    assert n1 > 0
+    assert sum(map(has_conf, rows[("v2", "train")])) == 3 * n1
+    assert len(rows[("v2", "train")]) == len(rows[("v1", "train")]) + 2 * n1
+    assert rows[("v2", "val")] == rows[("v1", "val")] and rows[("v2", "test")] == rows[("v1", "test")]
+    summary = json.loads((tmp_path / "v2" / "summary.json").read_text())
+    assert summary["upsample_confirmed"] == 3 and summary["records"]["train"] == len(rows[("v2", "train")])
