@@ -135,16 +135,31 @@ def check_reuse_context(rows: list[dict], chain: bool) -> None:
             f"({'drop --no-chain' if not chain else 'pass --no-chain'} or rerun those arms)")
 
 
-async def fetch_chains(articles: list[dict]) -> None:
-    """Sets `a["chain"]` on every article, before anything spends."""
+MAX_REMOVED_UPSTREAM = 5   # more than this and the sample has drifted too far to compare
+
+
+async def fetch_chains(articles: list[dict]) -> tuple[list[dict], list[str]]:
+    """Sets `a["chain"]` on every article, before anything spends. An article DocExtractor
+    has since removed (404) is dropped and reported -- every arm of the run, and a later
+    run over the same sample and seed, drops the same ones."""
     s = get_extract_settings()
+    kept: list[dict] = []
+    gone: list[str] = []
     async with make_docext_client(base_url=s.docext_base_url, read_key=s.docext_read_key,
                                   admin_key=s.docext_admin_key,
                                   verify_tls=s.docext_verify_tls) as dx:
         for a in articles:
             resp = await dx.get(f"/api/articles/{a['id']}")
+            if resp.status_code == 404:
+                gone.append(a["id"])
+                continue
             resp.raise_for_status()
             a["chain"] = chain_from_docext(resp.json(), a.get("source") or "")
+            kept.append(a)
+    if len(gone) > MAX_REMOVED_UPSTREAM:
+        raise SystemExit(f"{len(gone)} of {len(articles)} sampled articles were removed upstream "
+                         f"(> {MAX_REMOVED_UPSTREAM}) -- rebuild the sample")
+    return kept, gone
 
 
 async def seed_chains(driver, articles: list[dict]) -> None:
@@ -522,7 +537,11 @@ async def main() -> None:
     print(f"{len(articles)} articles from {len({a.get('vendor') for a in articles})} "
           f"vendors", flush=True)
     if not args.no_chain:
-        await fetch_chains(articles)
+        articles, gone = await fetch_chains(articles)
+        ids = {a["id"] for a in articles}
+        if gone:
+            print(f"dropped {len(gone)} article(s) removed upstream since the sample was built: "
+                  f"{gone}", flush=True)
         print(f"document context: {len({a['chain']['product']['id'] for a in articles})} "
               "products from DocExtractor", flush=True)
     run_now = arm_list(args.arms)

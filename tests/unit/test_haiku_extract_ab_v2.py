@@ -135,3 +135,55 @@ def test_vllm_gate_checks_every_edge_reply_was_verified() -> None:
 def test_vllm_gate_discounts_truncation_retries_that_went_to_the_strong_tier() -> None:
     assert ab.vllm_gate_problems("v2av", [_row("cheap", 11, 3, 1, retried=1)], 13.0) == []
     assert ab.vllm_gate_problems("v2a", [_row("cheap", 11, retried=1)], 10.0) == []
+
+
+class _Resp:
+    def __init__(self, status: int, body: dict | None = None) -> None:
+        self.status_code, self.body = status, body or {}
+
+    def json(self) -> dict:
+        return self.body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _Docext:
+    def __init__(self, gone: set[str]) -> None:
+        self.gone = gone
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, path: str) -> _Resp:
+        aid = path.rsplit("/", 1)[-1]
+        if aid in self.gone:
+            return _Resp(404)
+        return _Resp(200, {"id": aid, "vendor": {"id": "v", "name": "V"},
+                           "product": {"id": "p", "name": "P"}, "source_id": "s"})
+
+
+def test_articles_removed_upstream_are_dropped_and_reported(monkeypatch) -> None:
+    import asyncio
+    monkeypatch.setattr(ab, "make_docext_client", lambda **k: _Docext({"b"}))
+    monkeypatch.setattr(ab, "get_extract_settings", lambda: type("S", (), {
+        "docext_base_url": "x", "docext_read_key": "k", "docext_admin_key": "",
+        "docext_verify_tls": True})())
+    arts = [{"id": i, "source": "Guide"} for i in "abc"]
+    kept, gone = asyncio.run(ab.fetch_chains(arts))
+    assert [a["id"] for a in kept] == ["a", "c"] and gone == ["b"]
+    assert kept[0]["chain"]["vendor"]["id"] == "v"
+
+
+def test_too_many_articles_removed_upstream_stops_the_run(monkeypatch) -> None:
+    import asyncio
+    monkeypatch.setattr(ab, "make_docext_client", lambda **k: _Docext(set("abcdefg")))
+    monkeypatch.setattr(ab, "get_extract_settings", lambda: type("S", (), {
+        "docext_base_url": "x", "docext_read_key": "k", "docext_admin_key": "",
+        "docext_verify_tls": True})())
+    with pytest.raises(SystemExit, match="removed upstream"):
+        asyncio.run(ab.fetch_chains([{"id": i, "source": "G"} for i in "abcdefgh"]))
