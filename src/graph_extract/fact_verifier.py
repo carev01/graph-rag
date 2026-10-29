@@ -133,3 +133,17 @@ class EdgeVerifier:
         kept, dropped = keep_edges(parsed, edges)
         stats.verifier_dropped += len(dropped)
         return {**response, "edges": kept}
+
+
+def build_edge_verifier(settings: Any) -> EdgeVerifier:
+    """The verifier client from ExtractSettings; refuses a half-configured verifier."""
+    if not settings.edge_verifier_base_url:
+        raise ValueError("EDGE_VERIFIER_ENABLED needs EDGE_VERIFIER_BASE_URL")
+    if not settings.edge_verifier_api_key:
+        raise ValueError("EDGE_VERIFIER_ENABLED needs EDGE_VERIFIER_API_KEY")
+    import openai
+    client = openai.AsyncOpenAI(base_url=settings.edge_verifier_base_url,
+                                api_key=settings.edge_verifier_api_key.strip(),
+                                timeout=settings.edge_verifier_timeout_seconds, max_retries=1)
+    return EdgeVerifier(client, model=settings.edge_verifier_model,
+                        timeout=settings.edge_verifier_timeout_seconds)

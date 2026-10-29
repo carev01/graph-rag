@@ -80,6 +80,7 @@ from graph_extract.usage import CURRENT_PROMPT_NAME
 
 logger = logging.getLogger(__name__)
 
+EDGE_PROMPT_NAME = "extract_edges.edge"   # the reply the edge verifier checks
 DEDUP_PROMPT_NAME = "dedupe_edges.resolve_edge"
 
 
@@ -245,6 +246,8 @@ class DedupIndexGuard:
     grounding_unscoped: GroundingStats = field(default_factory=GroundingStats)
     # Re-issues an unusable reply (any prompt); None leaves the error to propagate.
     truncation_fallback: Any | None = None
+    # fact_verifier.EdgeVerifier (cheap tier, EDGE_VERIFIER_ENABLED); None = no check.
+    edge_verifier: Any | None = None
 
     def stats(self) -> DedupIndexStats:
         return CURRENT_DEDUP_STATS.get() or self.unscoped
@@ -255,7 +258,8 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                         timings: PromptTimings | None = None,
                         suppress_contradictions: bool = False,
                         grounding_unscoped: GroundingStats | None = None,
-                        truncation_fallback: Any | None = None) -> DedupIndexGuard:
+                        truncation_fallback: Any | None = None,
+                        edge_verifier: Any | None = None) -> DedupIndexGuard:
     """Wrap `graphiti.llm_client.generate_response` in place (the same instance-
     attribute pattern as the chat.completions wrappers in graphiti_client.py).
     `graphiti` only needs an `llm_client` attribute.
@@ -272,7 +276,8 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
     guard = DedupIndexGuard(fallback=fallback, unscoped=unscoped, raw=_Raw(orig),
                             timings=timings or PromptTimings(),
                             grounding_unscoped=grounding_unscoped or GroundingStats(),
-                            truncation_fallback=truncation_fallback)
+                            truncation_fallback=truncation_fallback,
+                            edge_verifier=edge_verifier)
 
     def _suppressed(response: Any, stats: DedupIndexStats) -> Any:
         """Clear the WHOLE contradicted_facts list -- same-pair and cross-pair
@@ -339,6 +344,12 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                     note_unscoped(guard.grounding_unscoped)
                     return response
                 return filter_entities(response, ctx)
+            if name == EDGE_PROMPT_NAME and guard.edge_verifier is not None:
+                # The verifier is built from the prompt AS AUTHORED: this tier's client
+                # appends its schema text to the messages in place.
+                authored = [Message(role=msg.role, content=msg.content) for msg in messages]
+                response = await _primary(name, messages, *args, **kwargs)
+                return await guard.edge_verifier.check(authored, response, guard.stats())
             if name != DEDUP_PROMPT_NAME:
                 return await _primary(name, messages, *args, **kwargs)
             stats = guard.stats()

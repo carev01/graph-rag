@@ -12,6 +12,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase
 from graph_extract import quality_labels
 from graph_extract import vector_search
 from graph_extract.config import ExtractSettings, get_extract_settings
+from graph_extract.fact_verifier import build_edge_verifier
 from graph_extract.eval import (
     cost_report,
     dedup_report,
@@ -129,6 +130,11 @@ async def _build_ingest_driver(
             suppress_contradictions=not settings.ingest_same_pair_contradictions,
             grounding_unscoped=grounding_unscoped)
         cheap_tier: ExtractionTier | None = None
+        edge_verifier = build_edge_verifier(settings) if settings.edge_verifier_enabled else None
+        if edge_verifier is not None and not (settings.extraction_routing
+                                              and settings.cheap_llm_api_key):
+            raise ValueError("EDGE_VERIFIER_ENABLED checks the cheap tier, and no cheap tier "
+                             "is configured (EXTRACTION_ROUTING / CHEAP_LLM_API_KEY)")
         if settings.extraction_routing and settings.cheap_llm_api_key:
             cheap_graphiti = build_cheap_graphiti(settings)
             await init_indices(cheap_graphiti)
@@ -142,7 +148,9 @@ async def _build_ingest_driver(
                 grounding_unscoped=grounding_unscoped,
                 # Truncated / unparseable / over-context cheap replies, any prompt.
                 truncation_fallback=(strong_guard.raw
-                                     if settings.cheap_truncation_fallback else None))
+                                     if settings.cheap_truncation_fallback else None),
+                # Fact verifier, cheap tier only (spec 2026-10-29-verifier-trial).
+                edge_verifier=edge_verifier)
             cheap_tier = ExtractionTier(
                 "cheap", cheap_graphiti,
                 EXTRACTION_INSTRUCTIONS + CHEAP_TIER_SALIENCE,

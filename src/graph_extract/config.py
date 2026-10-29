@@ -480,6 +480,16 @@ class ExtractSettings(BaseSettings):
     # identical retries truncated the same way and the article failed; all 17 malformed
     # replies in a 700-article capture were truncations. ON by default.
     cheap_truncation_fallback: bool = True
+    # Fact verifier on the cheap tier (fact_verifier.py, spec 2026-10-29-verifier-trial):
+    # a LoRA served next to the extractor labels each extract_edges reply's facts, and
+    # the edges it calls unsupported are dropped before graphiti writes them. Fails open.
+    # OFF by default: verifier1 missed its offline bar (0.275 catch at 0.013 false drops);
+    # the end-to-end trial decides whether it is adopted.
+    edge_verifier_enabled: bool = False
+    edge_verifier_base_url: str = ""
+    edge_verifier_api_key: str = ""
+    edge_verifier_model: str = "verifier"
+    edge_verifier_timeout_seconds: float = 120.0
     # Route an article to the STRONG tier when it is a dense table:
     dense_table_line_ratio: float = 0.25
     dense_pipe_count: int = 200
