@@ -56,6 +56,7 @@ import random
 import statistics
 import sys
 import time
+from typing import Any
 from dataclasses import asdict
 from pathlib import Path
 
@@ -262,14 +263,39 @@ class Spend:
                   flush=True)
 
 
+DOCEXT_ATTEMPTS = 3          # a DocExtractor 5xx is retried: 24 of 59 articles hit a
+DOCEXT_RETRY_SECONDS = 20    # transient 502 on 2026-10-29 while every probe after it was 200
+
+
+def _docext_server_error(exc: BaseException) -> bool:
+    return (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+            and "/api/articles/" in str(exc.request.url))
+
+
+async def _ingest_with_retry(ingest, article_id: str) -> tuple[Any, int]:
+    """ingest_article, retried on a DocExtractor server error. Safe: the per-chunk
+    HAS_EPISODE gate makes a re-run skip every chunk already written."""
+    for attempt in range(DOCEXT_ATTEMPTS):
+        try:
+            return await ingest.ingest_article(article_id), attempt
+        except Exception as exc:
+            if not _docext_server_error(exc) or attempt == DOCEXT_ATTEMPTS - 1:
+                raise
+            print(f"  {article_id[:8]}: DocExtractor {exc.response.status_code}, retrying "
+                  f"({attempt + 1}/{DOCEXT_ATTEMPTS - 1})", flush=True)
+            await asyncio.sleep(DOCEXT_RETRY_SECONDS)
+    raise AssertionError("unreachable")
+
+
 async def ingest_one(name: str, ingest, driver, a: dict, spend: Spend, out: Path) -> dict:
     tally = UsageTally()
     CURRENT_USAGE_TALLY.set(tally)        # this task's own context
     start = time.perf_counter()
     row: dict = {"arm": name, "article_id": a["id"], "vendor": a.get("vendor"),
                  "document_context": bool(a.get("chain"))}
+    retries = 0
     try:
-        res = await ingest.ingest_article(a["id"])
+        res, retries = await _ingest_with_retry(ingest, a["id"])
         g = await _article_graph(driver, a["id"])
         tier = res.tier if name in ROUTED_ARMS else name
         row.update(tier=tier, episodes=res.episodes_added, facts=g["facts"],
@@ -279,7 +305,7 @@ async def ingest_one(name: str, ingest, driver, a: dict, spend: Spend, out: Path
         tier = "cheap" if name in ROUTED_ARMS else name
         row.update(tier=tier, episodes=0, facts=0, entities=0, dedup=None,
                    fact_texts=[], error=f"{type(exc).__name__}: {exc}"[:500])
-    row.update(seconds=round(time.perf_counter() - start, 1),
+    row.update(docext_retries=retries, seconds=round(time.perf_counter() - start, 1),
                prompt_tokens=tally.prompt_tokens, cached_tokens=tally.cached_tokens,
                completion_tokens=tally.completion_tokens, llm_calls=tally.calls,
                cost=article_cost(rate_key(name, row["tier"]), tally.prompt_tokens,

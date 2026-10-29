@@ -187,3 +187,53 @@ def test_too_many_articles_removed_upstream_stops_the_run(monkeypatch) -> None:
         "docext_verify_tls": True})())
     with pytest.raises(SystemExit, match="removed upstream"):
         asyncio.run(ab.fetch_chains([{"id": i, "source": "G"} for i in "abcdefgh"]))
+
+
+def _http_error(status: int, url: str):
+    import httpx
+    req = httpx.Request("GET", url)
+    return httpx.HTTPStatusError("boom", request=req, response=httpx.Response(status, request=req))
+
+
+def test_ingest_one_retries_docextractor_server_errors(tmp_path, monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from graph_extract.dedup_guard import DedupIndexStats
+
+    async def graph(driver, aid):
+        return {"facts": 3, "entities": 2, "fact_texts": ["f"]}
+
+    monkeypatch.setattr(ab, "_article_graph", graph)
+    monkeypatch.setattr(ab, "DOCEXT_RETRY_SECONDS", 0)
+    calls = []
+
+    class Ingest:
+        async def ingest_article(self, aid):
+            calls.append(aid)
+            if len(calls) < 3:
+                raise _http_error(502, f"https://docextractor.x/api/articles/{aid}")
+            return SimpleNamespace(tier="cheap", episodes_added=1, dedup=DedupIndexStats())
+
+    row = asyncio.run(ab.ingest_one("v2", Ingest(), None, {"id": "a1"}, ab.Spend(5), tmp_path))
+    assert row["error"] is None and len(calls) == 3 and row["docext_retries"] == 2
+
+
+def test_ingest_one_does_not_retry_client_errors_or_give_up_late(tmp_path, monkeypatch) -> None:
+    import asyncio
+    monkeypatch.setattr(ab, "DOCEXT_RETRY_SECONDS", 0)
+    calls = []
+
+    class Ingest:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        async def ingest_article(self, aid):
+            calls.append(aid)
+            raise _http_error(self.status, f"https://docextractor.x/api/articles/{aid}")
+
+    row = asyncio.run(ab.ingest_one("v2", Ingest(404), None, {"id": "a"}, ab.Spend(5), tmp_path))
+    assert row["error"] and len(calls) == 1
+    calls.clear()
+    row = asyncio.run(ab.ingest_one("v2", Ingest(503), None, {"id": "b"}, ab.Spend(5), tmp_path))
+    assert row["error"] and len(calls) == ab.DOCEXT_ATTEMPTS
