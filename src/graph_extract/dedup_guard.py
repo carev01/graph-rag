@@ -116,6 +116,11 @@ class DedupIndexStats:
     # on the strong tier when the truncation fallback is installed.
     unusable_replies: int = 0
     unusable_retried: int = 0
+    # Edge verifier (fact_verifier.py, cheap tier, EDGE_VERIFIER_ENABLED): extract_edges
+    # replies checked, edges it dropped as unsupported, and checks that failed open.
+    verifier_calls: int = 0
+    verifier_dropped: int = 0
+    verifier_failed_open: int = 0
 
     def merge(self, other: DedupIndexStats) -> None:
         for f in fields(self):

@@ -23,8 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from graph_extract.fact_verifier import parse_reply
 from scripts.distill.dpo_coverage import norm_ws, quote_ok
-from scripts.distill.dpo_pairs import VERDICTS
 
 MIN_CATCH = 0.50
 MAX_FALSE_DROP = 0.02
@@ -34,26 +34,6 @@ _WORD = re.compile(r"[a-z0-9][a-z0-9.\-_/]*")
 STOPWORDS = frozenset("""a an and are as at be by can for from has have in is it its may of on or
 that the this to via was were when which with without you your not also into only use used uses
 using supports support supported""".split())
-
-
-def parse_reply(text: str, n: int) -> list[dict] | None:
-    try:
-        obj = json.loads(text)
-    except (TypeError, ValueError):
-        return None
-    labels = obj.get("labels") if isinstance(obj, dict) else None
-    if not isinstance(labels, list) or len(labels) != n:
-        return None
-    out: list[dict | None] = [None] * n
-    for lab in labels:
-        k = lab.get("n") if isinstance(lab, dict) else None
-        if type(k) is not int or not 1 <= k <= n or out[k - 1] is not None:
-            return None
-        verdict = lab.get("verdict")
-        if not isinstance(verdict, str) or verdict not in VERDICTS:
-            return None
-        out[k - 1] = lab
-    return [lab for lab in out if lab is not None]
 
 
 def drops(parsed: list[dict] | None, current: str, policy: str, n: int) -> list[bool]:
