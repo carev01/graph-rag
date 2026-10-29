@@ -58,3 +58,10 @@ def test_verifier_agreement_is_per_fact_and_fails_on_unparseable() -> None:
 def test_no_empty_reply_coercion() -> None:
     import inspect
     assert 'or ""' not in inspect.getsource(ls)
+
+
+def test_noise_floor_rule_is_the_pre_stated_one() -> None:
+    # A = adapter vs merged-now, M = merged-now vs captured; equivalent iff A >= M - 5, all parse.
+    assert ls.adapter_equivalent(identical_adapter=22, identical_merged=27, unparseable=0)
+    assert not ls.adapter_equivalent(identical_adapter=21, identical_merged=27, unparseable=0)
+    assert not ls.adapter_equivalent(identical_adapter=50, identical_merged=27, unparseable=1)

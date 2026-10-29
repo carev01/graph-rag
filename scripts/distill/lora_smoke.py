@@ -49,7 +49,7 @@ def _triples(text: str | None) -> set | None:
         return None
 
 
-def extractor_equivalence(pairs: list[tuple[str, str | None]]) -> dict:
+def extractor_equivalence(pairs: list[tuple[str | None, str | None]]) -> dict:
     """pairs = (captured merged-model reply, regenerated adapter reply)."""
     identical, differing, unparseable = 0, [], 0
     for i, (want, got) in enumerate(pairs):
@@ -66,6 +66,15 @@ def extractor_equivalence(pairs: list[tuple[str, str | None]]) -> dict:
 
 def extractor_passes(rep: dict) -> bool:
     return rep["identical"] >= MIN_IDENTICAL * rep["n"] / 50 and rep["unparseable"] == 0
+
+
+NOISE_MARGIN = 5   # of 50: the pre-stated tolerance (verifier-trial OPS.md, 2026-10-29)
+
+
+def adapter_equivalent(identical_adapter: int, identical_merged: int, unparseable: int) -> bool:
+    """The adapter differs from merged ckpt100 (served now, same box) no more than merged
+    ckpt100 differs from its own captured replies, give or take NOISE_MARGIN."""
+    return identical_adapter >= identical_merged - NOISE_MARGIN and unparseable == 0
 
 
 def verifier_agreement(n_facts: dict[str, int], notebook: dict[str, str],
@@ -102,10 +111,37 @@ async def _chat(client, sem, model: str, messages, max_tok: int,
                 time.perf_counter() - t0)
 
 
+async def replay_only(a: argparse.Namespace, client) -> int:
+    """Noise-floor mode: replay the extractor prompts on one served model, save the replies,
+    and compare them with the captured ones (and with --compare-with's, if given)."""
+    sem = asyncio.Semaphore(a.concurrency)
+    reqs = replay_requests(Path(a.capture).read_text().splitlines(), a.n)
+    outs = await asyncio.gather(*[_chat(client, sem, a.replay_only, r["messages"], 16384,
+                                        r["response_format"]) for r in reqs])
+    texts = [o[0] for o in outs]
+    Path(a.save_replies).write_text(json.dumps(
+        {r["call_id"]: t for r, t in zip(reqs, texts)}, ensure_ascii=False))
+    report: dict = {"model": a.replay_only,
+                    "vs_captured": extractor_equivalence([(r["completion"], t)
+                                                          for r, t in zip(reqs, texts)])}
+    if a.compare_with:
+        other = json.loads(Path(a.compare_with).read_text())
+        report["vs_compare_with"] = extractor_equivalence([(other.get(r["call_id"]), t)
+                                                           for r, t in zip(reqs, texts)])
+    Path(a.out).write_text(json.dumps(report, indent=2))
+    for k in ("vs_captured", "vs_compare_with"):
+        if k in report:
+            print(f"{a.replay_only} {k}: {report[k]['identical']}/{report[k]['n']} byte-identical, "
+                  f"{report[k]['unparseable']} unparseable")
+    return 0
+
+
 async def run(a: argparse.Namespace) -> int:
     import openai
     client = openai.AsyncOpenAI(base_url=os.environ["V2_BASE_URL"],
                                 api_key=os.environ["V2_API_KEY"].strip(), timeout=900)
+    if a.replay_only:
+        return await replay_only(a, client)
     models = {m.id for m in (await client.models.list()).data}
     report: dict = {"models": sorted(models)}
     missing = {"extractor", "verifier"} - models
@@ -153,14 +189,23 @@ async def run(a: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lora_smoke")
     ap.add_argument("--capture", required=True, help="capture-v2.jsonl served by merged ckpt100")
-    ap.add_argument("--verifier-data", required=True, help="dir with verifier1 test.jsonl")
-    ap.add_argument("--verifier-predictions", required=True)
+    ap.add_argument("--verifier-data", help="dir with verifier1 test.jsonl")
+    ap.add_argument("--verifier-predictions")
+    ap.add_argument("--replay-only", default="",
+                    help="noise-floor mode: replay the extractor prompts on this served model only")
+    ap.add_argument("--save-replies", help="--replay-only: write {call_id: reply} here")
+    ap.add_argument("--compare-with", help="--replay-only: another run's saved replies")
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--base-model", default="qwen35-graphrag",
                     help="the bare base's served name, for the throughput reference ('' skips)")
-    return asyncio.run(run(ap.parse_args(argv)))
+    a = ap.parse_args(argv)
+    if a.replay_only and not a.save_replies:
+        ap.error("--replay-only needs --save-replies")
+    if not a.replay_only and not (a.verifier_data and a.verifier_predictions):
+        ap.error("the smoke test needs --verifier-data and --verifier-predictions")
+    return asyncio.run(run(a))
 
 
 if __name__ == "__main__":
