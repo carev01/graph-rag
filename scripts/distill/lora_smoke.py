@@ -41,7 +41,7 @@ def replay_requests(capture_lines: list[str], n: int, seed: int = 20261029) -> l
     return random.Random(seed).sample(pool, min(n, len(pool)))
 
 
-def _triples(text: str) -> set | None:
+def _triples(text: str | None) -> set | None:
     try:
         return {(e["source_entity_name"], e["target_entity_name"], e["relation_type"])
                 for e in json.loads(text)["edges"]}
@@ -49,7 +49,7 @@ def _triples(text: str) -> set | None:
         return None
 
 
-def extractor_equivalence(pairs: list[tuple[str, str]]) -> dict:
+def extractor_equivalence(pairs: list[tuple[str, str | None]]) -> dict:
     """pairs = (captured merged-model reply, regenerated adapter reply)."""
     identical, differing, unparseable = 0, [], 0
     for i, (want, got) in enumerate(pairs):
@@ -91,13 +91,14 @@ def verifier_passes(rep: dict) -> bool:
 
 
 async def _chat(client, sem, model: str, messages, max_tok: int,
-                response_format=None) -> tuple[str, int, float]:
+                response_format=None) -> tuple[str | None, int, float]:
     async with sem:
         t0 = time.perf_counter()
         kw = {"response_format": response_format} if response_format else {}
         r = await client.chat.completions.create(model=model, messages=messages, temperature=0,
                                                  max_tokens=max_tok, **kw)
-        return (r.choices[0].message.content or "", r.usage.completion_tokens,
+        # An empty reply stays None: parse_reply and the equivalence check count it.
+        return (r.choices[0].message.content, r.usage.completion_tokens,
                 time.perf_counter() - t0)
 
 

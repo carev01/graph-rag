@@ -71,7 +71,7 @@ async def test_verifier_filters_edges_from_the_authored_prompt() -> None:
     install_dedup_guard(g, fallback=None, unscoped=DedupIndexStats(), edge_verifier=v)
     out, stats = await _scoped(_edge_call(g))
     assert out == {"edges": EDGES["edges"][:1]}
-    assert (stats.verifier_calls, stats.verifier_dropped) == (1, 1)
+    assert (stats.verifier_calls, stats.verifier_dropped, stats.edge_replies) == (1, 1, 1)
     assert v.seen == [["sys", AUTHORED]]          # not the schema-appended copy
 
 

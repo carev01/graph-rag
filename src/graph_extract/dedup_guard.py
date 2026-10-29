@@ -122,6 +122,8 @@ class DedupIndexStats:
     verifier_calls: int = 0
     verifier_dropped: int = 0
     verifier_failed_open: int = 0
+    verifier_empty: int = 0     # replies with no edges: nothing to check
+    edge_replies: int = 0       # extract_edges replies that reached the hook (= calls + empty)
 
     def merge(self, other: DedupIndexStats) -> None:
         for f in fields(self):
@@ -349,6 +351,7 @@ def install_dedup_guard(graphiti: Any, *, fallback: Any | None,
                 # appends its schema text to the messages in place.
                 authored = [Message(role=msg.role, content=msg.content) for msg in messages]
                 response = await _primary(name, messages, *args, **kwargs)
+                guard.stats().edge_replies += 1
                 return await guard.edge_verifier.check(authored, response, guard.stats())
             if name != DEDUP_PROMPT_NAME:
                 return await _primary(name, messages, *args, **kwargs)

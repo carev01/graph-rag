@@ -104,11 +104,15 @@ class EdgeVerifier:
         """The reply with its unsupported edges removed; any failure returns it as is.
         `messages` must be the call's messages AS AUTHORED (before the client appended
         its schema text)."""
-        if not isinstance(response, dict) or not isinstance(response.get("edges"), list) \
-                or not response["edges"]:
-            return response                  # nothing to check, or a shape we cannot read
-        edges = response["edges"]
+        if isinstance(response, dict) and response.get("edges") == []:
+            stats.verifier_empty += 1        # nothing to check
+            return response
         stats.verifier_calls += 1
+        if not isinstance(response, dict) or not isinstance(response.get("edges"), list):
+            stats.verifier_failed_open += 1  # graphiti contract drift: visible, never silent
+            logger.warning("edge verifier: extract_edges reply is not {'edges': [...]}; passed through")
+            return response
+        edges = response["edges"]
         if not all(isinstance(e, dict) for e in edges):
             stats.verifier_failed_open += 1
             return response

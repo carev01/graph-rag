@@ -105,9 +105,12 @@ def test_adapter_arms_name_the_lora_modules(monkeypatch: pytest.MonkeyPatch) -> 
     assert ab.rate_key("v2a", "cheap") == ab.rate_key("v2av", "cheap") == "local"
 
 
-def _row(tier: str, calls: int, vcalls: int = 0, dropped: int = 0, failed: int = 0) -> dict:
+def _row(tier: str, calls: int, vcalls: int = 0, dropped: int = 0, failed: int = 0,
+         edges: int | None = None, empty: int = 0, retried: int = 0) -> dict:
     return {"tier": tier, "llm_calls": calls, "dedup": {
-        "verifier_calls": vcalls, "verifier_dropped": dropped, "verifier_failed_open": failed}}
+        "verifier_calls": vcalls, "verifier_dropped": dropped, "verifier_failed_open": failed,
+        "verifier_empty": empty, "edge_replies": vcalls + empty if edges is None else edges,
+        "unusable_retried": retried}}
 
 
 def test_vllm_gate_accounts_for_verifier_requests() -> None:
@@ -122,3 +125,13 @@ def test_vllm_gate_accounts_for_verifier_requests() -> None:
     assert ab.vllm_gate_problems("v2", [_row("strong", 5)], 0.0)           # no cheap article
     assert ab.vllm_gate_problems("v2", [_row("cheap", 4), {"tier": "cheap", "llm_calls": 0,
                                                             "dedup": None}], 4.0) == []
+
+
+def test_vllm_gate_checks_every_edge_reply_was_verified() -> None:
+    assert ab.vllm_gate_problems("v2av", [_row("cheap", 10, 3, 1, edges=4)], 13.0)  # one skipped
+    assert ab.vllm_gate_problems("v2av", [_row("cheap", 10, 3, 1, edges=4, empty=1)], 13.0) == []
+
+
+def test_vllm_gate_discounts_truncation_retries_that_went_to_the_strong_tier() -> None:
+    assert ab.vllm_gate_problems("v2av", [_row("cheap", 11, 3, 1, retried=1)], 13.0) == []
+    assert ab.vllm_gate_problems("v2a", [_row("cheap", 11, retried=1)], 10.0) == []

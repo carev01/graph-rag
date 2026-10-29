@@ -374,7 +374,8 @@ def check_gate(name: str, rows: list[dict], llm_calls: int, claude_calls: int,
 
 
 def _verifier_totals(rows: list[dict]) -> dict[str, int]:
-    keys = ("verifier_calls", "verifier_dropped", "verifier_failed_open")
+    keys = ("verifier_calls", "verifier_dropped", "verifier_failed_open", "verifier_empty",
+            "edge_replies")
     return {k: sum((r.get("dedup") or {}).get(k, 0) for r in rows) for k in keys}
 
 
@@ -384,13 +385,20 @@ def vllm_gate_problems(name: str, rows: list[dict], vllm_delta: float) -> list[s
     what the arm claims. v2av must have fired, dropped something and never failed open;
     the other arms must not have called a verifier at all."""
     problems = []
-    cheap_calls = sum(r["llm_calls"] for r in rows if r["tier"] == "cheap")
+    cheap = [r for r in rows if r["tier"] == "cheap"]
+    # A truncated cheap reply is re-issued on the strong tier: counted in llm_calls, never
+    # served by vLLM.
+    retried = sum((r.get("dedup") or {}).get("unusable_retried", 0) for r in cheap)
+    cheap_calls = sum(r["llm_calls"] for r in cheap) - retried
     v = _verifier_totals(rows)
-    if cheap_calls == 0:
+    if cheap_calls <= 0:
         problems.append("no cheap-tier article among the gate articles")
     elif vllm_delta != cheap_calls + v["verifier_calls"]:
         problems.append(f"vLLM served {vllm_delta:.0f} requests for {cheap_calls} cheap-tier "
                         f"calls + {v['verifier_calls']} verifier calls")
+    if name == "v2av" and v["verifier_calls"] + v["verifier_empty"] != v["edge_replies"]:
+        problems.append(f"{v['edge_replies']} extract_edges replies but {v['verifier_calls']} "
+                        f"verified + {v['verifier_empty']} empty")
     if name == "v2av":
         if v["verifier_calls"] == 0:
             problems.append("the edge verifier never ran")

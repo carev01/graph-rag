@@ -94,10 +94,14 @@ def test_check_fails_open_and_counts() -> None:
 
 
 def test_check_passes_through_replies_it_cannot_read() -> None:
-    for resp in ({"edges": []}, {"no_edges": 1}, ["not", "a", "dict"], {"edges": "x"}):
+    client, stats = _Client(_reply("unsupported")), DedupIndexStats()
+    assert _check(client, {"edges": []}, stats) == {"edges": []}
+    assert client.calls == [] and stats.verifier_calls == 0 and stats.verifier_empty == 1
+    for resp in ({"no_edges": 1}, ["not", "a", "dict"], {"edges": "x"}):   # contract drift
         client, stats = _Client(_reply("unsupported")), DedupIndexStats()
         assert _check(client, resp, stats) == resp
-        assert client.calls == [] and stats.verifier_calls == 0
+        assert client.calls == []
+        assert (stats.verifier_calls, stats.verifier_failed_open) == (1, 1)
     stats = DedupIndexStats()
     assert _check(_Client(_reply()), {"edges": [_edge(0), "junk"]}, stats) == {"edges": [_edge(0), "junk"]}
     assert stats.verifier_failed_open == 1

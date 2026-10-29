@@ -53,3 +53,8 @@ def test_verifier_agreement_is_per_fact_and_fails_on_unparseable() -> None:
     rep = ls.verifier_agreement({"r1": 2}, nb, {"r1": "garbage"})
     assert rep["unparseable"] == 1 and rep["agree"] == 0
     assert ls.verifier_passes({"facts": 100, "agree": 95, "share": 0.95, "unparseable": 0})
+
+
+def test_no_empty_reply_coercion() -> None:
+    import inspect
+    assert 'or ""' not in inspect.getsource(ls)

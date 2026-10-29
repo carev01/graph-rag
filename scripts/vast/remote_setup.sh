@@ -19,7 +19,10 @@ MODEL_REPO="${MODEL_REPO:-carev01/qwen35-4b-graphrag}"
 # A branch/revision of MODEL_REPO (e.g. a fine-tune pushed to its own branch); each
 # non-main revision gets its own directory so switching never mixes shards.
 MODEL_REVISION="${MODEL_REVISION:-main}"
-if [ "$MODEL_REVISION" = main ]; then MODEL_DIR=/workspace/hf/model; else MODEL_DIR="/workspace/hf/model-$MODEL_REVISION"; fi
+# Another repo (LoRA mode's bare base) gets its own directory: /workspace/hf/model holds the
+# merged fine-tune, and serving adapters on top of it would be silently wrong.
+if [ "$MODEL_REPO" != carev01/qwen35-4b-graphrag ]; then MODEL_DIR="/workspace/hf/base-$(echo "$MODEL_REPO@$MODEL_REVISION" | tr '/@' '__')"
+elif [ "$MODEL_REVISION" = main ]; then MODEL_DIR=/workspace/hf/model; else MODEL_DIR="/workspace/hf/model-$MODEL_REVISION"; fi
 TUNNEL_PUBKEY="${TUNNEL_PUBKEY:-}"
 # LoRA mode (spec 2026-10-29-verifier-trial): serve MODEL_REPO as a base plus adapters,
 # LORA_ADAPTERS="name=repo@revision ..." (e.g. MODEL_REPO=Qwen/Qwen3.5-4B with
