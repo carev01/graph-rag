@@ -287,6 +287,23 @@ async def _ingest_with_retry(ingest, article_id: str) -> tuple[Any, int]:
     raise AssertionError("unreachable")
 
 
+async def fetch_markdown(dx, article_id: str) -> str | None:
+    """The judge's source text, retried on a DocExtractor server error; None when it stays
+    unavailable (the article is then unscored, never a crash of the whole pass)."""
+    for attempt in range(DOCEXT_ATTEMPTS):
+        try:
+            return (await fetch_article(dx, article_id)).content_markdown
+        except Exception as exc:
+            if not _docext_server_error(exc):
+                raise
+            if attempt == DOCEXT_ATTEMPTS - 1:
+                print(f"  {article_id[:8]}: DocExtractor unavailable for the judge -- unscored",
+                      flush=True)
+                return None
+            await asyncio.sleep(DOCEXT_RETRY_SECONDS)
+    return None
+
+
 async def ingest_one(name: str, ingest, driver, a: dict, spend: Spend, out: Path) -> dict:
     tally = UsageTally()
     CURRENT_USAGE_TALLY.set(tally)        # this task's own context
@@ -498,7 +515,10 @@ async def judge(pair: list[str], by_arm: dict[str, dict[str, dict]], out: Path,
             if spend.stopped:
                 print("judge stopped by the spend cap", flush=True)
                 break
-            md = (await fetch_article(dx, aid)).content_markdown
+            md = await fetch_markdown(dx, aid)
+            if md is None:
+                unscored.append(aid)
+                continue
             lab = labels_for(aid, pair)
             facts = {lab[a]: by_arm[a][aid]["fact_texts"] for a in pair}
             t = UsageTally()

@@ -237,3 +237,25 @@ def test_ingest_one_does_not_retry_client_errors_or_give_up_late(tmp_path, monke
     calls.clear()
     row = asyncio.run(ab.ingest_one("v2", Ingest(503), None, {"id": "b"}, ab.Spend(5), tmp_path))
     assert row["error"] and len(calls) == ab.DOCEXT_ATTEMPTS
+
+
+def test_judge_fetch_retries_docextractor_and_reports_a_lasting_failure(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    monkeypatch.setattr(ab, "DOCEXT_RETRY_SECONDS", 0)
+    calls = []
+
+    async def flaky(dx, aid):
+        calls.append(aid)
+        if len(calls) < 2:
+            raise _http_error(502, f"https://docextractor.x/api/articles/{aid}")
+        return SimpleNamespace(content_markdown="md")
+
+    monkeypatch.setattr(ab, "fetch_article", flaky)
+    assert asyncio.run(ab.fetch_markdown(None, "a1")) == "md" and len(calls) == 2
+
+    async def down(dx, aid):
+        raise _http_error(503, f"https://docextractor.x/api/articles/{aid}")
+
+    monkeypatch.setattr(ab, "fetch_article", down)
+    assert asyncio.run(ab.fetch_markdown(None, "a2")) is None
