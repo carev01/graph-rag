@@ -21,6 +21,12 @@ MODEL_REPO="${MODEL_REPO:-carev01/qwen35-4b-graphrag}"
 MODEL_REVISION="${MODEL_REVISION:-main}"
 if [ "$MODEL_REVISION" = main ]; then MODEL_DIR=/workspace/hf/model; else MODEL_DIR="/workspace/hf/model-$MODEL_REVISION"; fi
 TUNNEL_PUBKEY="${TUNNEL_PUBKEY:-}"
+# LoRA mode (spec 2026-10-29-verifier-trial): serve MODEL_REPO as a base plus adapters,
+# LORA_ADAPTERS="name=repo@revision ..." (e.g. MODEL_REPO=Qwen/Qwen3.5-4B with
+# extractor=carev01/qwen35-4b-graphrag-verifier@ckpt100-adapter and
+# verifier=carev01/qwen35-4b-graphrag-verifier@verifier1-ckpt200). A request picks an
+# adapter by model name; the bare base keeps the served name qwen35-graphrag.
+LORA_ADAPTERS="${LORA_ADAPTERS:-}"
 ARGS_FILE=/etc/vllm-args.conf
 KEY_ENV=/workspace/.env   # sourced by the supervised service; mode 600
 
@@ -70,6 +76,34 @@ snapshot_download(sys.argv[1], local_dir=sys.argv[2], revision=sys.argv[3],
 EOF
   model_complete || { echo "   download incomplete"; exit 1; }
 fi
+LORA_ARGS=""
+if [ -n "$LORA_ADAPTERS" ]; then
+  echo "== 2b/5 LoRA adapters"
+  MODULES=""
+  for spec in $LORA_ADAPTERS; do
+    name="${spec%%=*}"; ref="${spec#*=}"; repo="${ref%@*}"; rev="${ref##*@}"
+    dir="/workspace/hf/lora-$name"
+    HF_TOKEN="$HF_TOKEN" python - "$repo" "$rev" "$dir" <<'EOF'
+import json, os, sys
+from huggingface_hub import snapshot_download
+repo, rev, d = sys.argv[1:]
+snapshot_download(repo, revision=rev, local_dir=d, token=os.environ.get("HF_TOKEN") or False,
+                  allow_patterns=["adapter_model.safetensors", "adapter_config.json"])
+cfg_path = os.path.join(d, "adapter_config.json")
+cfg = json.load(open(cfg_path))
+# Unsloth stores target_modules as a regex string; vLLM wants names. Metadata only: the
+# adapter's weights exist for the language model's projections alone.
+if isinstance(cfg.get("target_modules"), str):
+    cfg["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj",
+                             "gate_proj", "up_proj", "down_proj"]
+    json.dump(cfg, open(cfg_path, "w"), indent=2)
+assert os.path.getsize(os.path.join(d, "adapter_model.safetensors")) > 0
+print(f"   {repo}@{rev} -> {d} (r={cfg.get('r')}, base {cfg.get('base_model_name_or_path')})")
+EOF
+    MODULES="$MODULES $name=$dir"
+  done
+  LORA_ARGS="--enable-lora --max-lora-rank 16 --max-loras 2 --lora-modules$MODULES"
+fi
 unset HF_TOKEN
 
 echo "== 3/5 point the supervised vllm service at the model"
@@ -87,7 +121,7 @@ setenv VLLM_ARGS ""                # the template's defaults (9B tool/reasoning 
 # prompts over ~16k tokens. The template's --compilation-config (CUDA graphs for batch
 # sizes 1-8 only) is replaced: we run up to 64 sequences.
 cat > "$ARGS_FILE" <<EOF
---served-model-name qwen35-graphrag --host 127.0.0.1 --port 18000 --max-model-len ${MAX_MODEL_LEN:-65536} --max-num-seqs ${MAX_SEQS:-64} --gpu-memory-utilization 0.90 --enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0}' --default-chat-template-kwargs '{"enable_thinking":false}'
+--served-model-name qwen35-graphrag --host 127.0.0.1 --port 18000 --max-model-len ${MAX_MODEL_LEN:-65536} --max-num-seqs ${MAX_SEQS:-64} --gpu-memory-utilization 0.90 --enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0}' --default-chat-template-kwargs '{"enable_thinking":false}' $LORA_ARGS
 EOF
 chmod 644 "$ARGS_FILE"
 ( umask 077; printf 'VLLM_API_KEY=%s\n' "$VLLM_KEY" > "$KEY_ENV" )

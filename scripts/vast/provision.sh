@@ -5,6 +5,8 @@
 #   scripts/vast/provision.sh <ssh-host> <ssh-port> [--cluster]
 #   e.g. scripts/vast/provision.sh ssh6.vast.ai 16301 --cluster
 #   MODEL_REVISION=<branch> serves that branch of the model repo (default: main).
+#   MODEL_REPO=<repo> LORA_ADAPTERS="name=repo@rev ..." serves a base plus LoRA adapters
+#   (private adapters need the HF token at the prompt).
 #
 # Prompts for the Hugging Face token (hidden; used once on the instance, never stored).
 # Keys live OUTSIDE the repo, in $VAST_DIR (default ~/.config/graph-rag/vast, mode 700):
@@ -36,7 +38,7 @@ echo "== reaching root@$HOST:$PORT (your own SSH key must be on the vast account
 read -r -s -p "Hugging Face token (Enter for none: the model repo is public): " HF_TOKEN; echo
 scp -q -P "$PORT" "$HERE/remote_setup.sh" "root@$HOST:/workspace/remote_setup.sh"
 printf '%s\n%s\n' "$HF_TOKEN" "$(cat "$VAST_DIR/api_key")" | "${SSH[@]}" \
-  "MODEL_REVISION='${MODEL_REVISION:-main}' TUNNEL_PUBKEY='$(cat "$VAST_DIR/tunnel_ed25519.pub")' bash /workspace/remote_setup.sh" \
+  "MODEL_REPO='${MODEL_REPO:-carev01/qwen35-4b-graphrag}' MODEL_REVISION='${MODEL_REVISION:-main}' LORA_ADAPTERS='${LORA_ADAPTERS:-}' TUNNEL_PUBKEY='$(cat "$VAST_DIR/tunnel_ed25519.pub")' bash /workspace/remote_setup.sh" \
   2>&1 | grep -v -E "^(Welcome to vast|Have fun|AI agents)"
 unset HF_TOKEN
 
