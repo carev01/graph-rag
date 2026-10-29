@@ -87,7 +87,14 @@ GATE_N = 2
 # Arms that keep production's routing: the article's tier comes from the router, and
 # each tier is priced at that arm's rate.
 ROUTED_ARMS = {"routed": {"cheap": "cheap", "strong": "strong"},
-               "v2": {"cheap": "local", "strong": "strong"}}
+               "v2": {"cheap": "local", "strong": "strong"},
+               "v2a": {"cheap": "local", "strong": "strong"},
+               "v2av": {"cheap": "local", "strong": "strong"}}
+# Arms whose cheap tier is our vLLM: the gate checks vLLM's own success counter.
+# v2a/v2av (spec 2026-10-29-verifier-trial): one base + LoRA adapters `extractor`
+# (ckpt100) and `verifier` (verifier1); v2av turns the edge verifier on.
+VLLM_ARMS = {"v2", "v2a", "v2av"}
+ADAPTER_EXTRACTOR, ADAPTER_VERIFIER = "extractor", "verifier"
 
 
 CHAIN_WRITE = (
@@ -207,14 +214,19 @@ def arm_settings(name: str, base: ExtractSettings, out: Path) -> dict:
                 "llm_cache_layout": True,
                 "extraction_routing": False,
                 "llm_capture_path": str(out / "capture-luna.jsonl")}
-    if name == "v2":
+    if name in VLLM_ARMS:
         import os
         url, key = os.environ.get("V2_BASE_URL", ""), os.environ.get("V2_API_KEY", "").strip()
         if not url or not key:
-            raise SystemExit("v2 arm needs V2_BASE_URL and V2_API_KEY")
-        return {"cheap_llm_base_url": url, "cheap_llm_api_key": key,
-                "cheap_llm_model": V2_MODEL, "cheap_llm_client_mode": "generic_json_schema",
-                "cheap_llm_timeout_seconds": 900.0, "cheap_llm_cache_layout": True}
+            raise SystemExit(f"{name} arm needs V2_BASE_URL and V2_API_KEY")
+        out = {"cheap_llm_base_url": url, "cheap_llm_api_key": key,
+               "cheap_llm_model": V2_MODEL if name == "v2" else ADAPTER_EXTRACTOR,
+               "cheap_llm_client_mode": "generic_json_schema",
+               "cheap_llm_timeout_seconds": 900.0, "cheap_llm_cache_layout": True}
+        if name == "v2av":
+            out.update(edge_verifier_enabled=True, edge_verifier_base_url=url,
+                       edge_verifier_api_key=key, edge_verifier_model=ADAPTER_VERIFIER)
+        return out
     raise SystemExit(f"unknown arm {name!r}")
 
 
@@ -285,12 +297,12 @@ async def run_arm(name: str, articles: list[dict], spend: Spend, out: Path,
             todo = list(articles)
             if gate:
                 calls0, claude0 = get_tally().calls, ac.CLAUDE_USAGE.calls
-                vllm0 = await vllm_requests(s.cheap_llm_base_url) if name == "v2" else 0.0
+                vllm0 = await vllm_requests(s.cheap_llm_base_url) if name in VLLM_ARMS else 0.0
                 for a in todo[:GATE_N]:
                     rows.append(await ingest_one(name, ingest, driver, a, spend, out))
                 todo = todo[GATE_N:]
                 vllm_delta = (await vllm_requests(s.cheap_llm_base_url) - vllm0
-                              if name == "v2" else 0.0)
+                              if name in VLLM_ARMS else 0.0)
                 check_gate(name, rows, get_tally().calls - calls0,
                            ac.CLAUDE_USAGE.calls - claude0, out, vllm_delta)
                 if gate_ok is not None:
@@ -351,19 +363,44 @@ def check_gate(name: str, rows: list[dict], llm_calls: int, claude_calls: int,
             problems.append(f"{len(open_schema)} request(s) without a closed schema")
         cached = sum(r.get("cached_tokens", 0) for r in recs)
         detail = f"{len(recs)} gpt-6-luna requests, reasoning none, {cached} cached"
-    elif name == "v2":
-        cheap_calls = sum(r["llm_calls"] for r in rows if r["tier"] == "cheap")
-        if cheap_calls == 0:
-            problems.append("no cheap-tier article among the gate articles")
-        elif vllm_delta != cheap_calls:
-            problems.append(f"vLLM served {vllm_delta:.0f} requests for {cheap_calls} "
-                            "cheap-tier calls")
-        detail = f"{vllm_delta:.0f} vLLM requests = {cheap_calls} cheap-tier calls"
+    elif name in VLLM_ARMS:
+        problems += vllm_gate_problems(name, rows, vllm_delta)
+        detail = f"{vllm_delta:.0f} vLLM requests, verifier {_verifier_totals(rows)}"
     if problems:
         raise SystemExit(f"ENGAGEMENT GATE FAILED ({name}) -- refusing to spend: "
                          + "; ".join(problems))
     print(f"GATE PASSED ({name}): {detail}, {episodes} episodes, "
           f"${sum(r['cost'] for r in rows):.4f}", flush=True)
+
+
+def _verifier_totals(rows: list[dict]) -> dict[str, int]:
+    keys = ("verifier_calls", "verifier_dropped", "verifier_failed_open")
+    return {k: sum((r.get("dedup") or {}).get(k, 0) for r in rows) for k in keys}
+
+
+def vllm_gate_problems(name: str, rows: list[dict], vllm_delta: float) -> list[str]:
+    """vLLM's success counter must rise by exactly the cheap-tier graphiti calls plus the
+    verifier's calls (a separate client, not in llm_calls): proof both adapters served
+    what the arm claims. v2av must have fired, dropped something and never failed open;
+    the other arms must not have called a verifier at all."""
+    problems = []
+    cheap_calls = sum(r["llm_calls"] for r in rows if r["tier"] == "cheap")
+    v = _verifier_totals(rows)
+    if cheap_calls == 0:
+        problems.append("no cheap-tier article among the gate articles")
+    elif vllm_delta != cheap_calls + v["verifier_calls"]:
+        problems.append(f"vLLM served {vllm_delta:.0f} requests for {cheap_calls} cheap-tier "
+                        f"calls + {v['verifier_calls']} verifier calls")
+    if name == "v2av":
+        if v["verifier_calls"] == 0:
+            problems.append("the edge verifier never ran")
+        elif v["verifier_dropped"] == 0:
+            problems.append("the edge verifier dropped nothing")
+        if v["verifier_failed_open"]:
+            problems.append(f"{v['verifier_failed_open']} verifier call(s) failed open")
+    elif v["verifier_calls"]:
+        problems.append(f"{name} must not run the edge verifier ({v['verifier_calls']} calls)")
+    return problems
 
 
 def summarise(rows: list[dict]) -> dict:
@@ -377,6 +414,7 @@ def summarise(rows: list[dict]) -> dict:
                tiers={t: sum(1 for r in rows if r["tier"] == t)
                       for t in {r["tier"] for r in rows}},
                dedup_calls=dedup_calls, dedup_invalid_calls=invalid,
+               **_verifier_totals(ok),
                dedup_invalid_rate=round(invalid / dedup_calls, 4) if dedup_calls else 0,
                cost_per_article=round(tot["cost"] / len(rows), 5) if rows else 0,
                cost_per_1k_facts=round(1000 * tot["cost"] / tot["facts"], 3)

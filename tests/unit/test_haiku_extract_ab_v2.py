@@ -89,3 +89,36 @@ def test_capture_writes_each_arm_to_its_own_file(tmp_path) -> None:
                                              ("v2,", ["v2"])])
 def test_arm_list_reads_none_as_no_arm(value: str, arms: list[str]) -> None:
     assert ab.arm_list(value) == arms
+
+
+def test_adapter_arms_name_the_lora_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("V2_BASE_URL", "http://127.0.0.1:18080/v1")
+    monkeypatch.setenv("V2_API_KEY", "k\n")
+    a = ab.arm_settings("v2a", None, None)  # type: ignore[arg-type]
+    av = ab.arm_settings("v2av", None, None)  # type: ignore[arg-type]
+    assert a["cheap_llm_model"] == av["cheap_llm_model"] == "extractor"
+    assert "edge_verifier_enabled" not in a
+    assert av["edge_verifier_enabled"] is True and av["edge_verifier_model"] == "verifier"
+    assert av["edge_verifier_base_url"] == "http://127.0.0.1:18080/v1"
+    assert av["edge_verifier_api_key"] == "k"
+    assert {k: v for k, v in av.items() if not k.startswith("edge_verifier")} == a
+    assert ab.rate_key("v2a", "cheap") == ab.rate_key("v2av", "cheap") == "local"
+
+
+def _row(tier: str, calls: int, vcalls: int = 0, dropped: int = 0, failed: int = 0) -> dict:
+    return {"tier": tier, "llm_calls": calls, "dedup": {
+        "verifier_calls": vcalls, "verifier_dropped": dropped, "verifier_failed_open": failed}}
+
+
+def test_vllm_gate_accounts_for_verifier_requests() -> None:
+    rows = [_row("cheap", 10, 3, 1), _row("strong", 7)]
+    assert ab.vllm_gate_problems("v2av", rows, 13.0) == []
+    assert ab.vllm_gate_problems("v2av", rows, 10.0)                       # verifier not on vLLM
+    assert ab.vllm_gate_problems("v2av", [_row("cheap", 10)], 10.0)        # never fired
+    assert ab.vllm_gate_problems("v2av", [_row("cheap", 10, 3, 0)], 13.0)  # fired, dropped nothing
+    assert ab.vllm_gate_problems("v2av", [_row("cheap", 10, 3, 1, 1)], 12.0)  # failed open
+    assert ab.vllm_gate_problems("v2a", [_row("cheap", 10)], 10.0) == []
+    assert ab.vllm_gate_problems("v2a", [_row("cheap", 10, 2, 1)], 12.0)   # verifier on a plain arm
+    assert ab.vllm_gate_problems("v2", [_row("strong", 5)], 0.0)           # no cheap article
+    assert ab.vllm_gate_problems("v2", [_row("cheap", 4), {"tier": "cheap", "llm_calls": 0,
+                                                            "dedup": None}], 4.0) == []
