@@ -173,3 +173,27 @@ def test_answer_can_be_installed_scaled_down_and_defaults_to_one():
     assert get(render(), "Deployment", "graph-rag-answer")["spec"]["replicas"] == 1
     assert get(render("answer.replicas=0"), "Deployment",
                "graph-rag-answer")["spec"]["replicas"] == 0
+
+
+def _env(docs: list[dict], name: str) -> dict:
+    container = pod_spec(get(docs, "Deployment", name))["containers"][0]
+    return {e["name"]: e.get("value", e.get("valueFrom")) for e in container.get("env", [])}
+
+
+def test_gpu_workers_extract_with_the_adapter_and_verify_through_the_tunnel():
+    docs = render("vast.enabled=true")
+    gpu, api = _env(docs, "graph-rag-worker-gpu"), _env(docs, "graph-rag-worker")
+    secret = {"secretKeyRef": {"name": "graph-rag-vast", "key": "api_key"}}
+    assert gpu["CHEAP_LLM_MODEL"] == "extractor"
+    assert gpu["EDGE_VERIFIER_ENABLED"] == "true"
+    assert gpu["EDGE_VERIFIER_BASE_URL"] == gpu["CHEAP_LLM_BASE_URL"] == \
+        "http://graph-rag-vast-tunnel:8000/v1"
+    assert gpu["EDGE_VERIFIER_API_KEY"] == gpu["CHEAP_LLM_API_KEY"] == secret
+    assert not {k for k in api if k.startswith(("EDGE_VERIFIER", "CHEAP_LLM"))}
+
+
+def test_the_verifier_rolls_back_with_one_value():
+    gpu = _env(render("vast.enabled=true", "vast.workerConfig.EDGE_VERIFIER_ENABLED=false"),
+               "graph-rag-worker-gpu")
+    assert gpu["EDGE_VERIFIER_ENABLED"] == "false"
+    assert gpu["CHEAP_LLM_MODEL"] == "extractor"

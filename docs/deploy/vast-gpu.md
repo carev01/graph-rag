@@ -2,7 +2,9 @@
 
 The cheap extraction tier can run on a rented GPU instead of OpenRouter: the fine-tuned
 **qwen35-4b-graphrag** served by **vLLM** on a vast.ai RTX 4090 and reached from the
-cluster through an SSH tunnel. Workers on this tier run as a second Deployment,
+cluster through an SSH tunnel. **Since 2026-10-31 the instance runs in LoRA mode**: one
+`Qwen/Qwen3.5-4B` base with two adapters, `extractor` (ckpt100) and `verifier`
+(verifier1, the fact verifier, §6). Workers on this tier run as a second Deployment,
 `graph-rag-worker-gpu`; the strong tier, the embedder and everything else are unchanged.
 
 ```
@@ -31,8 +33,12 @@ solar-pro4.
   restart: if it did, run §1 with `--cluster`.
 - **Switching workers between tiers:** §3.
 
-Model weights: private HF repo **`carev01/qwen35-4b-graphrag`** (bf16 safetensors). Its
-shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
+Model weights: the base `Qwen/Qwen3.5-4B` (public) and both adapters in the **private**
+HF repo `carev01/qwen35-4b-graphrag-verifier` (branches `ckpt100-adapter`,
+`verifier1-ckpt200`), so provisioning needs a read token. The merged ckpt100
+(`carev01/qwen35-4b-graphrag`, public, branch `opus-distill-2026-10-ckpt100`) still
+works without the verifier; see §6's rollback. The original merged model's shard 2 was
+rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
 
 ## 1. Provision the instance
 
@@ -48,12 +54,17 @@ shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
 2. Run, from the repo root:
 
    ```bash
+   export MODEL_REPO=Qwen/Qwen3.5-4B MODEL_REVISION=main
+   export LORA_ADAPTERS="extractor=carev01/qwen35-4b-graphrag-verifier@ckpt100-adapter verifier=carev01/qwen35-4b-graphrag-verifier@verifier1-ckpt200"
    scripts/vast/provision.sh ssh6.vast.ai 16301          # first run, via the proxy
    scripts/vast/provision.sh <PUBLIC_IPADDR> <VAST_TCP_PORT_22> --cluster   # then direct
    ```
 
-   It prompts for a Hugging Face token -- press Enter: the model repo is public since
-   2026-10-09 (a token, if given, is used once on the instance and never stored) -- then:
+   It prompts for a Hugging Face token: paste one with read access to the adapter repo
+   (it is used once on the instance and never stored). Leaving out the three variables
+   provisions the original merged model instead, served as `qwen35-graphrag`; the
+   workers then need `CHEAP_LLM_MODEL=qwen35-graphrag` and the verifier off (§6). It
+   then:
    - stops the template's stock vLLM (it serves Qwen3.5-9B) and kills the engine process
      it leaves holding ~20 GB of VRAM, and deletes that model's 18 GB download;
    - downloads `carev01/qwen35-4b-graphrag` (skipped when already complete on disk) and
@@ -64,7 +75,10 @@ shard 2 was rebuilt from the Q8_0 GGUF on 2026-10-08 — see §5.
    - installs the cluster's tunnel public key in `/root/.ssh/authorized_keys2` (vast
      rewrites `authorized_keys` from the account keys and would drop it), **restricted to forwarding
      `127.0.0.1:18000`** with no shell (`restrict,port-forwarding,permitopen=…,command="/bin/false"`), and proves the
-     tunnel key can reach `/v1/models`;
+     tunnel key can reach `/v1/models`, printing the served names. LoRA mode must show
+     `qwen35-base extractor verifier`. The bare base is deliberately not called
+     `qwen35-graphrag`, so a worker still set to the merged model's name gets a 404
+     instead of extracting with the untuned base;
    - with `--cluster`: rewrites the `graph-rag-vast` Secret (ssh host, port, host key,
      tunnel private key, vLLM API key) and restarts the tunnel pod.
 
@@ -86,15 +100,18 @@ helm upgrade graph-rag deploy/helm/graph-rag -n graph-rag --reset-then-reuse-val
 ```
 
 `vast.enabled` adds the tunnel Deployment and Service and the `graph-rag-worker-gpu`
-Deployment. The GPU workers get `CHEAP_LLM_BASE_URL=http://graph-rag-vast-tunnel:8000/v1`,
-`CHEAP_LLM_API_KEY` from the Secret and `CHEAP_LLM_MODEL=qwen35-graphrag` as `env`, which
-overrides the shared Secret/ConfigMap for those pods only.
+Deployment. The GPU workers get `CHEAP_LLM_BASE_URL` and `EDGE_VERIFIER_BASE_URL` (both
+`http://graph-rag-vast-tunnel:8000/v1`), `CHEAP_LLM_API_KEY` and `EDGE_VERIFIER_API_KEY`
+from the Secret, and `vast.workerConfig` (`CHEAP_LLM_MODEL=extractor`,
+`EDGE_VERIFIER_ENABLED=true`, the timeouts) as `env`, which overrides the shared
+Secret/ConfigMap for those pods only.
 
 **Before scaling GPU workers up, prove the path with a real call** (a failing GPU worker
 spends one of each job's 5 attempts per failure): run a one-off pod with the worker image,
-the same `envFrom`, and the three `env` overrides above, that POSTs one
-`/chat/completions` to `$CHEAP_LLM_BASE_URL` with `$CHEAP_LLM_API_KEY` and expects 200.
-Then scale up and confirm vLLM's `vllm:request_success_total` rises.
+the same `envFrom`, and the `env` overrides above, that POSTs one `/chat/completions` to
+`$CHEAP_LLM_BASE_URL` with `$CHEAP_LLM_API_KEY` for model `extractor` **and** one for
+model `verifier`, and expects 200 from both. Then scale up and confirm vLLM's
+`vllm:request_success_total` rises and the batch lines show `verifier_calls` > 0 (§6).
 
 ## 3. Moving workers between tiers
 
@@ -173,3 +190,28 @@ rebuilt from `carev01/qwen35-4b-graphrag-mtp-gguf` with `scripts/vast/gguf_rebui
 These run on the instance (paths under `/workspace`) and need llama.cpp's `gguf-py` and
 `conversion/` on `sys.path`. Re-run them only if the HF repo is ever lost and the GGUF is
 all that remains.
+
+## 6. The fact verifier
+
+Every cheap-tier `extract_edges` reply goes to the `verifier` adapter before graphiti
+sees it; the facts it labels unsupported are dropped (policy P2), and any failure --
+error, timeout, unusable reply -- keeps the reply as it was (`src/graph_extract/
+fact_verifier.py`). Strong-tier replies are not checked. Adopted 2026-10-31 on a 59-article
+trial, judged blind twice by DeepSeek and once by Opus: unsupported facts 61 -> 43 (-30%)
+at 99.5% of the distinct supported facts (Opus), 17 -> 6 at 98.0% (DeepSeek); running ckpt100
+as an adapter instead of merged passed the same rule (`graph-rag-distill/
+2026-10-29-verifier-trial/`). vLLM runs both adapters at ~5% extra cost per request.
+
+**Watch** the `dedup:` part of each `semantic batch` log line: `verifier_calls` (replies
+checked), `verifier_dropped` (facts removed), `verifier_failed_open` (checks that kept the
+reply because the verifier failed), `verifier_empty` and `edge_replies` (= calls + empty).
+The trial saw 35 facts dropped over 165 checked replies (~0.2 per reply) and 1
+failed open. `verifier_calls=0` with GPU workers busy
+means the verifier is not engaged; a `verifier_failed_open` above a few percent of calls
+means it is failing (the warnings name the cause) and the graph is getting unverified
+facts.
+
+**Rollback** (no reprovisioning): `--set vast.workerConfig.EDGE_VERIFIER_ENABLED=false`
+on the next `helm upgrade` (§3's command). The workers keep extracting with the same
+`extractor` adapter. To go back to the merged model, re-run §1 without the three
+variables, then also set `vast.workerConfig.CHEAP_LLM_MODEL=qwen35-graphrag`.

@@ -80,7 +80,14 @@ vast:
     limits: {cpu: 500m, memory: 64Mi}
   # Non-secret cheap-tier overrides for the GPU workers.
   workerConfig:
-    CHEAP_LLM_MODEL: qwen35-graphrag
+    # The instance serves Qwen3.5-4B plus two LoRA adapters (provision.sh LoRA mode):
+    # `extractor` (ckpt100) extracts; `verifier` (verifier1) drops the facts of each
+    # extract_edges reply it labels unsupported, failing open. Adopted 2026-10-31: -30%
+    # unsupported facts at 99.5% of distinct supported facts (Opus judge, 58 articles).
+    # Rollback: EDGE_VERIFIER_ENABLED=false (same instance). A merged-model instance
+    # serves `qwen35-graphrag` instead, and its workers need that name here.
+    CHEAP_LLM_MODEL: extractor
+    EDGE_VERIFIER_ENABLED: "true"
     CHEAP_LLM_CLIENT_MODE: generic_json_schema
     # A long answer needs minutes, not the default 90 s (BACKLOG 55). 900, not 300
     # (2026-10-10): on vLLM 0.30 a request generates ~25 tokens/s, and the longest Azure

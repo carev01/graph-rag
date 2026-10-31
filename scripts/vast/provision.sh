@@ -46,11 +46,15 @@ echo "== the tunnel key can forward, and nothing else"
 ssh -n -o BatchMode=yes -o IdentitiesOnly=yes -i "$VAST_DIR/tunnel_ed25519" -p "$PORT" \
   -o ExitOnForwardFailure=yes -f -N -L 18099:127.0.0.1:18000 "root@$HOST"
 sleep 2
-code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(cat "$VAST_DIR/api_key")" \
+models=$(mktemp)
+code=$(curl -s -o "$models" -w '%{http_code}' -H "Authorization: Bearer $(cat "$VAST_DIR/api_key")" \
   http://127.0.0.1:18099/v1/models)
 pkill -f "18099:127.0.0.1:18000" || true
-[ "$code" = 200 ] || { echo "tunnel check failed (HTTP $code)"; exit 1; }
-echo "   /v1/models via the tunnel key: HTTP 200"
+[ "$code" = 200 ] || { rm -f "$models"; echo "tunnel check failed (HTTP $code)"; exit 1; }
+# The names the GPU workers' CHEAP_LLM_MODEL must match (production: extractor + verifier).
+echo "   /v1/models via the tunnel key: HTTP 200, serving: $(python3 -c \
+  'import json,sys; print(" ".join(m["id"] for m in json.load(open(sys.argv[1]))["data"]))' "$models")"
+rm -f "$models"
 
 if [ "$CLUSTER" = "--cluster" ]; then
   echo "== refreshing secret $NS/$SECRET and restarting the tunnel"

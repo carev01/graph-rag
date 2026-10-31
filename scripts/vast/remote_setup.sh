@@ -28,8 +28,12 @@ TUNNEL_PUBKEY="${TUNNEL_PUBKEY:-}"
 # LORA_ADAPTERS="name=repo@revision ..." (e.g. MODEL_REPO=Qwen/Qwen3.5-4B with
 # extractor=carev01/qwen35-4b-graphrag-verifier@ckpt100-adapter and
 # verifier=carev01/qwen35-4b-graphrag-verifier@verifier1-ckpt200). A request picks an
-# adapter by model name; the bare base keeps the served name qwen35-graphrag.
+# adapter by model name. The bare base is served as qwen35-base, never qwen35-graphrag:
+# a worker still configured for the merged model then gets a 404 instead of silently
+# extracting with the untuned base.
 LORA_ADAPTERS="${LORA_ADAPTERS:-}"
+SERVED_NAME=qwen35-graphrag
+[ -z "$LORA_ADAPTERS" ] || SERVED_NAME=qwen35-base
 ARGS_FILE=/etc/vllm-args.conf
 KEY_ENV=/workspace/.env   # sourced by the supervised service; mode 600
 
@@ -124,7 +128,7 @@ setenv VLLM_ARGS ""                # the template's defaults (9B tool/reasoning 
 # prompts over ~16k tokens. The template's --compilation-config (CUDA graphs for batch
 # sizes 1-8 only) is replaced: we run up to 64 sequences.
 cat > "$ARGS_FILE" <<EOF
---served-model-name qwen35-graphrag --host 127.0.0.1 --port 18000 --max-model-len ${MAX_MODEL_LEN:-65536} --max-num-seqs ${MAX_SEQS:-64} --gpu-memory-utilization 0.90 --enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0}' --default-chat-template-kwargs '{"enable_thinking":false}' $LORA_ARGS
+--served-model-name $SERVED_NAME --host 127.0.0.1 --port 18000 --max-model-len ${MAX_MODEL_LEN:-65536} --max-num-seqs ${MAX_SEQS:-64} --gpu-memory-utilization 0.90 --enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0}' --default-chat-template-kwargs '{"enable_thinking":false}' $LORA_ARGS
 EOF
 chmod 644 "$ARGS_FILE"
 ( umask 077; printf 'VLLM_API_KEY=%s\n' "$VLLM_KEY" > "$KEY_ENV" )

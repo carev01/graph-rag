@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--concurrency", type=int, default=8)
-    ap.add_argument("--base-model", default="qwen35-graphrag",
+    ap.add_argument("--base-model", default="qwen35-base",
                     help="the bare base's served name, for the throughput reference ('' skips)")
     a = ap.parse_args(argv)
     if a.replay_only and not a.save_replies:

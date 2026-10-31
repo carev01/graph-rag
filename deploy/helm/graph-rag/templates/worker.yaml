@@ -43,6 +43,12 @@ spec:
               value: "http://graph-rag-vast-tunnel:8000/v1"
             - name: CHEAP_LLM_API_KEY
               valueFrom: {secretKeyRef: {name: {{ $.Values.vast.secretName }}, key: api_key}}
+            # The fact verifier is the instance's second LoRA adapter, same endpoint and
+            # key; EDGE_VERIFIER_ENABLED (vast.workerConfig) switches it.
+            - name: EDGE_VERIFIER_BASE_URL
+              value: "http://graph-rag-vast-tunnel:8000/v1"
+            - name: EDGE_VERIFIER_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ $.Values.vast.secretName }}, key: api_key}}
             {{- range $k, $v := $.Values.vast.workerConfig }}
             - name: {{ $k }}
               value: {{ $v | quote }}
