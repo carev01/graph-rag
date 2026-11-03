@@ -3,7 +3,8 @@
 For every question the judge gets the question, its type and gold facts, and the two
 answers under shuffled anonymous labels (A/B), each with the source document text behind
 every citation:
-- vendorkb: the cited chunk's text;
+- vendorkb: the cited chunk's text, as carried by the citation (`text`, recorded at answer
+  time); a DB lookup by chunk_id only when a citation lacks it;
 - graph (answer-api): the text of the episode(s) the cited fact came from, labelled with
   their article titles; the fact text is shown too, marked as the system's paraphrase.
   Every answer-api mode's citations carry `fact_uuid`, so community-report answers resolve
@@ -86,14 +87,26 @@ def _graph_sources(row: dict, graph_sources: dict[str, list[dict]]) -> list[dict
 
 
 def _vendorkb_sources(row: dict, chunk_texts: dict[str, str]) -> list[dict]:
+    """The citation's own `text` (the chunk as the answer model saw it) first; a DB lookup
+    by chunk_id only for rows written before citations carried it."""
     out = []
     for c in sorted(row.get("citations") or [], key=lambda c: c.get("marker", 0)):
         cid = c.get("chunk_id")
-        text = chunk_texts.get(str(cid)) if cid else None
+        text = c.get("text") if isinstance(c.get("text"), str) else None
+        if text is None:
+            text = chunk_texts.get(str(cid)) if cid else None
         docs = [] if text is None else [{"title": c.get("title"), "text": text}]
         out.append({"n": c.get("marker"), "paraphrase": None, "paraphrase_note": None,
                     "unresolvable": not docs, "documents": docs, "documents_omitted": 0})
     return out
+
+
+def chunk_ids_needing_lookup(rows: Iterable[dict]) -> set[str]:
+    """vendorkb chunk ids whose citation carries no `text` of its own."""
+    return {str(c["chunk_id"]) for r in rows
+            if r["side"] == "vendorkb" and r.get("answer")
+            for c in r.get("citations") or []
+            if c.get("chunk_id") and not isinstance(c.get("text"), str)}
 
 
 def fair_shares(needs: list[int], budget: int) -> list[int]:
@@ -365,11 +378,9 @@ async def _amain(args: argparse.Namespace) -> int:
     rows = [r for (qid, _s), r in latest.items() if qid in qids]
     fact_uuids = {c["fact_uuid"] for r in rows if r["side"] == "graph" and r.get("answer")
                   for c in r.get("citations") or [] if c.get("fact_uuid")}
-    chunk_ids = {str(c["chunk_id"]) for r in rows
-                 if r["side"] == "vendorkb" and r.get("answer")
-                 for c in r.get("citations") or [] if c.get("chunk_id")}
+    chunk_ids = chunk_ids_needing_lookup(rows)
     graph_sources = await fetch_graph_sources(fact_uuids)
-    chunk_texts = await fetch_chunk_texts(chunk_ids)
+    chunk_texts = await fetch_chunk_texts(chunk_ids) if chunk_ids else {}
     tasks = build_tasks(questions, latest, graph_sources=graph_sources,
                         chunk_texts=chunk_texts, seed=args.seed,
                         max_source_chars=args.max_source_chars)
@@ -384,7 +395,7 @@ async def _amain(args: argparse.Namespace) -> int:
     n_batches = len(list((pass_dir / "batches").glob("batch-*.jsonl")))
     print(f"pass {args.pass_n}: {len(tasks)} tasks, {n_batches} batches; "
           f"fact uuids {len(fact_uuids)} (resolved {sum(1 for v in graph_sources.values() if v)})"
-          f", chunks {len(chunk_ids)} (found {len(chunk_texts)}); truncated {n_trunc}; "
+          f", chunk DB lookups {len(chunk_ids)} (found {len(chunk_texts)}); truncated {n_trunc}; "
           f"unresolvable citations {n_unres}; citations with zero evidence text {n_zero} "
           "(expected 0)")
     return 0

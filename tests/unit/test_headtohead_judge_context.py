@@ -253,3 +253,18 @@ def test_pointer_to_a_truncated_copy_gets_its_own_text() -> None:
     assert s1["documents"][0]["truncated"] is True
     assert s2["documents"][0]["same_text_as_source"] is None
     assert len(s2["documents"][0]["text"].replace(J.TRUNCATION_NOTE, "")) == 1000
+
+
+def test_vendorkb_citation_text_is_preferred_over_the_db_lookup() -> None:
+    cits = [{"marker": 1, "chunk_id": "c1", "title": "Art 1", "text": "Text at answer time."},
+            {"marker": 2, "chunk_id": "c1", "title": "Art 1"}]
+    tasks = _build([_q("q1")], [_graph_row("q1"), _vk_row("q1", cits=cits)])
+    srcs = _side_answer(tasks[0], "vendorkb")["sources"]
+    assert srcs[0]["documents"][0]["text"] == "Text at answer time."
+    assert srcs[1]["documents"][0]["text"] == CHUNKS["c1"]  # fallback: DB by chunk_id
+
+
+def test_db_lookup_only_for_citations_without_text() -> None:
+    rows = [_vk_row("q1", cits=[{"marker": 1, "chunk_id": "c1", "text": "t"},
+                                {"marker": 2, "chunk_id": "c2"}])]
+    assert J.chunk_ids_needing_lookup(rows) == {"c2"}
