@@ -274,6 +274,7 @@ def score_run(run_dir: Path, questions: list[dict]) -> tuple[dict, list[str]]:
     records: dict[str, list[dict]] = {qid: [] for qid in qmap}
     truncated = {s: 0 for s in SIDES}
     unresolvable = {s: 0 for s in SIDES}
+    zero_evidence = {s: 0 for s in SIDES}
     pass3_keys: set[str] = set()
     for n, pdir in passes.items():
         if n > 3:
@@ -306,6 +307,7 @@ def score_run(run_dir: Path, questions: list[dict]) -> tuple[dict, list[str]]:
                 for s in SIDES:
                     truncated[s] += bool(task["truncated"][task["labels"][s]])
                     unresolvable[s] += task.get("unresolvable", {}).get(task["labels"][s], 0)
+                    zero_evidence[s] += task.get("zero_evidence", {}).get(task["labels"][s], 0)
             j = judged.get(key)
             err = None
             if needs_judge(task):
@@ -374,6 +376,8 @@ def score_run(run_dir: Path, questions: list[dict]) -> tuple[dict, list[str]]:
         "pass3_tasks": sorted(pass3_keys),
         "truncated_pass1": truncated,
         "unresolvable_citations_pass1": unresolvable,
+        "zero_evidence_citations_pass1": zero_evidence,  # expected 0 (fair-share cap)
+        "metric_notes": METRIC_NOTES,
         "tables": report_tables(per_question, records),
         "per_question": per_question,
         "problems": problems,
@@ -387,6 +391,15 @@ def _fmt(v: Any) -> str:
         return "-"
     return f"{v:.3f}" if isinstance(v, float) else str(v)
 
+
+METRIC_NOTES = {
+    "citation_precision": "share of answers whose citations all support their claims "
+                          "(citations_ok; the judge records one verdict per answer)",
+    "claim_precision": "supported claims / all claims, pooled over passes",
+    "fact_recall": "gold facts present / gold facts, pooled over passes",
+    "abstention_correct": "share of answers that abstained exactly when unanswerable",
+    "hit_rate": "a gold article among the cited sources (answerable questions only)",
+}
 
 COLUMNS = ("n", "perfect", "fact_recall", "claim_precision", "citation_precision",
            "abstention_correct", "hit_rate", "latency_mean_s", "cost_mean", "errored")
@@ -427,7 +440,11 @@ def main(argv: list[str] | None = None) -> int:
           f"scored {d['deciding_scored']}, incomplete {d['incomplete']})")
     print(f"truncated (pass 1): {result['truncated_pass1']}; unresolvable citations "
           f"(pass 1): {result['unresolvable_citations_pass1']}")
+    print(f"citations with zero evidence text (pass 1, expected 0): "
+          f"{result['zero_evidence_citations_pass1']}")
     print_tables(result["tables"])
+    for k, v in METRIC_NOTES.items():
+        print(f"  {k}: {v}")
     if problems:
         sys.exit(1)
     if not result["complete"]:

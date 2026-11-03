@@ -105,11 +105,75 @@ def test_source_text_is_capped_and_truncation_flagged() -> None:
     assert task["truncated"][v_label] is True
     assert task["truncated"][g_label] is False
     docs = [d for s in task["answers"][v_label]["sources"] for d in s["documents"]]
-    kept = sum(len(d["text"]) for d in docs if not d.get("truncated"))
-    assert kept == 800
-    assert docs[2]["truncated"] is True
+    # fair share: 1000 // 3 = 333 each, the 1 left over goes round-robin to the first
+    shown = [len(d["text"].replace(J.TRUNCATION_NOTE, "")) for d in docs]
+    assert sorted(shown) == [333, 333, 334]
+    assert all(d["truncated"] for d in docs)
     assert docs[2]["text"].startswith("3" + "x" * 199)
-    assert len(docs[2]["text"].replace(J.TRUNCATION_NOTE, "")) == 200
+    assert task["zero_evidence"] == {"A": 0, "B": 0}
+
+
+def test_fair_share_redistributes_unused_budget() -> None:
+    texts = {"c1": "a" * 100, "c2": "b" * 5000, "c3": "c" * 5000}
+    cits = [{"marker": i, "chunk_id": f"c{i}", "title": "T"} for i in range(1, 4)]
+    [task] = _build([_q("q1")], [_graph_row("q1"), _vk_row("q1", cits=cits)],
+                    chunk_texts=texts, max_source_chars=3000)
+    srcs = _side_answer(task, "vendorkb")["sources"]
+    shown = [len(s["documents"][0]["text"].replace(J.TRUNCATION_NOTE, "")) for s in srcs]
+    assert shown == [100, 1450, 1450]
+
+
+def test_long_fact_does_not_starve_later_citations() -> None:
+    episodes = {"f1": [{"fact": "F", "text": f"episode {i} " + "e" * 20000,
+                        "article_id": f"a{i}", "title": f"T{i}"} for i in range(30)]}
+    for k in range(2, 5):
+        episodes[f"f{k}"] = [{"fact": "G", "text": f"other {k} " + "o" * 300,
+                              "article_id": f"o{k}", "title": "O"}]
+    cits = [{"marker": 1, "fact": "F", "fact_uuid": "f1", "sources": []}] + [
+        {"marker": k, "fact": "G", "fact_uuid": f"f{k}", "sources": []} for k in range(2, 5)]
+    [task] = _build([_q("q1")], [_graph_row("q1", cits=cits), _vk_row("q1")],
+                    graph_sources=episodes)
+    g_label = task["labels"]["graph"]
+    srcs = task["answers"][g_label]["sources"]
+    assert len(srcs) == 4
+    for s in srcs:
+        assert sum(len(d["text"].replace(J.TRUNCATION_NOTE, "")) for d in s["documents"]) > 0
+    for s in srcs[1:]:  # small sources are shown whole
+        assert s["documents"][0]["truncated"] is False
+    assert task["truncated"][g_label] is True
+    assert task["zero_evidence"][g_label] == 0
+    total = sum(len(d["text"].replace(J.TRUNCATION_NOTE, ""))
+                for s in srcs for d in s["documents"])
+    assert total <= J.MAX_SOURCE_CHARS
+
+
+def test_episodes_of_the_cited_article_come_first_and_are_capped_at_five() -> None:
+    rows = {"f1": [{"fact": "F", "text": f"ep {i}", "article_id": f"a{i}", "title": f"T{i}"}
+                   for i in range(8)]}
+    cits = [{"marker": 1, "fact": "F", "fact_uuid": "f1",
+             "sources": [{"article_id": "a6", "title": "T6"}]}]
+    [task] = _build([_q("q1")], [_graph_row("q1", cits=cits), _vk_row("q1")],
+                    graph_sources=rows)
+    [src] = _side_answer(task, "graph")["sources"]
+    assert [d["text"] for d in src["documents"]] == ["ep 6", "ep 0", "ep 1", "ep 2", "ep 3"]
+    assert src["documents_omitted"] == 3
+    assert J.MAX_EPISODES_PER_FACT == 5
+    assert "ORDER BY" in J.EPISODES_FOR_FACTS
+
+
+def test_existing_pass_is_not_overwritten(tmp_path: Path) -> None:
+    pdir = tmp_path / "pass-1"
+    assert J.check_pass_dir(pdir, force=False) is None
+    pdir.mkdir()
+    (pdir / "tasks.jsonl").write_text("{}\n")
+    assert "exists" in (J.check_pass_dir(pdir, force=False) or "")
+    assert J.check_pass_dir(pdir, force=True) is None
+    (pdir / "judgements").mkdir()
+    assert J.check_pass_dir(pdir, force=False) is not None
+    assert J.check_pass_dir(pdir, force=True) is None  # empty judgements/
+    (pdir / "judgements" / "batch-001.jsonl").write_text("{}\n")
+    err = J.check_pass_dir(pdir, force=True)
+    assert err is not None and "judgements" in err
 
 
 def test_citation_without_fact_uuid_is_marked_unresolvable() -> None:
@@ -153,13 +217,14 @@ def test_last_answer_row_wins_and_missing_side_raises() -> None:
         raise AssertionError("missing vendorkb row must raise")
 
 
-def test_batches_hold_four_tasks(tmp_path: Path) -> None:
+def test_batches_hold_two_tasks(tmp_path: Path) -> None:
     qs = [_q(f"q{i}") for i in range(9)]
     rows = [r for q in qs for r in (_graph_row(q["id"]), _vk_row(q["id"]))]
     J.write_pass(tmp_path, _build(qs, rows))
     files = sorted((tmp_path / "batches").glob("*.jsonl"))
-    assert [f.name for f in files] == ["batch-001.jsonl", "batch-002.jsonl", "batch-003.jsonl"]
-    assert [len(f.read_text().splitlines()) for f in files] == [4, 4, 1]
+    assert J.BATCH_SIZE == 2
+    assert [f.name for f in files] == [f"batch-{i:03d}.jsonl" for i in range(1, 6)]
+    assert [len(f.read_text().splitlines()) for f in files] == [2, 2, 2, 2, 1]
 
 
 def test_episode_repeated_across_articles_or_facts_is_shown_once() -> None:
@@ -175,3 +240,16 @@ def test_episode_repeated_across_articles_or_facts_is_shown_once() -> None:
     assert s2["documents"][0]["text"] == ""
     assert s2["documents"][0]["same_text_as_source"] == 1
     assert s2["unresolvable"] is False
+
+
+def test_pointer_to_a_truncated_copy_gets_its_own_text() -> None:
+    rows = {"f1": [{"fact": "F", "text": "s" * 3000, "article_id": "a", "title": "A"}],
+            "f2": [{"fact": "G", "text": "s" * 3000, "article_id": "a", "title": "A"}]}
+    cits = [{"marker": 1, "fact": "F", "fact_uuid": "f1", "sources": []},
+            {"marker": 2, "fact": "G", "fact_uuid": "f2", "sources": []}]
+    [task] = _build([_q("q1")], [_graph_row("q1", cits=cits), _vk_row("q1")],
+                    graph_sources=rows, max_source_chars=2000)
+    s1, s2 = _side_answer(task, "graph")["sources"]
+    assert s1["documents"][0]["truncated"] is True
+    assert s2["documents"][0]["same_text_as_source"] is None
+    assert len(s2["documents"][0]["text"].replace(J.TRUNCATION_NOTE, "")) == 1000

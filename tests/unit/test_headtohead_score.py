@@ -186,6 +186,8 @@ def test_score_run_maps_labels_back_and_reports(tmp_path: Path) -> None:
     assert tables["deciding"]["all"]["vendorkb"]["hit_rate"] == 0.0
     assert tables["reported"]["all"]["graph"]["n"] == 1
     assert tables["deciding"]["all"]["vendorkb"]["latency_mean_s"] == 1.0
+    assert result["zero_evidence_citations_pass1"] == {"graph": 0, "vendorkb": 0}
+    assert "all support" in result["metric_notes"]["citation_precision"]
 
 
 def test_missing_judgement_is_reported_by_key(tmp_path: Path) -> None:
