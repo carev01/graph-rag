@@ -12,6 +12,7 @@ from scripts.headtohead import questions as Q
 CORPUS = {f"a{i}" for i in range(300)}
 CHANGED = {"c1", "c2"}
 ALL_IDS = CORPUS | CHANGED
+VENDORS = {"Veeam", "Microsoft", "AWS", "Cohesity"}
 
 
 def _make(qid: str, qtype: str, origin: str = "new") -> dict:
@@ -30,8 +31,8 @@ def _make(qid: str, qtype: str, origin: str = "new") -> dict:
         q["gold_sources"].append({"article_id": "a2"})
         q["written_from"] = ["a1", "a2"]
     if qtype == "cross_vendor":
-        q["vendors"] = ["Veeam", "Rubrik"]
-        q["gold_facts"] = ["Veeam: documented: x", "Rubrik: no evidence in the corpus"]
+        q["vendors"] = ["Veeam", "Microsoft"]
+        q["gold_facts"] = ["Veeam: documented: x", "Microsoft: no evidence in the corpus"]
     if qtype == "unanswerable":
         q["gold_facts"] = []
         q["gold_sources"] = []
@@ -50,7 +51,7 @@ def good() -> list[dict]:
 
 
 def check(qs: list[dict]) -> list[str]:
-    return Q.validate(qs, ALL_IDS - CHANGED, CHANGED)
+    return Q.validate(qs, ALL_IDS - CHANGED, CHANGED, corpus_vendors=VENDORS)
 
 
 def by_id(qs: list[dict], qid: str) -> dict:
@@ -161,18 +162,19 @@ def test_cross_vendor_gold_must_cover_each_vendor() -> None:
     qs = good()
     by_id(qs, "cross_vendor-0")["gold_facts"] = ["Veeam: documented: x"]
     problems = check(qs)
-    assert any("cross_vendor-0" in p and "Rubrik" in p for p in problems)
+    assert any("cross_vendor-0" in p and "Microsoft" in p for p in problems)
 
 
 def test_vendor_name_match_is_whole_word_and_case_insensitive() -> None:
     qs = good()
     q = by_id(qs, "cross_vendor-0")
-    q["vendors"] = ["Veeam", "Rubrik"]
-    q["gold_facts"] = ["veeam: ok", "Rubrikon: no"]
-    assert any("Rubrik" in p for p in check(qs))
+    q["vendors"] = ["Veeam", "AWS"]
+    q["gold_facts"] = ["veeam: ok", "AWSome: no"]
+    assert any("AWS" in p for p in check(qs))
     q["vendors"] = ["Veeam", "N-able (Cove)"]
     q["gold_facts"] = ["VEEAM: ok", "n-able (cove): no evidence"]
-    assert check(qs) == []
+    assert Q.validate(qs, ALL_IDS - CHANGED, CHANGED,
+                      corpus_vendors=VENDORS | {"N-able (Cove)"}) == []
 
 
 def test_every_problem_is_reported() -> None:
@@ -188,7 +190,8 @@ def test_load_questions_and_cli(tmp_path: Path, capsys: pytest.CaptureFixture[st
     qfile.write_text(yaml.safe_dump(qs), encoding="utf-8")
     assert Q.load_questions(qfile) == qs
     corpus = tmp_path / "corpus.json"
-    corpus.write_text(json.dumps([{"article_id": i} for i in sorted(CORPUS)]))
+    corpus.write_text(json.dumps([{"article_id": i, "vendor": v} for i, v in
+                                  zip(sorted(CORPUS), sorted(VENDORS) * 100, strict=False)]))
     report = tmp_path / "report.json"
     report.write_text(json.dumps({"changed_since_graph": ["c1: hash differs", "c2"]}))
     args = ["--check", str(qfile), "--corpus", str(corpus), "--ingest-report", str(report)]
@@ -209,3 +212,71 @@ def test_cli_missing_ingest_report_exits_2(tmp_path: Path) -> None:
     args = ["--check", str(qfile), "--corpus", str(corpus),
             "--ingest-report", str(tmp_path / "missing.json")]
     assert Q.main(args) == 2
+
+
+
+def test_answerable_needs_gold_sources_and_written_from() -> None:
+    qs = good()
+    by_id(qs, "single_vendor-0")["gold_sources"] = []
+    by_id(qs, "multi_article-0")["written_from"] = []
+    problems = check(qs)
+    assert any("single_vendor-0" in p and "gold_sources" in p for p in problems)
+    assert any("multi_article-0" in p and "written_from" in p for p in problems)
+
+
+def test_integer_article_ids_are_coerced_like_written_from() -> None:
+    corpus = {"101", "102"}
+    qs = good()
+    for q in qs:
+        if q["type"] != "unanswerable":
+            q["gold_sources"] = [{"article_id": 101}]
+            q["written_from"] = [101]
+    assert Q.validate(qs, corpus, set(), corpus_vendors=VENDORS) == []
+    by_id(qs, "g1")["gold_sources"] = [{"article_id": 999}]
+    by_id(qs, "r1")["gold_sources"] = [{"article_id": True}]
+    problems = Q.validate(qs, corpus, set(), corpus_vendors=VENDORS)
+    assert any("g1" in p and "999" in p for p in problems)
+    assert any("r1" in p and "article_id" in p for p in problems)
+
+
+def test_non_mapping_items_are_problems_not_tracebacks() -> None:
+    qs = [*good(), "just a string", ["a", "list"]]
+    problems = check(qs)
+    assert sum("not a mapping" in p for p in problems) == 2
+
+
+def test_vendors_must_be_corpus_vendors() -> None:
+    qs = good()
+    by_id(qs, "single_vendor-0")["vendors"] = ["Rubrik"]
+    by_id(qs, "g1")["vendors"] = "Veeam"
+    problems = check(qs)
+    assert any("single_vendor-0" in p and "Rubrik" in p and "corpus" in p for p in problems)
+    assert any("g1" in p and "vendors must be a list" in p for p in problems)
+
+
+def _cli_files(tmp_path: Path, questions_text: str, report: object) -> list[str]:
+    qfile = tmp_path / "q.yaml"
+    qfile.write_text(questions_text, encoding="utf-8")
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"article_id": "a1", "vendor": "Veeam"}]))
+    rep = tmp_path / "report.json"
+    rep.write_text(json.dumps(report))
+    return ["--check", str(qfile), "--corpus", str(corpus), "--ingest-report", str(rep)]
+
+
+def test_cli_non_list_yaml_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    args = _cli_files(tmp_path, "id: q1\ntype: single_vendor\n", {"changed_since_graph": []})
+    assert Q.main(args) == 2
+    assert "list" in capsys.readouterr().err
+
+
+def test_cli_unparseable_yaml_exits_2(tmp_path: Path) -> None:
+    args = _cli_files(tmp_path, "- id: [unclosed\n", {"changed_since_graph": []})
+    assert Q.main(args) == 2
+
+
+def test_cli_report_without_changed_key_exits_2(tmp_path: Path,
+                                                capsys: pytest.CaptureFixture[str]) -> None:
+    args = _cli_files(tmp_path, "[]", {"failed": []})
+    assert Q.main(args) == 2
+    assert "changed_since_graph" in capsys.readouterr().err

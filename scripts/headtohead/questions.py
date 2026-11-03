@@ -51,7 +51,20 @@ def _check_ids(label: str, ids: list[str], corpus: set[str], changed: set[str],
     return out
 
 
-def _validate_one(q: dict, corpus: set[str], changed: set[str]) -> list[str]:
+def _article_id(v: Any) -> str | None:
+    """An article id as written in the YAML: a string, or an int (coerced to str, as
+    written_from ids are). Anything else (bool, None, float, mapping) is not an id."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, str):
+        return v
+    if isinstance(v, int):
+        return str(v)
+    return None
+
+
+def _validate_one(q: dict, corpus: set[str], changed: set[str],
+                  corpus_vendors: set[str]) -> list[str]:
     label = str(q.get("id", "<no id>"))
     problems = [f"{label}: missing key {k}" for k in REQUIRED if k not in q]
     qtype = q.get("type")
@@ -75,11 +88,14 @@ def _validate_one(q: dict, corpus: set[str], changed: set[str]) -> list[str]:
     elif "gold_facts" in q:
         problems.append(f"{label}: gold_facts must be a list")
 
+    answerable = qtype != "unanswerable"
     sources = q.get("gold_sources")
     if isinstance(sources, list):
+        if answerable and not sources:
+            problems.append(f"{label}: an answerable question needs non-empty gold_sources")
         for s in sources:
-            sid = s.get("article_id") if isinstance(s, dict) else None
-            if not isinstance(sid, str):
+            sid = _article_id(s.get("article_id")) if isinstance(s, dict) else None
+            if sid is None:
                 problems.append(f"{label}: gold source without article_id: {s!r}")
             else:
                 problems += _check_ids(label, [sid], corpus, changed, "gold source")
@@ -87,15 +103,30 @@ def _validate_one(q: dict, corpus: set[str], changed: set[str]) -> list[str]:
         problems.append(f"{label}: gold_sources must be a list")
     wf = q.get("written_from")
     if isinstance(wf, list):
-        problems += _check_ids(label, [str(i) for i in wf], corpus, changed, "written_from")
+        if answerable and not wf:
+            problems.append(f"{label}: an answerable question needs non-empty written_from")
+        for i in wf:
+            wid = _article_id(i)
+            if wid is None:
+                problems.append(f"{label}: written_from entry is not an article id: {i!r}")
+            else:
+                problems += _check_ids(label, [wid], corpus, changed, "written_from")
     elif "written_from" in q:
         problems.append(f"{label}: written_from must be a list")
+
+    vendors = q.get("vendors")
+    if isinstance(vendors, list):
+        for v in vendors:
+            if str(v) not in corpus_vendors:
+                problems.append(f"{label}: vendor {v!r} is not a corpus vendor "
+                                f"({', '.join(sorted(corpus_vendors))})")
+    elif "vendors" in q:
+        problems.append(f"{label}: vendors must be a list")
 
     if "decides" in q and "origin" in q and q["decides"] is not (q["origin"] == "new"):
         problems.append(f"{label}: decides must be true exactly when origin is new")
 
     if qtype == "cross_vendor":
-        vendors = q.get("vendors")
         if not isinstance(vendors, list) or len(vendors) < 2:
             problems.append(f"{label}: cross_vendor needs at least 2 vendors")
         elif isinstance(facts, list):
@@ -105,25 +136,34 @@ def _validate_one(q: dict, corpus: set[str], changed: set[str]) -> list[str]:
     return problems
 
 
-def validate(questions: list[dict], corpus_ids: set[str], changed_ids: set[str]) -> list[str]:
+def validate(questions: list[Any], corpus_ids: set[str], changed_ids: set[str], *,
+             corpus_vendors: set[str]) -> list[str]:
     problems: list[str] = []
-    seen: Counter[str] = Counter(str(q.get("id")) for q in questions if "id" in q)
+    items = [q for q in questions if isinstance(q, dict)]
+    problems += [f"item {n}: not a mapping: {q!r}"[:200] for n, q in enumerate(questions, 1)
+                 if not isinstance(q, dict)]
+    seen: Counter[str] = Counter(str(q.get("id")) for q in items if "id" in q)
     problems += [f"{i}: duplicate id ({n} times)" for i, n in seen.items() if n > 1]
-    for q in questions:
-        problems += _validate_one(q, corpus_ids, changed_ids)
-    counts = Counter(q.get("type") for q in questions if q.get("origin") == "new")
+    for q in items:
+        problems += _validate_one(q, corpus_ids, changed_ids, corpus_vendors)
+    counts = Counter(q.get("type") for q in items if q.get("origin") == "new")
     for t, want in TARGET_COUNTS.items():
         if counts[t] != want:
             problems.append(f"new {t} questions: {counts[t]}, target {want}")
     return problems
 
 
-def _load_ids(corpus: Path) -> set[str]:
-    return {str(r["article_id"]) for r in json.loads(corpus.read_text(encoding="utf-8"))}
+def _load_corpus(corpus: Path) -> tuple[set[str], set[str]]:
+    """(article ids, vendors) of the corpus."""
+    rows = json.loads(corpus.read_text(encoding="utf-8"))
+    return ({str(r["article_id"]) for r in rows},
+            {str(r["vendor"]) for r in rows if r.get("vendor")})
 
 
 def _load_changed(report: Path) -> set[str]:
     data: Any = json.loads(report.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("changed_since_graph"), list):
+        raise ValueError(f"{report}: no changed_since_graph list")
     return {str(e).split(":", 1)[0].strip() for e in data["changed_since_graph"]}
 
 
@@ -137,9 +177,14 @@ def main(argv: list[str] | None = None) -> int:
         if not p.exists():
             print(f"missing required input: {p} (cannot check without it)", file=sys.stderr)
             return 2
-    problems = validate(
-        load_questions(args.check), _load_ids(args.corpus), _load_changed(args.ingest_report)
-    )
+    try:
+        questions = load_questions(args.check)
+        corpus_ids, corpus_vendors = _load_corpus(args.corpus)
+        changed = _load_changed(args.ingest_report)
+    except (ValueError, KeyError, TypeError, yaml.YAMLError) as e:  # bad input file
+        print(f"cannot check: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    problems = validate(questions, corpus_ids, changed, corpus_vendors=corpus_vendors)
     for p in problems:
         print(p)
     return 1 if problems else 0
