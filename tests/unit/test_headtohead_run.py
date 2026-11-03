@@ -182,3 +182,60 @@ def test_settings_dump_drops_secret_fields():
         _env_file=None, judge_api_key="sekret", vendorkb_dsn="postgresql://u:pw@h/db"))
     assert d["judge_model"] and "sekret" not in json.dumps(d) and "pw" not in json.dumps(d)
     assert not [k for k in d if any(w in k for w in ("key", "dsn", "password", "token"))]
+
+
+@pytest.mark.asyncio
+async def test_pool_gives_concurrent_calls_distinct_connections():
+    import asyncio
+
+    class Conn:
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+    async def factory():
+        return Conn()
+
+    pool = await runmod.ConnPool.create(factory, 2)
+    seen = []
+
+    async def call():
+        async with pool.acquire() as c:
+            seen.append(c)
+            await asyncio.sleep(0.01)
+
+    await asyncio.gather(call(), call())
+    assert len(seen) == 2 and seen[0] is not seen[1]
+    conns = list(pool._all)
+    await pool.close()
+    assert all(c.closed for c in conns)
+
+
+@pytest.mark.asyncio
+async def test_retried_vendorkb_usage_is_summed(tmp_path):
+    n = {"i": 0}
+
+    async def fn(q):
+        n["i"] += 1
+        first = n["i"] == 1
+        return {"answer": None if first else "ok [1]", "error": "empty reply" if first else None,
+                "citations": [1], "usage": {"prompt_tokens": 10, "completion_tokens": 5,
+                                            "cost": 0.5}, "scope": {}}
+
+    await _go(_qs(1), Transport(), fn, tmp_path)
+    v = next(r for r in _lines(tmp_path) if r["side"] == "vendorkb")
+    assert v["usage"] == {"prompt_tokens": 20, "completion_tokens": 10, "cost": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_resume_tolerates_torn_line_and_keeps_run_meta(tmp_path):
+    await _go(_qs(1), Transport(), _vk(), tmp_path)
+    p = tmp_path / "answers.jsonl"
+    p.write_text(p.read_text() + '{"qid": "q1", "si')  # torn, no newline
+    await _go(_qs(2), Transport(), _vk(), tmp_path)
+    rows = [json.loads(x) for x in p.read_text().splitlines() if x.startswith("{\"qid\": \"q")
+            and x.endswith("}")]
+    assert {(r["qid"], r["side"]) for r in rows} >= {("q1", "graph"), ("q1", "vendorkb")}
+    assert (tmp_path / "run_meta.json").exists()
+    assert list(tmp_path.glob("run_meta.resume-*.json"))

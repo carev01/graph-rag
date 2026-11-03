@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import logging
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +27,8 @@ import httpx
 
 from vendorkb.answer import REFUSAL
 from vendorkb.config import VendorkbSettings
+
+log = logging.getLogger(__name__)
 
 SIDES = ("graph", "vendorkb")
 ANSWER_API_TIMEOUT = 600.0
@@ -77,10 +82,58 @@ async def _graph_side(client: httpx.AsyncClient, question: str) -> dict:
     }
 
 
+def _add_usage(total: dict | None, usage: dict | None) -> dict | None:
+    """Sum prompt/completion tokens and cost over the attempts of one call."""
+    if not usage:
+        return total
+    out = dict(total or {"prompt_tokens": 0, "completion_tokens": 0, "cost": None})
+    for k in ("prompt_tokens", "completion_tokens"):
+        out[k] = (out.get(k) or 0) + (usage.get(k) or 0)
+    if usage.get("cost") is not None:
+        out["cost"] = (out.get("cost") or 0.0) + usage["cost"]
+    return out
+
+
+class ConnPool:
+    """`size` connections, one per concurrent vendorkb call: search_docs opens a
+    transaction with SET LOCAL, which must never interleave on a shared connection."""
+
+    def __init__(self) -> None:
+        self._q: asyncio.Queue[Any] = asyncio.Queue()
+        self._all: list[Any] = []
+
+    @classmethod
+    async def create(cls, factory: Callable[[], Awaitable[Any]], size: int) -> ConnPool:
+        pool = cls()
+        try:
+            for _ in range(size):
+                conn = await factory()
+                pool._all.append(conn)
+                pool._q.put_nowait(conn)
+        except BaseException:
+            await pool.close()
+            raise
+        return pool
+
+    @contextlib.asynccontextmanager
+    async def acquire(self) -> AsyncIterator[Any]:
+        conn = await self._q.get()
+        try:
+            yield conn
+        finally:
+            self._q.put_nowait(conn)
+
+    async def close(self) -> None:
+        for conn in self._all:
+            await conn.close()
+        self._all.clear()
+
+
 async def _vendorkb_side(fn: Callable[[str], Awaitable[dict]], question: str) -> dict:
     t0 = time.monotonic()
     res: dict[str, Any] = {}
     error: str | None = None
+    usage_total: dict[str, Any] | None = None
     for _attempt in (1, 2):
         try:
             res = await fn(question)
@@ -89,12 +142,13 @@ async def _vendorkb_side(fn: Callable[[str], Awaitable[dict]], question: str) ->
                 error = "empty answer"
         except Exception as e:  # recorded, never swallowed: it lands in `error`
             res, error = {}, f"{type(e).__name__}: {e}"
+        usage_total = _add_usage(usage_total, res.get("usage"))
         if not error:
             break
     scope = res.get("scope") or {}
     return {
         "answer": None if error else res["answer"],
-        "citations": res.get("citations") or [], "usage": res.get("usage"),
+        "citations": res.get("citations") or [], "usage": usage_total,
         "error": error, "latency_s": time.monotonic() - t0,
         "flags": {"uncited": res.get("uncited"), "unknown_markers": res.get("unknown_markers"),
                   "scope_relaxed": scope.get("relaxed"), "rerank_ok": res.get("rerank_ok"),
@@ -106,10 +160,15 @@ def _load_done(path: Path) -> dict[tuple[str, str], dict]:
     done: dict[tuple[str, str], dict] = {}
     if not path.exists():
         return done
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
+    lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    for i, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            if i == len(lines) - 1:
+                log.warning("skipping torn final line in %s", path)
+                continue
+            raise
         if row.get("answer") is not None or row.get("error"):
             done[(row["qid"], row["side"])] = row
     return done
@@ -137,11 +196,20 @@ async def run(
     await graph_state_check()  # before ANY request: refuses (raises) if the graph changed
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = await meta_collector()
-    (out_dir / "run_meta.json").write_text(
+    meta_path = out_dir / "run_meta.json"
+    if meta_path.exists():
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        meta_path = out_dir / f"run_meta.resume-{stamp}.json"
+    meta_path.write_text(
         json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
     qs = questions[:limit] if limit is not None else list(questions)
     path = out_dir / "answers.jsonl"
     done = _load_done(path)
+    if path.exists() and path.stat().st_size:
+        with path.open("rb+") as fb:  # a torn last line must not swallow the next row
+            fb.seek(-1, 2)
+            if fb.read(1) != b"\n":
+                fb.write(b"\n")
     final: dict[tuple[str, str], dict] = {
         k: v for k, v in done.items() if k[0] in {q["id"] for q in qs}}
     sem = asyncio.Semaphore(concurrency)
@@ -262,15 +330,22 @@ async def _amain(args: argparse.Namespace) -> int:
 
     settings = VendorkbSettings()
     questions = load_questions(Path(args.questions))
-    conn = await connect(settings.vendorkb_dsn)
-    client = AsyncOpenAI(base_url=settings.judge_base_url, api_key=settings.judge_api_key)
+    pool: ConnPool | None = None
+    client: Any = None
     try:
-        scope_index = await scope_index_from_db(conn)
+        client = AsyncOpenAI(base_url=settings.judge_base_url, api_key=settings.judge_api_key)
+        pool = await ConnPool.create(
+            lambda: connect(settings.vendorkb_dsn), args.concurrency)
+        async with pool.acquire() as conn:
+            scope_index = await scope_index_from_db(conn)
         async with (Embedder(settings) as embedder, Reranker(settings) as reranker,
                     httpx.AsyncClient(base_url=args.answer_api) as api):
             async def vk(q: str) -> dict:
-                return await answer(conn, q, settings=settings, embedder=embedder,
-                                    reranker=reranker, scope_index=scope_index, client=client)
+                assert pool is not None
+                async with pool.acquire() as conn:
+                    return await answer(conn, q, settings=settings, embedder=embedder,
+                                        reranker=reranker, scope_index=scope_index,
+                                        client=client)
 
             async def meta() -> dict:
                 return await kubectl_meta(settings)
@@ -280,8 +355,10 @@ async def _amain(args: argparse.Namespace) -> int:
                 limit=args.limit, concurrency=args.concurrency,
                 graph_state_check=real_graph_state_check, meta_collector=meta)
     finally:
-        await client.close()
-        await conn.close()
+        if client is not None:
+            await client.close()
+        if pool is not None:
+            await pool.close()
     rows = summary.pop("rows")
     print(json.dumps(summary, indent=2))
     if args.limit is not None:
