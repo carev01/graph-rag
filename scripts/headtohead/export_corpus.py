@@ -66,6 +66,18 @@ def _iso(v: Any) -> Any:
     return v
 
 
+async def read_max_episode_created_at() -> Any:
+    """The graph's frozen-state marker, read-only (same query as the exported state)."""
+    s = ExtractSettings()
+    driver = AsyncGraphDatabase.driver(s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password))
+    try:
+        r = await driver.execute_query(
+            STATE_QUERIES["max_episode_created_at"], routing_=RoutingControl.READ)
+        return _iso(r.records[0]["v"])
+    finally:
+        await driver.close()
+
+
 async def _fetch(out: Path, state_out: Path) -> Counter:
     s = ExtractSettings()
     driver = AsyncGraphDatabase.driver(s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password))
