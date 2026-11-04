@@ -4,6 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
+> **PARKED INDEFINITELY (2026-11-04).** vendorkb (chunk retrieval) beat the graph 28–0 in the
+> head-to-head (`docs/superpowers/head-to-head-report-2026-11-04.md`) and replaces it. Active
+> development moved to the sibling repo `../vendorkb` (github.com/carev01/vendorkb). The
+> `src/vendorkb/` copy here is frozen: it backs the head-to-head harness (`scripts/headtohead/`).
+> The k8s `graph-rag` namespace has been torn down. The Neo4j graph on alpcirag01 is kept.
+> Everything below describes the parked system.
+
 **Implementation underway (Phases 0–4 slice 1 merged).** Ingestion, semantic
 extraction, the community layer, and three of four retrieval modes are built and
 tested. Authoritative references:
