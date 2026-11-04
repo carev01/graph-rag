@@ -1,0 +1,2 @@
+{"key": "un-04", "A": {"gold": [], "claims": [], "citations_ok": true, "abstained": true, "notes": "Abstains; the processingRate note explains what the sources cover and [3] supports it."}, "B": {"gold": [], "claims": [], "citations_ok": true, "abstained": true}}
+{"key": "un-05", "A": {"gold": [], "claims": [], "citations_ok": true, "abstained": true}, "B": {"gold": [], "claims": [], "citations_ok": false, "abstained": true, "notes": "Abstains correctly, but [6] (an Azure CLI JSON output) does not support the 'file share counts per vault' limit it is cited for."}}

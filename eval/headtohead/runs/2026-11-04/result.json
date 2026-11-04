@@ -1,0 +1,4386 @@
+{
+  "complete": true,
+  "decision": {
+    "wins_graph": 0,
+    "wins_vendorkb": 28,
+    "p": 7.450580596923828e-09,
+    "winner": "vendorkb",
+    "decision": "vendorkb",
+    "deciding_scored": 100,
+    "incomplete": 0
+  },
+  "needs_third_pass": [
+    "cv-08",
+    "cv-10",
+    "ma-b-01",
+    "ma-b-02",
+    "sv-a-04",
+    "sv-b-12"
+  ],
+  "third_pass_pending": [],
+  "pass3_tasks": [
+    "cv-08",
+    "cv-10",
+    "ma-b-01",
+    "ma-b-02",
+    "sv-a-04",
+    "sv-b-12"
+  ],
+  "truncated_pass1": {
+    "graph": 6,
+    "vendorkb": 3
+  },
+  "unresolvable_citations_pass1": {
+    "graph": 0,
+    "vendorkb": 0
+  },
+  "zero_evidence_citations_pass1": {
+    "graph": 0,
+    "vendorkb": 0
+  },
+  "metric_notes": {
+    "citation_precision": "share of answers whose citations all support their claims (citations_ok; the judge records one verdict per answer)",
+    "claim_precision": "supported claims / all claims, pooled over passes",
+    "fact_recall": "gold facts present / gold facts, pooled over passes",
+    "abstention_correct": "share of answers that abstained exactly when unanswerable",
+    "hit_rate": "a gold article among the cited sources (answerable questions only)"
+  },
+  "tables": {
+    "deciding": {
+      "all": {
+        "graph": {
+          "n": 100,
+          "perfect": 22,
+          "perfect_rate": 0.22,
+          "fact_recall": 0.41911764705882354,
+          "claim_precision": 0.8715120051914341,
+          "citation_precision": 0.529126213592233,
+          "abstention_correct": 0.9805825242718447,
+          "hit_rate": 0.8,
+          "latency_mean_s": 30.92546711715637,
+          "latency_median_s": 21.000737404450774,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 100,
+          "perfect": 50,
+          "perfect_rate": 0.5,
+          "fact_recall": 0.7191176470588235,
+          "claim_precision": 0.9706477732793523,
+          "citation_precision": 0.9320388349514563,
+          "abstention_correct": 0.9563106796116505,
+          "hit_rate": 0.775,
+          "latency_mean_s": 3.8657083784253334,
+          "latency_median_s": 3.438787393621169,
+          "cost_mean": 0.001249221105,
+          "errored": 0
+        }
+      },
+      "cross_vendor": {
+        "graph": {
+          "n": 15,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.5365853658536586,
+          "claim_precision": 0.8517699115044248,
+          "citation_precision": 0.28125,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.7333333333333333,
+          "latency_mean_s": 86.58828764969172,
+          "latency_median_s": 86.9858872401528,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 15,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.5203252032520326,
+          "claim_precision": 0.9256756756756757,
+          "citation_precision": 0.8125,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.8,
+          "latency_mean_s": 5.539432843510682,
+          "latency_median_s": 6.150746162980795,
+          "cost_mean": 0.0013212111000000001,
+          "errored": 0
+        }
+      },
+      "multi_article": {
+        "graph": {
+          "n": 15,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.3372093023255814,
+          "claim_precision": 0.8668831168831169,
+          "citation_precision": 0.34375,
+          "abstention_correct": 1.0,
+          "hit_rate": 1.0,
+          "latency_mean_s": 18.4659585846588,
+          "latency_median_s": 18.93792675086297,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 15,
+          "perfect": 3,
+          "perfect_rate": 0.2,
+          "fact_recall": 0.7441860465116279,
+          "claim_precision": 0.9822222222222222,
+          "citation_precision": 0.875,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.8666666666666667,
+          "latency_mean_s": 4.869973913192128,
+          "latency_median_s": 5.004075157921761,
+          "cost_mean": 0.0011794332,
+          "errored": 0
+        }
+      },
+      "single_vendor": {
+        "graph": {
+          "n": 50,
+          "perfect": 3,
+          "perfect_rate": 0.06,
+          "fact_recall": 0.41818181818181815,
+          "claim_precision": 0.8877419354838709,
+          "citation_precision": 0.5196078431372549,
+          "abstention_correct": 0.9803921568627451,
+          "hit_rate": 0.76,
+          "latency_mean_s": 20.628533078557812,
+          "latency_median_s": 19.78531575843226,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 50,
+          "perfect": 27,
+          "perfect_rate": 0.54,
+          "fact_recall": 0.7714285714285715,
+          "claim_precision": 0.9935760171306209,
+          "citation_precision": 0.9607843137254902,
+          "abstention_correct": 0.9117647058823529,
+          "hit_rate": 0.74,
+          "latency_mean_s": 3.5268850424326956,
+          "latency_median_s": 3.3252500881208107,
+          "cost_mean": 0.0011752389,
+          "errored": 0
+        }
+      },
+      "unanswerable": {
+        "graph": {
+          "n": 20,
+          "perfect": 19,
+          "perfect_rate": 0.95,
+          "fact_recall": null,
+          "claim_precision": 0.5,
+          "citation_precision": 0.9,
+          "abstention_correct": 0.95,
+          "hit_rate": null,
+          "latency_mean_s": 24.265318213624415,
+          "latency_median_s": 24.03984372864943,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 20,
+          "perfect": 20,
+          "perfect_rate": 1.0,
+          "fact_recall": null,
+          "claim_precision": null,
+          "citation_precision": 1.0,
+          "abstention_correct": 1.0,
+          "hit_rate": null,
+          "latency_mean_s": 2.7042742185178215,
+          "latency_median_s": 2.6371021129889414,
+          "cost_mean": 0.00143252505,
+          "errored": 0
+        }
+      }
+    },
+    "reported": {
+      "all": {
+        "graph": {
+          "n": 19,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.24757281553398058,
+          "claim_precision": 0.8,
+          "citation_precision": 0.15789473684210525,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.8421052631578947,
+          "latency_mean_s": 68.51845557596779,
+          "latency_median_s": 19.033424399094656,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 19,
+          "perfect": 1,
+          "perfect_rate": 0.05263157894736842,
+          "fact_recall": 0.4320388349514563,
+          "claim_precision": 0.9635036496350365,
+          "citation_precision": 0.8947368421052632,
+          "abstention_correct": 0.8421052631578947,
+          "hit_rate": 0.5263157894736842,
+          "latency_mean_s": 4.790387940691097,
+          "latency_median_s": 4.427140895975754,
+          "cost_mean": 0.0022009862368421052,
+          "errored": 0
+        }
+      },
+      "cross_vendor": {
+        "graph": {
+          "n": 5,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.32142857142857145,
+          "claim_precision": 0.812206572769953,
+          "citation_precision": 0.2,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.8,
+          "latency_mean_s": 210.32465508077294,
+          "latency_median_s": 190.2439707268495,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 5,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.23214285714285715,
+          "claim_precision": 0.8688524590163934,
+          "citation_precision": 0.8,
+          "abstention_correct": 0.8,
+          "hit_rate": 0.2,
+          "latency_mean_s": 5.676352270459756,
+          "latency_median_s": 5.696004488039762,
+          "cost_mean": 0.0022711788,
+          "errored": 0
+        }
+      },
+      "multi_article": {
+        "graph": {
+          "n": 4,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.22727272727272727,
+          "claim_precision": 0.9,
+          "citation_precision": 0.375,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.75,
+          "latency_mean_s": 20.024811362905893,
+          "latency_median_s": 18.642725875834003,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 4,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.22727272727272727,
+          "claim_precision": 1.0,
+          "citation_precision": 1.0,
+          "abstention_correct": 0.75,
+          "hit_rate": 0.5,
+          "latency_mean_s": 4.561093499243725,
+          "latency_median_s": 4.415693409508094,
+          "cost_mean": 0.00249041925,
+          "errored": 0
+        }
+      },
+      "single_vendor": {
+        "graph": {
+          "n": 10,
+          "perfect": 0,
+          "perfect_rate": 0.0,
+          "fact_recall": 0.2169811320754717,
+          "claim_precision": 0.7633587786259542,
+          "citation_precision": 0.05,
+          "abstention_correct": 1.0,
+          "hit_rate": 0.9,
+          "latency_mean_s": 17.012813508789986,
+          "latency_median_s": 18.268249913002364,
+          "cost_mean": null,
+          "errored": 0
+        },
+        "vendorkb": {
+          "n": 10,
+          "perfect": 1,
+          "perfect_rate": 0.1,
+          "fact_recall": 0.6226415094339622,
+          "claim_precision": 0.9887005649717514,
+          "citation_precision": 0.9,
+          "abstention_correct": 0.9,
+          "hit_rate": 0.7,
+          "latency_mean_s": 4.439123552385718,
+          "latency_median_s": 4.237330498523079,
+          "cost_mean": 0.00205011675,
+          "errored": 0
+        }
+      }
+    }
+  },
+  "per_question": [
+    {
+      "qid": "sv-a-01",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 114.03312537400052,
+        "vendorkb": 4.332256061024964
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0003783285
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-02",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.839295031968504,
+        "vendorkb": 3.635237033944577
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010673685
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-03",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 26.08210227987729,
+        "vendorkb": 3.4316283541265875
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012884355
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-04",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false,
+          "3": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": true,
+          "3": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 30.218817400978878,
+        "vendorkb": 3.054053390165791
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000821898
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-05",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.05989410285838,
+        "vendorkb": 3.7624419778585434
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0037257165
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-06",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 22.413030784809962,
+        "vendorkb": 4.645415525184944
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000994059
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-07",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.971669541904703,
+        "vendorkb": 2.527029349002987
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001041084
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-08",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 19.552309735910967,
+        "vendorkb": 2.9988580280914903
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008208585
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-09",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 28.69621682795696,
+        "vendorkb": 3.039353916188702
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0014596065
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-10",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 23.921976253855973,
+        "vendorkb": 3.4195398311130702
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001352142
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-11",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 24.84875742997974,
+        "vendorkb": 2.6741291058715433
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0015746445
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-12",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 16.856887897010893,
+        "vendorkb": 1.9664657290559262
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000961983
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-13",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 13.65466131013818,
+        "vendorkb": 1.6623811209574342
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0006506775
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-a-14",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 5.391940166940913,
+        "vendorkb": 2.778707005083561
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011910195
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-01",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 23.492353992071003,
+        "vendorkb": 3.775149482069537
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001239678
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-02",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 3.601474065100774,
+        "vendorkb": 3.714565607951954
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001171269
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-03",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 24.211907560937107,
+        "vendorkb": 2.1428795068059117
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008477865
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-04",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 17.452745526097715,
+        "vendorkb": 3.018551778048277
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0009973755
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-05",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.611610405845568,
+        "vendorkb": 2.9512201419565827
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001104048
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-06",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 10.573296467075124,
+        "vendorkb": 2.86758094211109
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008613495
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-07",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 23.692889804020524,
+        "vendorkb": 2.68225380894728
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011718135
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-08",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 22.379924835870042,
+        "vendorkb": 2.2695498350076377
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000440451
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-09",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.94158070604317,
+        "vendorkb": 4.222000064095482
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001392237
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-10",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.018321780953556,
+        "vendorkb": 3.3499074620194733
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001468863
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-11",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 13.210094786947593,
+        "vendorkb": 2.769990637898445
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000703989
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-b-12",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": true,
+          "3": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false,
+          "3": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 18.318777797045186,
+        "vendorkb": 3.3322383591439575
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0006639435
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-01",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 12.819099544081837,
+        "vendorkb": 3.7539054120425135
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000893871
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-02",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 17.852702585048974,
+        "vendorkb": 5.8243514518253505
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001431243
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-03",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 15.827256239950657,
+        "vendorkb": 2.66338521707803
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011260755
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-04",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 15.163378318073228,
+        "vendorkb": 4.976628695148975
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010973655
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-05",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 20.55999521398917,
+        "vendorkb": 2.907163245836273
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0006986925
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-06",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 5.912852265872061,
+        "vendorkb": 5.75278781587258
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0009782685
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-07",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 24.683659258997068,
+        "vendorkb": 2.779996753903106
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000821403
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-08",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 16.256552756996825,
+        "vendorkb": 3.431457045953721
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010217295
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-09",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.17090353392996,
+        "vendorkb": 4.599782761884853
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000844074
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-10",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 23.295996675966308,
+        "vendorkb": 3.8814724951516837
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0017834355
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-11",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.865833485964686,
+        "vendorkb": 3.59060947294347
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000597564
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-c-12",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.339444550918415,
+        "vendorkb": 4.2255704121198505
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012370545
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-01",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 14.572358099045232,
+        "vendorkb": 2.8624450170900673
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0018292725
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-02",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 4.236612949986011,
+        "vendorkb": 5.114613272948191
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001218393
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-03",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 14.804962743073702,
+        "vendorkb": 3.318261817097664
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008108595
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-04",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 24.667163053061813,
+        "vendorkb": 3.087224079994485
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001669041
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-05",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 23.455257740803063,
+        "vendorkb": 2.2513296550605446
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000551232
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-06",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 15.874149787938222,
+        "vendorkb": 7.062661163043231
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0043240725
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-07",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.745661868946627,
+        "vendorkb": 4.1076655010692775
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001163151
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-08",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.857836310984567,
+        "vendorkb": 4.220992349088192
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0015602895
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-09",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 19.295680389972404,
+        "vendorkb": 2.7154530349653214
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010941975
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-10",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 19.395526697160676,
+        "vendorkb": 3.229637192795053
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008217
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-11",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 2,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.559735680930316,
+        "vendorkb": 3.287405129056424
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000981981
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "sv-d-12",
+      "type": "single_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 14.16837230999954,
+        "vendorkb": 5.676069075940177
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000816354
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-01",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.89545852318406,
+        "vendorkb": 2.921960931038484
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001472526
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-02",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 16.42871728190221,
+        "vendorkb": 6.068814248777926
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001467873
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-03",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 19.514831402804703,
+        "vendorkb": 4.9170941200573
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012942765
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-04",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 22.19432957097888,
+        "vendorkb": 5.2336819840129465
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001597266
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-05",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 13.076279354980215,
+        "vendorkb": 3.5592928661499172
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0013933755
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-06",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.93792675086297,
+        "vendorkb": 5.307667906861752
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.00089001
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-07",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.47318415506743,
+        "vendorkb": 4.403160232119262
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001191267
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-a-08",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 13.53252617106773,
+        "vendorkb": 9.118049497017637
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001140579
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-01",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false,
+          "3": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": true,
+          "3": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 12.11556916194968,
+        "vendorkb": 6.540977315045893
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0009979695
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-02",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false,
+          "3": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": true,
+          "3": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.917020248016343,
+        "vendorkb": 5.162859326926991
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011721105
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-03",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 11.079958642134443,
+        "vendorkb": 5.004075157921761
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.00079893
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-04",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 19.26710012392141,
+        "vendorkb": 5.212465333985165
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0014071365
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-05",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.396895552054048,
+        "vendorkb": 2.222939230967313
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0005420745
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-06",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 25.63155565992929,
+        "vendorkb": 3.9159285840578377
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012105225
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ma-b-07",
+      "type": "multi_article",
+      "decides": true,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 25.528026171028614,
+        "vendorkb": 3.460641962941736
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011155815
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-01",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 14.399808180052787,
+        "vendorkb": 3.1896255537867546
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011105325
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-04",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 7,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 17.987196230096743,
+        "vendorkb": 6.831467868993059
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0056395845
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-05",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.549303595907986,
+        "vendorkb": 3.511203263886273
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008756055
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-08",
+      "type": "multi_article",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.472453354857862,
+        "vendorkb": 4.427140895975754
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0020111355
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-09",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 21.159840924898162,
+        "vendorkb": 4.421535677043721
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0017821485
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-10",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 19.033424399094656,
+        "vendorkb": 5.929786501219496
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0019150065
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-11",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 17.633113079937175,
+        "vendorkb": 5.4455677138175815
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0015551415
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-12",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.788316393038258,
+        "vendorkb": 4.053125320002437
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010726155
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-13",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 16.904035545885563,
+        "vendorkb": 2.3424620090518147
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.002019204
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-gq-14",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 4.0132116510067135,
+        "vendorkb": 3.5004612100310624
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000975546
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-00",
+      "type": "multi_article",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 11.561303433962166,
+        "vendorkb": 4.404245923040435
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0014511915
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-01",
+      "type": "multi_article",
+      "decides": false,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 16.812998396810144,
+        "vendorkb": 4.006476898910478
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.003752595
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-02",
+      "type": "single_vendor",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 21.65988508798182,
+        "vendorkb": 5.166000406024978
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.003555783
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-05",
+      "type": "multi_article",
+      "decides": false,
+      "n_gold": 6,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 31.2524902659934,
+        "vendorkb": 5.406510279048234
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.002746755
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-07",
+      "type": "cross_vendor",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 262.310603933176,
+        "vendorkb": 2.9565953121054918
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008174925
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-08",
+      "type": "cross_vendor",
+      "decides": false,
+      "n_gold": 7,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 275.835716286907,
+        "vendorkb": 5.547469301149249
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.002861595
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-09",
+      "type": "cross_vendor",
+      "decides": false,
+      "n_gold": 7,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 173.7852812949568,
+        "vendorkb": 5.696004488039762
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012860595
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-10",
+      "type": "cross_vendor",
+      "decides": false,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 190.2439707268495,
+        "vendorkb": 8.452071944018826
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0056405745
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "ex-rt-12",
+      "type": "cross_vendor",
+      "decides": false,
+      "n_gold": 5,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 149.44770316197537,
+        "vendorkb": 5.729620306985453
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0007501725
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-01",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 147.32624043291435,
+        "vendorkb": 9.33060163911432
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001422729
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-02",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 124.13059479999356,
+        "vendorkb": 6.676626013126224
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.00090783
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-03",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 120.55145325697958,
+        "vendorkb": 4.070995657937601
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001446885
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-04",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 86.9858872401528,
+        "vendorkb": 6.220017657149583
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000853776
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-05",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 60.844833905110136,
+        "vendorkb": 6.229067676933482
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000953667
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-06",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 162.1173688431736,
+        "vendorkb": 6.150746162980795
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010630125
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-07",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 148.83861683309078,
+        "vendorkb": 8.478328635916114
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0013806045
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-08",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": true,
+          "3": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false,
+          "3": false
+        }
+      },
+      "hit": {
+        "graph": false,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 144.79755601705983,
+        "vendorkb": 3.455336440121755
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001020393
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-09",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 39.450631256913766,
+        "vendorkb": 6.491028687916696
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011458755
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-10",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false,
+          "3": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": false,
+          "3": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 106.65657760202885,
+        "vendorkb": 2.868881927104667
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001272843
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-11",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 63.63442073110491,
+        "vendorkb": 3.2421374719124287
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012356685
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-12",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 27.376929041929543,
+        "vendorkb": 3.998049227055162
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000562023
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-13",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 3,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 18.550994256976992,
+        "vendorkb": 3.615610936190933
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010309365
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-14",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": false
+      },
+      "latency": {
+        "graph": 26.710721672978252,
+        "vendorkb": 6.257625245023519
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.004215222
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "cv-15",
+      "type": "cross_vendor",
+      "decides": true,
+      "n_gold": 4,
+      "graph": false,
+      "vendorkb": false,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": false,
+          "2": false
+        }
+      },
+      "hit": {
+        "graph": true,
+        "vendorkb": true
+      },
+      "latency": {
+        "graph": 20.85148885496892,
+        "vendorkb": 6.006439274176955
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001306701
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-01",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 16.560537579935044,
+        "vendorkb": 3.6380694259423763
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0014835645
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-02",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 20.896263889968395,
+        "vendorkb": 2.7234180339146405
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0013154625
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-03",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": false,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": false,
+          "2": false
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 19.835579465841874,
+        "vendorkb": 2.775367035996169
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000638055
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-04",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 15.244783455040306,
+        "vendorkb": 3.4459464331157506
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001439757
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-05",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 19.046153079951182,
+        "vendorkb": 2.4352280700113624
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010181655
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-06",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 28.695503311930224,
+        "vendorkb": 2.0999856158159673
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001074447
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-07",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 33.592694781022146,
+        "vendorkb": 3.053325251908973
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.002249379
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-08",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 23.139193415176123,
+        "vendorkb": 3.94862131588161
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0012919995
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-09",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 22.434729974949732,
+        "vendorkb": 1.5988774299621582
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0014102055
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-10",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 22.384158335858956,
+        "vendorkb": 2.373115552123636
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0010918215
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-11",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 18.268501836108044,
+        "vendorkb": 4.062565183034167
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0032453685
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-12",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 33.50547635788098,
+        "vendorkb": 2.5596687339711934
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.001485099
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-13",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 20.138738770969212,
+        "vendorkb": 2.0072521280962974
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0013964445
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-14",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 31.676162289921194,
+        "vendorkb": 2.9541159188374877
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0011711205
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-15",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 30.602196261985227,
+        "vendorkb": 2.5426928009837866
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0009278775
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-16",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 27.732405475107953,
+        "vendorkb": 2.996894632000476
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.003783384
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-17",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 25.171997957862914,
+        "vendorkb": 2.7145354920066893
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0013751595
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-18",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 26.018188745016232,
+        "vendorkb": 2.387358460808173
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000797049
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-19",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 24.940494042122737,
+        "vendorkb": 1.9448130461387336
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.0008349165
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    },
+    {
+      "qid": "un-20",
+      "type": "unanswerable",
+      "decides": true,
+      "n_gold": 0,
+      "graph": true,
+      "vendorkb": true,
+      "passes": {
+        "graph": {
+          "1": true,
+          "2": true
+        },
+        "vendorkb": {
+          "1": true,
+          "2": true
+        }
+      },
+      "hit": {
+        "graph": null,
+        "vendorkb": null
+      },
+      "latency": {
+        "graph": 25.422605245839804,
+        "vendorkb": 1.823633809806779
+      },
+      "cost": {
+        "graph": null,
+        "vendorkb": 0.000621225
+      },
+      "errored": {
+        "graph": false,
+        "vendorkb": false
+      }
+    }
+  ],
+  "problems": [],
+  "warnings": []
+}

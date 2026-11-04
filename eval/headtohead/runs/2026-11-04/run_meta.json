@@ -1,0 +1,23 @@
+{
+  "answer_api_image": "ghcr.io/carev01/graph-rag:sha-3b30597",
+  "JUDGE_MODEL": "z-ai/glm-5.3-flash",
+  "RERANK_MODEL": "rerank-3",
+  "SYNTHESIS_REASONING_EFFORT": null,
+  "unset_env": [
+    "SYNTHESIS_REASONING_EFFORT"
+  ],
+  "vendorkb_settings": {
+    "embed_base_url": "http://srv-llm.home.lan:8082/v1",
+    "embed_model": "jinaai/jina-embeddings-v5-text-nano-retrieval",
+    "embed_dim": 768,
+    "embed_max_batch": 8,
+    "rerank_base_url": "https://api.voyageai.com/v1",
+    "rerank_model": "rerank-3",
+    "judge_base_url": "https://openrouter.ai/api/v1",
+    "judge_model": "z-ai/glm-5.3-flash",
+    "answer_reasoning_effort": "low",
+    "docext_base_url": "https://docextractor.k3s.home.lan",
+    "docext_verify_tls": false
+  },
+  "git_commit": "e443136ee800f771292d66f36c5d9f8b5f800839"
+}
