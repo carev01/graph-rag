@@ -1,0 +1,18 @@
+{
+  "documents": 20899,
+  "chunks": 32282,
+  "chunks_per_vendor": {
+    "AWS": 652,
+    "Cohesity": 339,
+    "Microsoft": 3007,
+    "Veeam": 28284
+  },
+  "token_percentiles": {
+    "p50": 450,
+    "p90": 1136,
+    "p99": 1251,
+    "max": 37076
+  },
+  "token_counting": "approximate tokens (chars/4)",
+  "over_max_tokens": 349
+}
